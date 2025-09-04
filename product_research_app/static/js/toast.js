@@ -8,7 +8,7 @@
       el.appendChild(b);
     }
     c.appendChild(el);
-    setTimeout(()=>{ if(el.parentNode) c.removeChild(el); }, opt.duration||2500);
+    setTimeout(()=>{ if(el.parentNode) c.removeChild(el); }, opt.duration||5000);
   }
   window.toast = { success:(m,o)=>make('success',m,o), error:(m,o)=>make('error',m,o), info:(m,o)=>make('info',m,o) };
 })();
