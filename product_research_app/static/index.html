@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <title>Product Research Copilot</title>
+<link rel="stylesheet" href="/static/css/app.css">
 <style>
 /* Basic layout */
 body { margin:0; padding:0; font-family: 'Segoe UI', Tahoma, sans-serif; color:#222; background: linear-gradient(to bottom, #f8fbff, #e9f0ff); }
@@ -18,8 +19,8 @@ button { padding:8px 14px; border:none; border-radius:4px; cursor:pointer; backg
 button:hover { opacity:0.85; }
 body.dark button { background: linear-gradient(90deg,#3a3cad,#7a53d6); color:#fff; }
 /* Chip style for filter toggle */
-#filtersBtn { background:#e0f0ff; border:1px solid #0077cc; color:#0077cc; padding:6px 10px; border-radius:16px; font-size:14px; }
-body.dark #filtersBtn { background:#2a2d5c; border-color:#7a53d6; color:#a9a9ff; }
+#btnFilters { background:#e0f0ff; border:1px solid #0077cc; color:#0077cc; padding:6px 10px; border-radius:16px; font-size:14px; }
+body.dark #btnFilters { background:#2a2d5c; border-color:#7a53d6; color:#a9a9ff; }
 select, input[type="text"], input[type="password"] { padding:6px; border-radius:4px; border:1px solid #ccc; }
 body.dark select, body.dark input[type="text"], body.dark input[type="password"] { background:#1f2344; color:#eaeaea; border-color:#444; }
 table { width:100%; border-collapse:collapse; margin-top:10px; }
@@ -74,7 +75,6 @@ body.dark #scoreInfo { background:#262a51; }
     <button id="trendsBtn" title="Ver tendencias">📊</button>
     <button id="darkToggle" title="Modo oscuro">🌙</button>
     <button id="configBtn" title="Configuración avanzada">⚙️</button>
-    <button id="filtersBtn" title="Filtros">🔎</button>
   </div>
 </header>
 <!-- Search bar row -->
@@ -83,12 +83,6 @@ body.dark #scoreInfo { background:#262a51; }
   <button id="searchBtn">Buscar</button>
 </div>
 </header>
-<!-- Secondary controls row: search, actions on selections -->
-<div id="controls" style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; justify-content:flex-end; margin-bottom:10px;">
-  <button id="deleteSelectedBtn">Eliminar seleccionados</button>
-  <button id="exportSelectedBtn">Exportar seleccionados</button>
-  <button id="selectAllBtn">Seleccionar todo</button>
-</div>
 <!-- Filtros avanzados -->
 <div id="filters" class="card" style="margin-top:10px; padding:10px; display:none; max-width:300px;">
   <strong>Filtros:</strong>
@@ -127,8 +121,6 @@ body.dark #scoreInfo { background:#262a51; }
   <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center;">
     <input type="text" id="newListName" placeholder="Nombre del grupo" style="flex:1; padding:4px; min-width:120px;">
     <button id="createListBtn">Crear</button>
-    <select id="assignListSelect" style="min-width:120px;"></select>
-    <button id="assignListBtn">Añadir</button>
   </div>
 </div>
 <div id="config" style="display:none;">
@@ -229,8 +221,24 @@ body.dark #scoreInfo { background:#262a51; }
 <!-- Legend icon -->
 <div id="legendIcon" style="margin-top:5px; font-size:18px; cursor:help; color:#0077cc;" title="Fila roja: producto duplicado\n🔥 1–5: más tendencia">ℹ️</div>
 
+<div id="table-toolbar" class="table-toolbar">
+  <div>
+    <input type="checkbox" id="selectAll">
+    <button id="btnFilters">Filtros</button>
+    <div>
+      <select id="groupSelect"></select>
+      <button id="btnAddToGroup">Añadir</button>
+    </div>
+  </div>
+  <div id="listMeta">0 resultados • Vista: Tabla ▾</div>
+  <div>
+    <button id="btnDelete" disabled>Eliminar</button>
+    <button id="btnExport" disabled>Exportar</button>
+  </div>
+</div>
+
 <table id="productTable">
-  <thead>
+  <thead class="sticky-thead">
     <tr id="headerRow"></tr>
   </thead>
   <tbody></tbody>
@@ -257,6 +265,7 @@ body.dark #scoreInfo { background:#262a51; }
   100% { transform: rotate(360deg); }
 }
 </style>
+<script src="/static/js/table.js"></script>
 <script>
 // Global arrays to hold all products and the current filtered list
 let allProducts = [];
@@ -366,6 +375,11 @@ function renderTable() {
     cb.type = 'checkbox';
     cb.classList.add('rowCheck');
     cb.dataset.id = item.id;
+    cb.checked = selection.has(item.id);
+    cb.addEventListener('change', () => {
+      if (cb.checked) selection.add(item.id); else selection.delete(item.id);
+      updateMasterState();
+    });
     tdSel.appendChild(cb);
     tr.appendChild(tdSel);
     columns.forEach(col => {
@@ -492,6 +506,9 @@ function renderTable() {
     tr.appendChild(tdDel);
     tbody.appendChild(tr);
   });
+  currentPageIds = products.map(p => p.id);
+  document.getElementById('listMeta').textContent = `${currentPageIds.length} resultados • Vista: Tabla ▾`;
+  updateMasterState();
 }
 
 function sortBy(field, type) {
@@ -532,7 +549,7 @@ function sortBy(field, type) {
 document.getElementById('refreshBtn').onclick = fetchProducts;
 window.onload = fetchProducts;
 // Toggle filters panel
-document.getElementById('filtersBtn').onclick = () => {
+document.getElementById('btnFilters').onclick = () => {
   const panel = document.getElementById('filters');
   if (!panel) return;
   panel.style.display = (panel.style.display === 'none' || panel.style.display === '') ? 'block' : 'none';
@@ -743,7 +760,7 @@ document.getElementById('applyFilters').onclick = () => {
   if (!isNaN(ratingMin)) active++;
   if (categoryText) active++;
   if (!isNaN(scoreMin)) active++;
-  const ftBtn = document.getElementById('filtersBtn');
+  const ftBtn = document.getElementById('btnFilters');
   if (ftBtn) {
     if (active > 0) {
       ftBtn.textContent = `⚙️ Filtros (${active})`;
@@ -767,7 +784,7 @@ document.getElementById('clearFilters').onclick = () => {
   document.getElementById('filterScoreMin').value = '';
   products = [...allProducts];
   // reset filter chip
-  const ftBtn2 = document.getElementById('filtersBtn');
+  const ftBtn2 = document.getElementById('btnFilters');
   if (ftBtn2) ftBtn2.textContent = '⚙️ Filtros';
   renderTable();
 };
@@ -839,9 +856,8 @@ async function deleteProduct(id){
 }
 
 // Delete selected products
-document.getElementById('deleteSelectedBtn').onclick = async () => {
-  const checkboxes = document.querySelectorAll('.rowCheck:checked');
-  const ids = Array.from(checkboxes).map(cb => parseInt(cb.dataset.id));
+document.getElementById('btnDelete').onclick = async () => {
+  const ids = Array.from(selection);
   if(!ids.length){ alert('Selecciona al menos un producto para eliminar'); return; }
   if(!confirm('¿Eliminar los productos seleccionados?')) return;
   try{
@@ -862,9 +878,8 @@ document.getElementById('deleteSelectedBtn').onclick = async () => {
 };
 
 // Export selected products as CSV
-document.getElementById('exportSelectedBtn').onclick = async () => {
-  const checkboxes = document.querySelectorAll('.rowCheck:checked');
-  const ids = Array.from(checkboxes).map(cb => parseInt(cb.dataset.id));
+document.getElementById('btnExport').onclick = async () => {
+  const ids = Array.from(selection);
   if(!ids.length){ alert('Selecciona productos para exportar'); return; }
   // Build query string
   const params = new URLSearchParams();
@@ -895,15 +910,6 @@ document.getElementById('exportSelectedBtn').onclick = async () => {
   } catch(err){ console.error(err); alert('Error al exportar'); }
 };
 
-// Select or deselect all products
-document.getElementById('selectAllBtn').onclick = () => {
-  const checks = document.querySelectorAll('.rowCheck');
-  const allChecked = Array.from(checks).every(cb => cb.checked);
-  checks.forEach(cb => {
-    cb.checked = !allChecked;
-  });
-};
-
 // -------- List management --------
 let currentListId = -1; // -1 indicates all products
 
@@ -912,7 +918,7 @@ async function loadLists() {
     const res = await fetch('/lists');
     const lists = await res.json();
     const container = document.getElementById('listsContainer');
-    const select = document.getElementById('assignListSelect');
+    const select = document.getElementById('groupSelect');
     container.innerHTML = '';
     select.innerHTML = '';
     // option for no list in assign select
@@ -1024,12 +1030,11 @@ document.getElementById('createListBtn').onclick = async () => {
 };
 
 // assign selected products to list
-document.getElementById('assignListBtn').onclick = async () => {
-  const listSelect = document.getElementById('assignListSelect');
+document.getElementById('btnAddToGroup').onclick = async () => {
+  const listSelect = document.getElementById('groupSelect');
   const lid = parseInt(listSelect.value);
   if(!lid){ alert('Selecciona un grupo'); return; }
-  const checkboxes = document.querySelectorAll('.rowCheck:checked');
-  const ids = Array.from(checkboxes).map(cb => parseInt(cb.dataset.id));
+  const ids = Array.from(selection);
   if(!ids.length){ alert('Selecciona productos para añadir'); return; }
   try{
     const res = await fetch('/add_to_list', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: lid, ids: ids})});
