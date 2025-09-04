@@ -179,9 +179,6 @@ body.dark #scoreInfo { background:#262a51; }
 
 <!-- Analysis panel for individual products (drawer) -->
 <div id="analysisCard" class="card" style="display:none; position:fixed; top:80px; right:0; width:350px; max-width:90%; height:calc(100% - 100px); overflow:auto; z-index:1500; box-shadow:-2px 0 8px rgba(0,0,0,0.3);"></div>
-<!-- Legend icon -->
-<div id="legendIcon" style="margin-top:5px; font-size:18px; cursor:help; color:#0077cc;" title="Fila roja: producto duplicado\n🔥 1–5: más tendencia">ℹ️</div>
-
 <div id="table-toolbar" class="table-toolbar">
   <div style="display:flex; align-items:center; gap:8px;">
     <input type="checkbox" id="selectAll">
@@ -205,8 +202,11 @@ body.dark #scoreInfo { background:#262a51; }
   </thead>
   <tbody></tbody>
 </table>
-<!-- Legend explaining row highlights and emojis -->
-<!-- Legend card will be inserted above the product table -->
+<button id="legendBtn" class="legend-btn">ℹ️</button>
+<div id="legendPop" class="popover hidden">
+  <div>• Fila roja: duplicado</div>
+  <div>• 🔥 x1–x5: tendencia en el nombre</div>
+</div>
 
 <!-- Overlay for viewing images in larger size -->
 <div id="imgOverlay" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background: rgba(0,0,0,0.8); justify-content:center; align-items:center; z-index:1000;">
@@ -354,8 +354,10 @@ function renderTable() {
     cb.classList.add('rowCheck');
     cb.dataset.id = item.id;
     cb.checked = selection.has(item.id);
+    tr.classList.toggle('selected', cb.checked);
     cb.addEventListener('change', () => {
       if (cb.checked) selection.add(item.id); else selection.delete(item.id);
+      tr.classList.toggle('selected', cb.checked);
       updateMasterState();
     });
     tdSel.appendChild(cb);
@@ -404,20 +406,15 @@ function renderTable() {
         };
         td.appendChild(img);
       } else if (key === 'name' && value) {
-        // Show name text
-        const span = document.createElement('span');
-        span.textContent = value;
-        td.appendChild(span);
-        // Append trending emojis to name
-        let tCount = 0;
-        if (value) {
-          const words = value.toLowerCase().split(/[^a-z0-9áéíóúüñ]+/);
-          tCount = words.filter(w => trendingWords.includes(w)).length;
-        }
-        if (tCount > 0) {
-          const emo = document.createElement('span');
-          emo.textContent = ' ' + '🔥'.repeat(Math.min(5, tCount));
-          td.appendChild(emo);
+        const fireText = firesFor(item.trendingScore);
+        const nameSpan = document.createElement('span');
+        nameSpan.textContent = value + (fireText ? ' ' : '');
+        td.appendChild(nameSpan);
+        if (fireText) {
+          const fireSpan = document.createElement('span');
+          fireSpan.className = 'fires';
+          fireSpan.textContent = fireText;
+          td.appendChild(fireSpan);
         }
         // If Kalodata URL exists, add copy link button
         const kal = item.extras && item.extras['KalodataUrl'];
