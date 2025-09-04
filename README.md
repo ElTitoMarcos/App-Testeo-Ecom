@@ -2,7 +2,6 @@
 
 ## Arranque silencioso en Windows
 
-
 Doble clic en `run_silent.vbs` para iniciar la aplicación sin ventana de consola.
 
 Alternativa de empaquetado:
