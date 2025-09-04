@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <title>Product Research Copilot</title>
 <link rel="stylesheet" href="/static/css/app.css">
+<link rel="stylesheet" href="/static/css/toast.css">
 <style>
 /* Basic layout */
 body { margin:0; padding:0; font-family: 'Segoe UI', Tahoma, sans-serif; color:#222; background: linear-gradient(to bottom, #f8fbff, #e9f0ff); }
@@ -243,6 +244,7 @@ body.dark #scoreInfo { background:#262a51; }
   100% { transform: rotate(360deg); }
 }
 </style>
+<script src="/static/js/toast.js"></script>
 <script src="/static/js/table.js"></script>
 <script>
 // Global arrays to hold all products and the current filtered list
@@ -401,7 +403,7 @@ function renderTable() {
           btnCopy.style.fontSize = '12px';
           btnCopy.onclick = () => {
             navigator.clipboard.writeText(kal).then(() => {
-              alert('Link copiado al portapapeles');
+              toast.success('Link copiado al portapapeles');
             });
           };
           td.appendChild(btnCopy);
@@ -448,7 +450,7 @@ function renderTable() {
     btn.style.color = 'red';
     btn.dataset.id = item.id;
     btn.onclick = () => {
-      if(confirm('¿Eliminar producto?')) deleteProduct(item.id);
+      toast.info('¿Eliminar producto?', {actionText:'Eliminar', onAction: () => deleteProduct(item.id)});
     };
     tdDel.appendChild(btn);
     tr.appendChild(tdDel);
@@ -522,7 +524,7 @@ fileInputEl.onchange = async () => {
     const res = await fetch('/upload', {method:'POST', body: formData});
     const data = await res.json();
     if(data.error){
-      alert('Error: '+data.error);
+      toast.error('Error: '+data.error);
     } else {
       let msg = '';
       if(data.inserted !== undefined) {
@@ -535,12 +537,12 @@ fileInputEl.onchange = async () => {
           msg += 'Imagen subida. No se añadieron productos automáticamente.';
         }
       }
-      alert(msg || 'Archivo procesado');
+      toast.success(msg || 'Archivo procesado');
       fetchProducts();
     }
   } catch(err){
     console.error(err);
-    alert('Error al subir archivo');
+    toast.error('Error al subir archivo');
   } finally {
     if (loading) loading.style.display = 'none';
     btn.disabled = false;
@@ -567,8 +569,8 @@ document.getElementById('saveConfig').onclick = async () => {
   payload.weights = weights;
   const res = await fetch('/setconfig', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
   const data = await res.json();
-  if(data.error){ alert('Error: '+data.error); } else {
-    alert('Configuración guardada');
+  if(data.error){ toast.error('Error: '+data.error); } else {
+    toast.success('Configuración guardada');
     // hide API key input if user entered one
     if(key){
       apiInput.value = '';
@@ -582,7 +584,7 @@ document.getElementById('autoWeights').onclick = async () => {
   const res = await fetch('/auto_weights', {method:'POST'});
   const data = await res.json();
   if (data.error) {
-    alert('Error al ajustar pesos: ' + data.error);
+    toast.error('Error al ajustar pesos: ' + data.error);
     return;
   }
   // Update weight inputs
@@ -592,7 +594,7 @@ document.getElementById('autoWeights').onclick = async () => {
   document.getElementById('w_social_proof').value = (data.social_proof || 1).toFixed(2);
   document.getElementById('w_margin').value = (data.margin || 1).toFixed(2);
   document.getElementById('w_logistics').value = (data.logistics || 1).toFixed(2);
-  alert('Pesos ajustados automáticamente. No olvides guardarlos.');
+  toast.info('Pesos ajustados automáticamente. No olvides guardarlos.');
 };
 
 // search feature
@@ -611,7 +613,7 @@ document.getElementById('searchBtn').onclick = () => {
 };
 document.getElementById('sendPrompt').onclick = async () => {
   const prompt = document.getElementById('customPrompt').value.trim();
-  if(!prompt){ alert('Escribe una consulta'); return; }
+  if(!prompt){ toast.info('Escribe una consulta'); return; }
   const res = await fetch('/custom_gpt', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({prompt: prompt})});
   const data = await res.json();
   const history = document.getElementById('history');
@@ -701,51 +703,52 @@ async function deleteProduct(id){
       // remove only from current list
       const res = await fetch('/remove_from_list', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({list_id: currentListId, ids: [id]})});
       const data = await res.json();
-      if(data.error){ alert('Error al eliminar del grupo: '+data.error); }
+      if(data.error){ toast.error('Error al eliminar del grupo: '+data.error); }
       // reload current list
       loadList(currentListId);
     } else {
       const res = await fetch('/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ids: [id]})});
       const data = await res.json();
-      if(data.error){ alert('Error al eliminar: '+data.error); }
+      if(data.error){ toast.error('Error al eliminar: '+data.error); }
       fetchProducts();
     }
-  } catch(err){ console.error(err); alert('Error al eliminar'); }
+  } catch(err){ console.error(err); toast.error('Error al eliminar'); }
 }
 
 // Delete selected products
-document.getElementById('btnDelete').onclick = async () => {
+document.getElementById('btnDelete').onclick = () => {
   const ids = Array.from(selection);
-  if(!ids.length){ alert('Selecciona al menos un producto para eliminar'); return; }
-  if(!confirm('¿Eliminar los productos seleccionados?')) return;
-  try{
-    if (typeof currentListId !== 'undefined' && currentListId > 0) {
-      const res = await fetch('/remove_from_list', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({list_id: currentListId, ids: ids})});
-      const data = await res.json();
-      if(data.error){ alert('Error al eliminar del grupo: '+data.error); } else { alert('Eliminados del grupo: '+data.removed); }
-      startProgress();
-      loadList(currentListId);
-    } else {
-      const res = await fetch('/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ids: ids})});
-      const data = await res.json();
-      if(data.error){ alert('Error al eliminar: '+data.error); } else { alert('Productos eliminados: '+data.deleted); }
-      startProgress();
-      fetchProducts();
-    }
-  }catch(err){ console.error(err); alert('Error al eliminar'); }
+  if(!ids.length){ toast.info('Selecciona al menos un producto para eliminar'); return; }
+  toast.info('¿Eliminar los productos seleccionados?', {actionText:'Eliminar', onAction: async () => {
+    try{
+      if (typeof currentListId !== 'undefined' && currentListId > 0) {
+        const res = await fetch('/remove_from_list', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({list_id: currentListId, ids: ids})});
+        const data = await res.json();
+        if(data.error){ toast.error('Error al eliminar del grupo: '+data.error); } else { toast.success('Eliminados del grupo: '+data.removed); }
+        startProgress();
+        loadList(currentListId);
+      } else {
+        const res = await fetch('/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ids: ids})});
+        const data = await res.json();
+        if(data.error){ toast.error('Error al eliminar: '+data.error); } else { toast.success('Productos eliminados: '+data.deleted); }
+        startProgress();
+        fetchProducts();
+      }
+    }catch(err){ console.error(err); toast.error('Error al eliminar'); }
+  }});
 };
 
 // Export selected products as CSV
 document.getElementById('btnExport').onclick = async () => {
   const ids = Array.from(selection);
-  if(!ids.length){ alert('Selecciona productos para exportar'); return; }
+  if(!ids.length){ toast.info('Selecciona productos para exportar'); return; }
   // Build query string
   const params = new URLSearchParams();
   params.set('ids', ids.join(','));
   // request export file
   try{
     const res = await fetch('/export?'+params.toString(), {method:'GET'});
-    if(res.status !== 200){ alert('Error al exportar'); return; }
+    if(res.status !== 200){ toast.error('Error al exportar'); return; }
     const blob = await res.blob();
     // determine filename from header or default
     const disposition = res.headers.get('Content-Disposition');
@@ -765,7 +768,7 @@ document.getElementById('btnExport').onclick = async () => {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  } catch(err){ console.error(err); alert('Error al exportar'); }
+  } catch(err){ console.error(err); toast.error('Error al exportar'); }
 };
 
 // -------- List management --------
@@ -824,9 +827,7 @@ async function loadLists() {
       del.style.cursor = 'pointer';
       del.onclick = (ev) => {
         ev.stopPropagation();
-        if(confirm('¿Eliminar grupo?')){
-          deleteList(lst.id);
-        }
+        toast.info('¿Eliminar grupo?', {actionText:'Eliminar', onAction: () => deleteList(lst.id)});
       };
       const wrapper = document.createElement('span');
       wrapper.appendChild(btn);
@@ -852,7 +853,7 @@ async function deleteList(id){
       currentListId = -1;
       fetchProducts();
     }
-  }catch(err){ console.error(err); alert('Error al eliminar grupo'); }
+  }catch(err){ console.error(err); toast.error('Error al eliminar grupo'); }
 }
 
 async function loadList(id){
@@ -872,34 +873,34 @@ async function loadList(id){
     renderTable();
     // refresh lists to highlight active group
     loadLists();
-  } catch(err){ console.error(err); alert('Error al cargar lista'); }
+  } catch(err){ console.error(err); toast.error('Error al cargar lista'); }
 }
 
 // create list button
 document.getElementById('createListBtn').onclick = async () => {
   const name = document.getElementById('newListName').value.trim();
-  if(!name){ alert('Ingresa un nombre para el grupo'); return; }
+  if(!name){ toast.info('Ingresa un nombre para el grupo'); return; }
   try{
     const res = await fetch('/create_list', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name:name})});
     const data = await res.json();
     document.getElementById('newListName').value = '';
     loadLists();
-  }catch(err){ console.error(err); alert('Error al crear grupo'); }
+  }catch(err){ console.error(err); toast.error('Error al crear grupo'); }
 };
 
 // assign selected products to list
 document.getElementById('btnAddToGroup').onclick = async () => {
   const listSelect = document.getElementById('groupSelect');
   const lid = parseInt(listSelect.value);
-  if(!lid){ alert('Selecciona un grupo'); return; }
+  if(!lid){ toast.info('Selecciona un grupo'); return; }
   const ids = Array.from(selection);
-  if(!ids.length){ alert('Selecciona productos para añadir'); return; }
+  if(!ids.length){ toast.info('Selecciona productos para añadir'); return; }
   try{
     const res = await fetch('/add_to_list', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: lid, ids: ids})});
     const data = await res.json();
-    alert('Productos añadidos al grupo');
+    toast.success('Productos añadidos al grupo');
     loadLists();
-  }catch(err){ console.error(err); alert('Error al añadir al grupo'); }
+  }catch(err){ console.error(err); toast.error('Error al añadir al grupo'); }
 };
 
 // load lists on page load
