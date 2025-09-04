@@ -246,7 +246,8 @@ body.dark #scoreInfo { background:#262a51; }
 </style>
 <script src="/static/js/toast.js"></script>
 <script src="/static/js/table.js"></script>
-<script>
+<script type="module">
+import { fetchJson } from "/static/js/net.js";
 // Global arrays to hold all products and the current filtered list
 let allProducts = [];
 let products = [];
@@ -296,8 +297,7 @@ function isTrending(name) {
 }
 
 async function fetchProducts() {
-  const res = await fetch('/products');
-  const data = await res.json();
+  const data = await fetchJson('/products');
   // keep a copy of all products for filtering
   allProducts = data;
   products = [...allProducts];
@@ -521,8 +521,7 @@ fileInputEl.onchange = async () => {
   const loading = document.getElementById('loadingOverlay');
   if (loading) loading.style.display = 'flex';
   try {
-    const res = await fetch('/upload', {method:'POST', body: formData});
-    const data = await res.json();
+    const data = await fetchJson('/upload', {method:'POST', body: formData});
     if(data.error){
       toast.error('Error: '+data.error);
     } else {
@@ -567,8 +566,7 @@ document.getElementById('saveConfig').onclick = async () => {
     logistics: parseFloat(document.getElementById('w_logistics').value) || 0,
   };
   payload.weights = weights;
-  const res = await fetch('/setconfig', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
-  const data = await res.json();
+  const data = await fetchJson('/setconfig', {method:'POST', body: JSON.stringify(payload)});
   if(data.error){ toast.error('Error: '+data.error); } else {
     toast.success('Configuración guardada');
     // hide API key input if user entered one
@@ -581,8 +579,7 @@ document.getElementById('saveConfig').onclick = async () => {
 };
 // auto weights button
 document.getElementById('autoWeights').onclick = async () => {
-  const res = await fetch('/auto_weights', {method:'POST'});
-  const data = await res.json();
+  const data = await fetchJson('/auto_weights', {method:'POST'});
   if (data.error) {
     toast.error('Error al ajustar pesos: ' + data.error);
     return;
@@ -614,8 +611,7 @@ document.getElementById('searchBtn').onclick = () => {
 document.getElementById('sendPrompt').onclick = async () => {
   const prompt = document.getElementById('customPrompt').value.trim();
   if(!prompt){ toast.info('Escribe una consulta'); return; }
-  const res = await fetch('/custom_gpt', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({prompt: prompt})});
-  const data = await res.json();
+  const data = await fetchJson('/custom_gpt', {method:'POST', body: JSON.stringify({prompt: prompt})});
   const history = document.getElementById('history');
   const details = document.createElement('details');
   const summary = document.createElement('summary');
@@ -701,14 +697,12 @@ async function deleteProduct(id){
   try {
     if (typeof currentListId !== 'undefined' && currentListId > 0) {
       // remove only from current list
-      const res = await fetch('/remove_from_list', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({list_id: currentListId, ids: [id]})});
-      const data = await res.json();
+      const data = await fetchJson('/remove_from_list', {method:'POST', body: JSON.stringify({list_id: currentListId, ids: [id]})});
       if(data.error){ toast.error('Error al eliminar del grupo: '+data.error); }
       // reload current list
       loadList(currentListId);
     } else {
-      const res = await fetch('/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ids: [id]})});
-      const data = await res.json();
+      const data = await fetchJson('/delete', {method:'POST', body: JSON.stringify({ids: [id]})});
       if(data.error){ toast.error('Error al eliminar: '+data.error); }
       fetchProducts();
     }
@@ -722,14 +716,12 @@ document.getElementById('btnDelete').onclick = () => {
   toast.info('¿Eliminar los productos seleccionados?', {actionText:'Eliminar', onAction: async () => {
     try{
       if (typeof currentListId !== 'undefined' && currentListId > 0) {
-        const res = await fetch('/remove_from_list', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({list_id: currentListId, ids: ids})});
-        const data = await res.json();
+        const data = await fetchJson('/remove_from_list', {method:'POST', body: JSON.stringify({list_id: currentListId, ids: ids})});
         if(data.error){ toast.error('Error al eliminar del grupo: '+data.error); } else { toast.success('Eliminados del grupo: '+data.removed); }
         startProgress();
         loadList(currentListId);
       } else {
-        const res = await fetch('/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ids: ids})});
-        const data = await res.json();
+        const data = await fetchJson('/delete', {method:'POST', body: JSON.stringify({ids: ids})});
         if(data.error){ toast.error('Error al eliminar: '+data.error); } else { toast.success('Productos eliminados: '+data.deleted); }
         startProgress();
         fetchProducts();
@@ -776,8 +768,7 @@ let currentListId = -1; // -1 indicates all products
 
 async function loadLists() {
   try {
-    const res = await fetch('/lists');
-    const lists = await res.json();
+    const lists = await fetchJson('/lists');
     const container = document.getElementById('listsContainer');
     const select = document.getElementById('groupSelect');
     container.innerHTML = '';
@@ -846,8 +837,7 @@ async function loadLists() {
 
 async function deleteList(id){
   try{
-    const res = await fetch('/delete_list', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id:id})});
-    const data = await res.json();
+    const data = await fetchJson('/delete_list', {method:'POST', body: JSON.stringify({id:id})});
     loadLists();
     if(currentListId === id){
       currentListId = -1;
@@ -866,8 +856,7 @@ async function loadList(id){
     return;
   }
   try{
-    const res = await fetch('/list/' + id);
-    const data = await res.json();
+    const data = await fetchJson('/list/' + id);
     allProducts = data;
     products = [...allProducts];
     renderTable();
@@ -881,8 +870,7 @@ document.getElementById('createListBtn').onclick = async () => {
   const name = document.getElementById('newListName').value.trim();
   if(!name){ toast.info('Ingresa un nombre para el grupo'); return; }
   try{
-    const res = await fetch('/create_list', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name:name})});
-    const data = await res.json();
+    const data = await fetchJson('/create_list', {method:'POST', body: JSON.stringify({name:name})});
     document.getElementById('newListName').value = '';
     loadLists();
   }catch(err){ console.error(err); toast.error('Error al crear grupo'); }
@@ -896,8 +884,7 @@ document.getElementById('btnAddToGroup').onclick = async () => {
   const ids = Array.from(selection);
   if(!ids.length){ toast.info('Selecciona productos para añadir'); return; }
   try{
-    const res = await fetch('/add_to_list', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: lid, ids: ids})});
-    const data = await res.json();
+    const data = await fetchJson('/add_to_list', {method:'POST', body: JSON.stringify({id: lid, ids: ids})});
     toast.success('Productos añadidos al grupo');
     loadLists();
   }catch(err){ console.error(err); toast.error('Error al añadir al grupo'); }
@@ -911,8 +898,7 @@ window.addEventListener('DOMContentLoaded', () => {
 // Analyse a single product and display results in the analysis card
 async function openAnalysis(id) {
   try {
-    const res = await fetch('/analysis', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id:id})});
-    const data = await res.json();
+    const data = await fetchJson('/analysis', {method:'POST', body: JSON.stringify({id:id})});
     const card = document.getElementById('analysisCard');
     if(data.error){
       card.innerHTML = `<strong>Error:</strong> ${data.error}`;
@@ -989,8 +975,7 @@ document.getElementById('trendsBtn').onclick = async () => {
     });
     return;
   }
-  const res = await fetch('/trends');
-  const data = await res.json();
+  const data = await fetchJson('/trends');
   if(data.error){
     cont.style.display = 'block';
     cont.textContent = 'Error al cargar tendencias: '+data.error;
