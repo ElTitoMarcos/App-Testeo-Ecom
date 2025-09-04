@@ -267,16 +267,6 @@ const columns = [
 
 let trendingWords = [];
 
-// Short number formatter (e.g. 12500 -> 12.5K, 1000000 -> 1M)
-function formatNumberShort(num) {
-  if (num === null || num === undefined || isNaN(num)) return '';
-  const abs = Math.abs(num);
-  if (abs >= 1e9) return (num/1e9).toFixed(2) + 'B';
-  if (abs >= 1e6) return (num/1e6).toFixed(2) + 'M';
-  if (abs >= 1e3) return (num/1e3).toFixed(2) + 'K';
-  return num.toLocaleString();
-}
-
 // Microinteraction progress bar
 function startProgress() {
   const bar = document.getElementById('progressBar');
@@ -372,25 +362,9 @@ function renderTable() {
         value = item.extras ? item.extras[key] : '';
       }
       if (key === 'score') {
-        if (value !== null && value !== undefined && value !== '') {
-          const badge = document.createElement('span');
-          badge.textContent = value;
-          badge.style.padding = '2px 6px';
-          badge.style.borderRadius = '12px';
-          badge.style.fontWeight = '600';
-          // color coding
-          const valNum = parseFloat(value);
-          if (valNum >= 70) {
-            badge.style.background = '#d4f8e8';
-            badge.style.color = '#0f8a42';
-          } else if (valNum >= 40) {
-            badge.style.background = '#fff4d6';
-            badge.style.color = '#b98800';
-          } else {
-            badge.style.background = '#fde4e4';
-            badge.style.color = '#c53030';
-          }
-          td.appendChild(badge);
+        const sc = parseFloat(value);
+        if (!isNaN(sc)) {
+          td.innerHTML = '<span class="' + scoreClass(sc) + '">' + Math.round(sc) + '</span>';
         }
       } else if (key === 'image_url' && value) {
         const img = document.createElement('img');
@@ -437,9 +411,8 @@ function renderTable() {
         if (isNaN(num)) {
           td.textContent = '';
         } else {
-          // Use short format for specific columns
           if (key === 'Item Sold' || key === 'Revenue($)' || key === 'Creator Number') {
-            td.textContent = formatNumberShort(num);
+            td.textContent = abbr(num);
           } else {
             td.textContent = num.toLocaleString();
           }

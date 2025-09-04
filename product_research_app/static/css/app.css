@@ -19,3 +19,14 @@
 #topBar{ position:sticky; top:0; z-index:40; }
 #searchRow{ background:#f8fbff; }
 body.dark #searchRow{ background:#1a1b2e; }
+
+.table tr{ height:52px; }
+.table td, .table th{ padding:8px 12px; }
+.table tbody tr:nth-child(odd){ background:#11192B; }
+
+.badge{ border-radius:10px; padding:2px 8px; font-weight:600; }
+.score-green{ background:#183B2D; color:#44C48C }
+.score-amber{ background:#3A3119; color:#F1B44C }
+.score-red{ background:#3A1E1E; color:#F16969 }
+
+.bottombar{ position:sticky; bottom:0; left:0; right:0; background:#0F1424; border-top:1px solid #243150; display:flex; justify-content:space-between; align-items:center; padding:8px 12px; z-index:25 }
