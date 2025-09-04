@@ -7,9 +7,9 @@
 .drawer.right{ position: fixed; right:0; top:0; bottom:0; width:360px; background:#0F1424; border-left:1px solid #243150; box-shadow: -8px 0 16px rgba(0,0,0,.2); padding:16px; z-index:100; }
 .hidden{ display:none; }
 
-.legend-btn{ position: sticky; left:0; bottom:0; margin:8px; background:#1F2A44; border:1px solid #34456B; border-radius:8px; padding:4px 8px; }
+.legend-btn{ position:fixed; left:16px; bottom:16px; background:#1F2A44; border:1px solid #34456B; border-radius:8px; padding:4px 8px; z-index:900; }
 
-.popover{ position:absolute; left:12px; bottom:40px; background:#0F1424; border:1px solid #34456B; padding:10px 12px; border-radius:8px; box-shadow:0 8px 16px rgba(0,0,0,.3); }
+.popover{ position:fixed; left:16px; bottom:56px; background:#0F1424; border:1px solid #34456B; padding:10px 12px; border-radius:8px; box-shadow:0 8px 16px rgba(0,0,0,.3); z-index:900; }
 
 .selected .fires{ filter: grayscale(1); opacity:.6; }
 
