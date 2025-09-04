@@ -48,15 +48,6 @@ body.dark pre { background:#2e315f; }
 body.dark .weight-slider {
   accent-color:#7a53d6;
 }
-/* Side panel for filters */
-#filtersPanel {
-  position:sticky;
-  top:80px;
-  align-self:flex-start;
-  width:260px;
-  max-height:80vh;
-  overflow:auto;
-}
 /* Info box */
 #scoreInfo { display:none; }
 body.dark #scoreInfo { background:#262a51; }
@@ -83,37 +74,6 @@ body.dark #scoreInfo { background:#262a51; }
   <button id="searchBtn">Buscar</button>
 </div>
 </header>
-<!-- Filtros avanzados -->
-<div id="filters" class="card" style="margin-top:10px; padding:10px; display:none; max-width:300px;">
-  <strong>Filtros:</strong>
-  <div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:6px;">
-    <div style="flex:1; min-width:120px;">
-      <label>Precio mín<br/><input type="number" id="filterPriceMin" style="width:100%;"></label>
-    </div>
-    <div style="flex:1; min-width:120px;">
-      <label>Precio máx<br/><input type="number" id="filterPriceMax" style="width:100%;"></label>
-    </div>
-    <div style="flex:1; min-width:120px;">
-      <label>Fecha desde<br/><input type="date" id="filterDateMin" style="width:100%;"></label>
-    </div>
-    <div style="flex:1; min-width:120px;">
-      <label>Fecha hasta<br/><input type="date" id="filterDateMax" style="width:100%;"></label>
-    </div>
-    <div style="flex:1; min-width:120px;">
-      <label>Rating mín<br/><input type="number" id="filterRatingMin" step="0.1" min="0" max="5" style="width:100%;"></label>
-    </div>
-    <div style="flex:1; min-width:120px;">
-      <label>Categoría<br/><input type="text" id="filterCategory" style="width:100%;"></label>
-    </div>
-    <div style="flex:1; min-width:120px;">
-      <label>Score mín<br/><input type="number" id="filterScoreMin" step="0.1" style="width:100%;"></label>
-    </div>
-  </div>
-  <div style="display:flex; gap:8px; margin-top:10px;">
-    <button id="applyFilters" style="flex:1;">Aplicar filtros</button>
-    <button id="clearFilters" style="flex:1; background:none; border:1px solid #0077cc; color:#0077cc;">Limpiar filtros</button>
-  </div>
-</div>
 <!-- Groups/Lists management -->
 <div id="listsSection" class="card" style="margin-top:5px; padding:10px; max-width:420px;">
   <strong>Grupos:</strong>
@@ -222,9 +182,10 @@ body.dark #scoreInfo { background:#262a51; }
 <div id="legendIcon" style="margin-top:5px; font-size:18px; cursor:help; color:#0077cc;" title="Fila roja: producto duplicado\n🔥 1–5: más tendencia">ℹ️</div>
 
 <div id="table-toolbar" class="table-toolbar">
-  <div>
+  <div style="display:flex; align-items:center; gap:8px;">
     <input type="checkbox" id="selectAll">
     <button id="btnFilters">Filtros</button>
+    <div id="activeFilterChips" style="display:flex; flex-wrap:wrap;"></div>
     <div>
       <select id="groupSelect"></select>
       <button id="btnAddToGroup">Añadir</button>
@@ -257,6 +218,22 @@ body.dark #scoreInfo { background:#262a51; }
   <div style="text-align:center;">
     <div class="spinner" style="margin-bottom:10px; width:40px; height:40px; border:5px solid #f3f3f3; border-top:5px solid #0062ff; border-radius:50%; animation: spin 1s linear infinite;"></div>
     <div>Cargando archivo...</div>
+  </div>
+</div>
+<div id="filtersDrawer" class="drawer right hidden">
+  <h3>Filtros</h3>
+  <div style="display:flex; flex-direction:column; gap:8px;">
+    <label>Precio mín<br><input type="number" id="filterPriceMin"></label>
+    <label>Precio máx<br><input type="number" id="filterPriceMax"></label>
+    <label>Fecha desde<br><input type="date" id="filterDateMin"></label>
+    <label>Fecha hasta<br><input type="date" id="filterDateMax"></label>
+    <label>Rating mín<br><input type="number" id="filterRatingMin" step="0.1" min="0" max="5"></label>
+    <label>Categoría<br><input type="text" id="filterCategory"></label>
+    <label>Score mín<br><input type="number" id="filterScoreMin" step="0.1"></label>
+  </div>
+  <div style="display:flex; gap:8px; margin-top:12px;">
+    <button id="applyFilters" style="flex:1;">Aplicar</button>
+    <button id="clearFilters" style="flex:1;">Limpiar</button>
   </div>
 </div>
 <style>
@@ -548,13 +525,6 @@ function sortBy(field, type) {
 
 document.getElementById('refreshBtn').onclick = fetchProducts;
 window.onload = fetchProducts;
-// Toggle filters panel
-document.getElementById('btnFilters').onclick = () => {
-  const panel = document.getElementById('filters');
-  if (!panel) return;
-  panel.style.display = (panel.style.display === 'none' || panel.style.display === '') ? 'block' : 'none';
-};
-
 // Toggle config panel
 document.getElementById('configBtn').onclick = () => {
   const cfg = document.getElementById('config');
@@ -705,89 +675,6 @@ function parseDate(value) {
   return null;
 }
 
-// Apply filters based on user input
-document.getElementById('applyFilters').onclick = () => {
-  const priceMin = parseFloat(document.getElementById('filterPriceMin').value);
-  const priceMax = parseFloat(document.getElementById('filterPriceMax').value);
-  const dateMinVal = document.getElementById('filterDateMin').value;
-  const dateMaxVal = document.getElementById('filterDateMax').value;
-  const ratingMin = parseFloat(document.getElementById('filterRatingMin').value);
-  const categoryText = document.getElementById('filterCategory').value.trim().toLowerCase();
-  const scoreMin = parseFloat(document.getElementById('filterScoreMin').value);
-  const dMin = dateMinVal ? parseDate(dateMinVal) : null;
-  const dMax = dateMaxVal ? parseDate(dateMaxVal) : null;
-  products = allProducts.filter(item => {
-    // Filter price
-    if (!isNaN(priceMin)) {
-      if (item.price === null || item.price === undefined || item.price < priceMin) return false;
-    }
-    if (!isNaN(priceMax)) {
-      if (item.price === null || item.price === undefined || item.price > priceMax) return false;
-    }
-    // Filter launch date from extras
-    if (dMin || dMax) {
-      let launch = '';
-      if (item.extras && item.extras['Launch Date']) {
-        launch = item.extras['Launch Date'];
-      }
-      const dLaunch = parseDate(launch);
-      if (dMin && dLaunch && dLaunch < dMin) return false;
-      if (dMax && dLaunch && dLaunch > dMax) return false;
-    }
-    // Filter rating
-    if (!isNaN(ratingMin)) {
-      const ratingVal = item.extras && item.extras['Product Rating'] ? parseFloat(String(item.extras['Product Rating']).replace(/[^0-9.]+/g,'')) : null;
-      if (ratingVal === null || ratingVal < ratingMin) return false;
-    }
-    // Filter category text
-    if (categoryText) {
-      const cat = (item.category || '').toString().toLowerCase();
-      if (!cat.includes(categoryText)) return false;
-    }
-    // Filter minimum score
-    if (!isNaN(scoreMin)) {
-      const sc = item.score;
-      if (sc === null || sc === undefined || sc < scoreMin) return false;
-    }
-    return true;
-  });
-  // update filter chip text with number of active filters
-  let active = 0;
-  if (!isNaN(priceMin)) active++;
-  if (!isNaN(priceMax)) active++;
-  if (dMin) active++;
-  if (dMax) active++;
-  if (!isNaN(ratingMin)) active++;
-  if (categoryText) active++;
-  if (!isNaN(scoreMin)) active++;
-  const ftBtn = document.getElementById('btnFilters');
-  if (ftBtn) {
-    if (active > 0) {
-      ftBtn.textContent = `⚙️ Filtros (${active})`;
-    } else {
-      ftBtn.textContent = '⚙️ Filtros';
-    }
-  }
-  // start progress animation
-  startProgress();
-  renderTable();
-};
-
-// Clear filters and reset list
-document.getElementById('clearFilters').onclick = () => {
-  document.getElementById('filterPriceMin').value = '';
-  document.getElementById('filterPriceMax').value = '';
-  document.getElementById('filterDateMin').value = '';
-  document.getElementById('filterDateMax').value = '';
-  document.getElementById('filterRatingMin').value = '';
-  document.getElementById('filterCategory').value = '';
-  document.getElementById('filterScoreMin').value = '';
-  products = [...allProducts];
-  // reset filter chip
-  const ftBtn2 = document.getElementById('btnFilters');
-  if (ftBtn2) ftBtn2.textContent = '⚙️ Filtros';
-  renderTable();
-};
 
 // toggle API key visibility
 document.getElementById('toggleApiKey').onclick = () => {
@@ -1308,5 +1195,6 @@ document.getElementById('trendsBtn').onclick = async () => {
   renderTable();
 };
 </script>
+<script src="/static/js/filters.js"></script>
 </body>
 </html>
