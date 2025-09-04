@@ -1,0 +1,12 @@
+{
+  "api_key": "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",
+  "model": "gpt-4o",
+  "weights": {
+    "momentum": 1.0,
+    "saturation": 1.0,
+    "differentiation": 1.0,
+    "social_proof": 1.0,
+    "margin": 1.0,
+    "logistics": 1.0
+  }
+}
