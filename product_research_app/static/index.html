@@ -54,26 +54,27 @@ body.dark #scoreInfo { background:#262a51; }
 </style>
 </head>
 <body>
-<header style="padding:8px 15px; margin-bottom:10px; display:flex; align-items:center; justify-content:space-between;">
-  <div style="display:flex; align-items:center; gap:8px;">
-    <h1 style="margin:0; font-size:1.4rem;">Ecom Testing App</h1>
-    <p style="margin:0;font-size:12px; opacity:0.8;">By El Tito 🤙</p>
+<div id="topBar">
+  <header style="padding:8px 15px; display:flex; align-items:center; justify-content:space-between;">
+    <div style="display:flex; align-items:center; gap:8px;">
+      <h1 style="margin:0; font-size:1.4rem;">Ecom Testing App</h1>
+      <p style="margin:0;font-size:12px; opacity:0.8;">By El Tito 🤙</p>
+    </div>
+    <div style="flex:1; display:flex; justify-content:flex-end; gap:8px; align-items:center;">
+      <input type="file" id="fileInput" style="display:none;" />
+      <button id="uploadBtn" title="Subir archivo">📤</button>
+      <button id="refreshBtn" title="Actualizar lista">🔄</button>
+      <button id="trendsBtn" title="Ver tendencias">📊</button>
+      <button id="darkToggle" title="Modo oscuro">🌙</button>
+      <button id="configBtn" title="Configuración avanzada">⚙️</button>
+    </div>
+  </header>
+  <!-- Search bar row -->
+  <div id="searchRow" style="display:flex; justify-content:center; padding:8px 15px; gap:8px;">
+    <input type="text" id="searchInput" placeholder="Buscar producto o palabra clave..." style="flex:1; max-width:600px; padding:8px; border-radius:20px; border:1px solid #ccc; font-size:14px;" />
+    <button id="searchBtn">Buscar</button>
   </div>
-  <div style="flex:1; display:flex; justify-content:flex-end; gap:8px; align-items:center;">
-    <input type="file" id="fileInput" style="display:none;" />
-    <button id="uploadBtn" title="Subir archivo">📤</button>
-    <button id="refreshBtn" title="Actualizar lista">🔄</button>
-    <button id="trendsBtn" title="Ver tendencias">📊</button>
-    <button id="darkToggle" title="Modo oscuro">🌙</button>
-    <button id="configBtn" title="Configuración avanzada">⚙️</button>
-  </div>
-</header>
-<!-- Search bar row -->
-<div id="searchRow" style="display:flex; justify-content:center; padding:8px 15px; gap:8px;">
-  <input type="text" id="searchInput" placeholder="Buscar producto o palabra clave..." style="flex:1; max-width:600px; padding:8px; border-radius:20px; border:1px solid #ccc; font-size:14px;" />
-  <button id="searchBtn">Buscar</button>
 </div>
-</header>
 <!-- Groups/Lists management -->
 <div id="listsSection" class="card" style="margin-top:5px; padding:10px; max-width:420px;">
   <strong>Grupos:</strong>

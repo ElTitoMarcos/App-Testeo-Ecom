@@ -137,3 +137,11 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+function updateHeaderHeight() {
+  const topBar = document.getElementById('topBar');
+  if (topBar) {
+    document.documentElement.style.setProperty('--header-h', `${topBar.offsetHeight}px`);
+  }
+}
+window.addEventListener('load', updateHeaderHeight);
+window.addEventListener('resize', updateHeaderHeight);

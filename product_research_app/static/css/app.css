@@ -9,3 +9,7 @@
 
 .chip{ display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border:1px solid #34456B; border-radius:999px; background:#1F2A44; color:#E5EAF5; margin:0 6px 6px 0; font-size:12px }
 .chip button{background:none;border:0;color:#A9B4D0;cursor:pointer}
+
+#topBar{ position:sticky; top:0; z-index:40; }
+#searchRow{ background:#f8fbff; }
+body.dark #searchRow{ background:#1a1b2e; }
