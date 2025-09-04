@@ -25,9 +25,10 @@ import os
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
-import cgi
 import threading
 import sqlite3
+from email.parser import BytesParser
+from email.policy import default
 
 from . import database
 from . import config
@@ -36,6 +37,47 @@ from . import gpt
 APP_DIR = Path(__file__).resolve().parent
 DB_PATH = APP_DIR / "data.sqlite3"
 STATIC_DIR = APP_DIR / "static"
+
+# Minimal helpers replacing deprecated ``cgi`` module in Python 3.13.
+def parse_header(line: str) -> tuple[str, dict]:
+    """Parse a Content-Type style header.
+
+    Returns the main content type and a dictionary of parameters.
+    """
+    if not line:
+        return "", {}
+    parts = [p.strip() for p in line.split(";")]
+    ctype = parts[0].lower()
+    params = {}
+    for item in parts[1:]:
+        if "=" in item:
+            k, v = item.split("=", 1)
+            params[k.strip().lower()] = v.strip().strip('"')
+    return ctype, params
+
+
+def parse_multipart(body: bytes, boundary: str) -> dict:
+    """Parse ``multipart/form-data`` body into a simple dict.
+
+    Each field is returned either as a text string or a dictionary with
+    ``filename`` and ``content`` keys for file uploads.
+    """
+    parser = BytesParser(policy=default)
+    # Construct a minimal message so ``BytesParser`` can consume it
+    prefix = f"Content-Type: multipart/form-data; boundary={boundary}\n\n".encode()
+    msg = parser.parsebytes(prefix + body)
+    result = {}
+    for part in msg.iter_parts():
+        if part.get_content_disposition() != "form-data":
+            continue
+        name = part.get_param("name", header="content-disposition")
+        filename = part.get_filename()
+        data = part.get_payload(decode=True)
+        if filename:
+            result[name] = {"filename": filename, "content": data}
+        else:
+            result[name] = data.decode("utf-8")
+    return result
 
 # Heuristic scoring for offline evaluation.
 def offline_evaluate(product: dict) -> dict:
@@ -471,20 +513,20 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def handle_upload(self):
-        # handle multipart form data
-        ctype, pdict = cgi.parse_header(self.headers.get('Content-Type'))
-        if ctype != 'multipart/form-data':
+        # handle multipart form data without the deprecated ``cgi`` module
+        ctype, pdict = parse_header(self.headers.get('Content-Type'))
+        if ctype != 'multipart/form-data' or 'boundary' not in pdict:
             self.send_error(400, "Expected multipart/form-data")
             return
-        form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={'REQUEST_METHOD':'POST'})
-        # ``form" may contain multiple fields; we look up 'file' key safely
-        fileitem = form['file'] if 'file' in form else None
-        # ``fileitem" must not be evaluated in boolean context
-        if fileitem is None or not getattr(fileitem, 'filename', None):
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length)
+        form = parse_multipart(body, pdict['boundary'])
+        fileitem = form.get('file')
+        if not fileitem or 'filename' not in fileitem:
             self.send_error(400, "No file provided")
             return
-        filename = Path(fileitem.filename).name
-        data = fileitem.file.read()
+        filename = Path(fileitem['filename']).name
+        data = fileitem['content']
         ext = Path(filename).suffix.lower()
         conn = ensure_db()
         inserted = 0
