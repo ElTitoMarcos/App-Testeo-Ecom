@@ -14,3 +14,15 @@ master.addEventListener('change', ()=>{
   renderTable();
   updateMasterState();
 });
+
+function firesFor(score0to5){
+  const n = Math.max(0, Math.min(5, Math.round(score0to5 || 0)));
+  return '🔥'.repeat(n);
+}
+
+const legendBtn = document.getElementById('legendBtn');
+const legendPop = document.getElementById('legendPop');
+if(legendBtn && legendPop){
+  legendBtn.addEventListener('click', ()=>legendPop.classList.toggle('hidden'));
+  document.addEventListener('click',(e)=>{ if(!legendPop.contains(e.target) && e.target!==legendBtn) legendPop.classList.add('hidden'); });
+}

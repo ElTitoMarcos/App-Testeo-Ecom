@@ -7,6 +7,12 @@
 .drawer.right{ position: fixed; right:0; top:0; bottom:0; width:360px; background:#0F1424; border-left:1px solid #243150; box-shadow: -8px 0 16px rgba(0,0,0,.2); padding:16px; z-index:100; }
 .hidden{ display:none; }
 
+.legend-btn{ position: sticky; left:0; bottom:0; margin:8px; background:#1F2A44; border:1px solid #34456B; border-radius:8px; padding:4px 8px; }
+
+.popover{ position:absolute; left:12px; bottom:40px; background:#0F1424; border:1px solid #34456B; padding:10px 12px; border-radius:8px; box-shadow:0 8px 16px rgba(0,0,0,.3); }
+
+.selected .fires{ filter: grayscale(1); opacity:.6; }
+
 .chip{ display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border:1px solid #34456B; border-radius:999px; background:#1F2A44; color:#E5EAF5; margin:0 6px 6px 0; font-size:12px }
 .chip button{background:none;border:0;color:#A9B4D0;cursor:pointer}
 
