@@ -41,6 +41,8 @@ details summary { cursor:pointer; font-weight:600; color:#0062ff; }
 body.dark details summary { color:#80b3ff; }
 pre { white-space:pre-wrap; background:#f5f7ff; padding:8px; border-radius:4px; }
 body.dark pre { background:#2e315f; }
+/* Analysis drawer */
+.tab-section { white-space:pre-wrap; font-family:monospace; }
 /* Weight slider styling */
 .weight-slider {
   width:120px;
@@ -178,8 +180,25 @@ body.dark #scoreInfo { background:#262a51; }
   </div>
 </div>
 
-<!-- Analysis panel for individual products (drawer) -->
-<div id="analysisCard" class="card" style="display:none; position:fixed; top:80px; right:0; width:350px; max-width:90%; height:calc(100% - 100px); overflow:auto; z-index:1500; box-shadow:-2px 0 8px rgba(0,0,0,0.3);"></div>
+<!-- Analysis drawer with tabbed content -->
+<div id="analysisDrawer" class="drawer right hidden">
+  <div style="text-align:right;"><button id="closeAnalysis" style="background:none;border:none;font-size:20px;cursor:pointer;">✖</button></div>
+  <div id="analysisTabs" style="display:flex; gap:6px; margin-bottom:8px;">
+    <button data-tab="resumen" class="active">Resumen</button>
+    <button data-tab="fuentes">Fuentes</button>
+    <button data-tab="economia">Economía</button>
+    <button data-tab="riesgos">Riesgos</button>
+    <button data-tab="creatividad">Creatividad</button>
+  </div>
+  <div id="analysisContent">
+    <pre id="tab-resumen" class="tab-section"></pre>
+    <pre id="tab-fuentes" class="tab-section hidden"></pre>
+    <pre id="tab-economia" class="tab-section hidden"></pre>
+    <pre id="tab-riesgos" class="tab-section hidden"></pre>
+    <pre id="tab-creatividad" class="tab-section hidden"></pre>
+  </div>
+  <button id="analysisExport">Exportar</button>
+</div>
 <div id="table-toolbar" class="table-toolbar">
   <div style="display:flex; align-items:center; gap:8px;">
     <input type="checkbox" id="selectAll">
@@ -248,6 +267,7 @@ body.dark #scoreInfo { background:#262a51; }
 <script src="/static/js/table.js"></script>
 <script type="module">
 import { fetchJson } from "/static/js/net.js";
+import { openAnalysis } from "/static/js/analyze.js";
 // Global arrays to hold all products and the current filtered list
 let allProducts = [];
 let products = [];
@@ -435,7 +455,7 @@ function renderTable() {
     btnAnal.style.fontSize = '16px';
     btnAnal.dataset.id = item.id;
     btnAnal.onclick = () => {
-      openAnalysis(item.id);
+      openAnalysis(item);
     };
     tdAnal.appendChild(btnAnal);
     tr.appendChild(tdAnal);
@@ -894,66 +914,6 @@ document.getElementById('btnAddToGroup').onclick = async () => {
 window.addEventListener('DOMContentLoaded', () => {
   loadLists();
 });
-
-// Analyse a single product and display results in the analysis card
-async function openAnalysis(id) {
-  try {
-    const data = await fetchJson('/analysis', {method:'POST', body: JSON.stringify({id:id})});
-    const card = document.getElementById('analysisCard');
-    if(data.error){
-      card.innerHTML = `<strong>Error:</strong> ${data.error}`;
-    } else {
-      // find the product name
-      const prod = allProducts.find(p => p.id == id) || {};
-      let html = `<div style="text-align:right;"><button id="closeAnalysis" style="background:none;border:none;font-size:20px;cursor:pointer;">✖</button></div>`;
-      html += `<h3>Análisis de producto: ${prod.name || id}</h3>`;
-      const makeList = (title, items) => {
-        if(!items || !items.length) return '';
-        let out = `<h4>${title}</h4><ul>`;
-        items.forEach(it => { out += `<li>${it}</li>`; });
-        out += '</ul>';
-        return out;
-      };
-      html += makeList('Pros', data.pros);
-      html += makeList('Contras', data.cons);
-      html += makeList('Opiniones', data.opinions);
-      html += makeList('Competidores', data.competitors);
-      if(data.summary){ html += `<p><strong>Resumen:</strong> ${data.summary}</p>`; }
-      // export button
-      html += `<button id="exportAnalysisBtn">Exportar análisis</button>`;
-      card.innerHTML = html;
-      card.style.display = 'block';
-      // close button
-      document.getElementById('closeAnalysis').onclick = () => {
-        card.style.display = 'none';
-      };
-      document.getElementById('exportAnalysisBtn').onclick = () => {
-        const blob = new Blob([html.replace(/<[^>]+>/g, '')], {type:'text/plain'});
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `analisis_${prod.name || id}.txt`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-      };
-    }
-  } catch(err){
-    console.error(err);
-    const card = document.getElementById('analysisCard');
-    // show error message with close button
-    card.innerHTML = `<div style="text-align:right;"><button id="closeAnalysisError" style="background:none;border:none;font-size:20px;cursor:pointer;">✖</button></div>`+
-      `<p>Error al analizar producto</p>`;
-    card.style.display = 'block';
-    const closeBtn = document.getElementById('closeAnalysisError');
-    if(closeBtn){
-      closeBtn.onclick = () => {
-        card.style.display = 'none';
-      };
-    }
-  }
-}
 
 // trends button
 document.getElementById('trendsBtn').onclick = async () => {
