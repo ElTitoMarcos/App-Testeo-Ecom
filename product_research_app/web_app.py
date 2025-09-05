@@ -28,6 +28,7 @@ from pathlib import Path
 import cgi
 import threading
 import sqlite3
+from typing import Dict, Any
 
 from . import database
 from . import config
@@ -467,6 +468,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/analysis":
             self.handle_analysis()
+            return
+        if path == "/shutdown":
+            self.handle_shutdown()
             return
         self.send_error(404)
 
@@ -1186,9 +1190,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         model = config.get_model()
         # if no API key, fallback to simple heuristic analysis
         if not api_key:
-            analysis = self.simple_analysis(p)
+            analysis = self.simple_analysis_text(p)
             self._set_json()
-            self.wfile.write(json.dumps(analysis, ensure_ascii=False).encode('utf-8'))
+            self.wfile.write(json.dumps({"analysis": analysis}, ensure_ascii=False).encode('utf-8'))
             return
         # call the GPT analysis; if fails fallback to simple heuristic
         try:
@@ -1196,9 +1200,15 @@ class RequestHandler(BaseHTTPRequestHandler):
         except Exception:
             analysis = None
         if not analysis:
-            analysis = self.simple_analysis(p)
+            analysis = self.simple_analysis_text(p)
         self._set_json()
-        self.wfile.write(json.dumps(analysis, ensure_ascii=False).encode('utf-8'))
+        self.wfile.write(json.dumps({"analysis": analysis}, ensure_ascii=False).encode('utf-8'))
+
+    def handle_shutdown(self):
+        """Shutdown the HTTP server."""
+        self._set_json()
+        self.wfile.write(json.dumps({"ok": True}).encode('utf-8'))
+        threading.Thread(target=self.server.shutdown, daemon=True).start()
 
     def handle_delete(self):
         """Delete one or more products specified in the request body.
@@ -1379,6 +1389,23 @@ class RequestHandler(BaseHTTPRequestHandler):
             "competitors": competitors,
             "summary": summary
         }
+
+    def simple_analysis_text(self, prod: sqlite3.Row) -> str:
+        """Generate readable text from :func:`simple_analysis`."""
+        data = self.simple_analysis(prod)
+        parts: list[str] = []
+        if data.get("pros"):
+            parts.append("Pros: " + ", ".join(data["pros"]) + ".")
+        if data.get("cons"):
+            parts.append("Contras: " + ", ".join(data["cons"]) + ".")
+        if data.get("opinions"):
+            parts.append("Opiniones: " + ", ".join(data["opinions"]) + ".")
+        if data.get("competitors"):
+            parts.append("Competidores: " + ", ".join(data["competitors"]) + ".")
+        if data.get("summary"):
+            parts.append("Resumen: " + data["summary"])
+        parts.append("Fuentes, economía, riesgos y creatividad no disponibles en modo sin API.")
+        return "\n".join(parts)
 
 
 def run(host: str = '127.0.0.1', port: int = 8000):

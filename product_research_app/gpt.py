@@ -390,7 +390,7 @@ def simplify_product_names(api_key: str, model: str, names: List[str], *, temper
 # ``summary`` keys.  If the API key is missing or the call fails, an empty
 # dictionary is returned.
 
-def analyze_product(api_key: str, model: str, product: Dict[str, Any], *, temperature: float = 0.2) -> Dict[str, Any]:
+def analyze_product(api_key: str, model: str, product: Dict[str, Any], *, temperature: float = 0.2) -> str:
     """Analyse an individual product using OpenAI chat completion.
 
     Args:
@@ -403,12 +403,12 @@ def analyze_product(api_key: str, model: str, product: Dict[str, Any], *, temper
             produce more deterministic responses.
 
     Returns:
-        A dictionary with keys ``pros``, ``cons``, ``opinions``,
-        ``competitors`` and ``summary``.  If the API call fails the
-        dictionary will be empty.
+        Texto en español con las secciones: Producto, Demanda y Tendencia,
+        Competencia, Pros, Contras, Veredicto, Fuentes, Economía, Riesgos y
+        Creatividad.  Si la llamada falla se devuelve una cadena vacía.
     """
     if not api_key or not model or not product.get("name"):
-        return {}
+        return ""
     # Build a concise description of the product from available fields
     descr = product.get("description") or ""
     cat = product.get("category") or ""
@@ -427,20 +427,14 @@ def analyze_product(api_key: str, model: str, product: Dict[str, Any], *, temper
         info += f"Categoría: {cat}. "
     if extra_str:
         info += f"Datos: {extra_str}. "
-    # Compose the user prompt.  It instructs the model to use the principles
-    # described in the attached documents (strong desires, market sophistication,
-    # differentiation, etc.) when assessing the product.
+    # Compose the user prompt requesting a natural language report.
     user_prompt = (
         "Eres un experto en investigación de productos para comercio electrónico y dropshipping. "
         "Utiliza los principios de las clases magistrales y documentos adjuntos (como Breakthrough Advertising, "
-        "Product Research MasterClass, y otros documentos de investigación) para evaluar un producto. "
-        "Analiza sus ventajas y desventajas, qué opinan los clientes potenciales, quiénes son los principales "
-        "competidores y proporciona un breve resumen. Para competir en el mercado se consideran factores como la "
-        "magnitud del deseo que satisface (\"I want\"), la sofisticación del mercado, la saturación, la diferenciación "
-        "del producto, la prueba social y los márgenes. "
-        "Devuelve exclusivamente un objeto JSON con las claves: pros (lista de fortalezas), cons (lista de debilidades), "
-        "opinions (lista de percepciones de los consumidores), competitors (lista de competidores relevantes) y summary "
-        "(resumen ejecutivo en español). No incluyas texto fuera de este JSON."
+        "Product Research MasterClass y otros documentos de investigación) para evaluar un producto. "
+        "Redacta un informe detallado en español en texto plano, sin formato de código ni listas. "
+        "Incluye y titula las siguientes secciones: Producto, Demanda y Tendencia, Competencia, Pros, Contras, "
+        "Veredicto, Fuentes, Economía, Riesgos y Creatividad. Cada sección debe consistir en una o dos frases completas."
     )
     messages = [
         {"role": "system", "content": "Eres un asistente experto en análisis de productos."},
@@ -449,9 +443,6 @@ def analyze_product(api_key: str, model: str, product: Dict[str, Any], *, temper
     try:
         resp = call_openai_chat(api_key, model, messages, temperature=temperature)
         content = resp["choices"][0]["message"]["content"].strip()
-        result = json.loads(content)
-        if not isinstance(result, dict):
-            return {}
-        return result
+        return content
     except Exception:
-        return {}
+        return ""
