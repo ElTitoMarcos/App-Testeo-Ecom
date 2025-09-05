@@ -436,6 +436,11 @@ class RequestHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path == "/shutdown":
+            self._set_json()
+            self.wfile.write(json.dumps({"ok": True}).encode("utf-8"))
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
+            return
         if path == "/upload":
             self.handle_upload()
             return
