@@ -202,7 +202,6 @@ body.dark #scoreInfo { background:#262a51; }
   </thead>
   <tbody></tbody>
 </table>
-<button id="legendBtn" class="legend-btn">ℹ️</button>
 <div id="legendPop" class="popover hidden">
   <div>• Fila roja: duplicado</div>
   <div>• 🔥 x1–x5: tendencia en el nombre</div>
@@ -338,6 +337,8 @@ async function fetchProducts() {
   products = [...allProducts];
   window.allProducts = allProducts;
   window.products = products;
+  selection.clear();
+  updateMasterState();
   renderTable();
 }
 
@@ -882,6 +883,8 @@ async function loadList(id){
     products = [...allProducts];
     window.allProducts = allProducts;
     window.products = products;
+    selection.clear();
+    updateMasterState();
     renderTable();
     // refresh lists to highlight active group
     loadLists();
