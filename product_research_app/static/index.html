@@ -183,20 +183,7 @@ body.dark #scoreInfo { background:#262a51; }
 <!-- Analysis drawer with tabbed content -->
 <div id="analysisDrawer" class="drawer right hidden">
   <div style="text-align:right;"><button id="closeAnalysis" style="background:none;border:none;font-size:20px;cursor:pointer;">✖</button></div>
-  <div id="analysisTabs" style="display:flex; gap:6px; margin-bottom:8px;">
-    <button data-tab="resumen" class="active">Resumen</button>
-    <button data-tab="fuentes">Fuentes</button>
-    <button data-tab="economia">Economía</button>
-    <button data-tab="riesgos">Riesgos</button>
-    <button data-tab="creatividad">Creatividad</button>
-  </div>
-  <div id="analysisContent">
-    <pre id="tab-resumen" class="tab-section"></pre>
-    <pre id="tab-fuentes" class="tab-section hidden"></pre>
-    <pre id="tab-economia" class="tab-section hidden"></pre>
-    <pre id="tab-riesgos" class="tab-section hidden"></pre>
-    <pre id="tab-creatividad" class="tab-section hidden"></pre>
-  </div>
+  <div id="analysisContent" style="white-space:pre-wrap; overflow-y:auto; max-height:80vh;"></div>
   <button id="analysisExport">Exportar</button>
 </div>
 <div id="table-toolbar" class="table-toolbar">
