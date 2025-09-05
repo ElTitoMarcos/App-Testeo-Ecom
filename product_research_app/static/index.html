@@ -160,21 +160,56 @@ body.dark #scoreInfo { background:#262a51; }
   <div id="history" style="margin-top:10px;"></div>
 </div>
 <div id="trends" class="card" style="display:none;"></div>
-<!-- Chart container for simple bar graph of top products -->
+<!-- Chart container for trends -->
 <div id="chartContainer" class="card" style="display:none;">
-  <div style="display:flex; flex-wrap:wrap; gap:10px; justify-content:space-around;">
-    <div style="flex:1; min-width:400px; text-align:center;">
-      <h3 style="margin-bottom:4px; font-size:16px;">Ingresos vs Unidades</h3>
-      <canvas id="chartCanvas" width="600" height="350"></canvas>
-    </div>
-    <div style="flex:1; min-width:400px; text-align:center;">
-      <h3 style="margin-bottom:4px; font-size:16px;"># Productos por categoría</h3>
-      <canvas id="catCountCanvas" width="600" height="350"></canvas>
-    </div>
-    <div style="flex:1; min-width:400px; text-align:center;">
-      <h3 style="margin-bottom:4px; font-size:16px;">Ingresos medios por categoría</h3>
-      <canvas id="catRevenueCanvas" width="600" height="350"></canvas>
-    </div>
+  <div id="trendControls" style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; margin-bottom:20px;">
+    <div><label>Desde: <input type="date" id="trendStart"></label></div>
+    <div><label>Hasta: <input type="date" id="trendEnd"></label></div>
+    <div><label>Métrica:
+      <select id="metricSelect">
+        <option value="revenue">Ingresos</option>
+        <option value="units">Unidades</option>
+        <option value="avg_price">Avg. Unit Price</option>
+      </select>
+    </label></div>
+    <button id="applyTrendFilters">Aplicar</button>
+  </div>
+  <div id="kpiPanel" style="display:flex; flex-wrap:wrap; gap:20px; justify-content:space-around; margin-bottom:20px;"></div>
+  <div style="width:100%; margin-bottom:20px;">
+    <h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Comparativo por categoría</h3>
+    <canvas id="catCompareCanvas" style="width:100%; height:400px;"></canvas>
+  </div>
+  <div style="width:100%; margin-bottom:20px;">
+    <h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Resumen por categoría</h3>
+    <table id="categorySummaryTable"></table>
+  </div>
+  <div style="width:100%; margin-bottom:20px;">
+    <h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Top categorías por crecimiento en ingresos</h3>
+    <canvas id="catRevenueGrowthCanvas" style="width:100%;"></canvas>
+  </div>
+  <div style="width:100%; margin-bottom:20px;">
+    <h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Top categorías por crecimiento en unidades</h3>
+    <canvas id="catUnitGrowthCanvas" style="width:100%;"></canvas>
+  </div>
+  <div style="width:100%; margin-bottom:20px;">
+    <h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Ingresos/unidades por categoría</h3>
+    <canvas id="catRevPerUnitCanvas" style="width:100%;"></canvas>
+  </div>
+  <div style="width:100%; margin-bottom:20px;">
+    <h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Palabras clave destacadas</h3>
+    <canvas id="keywordTrendCanvas" style="width:100%;"></canvas>
+  </div>
+  <div style="width:100%; margin-bottom:20px;">
+    <h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Marcas más repetidas</h3>
+    <canvas id="brandTrendCanvas" style="width:100%;"></canvas>
+  </div>
+  <div style="width:100%; margin-bottom:20px;">
+    <h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Rating vs Ingresos</h3>
+    <canvas id="ratingRevenueCanvas" style="width:100%; height:400px;"></canvas>
+  </div>
+  <div style="width:100%;">
+    <h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Precio promedio vs Ingresos</h3>
+    <canvas id="priceRevenueCanvas" style="width:100%; height:400px;"></canvas>
   </div>
 </div>
 
@@ -923,247 +958,136 @@ window.addEventListener('DOMContentLoaded', () => {
   loadLists();
 });
 
-// trends button
+// trends button & analytics rendering
+let trendsData = null;
+let currentMetric = 'revenue';
 document.getElementById('trendsBtn').onclick = async () => {
   const cont = document.getElementById('trends');
-  // toggle visibility
-  if(cont.style.display === 'block'){
+  if (cont.style.display === 'block') {
     cont.style.display = 'none';
     cont.innerHTML = '';
-    // hide and clear charts
-    const chartDiv = document.getElementById('chartContainer');
-    if(chartDiv) chartDiv.style.display = 'none';
-    const canvases = ['chartCanvas','catCountCanvas','catRevenueCanvas'];
-    canvases.forEach(id => {
-      const cv = document.getElementById(id);
-      if(cv){
-        const cx = cv.getContext('2d');
-        cx && cx.clearRect(0,0,cv.width,cv.height);
-      }
-    });
+    document.getElementById('chartContainer').style.display = 'none';
     return;
   }
-  const data = await fetchJson('/trends');
-  if(data.error){
-    cont.style.display = 'block';
-    cont.textContent = 'Error al cargar tendencias: '+data.error;
-    return;
-  }
-  // store trending keywords for highlighting
-  trendingWords = (data.keywords || []).map(([word]) => word.toLowerCase());
+  cont.style.display = 'block';
+  cont.innerHTML = '<h3>Tendencias</h3>';
+  await loadTrends();
+};
+document.getElementById('applyTrendFilters').onclick = () => loadTrends();
+document.getElementById('metricSelect').onchange = e => {
+  currentMetric = e.target.value;
+  renderTrends();
+};
+
+async function loadTrends(){
+  const cont = document.getElementById('trends');
+  const start = document.getElementById('trendStart').value;
+  const end = document.getElementById('trendEnd').value;
+  let url = '/trends';
+  const params=[];
+  if(start) params.push('start='+encodeURIComponent(start));
+  if(end) params.push('end='+encodeURIComponent(end));
+  if(params.length) url += '?' + params.join('&');
+  const data = await fetchJson(url);
+  if(data.error){ cont.textContent = 'Error al cargar tendencias: '+data.error; return; }
+  trendsData = data;
+  trendingWords = (data.keywords || []).map(([w])=>w.toLowerCase());
   let html = '<h3>Tendencias</h3>';
-  if(data.categories && data.categories.length){
-    html += '<strong>Categorías más frecuentes:</strong><ul>';
-    data.categories.forEach(([cat,count]) => {
-      html += `<li>${cat} (${count})</li>`;
-    });
-    html += '</ul>';
-  }
-  if(data.keywords && data.keywords.length){
-    html += '<strong>Palabras clave destacadas:</strong><ul>';
-    data.keywords.forEach(([word,count]) => {
-      html += `<li>${word} (${count})</li>`;
-    });
-    html += '</ul>';
-  }
   if(data.top_products && data.top_products.length){
     html += '<strong>Top productos por puntuación:</strong><ol>';
-    data.top_products.forEach(item => {
-      html += `<li>${item.name} (Score: ${item.score.toFixed(2)})</li>`;
-    });
+    data.top_products.forEach(item=>{ html += `<li>${item.name} (Score: ${item.score.toFixed(2)})</li>`; });
     html += '</ol>';
   }
   cont.innerHTML = html;
-  cont.style.display = 'block';
-  // prepare and draw chart: use existing products array to get revenue and units sold
+  renderTrends();
+}
+
+function renderTrends(){
+  if(!trendsData) return;
   const chartDiv = document.getElementById('chartContainer');
-  const canvas = document.getElementById('chartCanvas');
-  const ctx = canvas.getContext('2d');
-  // extract data for top products (limit 10)
-  const top = (data.top_products || []).slice(0, 10);
-  const labels = [];
-  const revenues = [];
-  const units = [];
-  top.forEach(tp => {
-    // find product in local list by id
-    const prod = products.find(p => p.id === tp.id);
-    if (prod) {
-      labels.push(prod.name);
-      const rev = prod.extras ? parseFloat(String(prod.extras['Revenue($)']).replace(/[^0-9.-]+/g,'')) : 0;
-      const unit = prod.extras ? parseFloat(String(prod.extras['Item Sold']).replace(/[^0-9.-]+/g,'')) : 0;
-      revenues.push(isNaN(rev) ? 0 : rev);
-      units.push(isNaN(unit) ? 0 : unit);
-    }
-  });
-  // clear canvas
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  if (labels.length > 0) {
-    // simple bar chart: compute scaling
-    const maxRev = Math.max(...revenues);
-    const maxUnit = Math.max(...units);
-    const barWidth = (canvas.width - 40) / (labels.length * 2);
-    labels.forEach((lbl, idx) => {
-      const x = 40 + idx * 2 * barWidth + barWidth * 0.5;
-      // revenue bar (blue)
-      const hRev = maxRev > 0 ? (revenues[idx] / maxRev) * (canvas.height - 60) : 0;
-      ctx.fillStyle = '#42a5f5';
-      ctx.fillRect(x, canvas.height - hRev - 40, barWidth * 0.4, hRev);
-      // value for revenue
-      ctx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
-      ctx.font = '12px sans-serif';
-      ctx.fillText(revenues[idx].toFixed(0), x + barWidth * 0.2, canvas.height - hRev - 45);
-      // units bar (green)
-      const hUnit = maxUnit > 0 ? (units[idx] / maxUnit) * (canvas.height - 60) : 0;
-      ctx.fillStyle = '#66bb6a';
-      ctx.fillRect(x + barWidth * 0.45, canvas.height - hUnit - 40, barWidth * 0.4, hUnit);
-      // value for units
-      ctx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
-      ctx.font = '12px sans-serif';
-      ctx.fillText(units[idx].toFixed(0), x + barWidth * 0.65, canvas.height - hUnit - 45);
-      // label rotated
-      ctx.save();
-      ctx.translate(x + barWidth * 0.4, canvas.height - 25);
-      ctx.rotate(-Math.PI / 4);
-      ctx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
-      ctx.font = '12px sans-serif';
-      ctx.fillText(lbl.substring(0, 15) + (lbl.length > 15 ? '…' : ''), 0, 0);
-      ctx.restore();
+  chartDiv.style.display='block';
+  const k = trendsData.kpis || {};
+  document.getElementById('kpiPanel').innerHTML = `
+    <div><strong>Ingresos totales:</strong> ${k.total_revenue ? k.total_revenue.toFixed(2) : 0}</div>
+    <div><strong>Unidades totales:</strong> ${k.total_units || 0}</div>
+    <div><strong>Precio medio:</strong> ${k.avg_price ? k.avg_price.toFixed(2) : 0}</div>
+    <div><strong>Categoría top:</strong> ${k.top_category || '-'}</div>
+    <div><strong>Producto top:</strong> ${k.top_product || '-'}</div>`;
+  const tooltip = document.getElementById('chartTooltip');
+  const drawHorizontal = (canvasId, entries, color, axisLabel) => {
+    const canvas = document.getElementById(canvasId);
+    const ctx = canvas.getContext('2d');
+    const padL=120,padT=20,padB=40,barH=28,gap=12;
+    const width = chartDiv.clientWidth - 40;
+    canvas.width = width;
+    canvas.height = padT + padB + entries.length*(barH+gap);
+    ctx.fillStyle='#fafafa'; ctx.fillRect(0,0,canvas.width,canvas.height);
+    const maxVal = Math.max(...entries.map(e=>e.value),0);
+    ctx.font='14px sans-serif'; ctx.textBaseline='middle';
+    const rects=[];
+    entries.forEach((e,i)=>{
+      const y=padT+i*(barH+gap);
+      const len=maxVal?(e.value/maxVal)*(canvas.width-padL-40):0;
+      ctx.fillStyle=color; ctx.fillRect(padL,y,len,barH);
+      ctx.fillStyle='#000'; ctx.fillText(e.value,padL+len+5,y+barH/2);
+      ctx.fillText(e.label,10,y+barH/2);
+      rects.push({x:padL,y:y,w:len,h:barH,data:e});
     });
-    // axis lines
-    ctx.strokeStyle = document.body.classList.contains('dark') ? '#aaa' : '#333';
-    ctx.beginPath();
-    ctx.moveTo(40, canvas.height - 40);
-    ctx.lineTo(canvas.width, canvas.height - 40);
-    ctx.moveTo(40, 0);
-    ctx.lineTo(40, canvas.height - 40);
-    ctx.stroke();
-    // axis labels
-    ctx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
-    ctx.font = '14px sans-serif';
-    ctx.fillText('Productos', canvas.width / 2, canvas.height - 10);
-    ctx.save();
-    ctx.translate(15, canvas.height / 2);
-    ctx.rotate(-Math.PI / 2);
-    ctx.fillText('Ingresos / Unidades', 0, 0);
-    ctx.restore();
-  }
-  // draw category charts
-  const catCountCanvas = document.getElementById('catCountCanvas');
-  const catCountCtx = catCountCanvas.getContext('2d');
-  const catRevenueCanvas = document.getElementById('catRevenueCanvas');
-  const catRevenueCtx = catRevenueCanvas.getContext('2d');
-  // compute category counts and revenue
-  const counts = {};
-  const revSum = {};
-  const revCount = {};
-  products.forEach(item => {
-    const cat = (item.category || '').trim().toLowerCase();
-    if (!cat) return;
-    counts[cat] = (counts[cat] || 0) + 1;
-    // revenue
-    let rev = 0;
-    if (item.extras && item.extras['Revenue($)']) {
-      const v = parseFloat(String(item.extras['Revenue($)']).replace(/[^0-9.-]+/g,''));
-      if (!isNaN(v)) rev = v;
-    }
-    revSum[cat] = (revSum[cat] || 0) + rev;
-    revCount[cat] = (revCount[cat] || 0) + (rev > 0 ? 1 : 0);
-  });
-  // sort categories by counts and take top 10
-  const catEntries = Object.entries(counts).sort((a,b) => b[1] - a[1]).slice(0, 10);
-  const catLabels = catEntries.map(e => e[0]);
-  const catValues = catEntries.map(e => e[1]);
-  // draw category counts bar chart
-  catCountCtx.clearRect(0, 0, catCountCanvas.width, catCountCanvas.height);
-  if (catLabels.length > 0) {
-    const maxCount = Math.max(...catValues);
-    const barWidth = (catCountCanvas.width - 40) / (catLabels.length * 2);
-    catLabels.forEach((lbl, idx) => {
-      const x = 40 + idx * 2 * barWidth + barWidth * 0.5;
-      const h = maxCount > 0 ? (catValues[idx] / maxCount) * (catCountCanvas.height - 60) : 0;
-      catCountCtx.fillStyle = '#ffb74d';
-      catCountCtx.fillRect(x, catCountCanvas.height - h - 40, barWidth * 0.8, h);
-      // value
-      catCountCtx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
-      catCountCtx.font = '12px sans-serif';
-      catCountCtx.fillText(catValues[idx], x + barWidth * 0.4, catCountCanvas.height - h - 45);
-      catCountCtx.save();
-      catCountCtx.translate(x + barWidth * 0.4, catCountCanvas.height - 25);
-      catCountCtx.rotate(-Math.PI / 4);
-      catCountCtx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
-      catCountCtx.font = '12px sans-serif';
-      catCountCtx.fillText(lbl.substring(0, 15) + (lbl.length > 15 ? '…' : ''), 0, 0);
-      catCountCtx.restore();
-    });
-    // axis
-    catCountCtx.strokeStyle = document.body.classList.contains('dark') ? '#aaa' : '#333';
-    catCountCtx.beginPath();
-    catCountCtx.moveTo(40, catCountCanvas.height - 40);
-    catCountCtx.lineTo(catCountCanvas.width, catCountCanvas.height - 40);
-    catCountCtx.moveTo(40, 0);
-    catCountCtx.lineTo(40, catCountCanvas.height - 40);
-    catCountCtx.stroke();
-    catCountCtx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
-    catCountCtx.font = '14px sans-serif';
-    catCountCtx.fillText('Categorías', catCountCanvas.width / 2, catCountCanvas.height - 10);
-    catCountCtx.save();
-    catCountCtx.translate(15, catCountCanvas.height / 2);
-    catCountCtx.rotate(-Math.PI / 2);
-    catCountCtx.fillText('# Productos', 0, 0);
-    catCountCtx.restore();
-  }
-  // compute average revenue per category for top categories
-  const avgRev = catLabels.map(cat => {
-    const sum = revSum[cat] || 0;
-    const count = revCount[cat] || counts[cat];
-    return count > 0 ? sum / count : 0;
-  });
-  // draw average revenue chart
-  catRevenueCtx.clearRect(0, 0, catRevenueCanvas.width, catRevenueCanvas.height);
-  if (catLabels.length > 0) {
-    const maxRevAvg = Math.max(...avgRev);
-    const barWidth2 = (catRevenueCanvas.width - 40) / (catLabels.length * 2);
-    catLabels.forEach((lbl, idx) => {
-      const x = 40 + idx * 2 * barWidth2 + barWidth2 * 0.5;
-      const h = maxRevAvg > 0 ? (avgRev[idx] / maxRevAvg) * (catRevenueCanvas.height - 60) : 0;
-      catRevenueCtx.fillStyle = '#4db6ac';
-      catRevenueCtx.fillRect(x, catRevenueCanvas.height - h - 40, barWidth2 * 0.8, h);
-      // value
-      catRevenueCtx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
-      catRevenueCtx.font = '12px sans-serif';
-      catRevenueCtx.fillText(avgRev[idx].toFixed(0), x + barWidth2 * 0.4, catRevenueCanvas.height - h - 45);
-      catRevenueCtx.save();
-      catRevenueCtx.translate(x + barWidth2 * 0.4, catRevenueCanvas.height - 25);
-      catRevenueCtx.rotate(-Math.PI / 4);
-      catRevenueCtx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
-      catRevenueCtx.font = '12px sans-serif';
-      catRevenueCtx.fillText(lbl.substring(0, 15) + (lbl.length > 15 ? '…' : ''), 0, 0);
-      catRevenueCtx.restore();
-    });
-    catRevenueCtx.strokeStyle = document.body.classList.contains('dark') ? '#aaa' : '#333';
-    catRevenueCtx.beginPath();
-    catRevenueCtx.moveTo(40, catRevenueCanvas.height - 40);
-    catRevenueCtx.lineTo(catRevenueCanvas.width, catRevenueCanvas.height - 40);
-    catRevenueCtx.moveTo(40, 0);
-    catRevenueCtx.lineTo(40, catRevenueCanvas.height - 40);
-    catRevenueCtx.stroke();
-    catRevenueCtx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
-    catRevenueCtx.font = '14px sans-serif';
-    catRevenueCtx.fillText('Categorías', catRevenueCanvas.width / 2, catRevenueCanvas.height - 10);
-    catRevenueCtx.save();
-    catRevenueCtx.translate(15, catRevenueCanvas.height / 2);
-    catRevenueCtx.rotate(-Math.PI / 2);
-    catRevenueCtx.fillText('Ingresos medios', 0, 0);
-    catRevenueCtx.restore();
-  }
-  chartDiv.style.display = 'block';
-  // re-render table to show outlines for trending products
+    ctx.strokeStyle='#666'; ctx.beginPath();
+    ctx.moveTo(padL,padT-10); ctx.lineTo(padL,canvas.height-padB); ctx.lineTo(canvas.width-20,canvas.height-padB); ctx.stroke();
+    ctx.font='16px sans-serif'; ctx.fillStyle='#000'; if(axisLabel) ctx.fillText(axisLabel,canvas.width/2,canvas.height-10);
+    canvas.onmousemove=ev=>{
+      const r=canvas.getBoundingClientRect(); const mx=ev.clientX-r.left,my=ev.clientY-r.top;
+      const hit=rects.find(b=>mx>=b.x && mx<=b.x+b.w && my>=b.y && my<=b.y+b.h);
+      if(hit){ tooltip.style.display='block'; tooltip.textContent=hit.data.tooltip||`${hit.data.label}: ${hit.data.value}`; tooltip.style.left=ev.pageX+10+'px'; tooltip.style.top=ev.pageY+10+'px'; }
+      else tooltip.style.display='none'; };
+    canvas.onmouseleave=()=>tooltip.style.display='none';
+  };
+  const drawScatter = (canvasId, points, color, xLabel, yLabel) => {
+    const canvas=document.getElementById(canvasId); const ctx=canvas.getContext('2d');
+    const padL=60,padB=40,padT=20,width=chartDiv.clientWidth-40,height=400;
+    canvas.width=width; canvas.height=height;
+    ctx.fillStyle='#fafafa'; ctx.fillRect(0,0,width,height);
+    const maxX=Math.max(...points.map(p=>p.x),0), maxY=Math.max(...points.map(p=>p.y),0), maxR=Math.max(...points.map(p=>p.r||0),0);
+    const pts=[];
+    points.forEach(p=>{ const x=padL+(maxX?(p.x/maxX)*(width-padL-20):0); const y=height-padB-(maxY?(p.y/maxY)*(height-padT-padB):0); const r=p.r?Math.max(4,(p.r/maxR)*20):6; ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fillStyle=color; ctx.fill(); pts.push({x,y,r,data:p});});
+    ctx.strokeStyle='#666'; ctx.beginPath(); ctx.moveTo(padL,padT); ctx.lineTo(padL,height-padB); ctx.lineTo(width-20,height-padB); ctx.stroke();
+    ctx.font='16px sans-serif'; ctx.fillStyle='#000'; ctx.fillText(xLabel,width/2,height-10); ctx.save(); ctx.translate(20,height/2); ctx.rotate(-Math.PI/2); ctx.fillText(yLabel,0,0); ctx.restore();
+    canvas.onmousemove=ev=>{ const r=canvas.getBoundingClientRect(); const mx=ev.clientX-r.left,my=ev.clientY-r.top; const hit=pts.find(p=>Math.hypot(mx-p.x,my-p.y)<=p.r); if(hit){ const d=hit.data; tooltip.style.display='block'; tooltip.innerHTML=`${d.label||''}<br/>Ingresos: ${d.revenue?.toFixed?d.revenue.toFixed(2):d.y.toFixed(2)}<br/>Unidades: ${d.units||''}<br/>Rating: ${d.rating||''}`; tooltip.style.left=ev.pageX+10+'px'; tooltip.style.top=ev.pageY+10+'px'; } else tooltip.style.display='none'; };
+    canvas.onmouseleave=()=>tooltip.style.display='none';
+  };
+  const metricLabel = currentMetric==='units'?'Unidades medias':currentMetric==='avg_price'?'Precio medio':'Ingresos medios';
+  const catPts=(trendsData.category_compare||[]).map(c=>({x:c.products,y:currentMetric==='units'?c.avg_units:currentMetric==='avg_price'?c.avg_price:c.avg_revenue,label:c.category,revenue:c.total_revenue,units:c.total_units,rating:c.avg_rating}));
+  drawScatter('catCompareCanvas',catPts,'#26a69a','Productos listados',metricLabel);
+  renderCategorySummary();
+  drawHorizontal('catRevenueGrowthCanvas',(trendsData.cat_revenue_growth||[]).map(e=>({label:e[0],value:e[1]})),'#42a5f5','Crecimiento ingresos');
+  drawHorizontal('catUnitGrowthCanvas',(trendsData.cat_units_growth||[]).map(e=>({label:e[0],value:e[1]})),'#66bb6a','Crecimiento unidades');
+  drawHorizontal('catRevPerUnitCanvas',(trendsData.cat_rev_per_unit||[]).map(e=>({label:e[0],value:e[1]})),'#ffca28','Ingresos/unidad');
+  drawHorizontal('keywordTrendCanvas',(trendsData.keywords||[]).map(e=>({label:e[0],value:e[1]})),'#29b6f6','Frecuencia');
+  drawHorizontal('brandTrendCanvas',(trendsData.brands||[]).map(e=>({label:e[0],value:e[1]})),'#ab47bc','Frecuencia');
+  drawScatter('ratingRevenueCanvas',trendsData.scatter_rating_revenue||[],'#ef5350','Rating','Ingresos');
+  drawScatter('priceRevenueCanvas',trendsData.scatter_price_revenue||[],'#7e57c2','Precio promedio','Ingresos');
   renderTable();
-};
+}
+
+let catSort={key:'category',asc:true};
+function renderCategorySummary(){
+  const table=document.getElementById('categorySummaryTable');
+  if(!table) return;
+  let rows=[...(trendsData.category_summary||[])];
+  rows.sort((a,b)=>{const k=catSort.key;const va=a[k],vb=b[k];if(typeof va==='string') return catSort.asc?va.localeCompare(vb):vb.localeCompare(va);return catSort.asc?va-vb:vb-va;});
+  let head=`<thead><tr><th data-key="category">Categoría</th><th data-key="products">#Productos</th><th data-key="total_units">Unidades totales</th><th data-key="total_revenue">Ingresos totales</th><th data-key="avg_price">Precio promedio</th><th data-key="avg_rating">Rating promedio</th></tr></thead>`;
+  let body='<tbody>';
+  rows.forEach(r=>{body+=`<tr><td>${r.category}</td><td>${r.products}</td><td>${r.total_units.toFixed(0)}</td><td>${r.total_revenue.toFixed(2)}</td><td>${r.avg_price.toFixed(2)}</td><td>${r.avg_rating.toFixed(2)}</td></tr>`;});
+  body+='</tbody>'; table.innerHTML=head+body;
+  table.querySelectorAll('th').forEach(th=>{th.style.cursor='pointer';th.onclick=()=>{const key=th.dataset.key;if(catSort.key===key) catSort.asc=!catSort.asc; else {catSort.key=key;catSort.asc=true;} renderCategorySummary();};});
+}
+
 window.renderTable = renderTable;
 window.startProgress = startProgress;
 window.parseDate = parseDate;
 </script>
+<div id="chartTooltip" style="position:absolute; background:#fff; border:1px solid #333; padding:4px; font-size:12px; border-radius:4px; pointer-events:none; display:none; z-index:2000;"></div>
 <script src="/static/js/filters.js"></script>
 </body>
 </html>
