@@ -413,6 +413,11 @@ function renderTable() {
         const sc = parseFloat(value);
         if (!isNaN(sc)) {
           td.innerHTML = '<span class="' + winnerScoreClass(sc) + '">' + Math.round(sc) + '</span>';
+          if (item.winner_score_v2_breakdown && item.winner_score_v2_breakdown.justifications) {
+            const j = item.winner_score_v2_breakdown.justifications;
+            const tooltip = Object.entries(j).map(([k,v])=>`${k}: ${v}`).join('\n');
+            td.title = tooltip;
+          }
         }
       } else if (key === 'image_url' && value) {
         const img = document.createElement('img');

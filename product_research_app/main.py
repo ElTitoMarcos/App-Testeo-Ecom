@@ -313,10 +313,12 @@ def evaluate_product(conn: database.sqlite3.Connection) -> None:
         if config.is_scoring_v2_enabled():
             resp = gpt.evaluate_winner_score(api_key, model, dict(product))
             weights_map = config.get_scoring_v2_weights()
-            scores = {}
+            scores: Dict[str, int] = {}
+            justifs: Dict[str, str] = {}
             for field in WINNER_V2_FIELDS:
+                item = resp.get(field) or {}
                 try:
-                    val = int(resp.get(field, 3))
+                    val = int(item.get("score", 3))
                 except Exception:
                     val = 3
                 if val < 1:
@@ -324,10 +326,17 @@ def evaluate_product(conn: database.sqlite3.Connection) -> None:
                 if val > 5:
                     val = 5
                 scores[field] = val
+                j = item.get("justificacion")
+                if isinstance(j, str):
+                    justifs[field] = j.strip()
             weighted = sum(scores[f] * weights_map.get(f, 0.0) for f in WINNER_V2_FIELDS)
             raw_score = weighted * 8.0
             pct = ((raw_score - 8.0) / 32.0) * 100.0
-            breakdown = {"scores": scores, "weights": weights_map}
+            breakdown = {
+                "scores": scores,
+                "justifications": justifs,
+                "weights": weights_map,
+            }
             database.insert_score(
                 conn,
                 product_id=pid,

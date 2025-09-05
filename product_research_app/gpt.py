@@ -379,16 +379,16 @@ Título: {title}
 Descripción: {description}
 Categoría: {category}
 
-Devuelve en formato JSON:
+Devuelve en formato JSON usando para cada variable un objeto con "score" (entero 1-5) y "justificacion" (frase breve de una línea):
 {{
-  "magnitud_deseo": x,
-  "nivel_consciencia": x,
-  "saturacion_mercado": x,
-  "facilidad_anuncio": x,
-  "facilidad_logistica": x,
-  "escalabilidad": x,
-  "engagement_shareability": x,
-  "durabilidad_recurrencia": x
+  "magnitud_deseo": {{"score": x, "justificacion": "..."}},
+  "nivel_consciencia": {{"score": x, "justificacion": "..."}},
+  "saturacion_mercado": {{"score": x, "justificacion": "..."}},
+  "facilidad_anuncio": {{"score": x, "justificacion": "..."}},
+  "facilidad_logistica": {{"score": x, "justificacion": "..."}},
+  "escalabilidad": {{"score": x, "justificacion": "..."}},
+  "engagement_shareability": {{"score": x, "justificacion": "..."}},
+  "durabilidad_recurrencia": {{"score": x, "justificacion": "..."}}
 }}
 """
     return prompt.strip()

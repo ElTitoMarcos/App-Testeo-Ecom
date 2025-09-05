@@ -256,6 +256,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                         else "total_score"
                     )
                     score_value = score.get(key)
+                    breakdown_data = {}
+                    if config.is_scoring_v2_enabled():
+                        try:
+                            breakdown_data = json.loads(
+                                score.get("winner_score_v2_breakdown") or "{}"
+                            )
+                        except Exception:
+                            breakdown_data = {}
                 row = {
                     "id": p["id"],
                     "name": p["name"],
@@ -266,6 +274,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 }
                 if config.is_scoring_v2_enabled():
                     row["winner_score_v2_pct"] = score_value
+                    if score:
+                        row["winner_score_v2_breakdown"] = breakdown_data
                 else:
                     row["score"] = score_value
                 rows.append(row)
@@ -339,6 +349,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                             else "total_score"
                         )
                         score_value = score.get(key)
+                        breakdown_data = {}
+                        if config.is_scoring_v2_enabled():
+                            try:
+                                breakdown_data = json.loads(
+                                    score.get("winner_score_v2_breakdown") or "{}"
+                                )
+                            except Exception:
+                                breakdown_data = {}
                     row = {
                         "id": p["id"],
                         "name": p["name"],
@@ -349,6 +367,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                     }
                     if config.is_scoring_v2_enabled():
                         row["winner_score_v2_pct"] = score_value
+                        if score:
+                            row["winner_score_v2_breakdown"] = breakdown_data
                     else:
                         row["score"] = score_value
                     rows.append(row)
@@ -1133,10 +1153,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                                         "category": category,
                                     },
                                 )
-                                scores = {}
+                                scores: Dict[str, int] = {}
+                                justifs: Dict[str, str] = {}
                                 for field in WINNER_V2_FIELDS:
+                                    item = resp.get(field) or {}
                                     try:
-                                        val = int(resp.get(field, 3))
+                                        val = int(item.get("score", 3))
                                     except Exception:
                                         val = 3
                                     if val < 1:
@@ -1144,13 +1166,20 @@ class RequestHandler(BaseHTTPRequestHandler):
                                     if val > 5:
                                         val = 5
                                     scores[field] = val
+                                    j = item.get("justificacion")
+                                    if isinstance(j, str):
+                                        justifs[field] = j.strip()
                                 weighted = sum(
                                     scores[f] * weights_map.get(f, 0.0)
                                     for f in WINNER_V2_FIELDS
                                 )
                                 raw_score = weighted * 8.0
                                 pct = ((raw_score - 8.0) / 32.0) * 100.0
-                                breakdown = {"scores": scores, "weights": weights_map}
+                                breakdown = {
+                                    "scores": scores,
+                                    "justifications": justifs,
+                                    "weights": weights_map,
+                                }
                                 database.insert_score(
                                     conn,
                                     product_id=pid,
@@ -1297,10 +1326,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                     continue
                 try:
                     resp = gpt.evaluate_winner_score(api_key, model, dict(p))
-                    scores = {}
+                    scores: Dict[str, int] = {}
+                    justifs: Dict[str, str] = {}
                     for field in WINNER_V2_FIELDS:
+                        item = resp.get(field) or {}
                         try:
-                            val = int(resp.get(field, 3))
+                            val = int(item.get("score", 3))
                         except Exception:
                             val = 3
                         if val < 1:
@@ -1308,12 +1339,19 @@ class RequestHandler(BaseHTTPRequestHandler):
                         if val > 5:
                             val = 5
                         scores[field] = val
+                        j = item.get("justificacion")
+                        if isinstance(j, str):
+                            justifs[field] = j.strip()
                     weighted = sum(
                         scores[f] * weights_map.get(f, 0.0) for f in WINNER_V2_FIELDS
                     )
                     raw_score = weighted * 8.0
                     pct = ((raw_score - 8.0) / 32.0) * 100.0
-                    breakdown = {"scores": scores, "weights": weights_map}
+                    breakdown = {
+                        "scores": scores,
+                        "justifications": justifs,
+                        "weights": weights_map,
+                    }
                     database.insert_score(
                         conn,
                         product_id=p['id'],
