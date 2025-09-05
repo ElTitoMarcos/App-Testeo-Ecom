@@ -160,21 +160,35 @@ body.dark #scoreInfo { background:#262a51; }
   <div id="history" style="margin-top:10px;"></div>
 </div>
 <div id="trends" class="card" style="display:none;"></div>
-<!-- Chart container for simple bar graph of top products -->
+<!-- Chart container for trends -->
 <div id="chartContainer" class="card" style="display:none;">
-  <div style="display:flex; flex-wrap:wrap; gap:10px; justify-content:space-around;">
-    <div style="flex:1; min-width:400px; text-align:center;">
-      <h3 style="margin-bottom:4px; font-size:16px;">Ingresos vs Unidades</h3>
-      <canvas id="chartCanvas" width="600" height="350"></canvas>
-    </div>
-    <div style="flex:1; min-width:400px; text-align:center;">
-      <h3 style="margin-bottom:4px; font-size:16px;"># Productos por categoría</h3>
-      <canvas id="catCountCanvas" width="600" height="350"></canvas>
-    </div>
-    <div style="flex:1; min-width:400px; text-align:center;">
-      <h3 style="margin-bottom:4px; font-size:16px;">Ingresos medios por categoría</h3>
-      <canvas id="catRevenueCanvas" width="600" height="350"></canvas>
-    </div>
+  <div style="width:100%; margin-bottom:20px;">
+    <h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Top categorías por crecimiento en ingresos</h3>
+    <canvas id="catRevenueGrowthCanvas" style="width:100%;"></canvas>
+  </div>
+  <div style="width:100%; margin-bottom:20px;">
+    <h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Top categorías por crecimiento en unidades</h3>
+    <canvas id="catUnitGrowthCanvas" style="width:100%;"></canvas>
+  </div>
+  <div style="width:100%; margin-bottom:20px;">
+    <h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Ingresos/unidades por categoría</h3>
+    <canvas id="catRevPerUnitCanvas" style="width:100%;"></canvas>
+  </div>
+  <div style="width:100%; margin-bottom:20px;">
+    <h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Palabras clave destacadas</h3>
+    <canvas id="keywordTrendCanvas" style="width:100%;"></canvas>
+  </div>
+  <div style="width:100%; margin-bottom:20px;">
+    <h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Marcas más repetidas</h3>
+    <canvas id="brandTrendCanvas" style="width:100%;"></canvas>
+  </div>
+  <div style="width:100%; margin-bottom:20px;">
+    <h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Rating vs Ingresos</h3>
+    <canvas id="ratingRevenueCanvas" style="width:100%; height:400px;"></canvas>
+  </div>
+  <div style="width:100%;">
+    <h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Precio promedio vs Ingresos</h3>
+    <canvas id="priceRevenueCanvas" style="width:100%; height:400px;"></canvas>
   </div>
 </div>
 
@@ -933,7 +947,7 @@ document.getElementById('trendsBtn').onclick = async () => {
     // hide and clear charts
     const chartDiv = document.getElementById('chartContainer');
     if(chartDiv) chartDiv.style.display = 'none';
-    const canvases = ['chartCanvas','catCountCanvas','catRevenueCanvas'];
+    const canvases = ['catRevenueGrowthCanvas','catUnitGrowthCanvas','catRevPerUnitCanvas','keywordTrendCanvas','brandTrendCanvas','ratingRevenueCanvas','priceRevenueCanvas'];
     canvases.forEach(id => {
       const cv = document.getElementById(id);
       if(cv){
@@ -952,20 +966,6 @@ document.getElementById('trendsBtn').onclick = async () => {
   // store trending keywords for highlighting
   trendingWords = (data.keywords || []).map(([word]) => word.toLowerCase());
   let html = '<h3>Tendencias</h3>';
-  if(data.categories && data.categories.length){
-    html += '<strong>Categorías más frecuentes:</strong><ul>';
-    data.categories.forEach(([cat,count]) => {
-      html += `<li>${cat} (${count})</li>`;
-    });
-    html += '</ul>';
-  }
-  if(data.keywords && data.keywords.length){
-    html += '<strong>Palabras clave destacadas:</strong><ul>';
-    data.keywords.forEach(([word,count]) => {
-      html += `<li>${word} (${count})</li>`;
-    });
-    html += '</ul>';
-  }
   if(data.top_products && data.top_products.length){
     html += '<strong>Top productos por puntuación:</strong><ol>';
     data.top_products.forEach(item => {
@@ -975,188 +975,91 @@ document.getElementById('trendsBtn').onclick = async () => {
   }
   cont.innerHTML = html;
   cont.style.display = 'block';
-  // prepare and draw chart: use existing products array to get revenue and units sold
   const chartDiv = document.getElementById('chartContainer');
-  const canvas = document.getElementById('chartCanvas');
-  const ctx = canvas.getContext('2d');
-  // extract data for top products (limit 10)
-  const top = (data.top_products || []).slice(0, 10);
-  const labels = [];
-  const revenues = [];
-  const units = [];
-  top.forEach(tp => {
-    // find product in local list by id
-    const prod = products.find(p => p.id === tp.id);
-    if (prod) {
-      labels.push(prod.name);
-      const rev = prod.extras ? parseFloat(String(prod.extras['Revenue($)']).replace(/[^0-9.-]+/g,'')) : 0;
-      const unit = prod.extras ? parseFloat(String(prod.extras['Item Sold']).replace(/[^0-9.-]+/g,'')) : 0;
-      revenues.push(isNaN(rev) ? 0 : rev);
-      units.push(isNaN(unit) ? 0 : unit);
-    }
-  });
-  // clear canvas
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  if (labels.length > 0) {
-    // simple bar chart: compute scaling
-    const maxRev = Math.max(...revenues);
-    const maxUnit = Math.max(...units);
-    const barWidth = (canvas.width - 40) / (labels.length * 2);
-    labels.forEach((lbl, idx) => {
-      const x = 40 + idx * 2 * barWidth + barWidth * 0.5;
-      // revenue bar (blue)
-      const hRev = maxRev > 0 ? (revenues[idx] / maxRev) * (canvas.height - 60) : 0;
-      ctx.fillStyle = '#42a5f5';
-      ctx.fillRect(x, canvas.height - hRev - 40, barWidth * 0.4, hRev);
-      // value for revenue
-      ctx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
-      ctx.font = '12px sans-serif';
-      ctx.fillText(revenues[idx].toFixed(0), x + barWidth * 0.2, canvas.height - hRev - 45);
-      // units bar (green)
-      const hUnit = maxUnit > 0 ? (units[idx] / maxUnit) * (canvas.height - 60) : 0;
-      ctx.fillStyle = '#66bb6a';
-      ctx.fillRect(x + barWidth * 0.45, canvas.height - hUnit - 40, barWidth * 0.4, hUnit);
-      // value for units
-      ctx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
-      ctx.font = '12px sans-serif';
-      ctx.fillText(units[idx].toFixed(0), x + barWidth * 0.65, canvas.height - hUnit - 45);
-      // label rotated
-      ctx.save();
-      ctx.translate(x + barWidth * 0.4, canvas.height - 25);
-      ctx.rotate(-Math.PI / 4);
-      ctx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
-      ctx.font = '12px sans-serif';
-      ctx.fillText(lbl.substring(0, 15) + (lbl.length > 15 ? '…' : ''), 0, 0);
-      ctx.restore();
-    });
-    // axis lines
-    ctx.strokeStyle = document.body.classList.contains('dark') ? '#aaa' : '#333';
-    ctx.beginPath();
-    ctx.moveTo(40, canvas.height - 40);
-    ctx.lineTo(canvas.width, canvas.height - 40);
-    ctx.moveTo(40, 0);
-    ctx.lineTo(40, canvas.height - 40);
-    ctx.stroke();
-    // axis labels
-    ctx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
+  const drawHorizontal = (canvasId, entries, color, axisLabel) => {
+    const canvas = document.getElementById(canvasId);
+    const ctx = canvas.getContext('2d');
+    const labels = entries.map(e => e[0]);
+    const values = entries.map(e => e[1]);
+    const paddingLeft = 120;
+    const paddingTop = 20;
+    const paddingBottom = 40;
+    const barHeight = 28;
+    const gap = 12;
+    const width = chartDiv.clientWidth - 40;
+    canvas.width = width;
+    canvas.height = paddingTop + paddingBottom + labels.length * (barHeight + gap);
+    ctx.fillStyle = '#fafafa';
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+    const maxVal = Math.max(...values, 0);
     ctx.font = '14px sans-serif';
-    ctx.fillText('Productos', canvas.width / 2, canvas.height - 10);
+    ctx.textBaseline = 'middle';
+    labels.forEach((lbl, idx) => {
+      const y = paddingTop + idx*(barHeight+gap);
+      const barLen = maxVal ? (values[idx]/maxVal)*(canvas.width - paddingLeft - 40) : 0;
+      ctx.fillStyle = color;
+      ctx.fillRect(paddingLeft, y, barLen, barHeight);
+      ctx.fillStyle = '#000';
+      ctx.fillText(values[idx], paddingLeft + barLen + 5, y + barHeight/2);
+      ctx.fillText(lbl, 10, y + barHeight/2);
+    });
+    ctx.strokeStyle = '#666';
+    ctx.beginPath();
+    ctx.moveTo(paddingLeft, paddingTop - 10);
+    ctx.lineTo(paddingLeft, canvas.height - paddingBottom);
+    ctx.lineTo(canvas.width - 20, canvas.height - paddingBottom);
+    ctx.stroke();
+    ctx.font = '16px sans-serif';
+    ctx.fillStyle = '#000';
+    if(axisLabel) ctx.fillText(axisLabel, canvas.width / 2, canvas.height - 10);
+  };
+  const drawScatter = (canvasId, points, color, xLabel, yLabel) => {
+    const canvas = document.getElementById(canvasId);
+    const ctx = canvas.getContext('2d');
+    const paddingLeft = 60;
+    const paddingBottom = 40;
+    const paddingTop = 20;
+    const width = chartDiv.clientWidth - 40;
+    const height = 400;
+    canvas.width = width;
+    canvas.height = height;
+    ctx.fillStyle = '#fafafa';
+    ctx.fillRect(0,0,width,height);
+    const maxX = Math.max(...points.map(p=>p.x), 0);
+    const maxY = Math.max(...points.map(p=>p.y), 0);
+    const maxR = Math.max(...points.map(p=>p.r || 0), 0);
+    points.forEach(p => {
+      const x = paddingLeft + (maxX ? (p.x/maxX)*(width - paddingLeft - 20) : 0);
+      const y = height - paddingBottom - (maxY ? (p.y/maxY)*(height - paddingTop - paddingBottom) : 0);
+      const r = p.r ? Math.max(4, (p.r/maxR)*20) : 6;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI*2);
+      ctx.fillStyle = color;
+      ctx.fill();
+    });
+    ctx.strokeStyle = '#666';
+    ctx.beginPath();
+    ctx.moveTo(paddingLeft, paddingTop);
+    ctx.lineTo(paddingLeft, height - paddingBottom);
+    ctx.lineTo(width - 20, height - paddingBottom);
+    ctx.stroke();
+    ctx.font = '16px sans-serif';
+    ctx.fillStyle = '#000';
+    ctx.fillText(xLabel, width / 2, height - 10);
     ctx.save();
-    ctx.translate(15, canvas.height / 2);
+    ctx.translate(20, height / 2);
     ctx.rotate(-Math.PI / 2);
-    ctx.fillText('Ingresos / Unidades', 0, 0);
+    ctx.fillText(yLabel, 0, 0);
     ctx.restore();
-  }
-  // draw category charts
-  const catCountCanvas = document.getElementById('catCountCanvas');
-  const catCountCtx = catCountCanvas.getContext('2d');
-  const catRevenueCanvas = document.getElementById('catRevenueCanvas');
-  const catRevenueCtx = catRevenueCanvas.getContext('2d');
-  // compute category counts and revenue
-  const counts = {};
-  const revSum = {};
-  const revCount = {};
-  products.forEach(item => {
-    const cat = (item.category || '').trim().toLowerCase();
-    if (!cat) return;
-    counts[cat] = (counts[cat] || 0) + 1;
-    // revenue
-    let rev = 0;
-    if (item.extras && item.extras['Revenue($)']) {
-      const v = parseFloat(String(item.extras['Revenue($)']).replace(/[^0-9.-]+/g,''));
-      if (!isNaN(v)) rev = v;
-    }
-    revSum[cat] = (revSum[cat] || 0) + rev;
-    revCount[cat] = (revCount[cat] || 0) + (rev > 0 ? 1 : 0);
-  });
-  // sort categories by counts and take top 10
-  const catEntries = Object.entries(counts).sort((a,b) => b[1] - a[1]).slice(0, 10);
-  const catLabels = catEntries.map(e => e[0]);
-  const catValues = catEntries.map(e => e[1]);
-  // draw category counts bar chart
-  catCountCtx.clearRect(0, 0, catCountCanvas.width, catCountCanvas.height);
-  if (catLabels.length > 0) {
-    const maxCount = Math.max(...catValues);
-    const barWidth = (catCountCanvas.width - 40) / (catLabels.length * 2);
-    catLabels.forEach((lbl, idx) => {
-      const x = 40 + idx * 2 * barWidth + barWidth * 0.5;
-      const h = maxCount > 0 ? (catValues[idx] / maxCount) * (catCountCanvas.height - 60) : 0;
-      catCountCtx.fillStyle = '#ffb74d';
-      catCountCtx.fillRect(x, catCountCanvas.height - h - 40, barWidth * 0.8, h);
-      // value
-      catCountCtx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
-      catCountCtx.font = '12px sans-serif';
-      catCountCtx.fillText(catValues[idx], x + barWidth * 0.4, catCountCanvas.height - h - 45);
-      catCountCtx.save();
-      catCountCtx.translate(x + barWidth * 0.4, catCountCanvas.height - 25);
-      catCountCtx.rotate(-Math.PI / 4);
-      catCountCtx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
-      catCountCtx.font = '12px sans-serif';
-      catCountCtx.fillText(lbl.substring(0, 15) + (lbl.length > 15 ? '…' : ''), 0, 0);
-      catCountCtx.restore();
-    });
-    // axis
-    catCountCtx.strokeStyle = document.body.classList.contains('dark') ? '#aaa' : '#333';
-    catCountCtx.beginPath();
-    catCountCtx.moveTo(40, catCountCanvas.height - 40);
-    catCountCtx.lineTo(catCountCanvas.width, catCountCanvas.height - 40);
-    catCountCtx.moveTo(40, 0);
-    catCountCtx.lineTo(40, catCountCanvas.height - 40);
-    catCountCtx.stroke();
-    catCountCtx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
-    catCountCtx.font = '14px sans-serif';
-    catCountCtx.fillText('Categorías', catCountCanvas.width / 2, catCountCanvas.height - 10);
-    catCountCtx.save();
-    catCountCtx.translate(15, catCountCanvas.height / 2);
-    catCountCtx.rotate(-Math.PI / 2);
-    catCountCtx.fillText('# Productos', 0, 0);
-    catCountCtx.restore();
-  }
-  // compute average revenue per category for top categories
-  const avgRev = catLabels.map(cat => {
-    const sum = revSum[cat] || 0;
-    const count = revCount[cat] || counts[cat];
-    return count > 0 ? sum / count : 0;
-  });
-  // draw average revenue chart
-  catRevenueCtx.clearRect(0, 0, catRevenueCanvas.width, catRevenueCanvas.height);
-  if (catLabels.length > 0) {
-    const maxRevAvg = Math.max(...avgRev);
-    const barWidth2 = (catRevenueCanvas.width - 40) / (catLabels.length * 2);
-    catLabels.forEach((lbl, idx) => {
-      const x = 40 + idx * 2 * barWidth2 + barWidth2 * 0.5;
-      const h = maxRevAvg > 0 ? (avgRev[idx] / maxRevAvg) * (catRevenueCanvas.height - 60) : 0;
-      catRevenueCtx.fillStyle = '#4db6ac';
-      catRevenueCtx.fillRect(x, catRevenueCanvas.height - h - 40, barWidth2 * 0.8, h);
-      // value
-      catRevenueCtx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
-      catRevenueCtx.font = '12px sans-serif';
-      catRevenueCtx.fillText(avgRev[idx].toFixed(0), x + barWidth2 * 0.4, catRevenueCanvas.height - h - 45);
-      catRevenueCtx.save();
-      catRevenueCtx.translate(x + barWidth2 * 0.4, catRevenueCanvas.height - 25);
-      catRevenueCtx.rotate(-Math.PI / 4);
-      catRevenueCtx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
-      catRevenueCtx.font = '12px sans-serif';
-      catRevenueCtx.fillText(lbl.substring(0, 15) + (lbl.length > 15 ? '…' : ''), 0, 0);
-      catRevenueCtx.restore();
-    });
-    catRevenueCtx.strokeStyle = document.body.classList.contains('dark') ? '#aaa' : '#333';
-    catRevenueCtx.beginPath();
-    catRevenueCtx.moveTo(40, catRevenueCanvas.height - 40);
-    catRevenueCtx.lineTo(catRevenueCanvas.width, catRevenueCanvas.height - 40);
-    catRevenueCtx.moveTo(40, 0);
-    catRevenueCtx.lineTo(40, catRevenueCanvas.height - 40);
-    catRevenueCtx.stroke();
-    catRevenueCtx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
-    catRevenueCtx.font = '14px sans-serif';
-    catRevenueCtx.fillText('Categorías', catRevenueCanvas.width / 2, catRevenueCanvas.height - 10);
-    catRevenueCtx.save();
-    catRevenueCtx.translate(15, catRevenueCanvas.height / 2);
-    catRevenueCtx.rotate(-Math.PI / 2);
-    catRevenueCtx.fillText('Ingresos medios', 0, 0);
-    catRevenueCtx.restore();
-  }
+  };
   chartDiv.style.display = 'block';
+  drawHorizontal('catRevenueGrowthCanvas', data.cat_revenue_growth || [], '#42a5f5', 'Crecimiento ingresos');
+  drawHorizontal('catUnitGrowthCanvas', data.cat_units_growth || [], '#66bb6a', 'Crecimiento unidades');
+  drawHorizontal('catRevPerUnitCanvas', data.cat_rev_per_unit || [], '#ffca28', 'Ingresos/unidad');
+  drawHorizontal('keywordTrendCanvas', data.keywords || [], '#29b6f6', 'Frecuencia');
+  drawHorizontal('brandTrendCanvas', data.brands || [], '#ab47bc', 'Frecuencia');
+  drawScatter('ratingRevenueCanvas', data.scatter_rating_revenue || [], '#ef5350', 'Rating', 'Ingresos');
+  drawScatter('priceRevenueCanvas', data.scatter_price_revenue || [], '#7e57c2', 'Precio promedio', 'Ingresos');
   // re-render table to show outlines for trending products
   renderTable();
 };
