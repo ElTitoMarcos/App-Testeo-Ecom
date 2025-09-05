@@ -378,26 +378,22 @@ def simplify_product_names(api_key: str, model: str, names: List[str], *, temper
         return {}
 
 
-def generate_detailed_summary(
-    api_key: str,
-    model: str,
-    product: dict,
-    analysis: dict,
-) -> str:
+def generate_detailed_summary(api_key: str, model: str, product: dict) -> str:
     """Generate a detailed Spanish summary for a product.
 
-    The prompt integrates the original title, extracted signals and risks,
-    repeated words, and price information.  It asks the model to produce a
-    single, relatively long text that synthesizes buyer comments, pros and
-    cons, comparisons with the competition, mentions repeated words and
-    comments on the price.
+    The function builds a natural language prompt using the available
+    information in ``product`` (título, señales, flags, price, rating,
+    palabras repetidas, etc.) and sends it to the OpenAI Chat API.  The
+    model returns a single block of text with a detailed analysis covering
+    comentarios frecuentes, pros y contras, comparativa con la competencia
+    y observaciones sobre el precio.
 
     Args:
         api_key: OpenAI API key.
         model: Identifier of the chat model to call.
-        product: Dictionary containing at least ``title`` and optionally ``price``.
-        analysis: Dictionary produced by the title analyzer with ``signals``,
-            ``flags`` and ``summary`` fields.
+        product: Dictionary with the data to summarise.  Expected keys include
+            ``title``, ``signals`` and ``flags``.  Optional keys such as
+            ``price``, ``rating`` or ``repeats`` will be used if present.
 
     Returns:
         The text returned by the model.
@@ -407,11 +403,12 @@ def generate_detailed_summary(
     """
 
     title = product.get("title", "")
-    price = analysis.get("price", product.get("price"))
-    bucket = analysis.get("summary", {}).get("price_bucket")
-    signals = analysis.get("signals", {})
-    flags = analysis.get("flags", {})
-    repeats = analysis.get("repeats") or analysis.get("repeated_words")
+    price = product.get("price")
+    rating = product.get("rating")
+    bucket = product.get("summary", {}).get("price_bucket") or product.get("price_bucket")
+    signals = product.get("signals", {})
+    flags = product.get("flags", {})
+    repeats = product.get("repeats") or product.get("repeated_words")
     if not repeats:
         tokens = title.lower().split()
         repeats = [tok for tok, c in Counter(tokens).items() if c > 1]
@@ -420,6 +417,7 @@ def generate_detailed_summary(
     flags_str = json.dumps(flags, ensure_ascii=False)
     repeats_str = ", ".join(repeats) if repeats else "ninguna"
     price_str = "desconocido" if price is None else str(price)
+    rating_str = "sin datos" if rating is None else str(rating)
     bucket_str = bucket or "sin datos"
 
     prompt = (
@@ -433,6 +431,7 @@ def generate_detailed_summary(
         f"Riesgos detectados: {flags_str}\n"
         f"Palabras repetidas: {repeats_str}\n"
         f"Precio: {price_str} (bucket: {bucket_str})\n"
+        f"Valoración media: {rating_str}\n"
     )
 
     messages = [

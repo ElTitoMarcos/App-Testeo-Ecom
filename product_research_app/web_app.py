@@ -444,6 +444,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/api/analyze/title_detail":
             self.handle_title_detail()
             return
+        if path == "/api/analyze/product_detail":
+            self.handle_product_detail()
+            return
         if path == "/upload":
             self.handle_upload()
             return
@@ -1182,8 +1185,41 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"error": "No API key configured"}).encode('utf-8'))
             return
         try:
-            product = {"title": data.get("title"), "price": data.get("price")}
-            detail = gpt.generate_detailed_summary(api_key, model, product, data)
+            detail = gpt.generate_detailed_summary(api_key, model, data)
+            self._set_json()
+            self.wfile.write(json.dumps({"detail": detail}).encode('utf-8'))
+        except Exception as exc:
+            self._set_json(500)
+            self.wfile.write(json.dumps({"error": str(exc)}).encode('utf-8'))
+
+    def handle_product_detail(self):
+        """Return a detailed analysis for a single product.
+
+        The request body must be JSON containing at least ``title`` and
+        ``signals`` fields, typically produced by ``analyze_titles``.  The
+        handler forwards the information to ``generate_detailed_summary`` and
+        returns the resulting text.
+        """
+        length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(length).decode('utf-8')
+        try:
+            data = json.loads(body)
+        except Exception:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+            return
+        if not isinstance(data, dict) or 'title' not in data or 'signals' not in data:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "Missing required fields"}).encode('utf-8'))
+            return
+        api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
+        model = config.get_model()
+        if not api_key:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "No API key configured"}).encode('utf-8'))
+            return
+        try:
+            detail = gpt.generate_detailed_summary(api_key, model, data)
             self._set_json()
             self.wfile.write(json.dumps({"detail": detail}).encode('utf-8'))
         except Exception as exc:
