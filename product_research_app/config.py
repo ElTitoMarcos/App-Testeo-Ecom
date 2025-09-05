@@ -105,3 +105,50 @@ def is_scoring_v2_enabled() -> bool:
     except Exception:
         return True
 
+# ---------------- Winner Score v2 weights -----------------
+
+SCORING_V2_DEFAULT_WEIGHTS: Dict[str, float] = {
+    "magnitud_deseo": 0.125,
+    "nivel_consciencia": 0.125,
+    "saturacion_mercado": 0.125,
+    "facilidad_anuncio": 0.125,
+    "facilidad_logistica": 0.125,
+    "escalabilidad": 0.125,
+    "engagement_shareability": 0.125,
+    "durabilidad_recurrencia": 0.125,
+}
+
+
+def get_scoring_v2_weights() -> Dict[str, float]:
+    """Return the weighting factors for Winner Score v2 variables.
+
+    The configuration may include a ``scoring_v2_weights`` object mapping the
+    eight Winner Score variables to numeric values between 0 and 1. If weights
+    are missing or invalid, defaults are used and the result is normalized so
+    that the sum of all weights equals 1.
+    """
+
+    cfg = load_config()
+    user_weights = cfg.get("scoring_v2_weights", {})
+    weights: Dict[str, float] = {}
+    total = 0.0
+    for key, default in SCORING_V2_DEFAULT_WEIGHTS.items():
+        try:
+            val = float(user_weights.get(key, default))
+            if val < 0:
+                val = 0.0
+        except Exception:
+            val = default
+        weights[key] = val
+        total += val
+    if total <= 0:
+        return SCORING_V2_DEFAULT_WEIGHTS.copy()
+    return {k: v / total for k, v in weights.items()}
+
+
+def set_scoring_v2_weights(weights: Dict[str, float]) -> None:
+    """Persist Winner Score v2 weights to configuration."""
+
+    cfg = load_config()
+    cfg["scoring_v2_weights"] = weights
+    save_config(cfg)

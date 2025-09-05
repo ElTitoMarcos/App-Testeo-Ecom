@@ -238,7 +238,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                     extra_dict = {}
                 score_value = None
                 if score:
-                    key = "winner_score_v2" if config.is_scoring_v2_enabled() else "total_score"
+                    key = (
+                        "winner_score_v2_pct"
+                        if config.is_scoring_v2_enabled()
+                        else "total_score"
+                    )
                     score_value = score.get(key)
                 row = {
                     "id": p["id"],
@@ -249,7 +253,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "extras": extra_dict,
                 }
                 if config.is_scoring_v2_enabled():
-                    row["winner_score_v2"] = score_value
+                    row["winner_score_v2_pct"] = score_value
                 else:
                     row["score"] = score_value
                 rows.append(row)
@@ -316,7 +320,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                         extra_dict = {}
                     score_value = None
                     if score:
-                        key = "winner_score_v2" if config.is_scoring_v2_enabled() else "total_score"
+                        key = (
+                            "winner_score_v2_pct"
+                            if config.is_scoring_v2_enabled()
+                            else "total_score"
+                        )
                         score_value = score.get(key)
                     row = {
                         "id": p["id"],
@@ -327,7 +335,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         "extras": extra_dict,
                     }
                     if config.is_scoring_v2_enabled():
-                        row["winner_score_v2"] = score_value
+                        row["winner_score_v2_pct"] = score_value
                     else:
                         row["score"] = score_value
                     rows.append(row)
@@ -531,7 +539,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                 scores = database.get_scores_for_product(conn, p["id"])
                 score_val = None
                 if scores:
-                    key = "winner_score_v2" if config.is_scoring_v2_enabled() else "total_score"
+                    key = (
+                        "winner_score_v2_pct"
+                        if config.is_scoring_v2_enabled()
+                        else "total_score"
+                    )
                     try:
                         score_val = scores[0][key]
                     except Exception:
@@ -539,7 +551,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 if score_val is not None:
                     rows.append((p["id"], p["name"], score_val))
             rows.sort(key=lambda x: x[2], reverse=True)
-            key_name = "winner_score_v2" if config.is_scoring_v2_enabled() else "score"
+            key_name = "winner_score_v2_pct" if config.is_scoring_v2_enabled() else "score"
             top_products = [{"id": r[0], "name": r[1], key_name: r[2]} for r in rows[:10]]
 
             self._set_json()
