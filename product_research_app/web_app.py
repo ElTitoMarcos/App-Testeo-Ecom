@@ -388,7 +388,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                     continue
                 if end_dt and (launch_dt is None or launch_dt > end_dt):
                     continue
-
                 cat = (p["category"] or "").strip().lower()
                 if cat:
                     cat_product_count[cat] += 1
@@ -504,6 +503,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "total_units": total_u,
                     "avg_rating": avg_r,
                 })
+                
                 category_summary.append({
                     "category": cat.title(),
                     "products": count,
