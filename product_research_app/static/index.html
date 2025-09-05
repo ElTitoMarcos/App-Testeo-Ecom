@@ -358,13 +358,9 @@ function renderTable() {
       th.onclick = () => sortBy(col.key, col.type);
       headerRow.appendChild(th);
     });
-      // Analysis column header
-      const thAnal = document.createElement('th');
-      thAnal.textContent = '🔍';
-      headerRow.appendChild(thAnal);
-      // Add delete column header
-      const thDel = document.createElement('th');
-      headerRow.appendChild(thDel);
+    // Add delete column header
+    const thDel = document.createElement('th');
+    headerRow.appendChild(thDel);
   }
   // Clear body
   tbody.innerHTML = '';
