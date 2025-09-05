@@ -97,6 +97,25 @@ function renderTable(items) {
     tdCopy.appendChild(btn);
     tr.appendChild(tdCopy);
 
+    const tdDetail = document.createElement('td');
+    const btnDetail = document.createElement('button');
+    btnDetail.textContent = '🔍';
+    btnDetail.title = 'Ver análisis detallado';
+    btnDetail.addEventListener('click', async () => {
+      try {
+        const resp = await fetchJson('/api/analyze/title_detail', {
+          method: 'POST',
+          body: JSON.stringify(item),
+          headers: { 'Content-Type': 'application/json' }
+        });
+        alert(resp.detail);
+      } catch (err) {
+        if (window.toast) toast.error('No se pudo obtener el detalle');
+      }
+    });
+    tdDetail.appendChild(btnDetail);
+    tr.appendChild(tdDetail);
+
     tbody.appendChild(tr);
   });
 }
