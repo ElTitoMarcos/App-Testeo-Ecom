@@ -76,6 +76,27 @@ body.dark #scoreInfo { background:#262a51; }
     <button id="searchBtn">Buscar</button>
   </div>
 </div>
+<!-- Title Analyzer Panel -->
+<div id="titleAnalyzerPanel" class="card" style="margin-top:10px;">
+  <h2 style="margin-top:0;">Analizador de Títulos</h2>
+  <div style="margin-bottom:8px;">
+    <input type="file" id="taFile" accept=".csv,.xlsx,.json" />
+    <button id="taAnalyzeBtn">Analizar</button>
+  </div>
+  <table id="taTable" class="table" style="display:none;">
+    <thead>
+      <tr>
+        <th>Título</th>
+        <th>Señales</th>
+        <th>Score</th>
+        <th>Resumen</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+  <div id="taSummary" style="margin-top:12px; display:none;"></div>
+</div>
 <!-- Groups/Lists management -->
 <div id="listsSection" class="card" style="margin-top:5px; padding:10px; max-width:420px;">
   <strong>Grupos:</strong>
@@ -1076,6 +1097,7 @@ document.getElementById('trendsBtn').onclick = async () => {
   renderTable();
 };
 </script>
+<script type="module" src="/static/js/title_analyzer.js"></script>
 <script src="/static/js/filters.js"></script>
 </body>
 </html>

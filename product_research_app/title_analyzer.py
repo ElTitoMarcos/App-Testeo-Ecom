@@ -68,7 +68,7 @@ def _tokenize(text: str) -> List[str]:
     tokens = re.findall(r"\b\w+\b", text.lower())
     tokens = [t for t in tokens if t not in EN_STOPWORDS and t not in ES_STOPWORDS]
     return tokens
-  
+
 def _compute_quantiles(values: List[float]) -> Tuple[Optional[float], Optional[float]]:
     """Return approximate 33%% and 66%% quantiles for ``values``."""
     if not values:
