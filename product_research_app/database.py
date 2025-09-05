@@ -83,9 +83,30 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             summary TEXT,
             explanations JSON,
             created_at TEXT NOT NULL,
+            winner_score_v2_raw REAL,
+            winner_score_v2_pct REAL,
+            winner_score_v2_breakdown JSON,
             FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
         )
         """
+    )
+    cur.execute("PRAGMA table_info(scores)")
+    cols = [row[1] for row in cur.fetchall()]
+    if "winner_score_v2_raw" not in cols:
+        cur.execute("ALTER TABLE scores ADD COLUMN winner_score_v2_raw REAL")
+    if "winner_score_v2_pct" not in cols:
+        cur.execute("ALTER TABLE scores ADD COLUMN winner_score_v2_pct REAL")
+    if "winner_score_v2_breakdown" not in cols:
+        cur.execute("ALTER TABLE scores ADD COLUMN winner_score_v2_breakdown JSON")
+    if "winner_score_v2" in cols:
+        cur.execute(
+            "UPDATE scores SET winner_score_v2_raw = winner_score_v2 WHERE winner_score_v2_raw IS NULL"
+        )
+    cur.execute(
+        "UPDATE scores SET winner_score_v2_pct = ((winner_score_v2_raw - 8) / 32.0) * 100 WHERE winner_score_v2_raw IS NOT NULL AND winner_score_v2_pct IS NULL"
+    )
+    cur.execute(
+        "UPDATE scores SET winner_score_v2_breakdown = '{}' WHERE winner_score_v2_breakdown IS NULL"
     )
     # Lists table
     cur.execute(
@@ -193,16 +214,27 @@ def insert_score(
     logistics: float,
     summary: str,
     explanations: Dict[str, Any],
+    winner_score_v2_raw: Optional[float] = None,
+    winner_score_v2_pct: Optional[float] = None,
+    winner_score_v2_breakdown: Optional[Dict[str, Any]] = None,
 ) -> int:
     """Insert a new AI score for a product."""
+
     cur = conn.cursor()
     created_at = datetime.utcnow().isoformat()
+    if winner_score_v2_raw is None and winner_score_v2_pct is not None:
+        winner_score_v2_raw = 8 + (winner_score_v2_pct / 100.0) * 32
+    if winner_score_v2_pct is None and winner_score_v2_raw is not None:
+        winner_score_v2_pct = ((winner_score_v2_raw - 8) / 32.0) * 100
+    if winner_score_v2_breakdown is None:
+        winner_score_v2_breakdown = {}
     cur.execute(
         """
         INSERT INTO scores (
             product_id, model, total_score, momentum, saturation, differentiation,
-            social_proof, margin, logistics, summary, explanations, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?), ?)
+            social_proof, margin, logistics, summary, explanations, created_at,
+            winner_score_v2_raw, winner_score_v2_pct, winner_score_v2_breakdown)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?), ?, ?, ?, json(?))
         """,
         (
             product_id,
@@ -217,6 +249,9 @@ def insert_score(
             summary,
             json_dump(explanations),
             created_at,
+            winner_score_v2_raw,
+            winner_score_v2_pct,
+            json_dump(winner_score_v2_breakdown),
         ),
     )
     conn.commit()
