@@ -83,10 +83,19 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             summary TEXT,
             explanations JSON,
             created_at TEXT NOT NULL,
+            winner_score_v2 REAL,
             FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
         )
         """
     )
+    # ensure new column exists for pre-existing databases
+    cur.execute("PRAGMA table_info(scores)")
+    cols = [row[1] for row in cur.fetchall()]
+    if "winner_score_v2" not in cols:
+        cur.execute("ALTER TABLE scores ADD COLUMN winner_score_v2 REAL")
+        cur.execute(
+            "UPDATE scores SET winner_score_v2 = total_score WHERE winner_score_v2 IS NULL"
+        )
     # Lists table
     cur.execute(
         """
@@ -193,16 +202,20 @@ def insert_score(
     logistics: float,
     summary: str,
     explanations: Dict[str, Any],
+    winner_score_v2: Optional[float] = None,
 ) -> int:
     """Insert a new AI score for a product."""
+
     cur = conn.cursor()
     created_at = datetime.utcnow().isoformat()
+    if winner_score_v2 is None:
+        winner_score_v2 = total_score
     cur.execute(
         """
         INSERT INTO scores (
             product_id, model, total_score, momentum, saturation, differentiation,
-            social_proof, margin, logistics, summary, explanations, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?), ?)
+            social_proof, margin, logistics, summary, explanations, created_at, winner_score_v2)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?), ?, ?)
         """,
         (
             product_id,
@@ -217,6 +230,7 @@ def insert_score(
             summary,
             json_dump(explanations),
             created_at,
+            winner_score_v2,
         ),
     )
     conn.commit()

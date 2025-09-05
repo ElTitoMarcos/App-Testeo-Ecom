@@ -5,7 +5,7 @@ let bottomBar = null;
 
 import('./format.js').then(m => {
   window.abbr = m.abbr;
-  window.scoreClass = m.scoreClass;
+  window.winnerScoreClass = m.winnerScoreClass;
 });
 
 function updateMasterState(){
