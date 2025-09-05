@@ -29,11 +29,11 @@ function closeDrawer() {
 function applyFiltersFromState() {
   const dMin = filtersState.dateMin ? parseDate(filtersState.dateMin) : null;
   const dMax = filtersState.dateMax ? parseDate(filtersState.dateMax) : null;
-  products = allProducts.filter(item => {
-    if (!isNaN(filtersState.priceMin)) {
+  const filtered = allProducts.filter(item => {
+    if (filtersState.priceMin !== null && !isNaN(filtersState.priceMin)) {
       if (item.price === null || item.price === undefined || item.price < filtersState.priceMin) return false;
     }
-    if (!isNaN(filtersState.priceMax)) {
+    if (filtersState.priceMax !== null && !isNaN(filtersState.priceMax)) {
       if (item.price === null || item.price === undefined || item.price > filtersState.priceMax) return false;
     }
     if (dMin || dMax) {
@@ -43,7 +43,7 @@ function applyFiltersFromState() {
       if (dMin && dLaunch && dLaunch < dMin) return false;
       if (dMax && dLaunch && dLaunch > dMax) return false;
     }
-    if (!isNaN(filtersState.ratingMin)) {
+    if (filtersState.ratingMin !== null && !isNaN(filtersState.ratingMin)) {
       const ratingVal = item.extras && item.extras['Product Rating'] ? parseFloat(String(item.extras['Product Rating']).replace(/[^0-9.]+/g,'')) : null;
       if (ratingVal === null || ratingVal < filtersState.ratingMin) return false;
     }
@@ -51,12 +51,15 @@ function applyFiltersFromState() {
       const cat = (item.category || '').toString().toLowerCase();
       if (!cat.includes(filtersState.category)) return false;
     }
-    if (!isNaN(filtersState.scoreMin)) {
+    if (filtersState.scoreMin !== null && !isNaN(filtersState.scoreMin)) {
       const sc = item.score;
       if (sc === null || sc === undefined || sc < filtersState.scoreMin) return false;
     }
     return true;
   });
+  // Mutate the global products array in place so renderTable sees the filtered list
+  products.splice(0, products.length, ...filtered);
+  window.products = products;
   buildActiveChips(filtersState);
   if (typeof startProgress === 'function') startProgress();
   renderTable();
@@ -67,13 +70,13 @@ function buildActiveChips(state) {
   if (!container) return;
   container.innerHTML = '';
   const chips = [];
-  if (!isNaN(state.priceMin)) chips.push(['priceMin', `≥ ${state.priceMin}`]);
-  if (!isNaN(state.priceMax)) chips.push(['priceMax', `≤ ${state.priceMax}`]);
+  if (state.priceMin !== null && !isNaN(state.priceMin)) chips.push(['priceMin', `≥ ${state.priceMin}`]);
+  if (state.priceMax !== null && !isNaN(state.priceMax)) chips.push(['priceMax', `≤ ${state.priceMax}`]);
   if (state.dateMin) chips.push(['dateMin', `Desde ${state.dateMin}`]);
   if (state.dateMax) chips.push(['dateMax', `Hasta ${state.dateMax}`]);
-  if (!isNaN(state.ratingMin)) chips.push(['ratingMin', `Rating ≥ ${state.ratingMin}`]);
+  if (state.ratingMin !== null && !isNaN(state.ratingMin)) chips.push(['ratingMin', `Rating ≥ ${state.ratingMin}`]);
   if (state.category) chips.push(['category', `Cat: ${state.category}`]);
-  if (!isNaN(state.scoreMin)) chips.push(['scoreMin', `Score ≥ ${state.scoreMin}`]);
+  if (state.scoreMin !== null && !isNaN(state.scoreMin)) chips.push(['scoreMin', `Score ≥ ${state.scoreMin}`]);
   chips.forEach(([key, label]) => {
     const chip = document.createElement('span');
     chip.className = 'chip';
@@ -95,14 +98,19 @@ function buildActiveChips(state) {
 }
 
 document.getElementById('btnFilters')?.addEventListener('click', toggleDrawer);
+document.getElementById('closeFilters')?.addEventListener('click', closeDrawer);
 document.getElementById('applyFilters')?.addEventListener('click', () => {
-  filtersState.priceMin = parseFloat(document.getElementById('filterPriceMin').value);
-  filtersState.priceMax = parseFloat(document.getElementById('filterPriceMax').value);
+  const pMinVal = document.getElementById('filterPriceMin').value;
+  const pMaxVal = document.getElementById('filterPriceMax').value;
+  const rMinVal = document.getElementById('filterRatingMin').value;
+  const sMinVal = document.getElementById('filterScoreMin').value;
+  filtersState.priceMin = pMinVal ? parseFloat(pMinVal) : null;
+  filtersState.priceMax = pMaxVal ? parseFloat(pMaxVal) : null;
   filtersState.dateMin = document.getElementById('filterDateMin').value;
   filtersState.dateMax = document.getElementById('filterDateMax').value;
-  filtersState.ratingMin = parseFloat(document.getElementById('filterRatingMin').value);
+  filtersState.ratingMin = rMinVal ? parseFloat(rMinVal) : null;
   filtersState.category = document.getElementById('filterCategory').value.trim().toLowerCase();
-  filtersState.scoreMin = parseFloat(document.getElementById('filterScoreMin').value);
+  filtersState.scoreMin = sMinVal ? parseFloat(sMinVal) : null;
   applyFiltersFromState();
   closeDrawer();
 });
