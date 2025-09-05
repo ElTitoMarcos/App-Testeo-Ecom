@@ -135,6 +135,10 @@ body.dark .table tbody tr:nth-child(odd) { background: #11192B; }
 .score-amber { background: #3A3119; color: #F1B44C; }
 .score-red { background: #3A1E1E; color: #F16969; }
 
+/* Title Analyzer */
+.ta-flag { margin-left: 4px; }
+#taSummary canvas { max-width: 100%; }
+
 .bottombar {
   position: sticky;
   bottom: 0;

@@ -41,8 +41,6 @@ details summary { cursor:pointer; font-weight:600; color:#0062ff; }
 body.dark details summary { color:#80b3ff; }
 pre { white-space:pre-wrap; background:#f5f7ff; padding:8px; border-radius:4px; }
 body.dark pre { background:#2e315f; }
-/* Analysis drawer */
-.tab-section { white-space:pre-wrap; font-family:monospace; }
 /* Weight slider styling */
 .weight-slider {
   width:120px;
@@ -77,6 +75,27 @@ body.dark #scoreInfo { background:#262a51; }
     <input type="text" id="searchInput" placeholder="Buscar producto o palabra clave..." style="flex:1; max-width:600px; padding:8px; border-radius:20px; border:1px solid #ccc; font-size:14px;" />
     <button id="searchBtn">Buscar</button>
   </div>
+</div>
+<!-- Title Analyzer Panel -->
+<div id="titleAnalyzerPanel" class="card" style="margin-top:10px;">
+  <h2 style="margin-top:0;">Analizador de Títulos</h2>
+  <div style="margin-bottom:8px;">
+    <input type="file" id="taFile" accept=".csv,.xlsx,.json" />
+    <button id="taAnalyzeBtn">Analizar</button>
+  </div>
+  <table id="taTable" class="table" style="display:none;">
+    <thead>
+      <tr>
+        <th>Título</th>
+        <th>Señales</th>
+        <th>Score</th>
+        <th>Resumen</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+  <div id="taSummary" style="margin-top:12px; display:none;"></div>
 </div>
 <!-- Groups/Lists management -->
 <div id="listsSection" class="card" style="margin-top:5px; padding:10px; max-width:420px;">
@@ -180,12 +199,6 @@ body.dark #scoreInfo { background:#262a51; }
   </div>
 </div>
 
-<!-- Analysis drawer with tabbed content -->
-<div id="analysisDrawer" class="drawer right hidden">
-  <div style="text-align:right;"><button id="closeAnalysis" style="background:none;border:none;font-size:20px;cursor:pointer;">✖</button></div>
-  <div id="analysisContent" style="white-space:pre-wrap; overflow-y:auto; max-height:80vh;"></div>
-  <button id="analysisExport">Exportar</button>
-</div>
 <div id="table-toolbar" class="table-toolbar">
   <div style="display:flex; align-items:center; gap:8px;">
     <input type="checkbox" id="selectAll">
@@ -254,7 +267,6 @@ body.dark #scoreInfo { background:#262a51; }
 <script src="/static/js/table.js"></script>
 <script type="module">
 import { fetchJson } from "/static/js/net.js";
-import { openAnalysis } from "/static/js/analyze.js";
 window.addEventListener('beforeunload', () => navigator.sendBeacon('/shutdown'));
 // Global arrays to hold all products and the current filtered list
 let allProducts = [];
@@ -432,21 +444,6 @@ function renderTable() {
       }
       tr.appendChild(td);
     });
-    // Analysis button cell
-    const tdAnal = document.createElement('td');
-    const btnAnal = document.createElement('button');
-    btnAnal.textContent = '🔍';
-    btnAnal.title = 'Analizar producto';
-    btnAnal.style.background = 'transparent';
-    btnAnal.style.border = 'none';
-    btnAnal.style.cursor = 'pointer';
-    btnAnal.style.fontSize = '16px';
-    btnAnal.dataset.id = item.id;
-    btnAnal.onclick = () => {
-      openAnalysis(item);
-    };
-    tdAnal.appendChild(btnAnal);
-    tr.appendChild(tdAnal);
     // Delete button
     const tdDel = document.createElement('td');
     const btn = document.createElement('button');
@@ -1100,6 +1097,7 @@ document.getElementById('trendsBtn').onclick = async () => {
   renderTable();
 };
 </script>
+<script type="module" src="/static/js/title_analyzer.js"></script>
 <script src="/static/js/filters.js"></script>
 </body>
 </html>
