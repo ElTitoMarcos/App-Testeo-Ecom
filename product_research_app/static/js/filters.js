@@ -5,7 +5,6 @@ let filtersState = {
   dateMax: '',
   ratingMin: null,
   category: '',
-  scoreMin: null,
 };
 
 const idMap = {
@@ -14,8 +13,7 @@ const idMap = {
   dateMin: 'filterDateMin',
   dateMax: 'filterDateMax',
   ratingMin: 'filterRatingMin',
-  category: 'filterCategory',
-  scoreMin: 'filterScoreMin'
+  category: 'filterCategory'
 };
 
 function toggleDrawer() {
@@ -51,10 +49,6 @@ function applyFiltersFromState() {
       const cat = (item.category || '').toString().toLowerCase();
       if (!cat.includes(filtersState.category)) return false;
     }
-    if (filtersState.scoreMin !== null && !isNaN(filtersState.scoreMin)) {
-      const sc = item.score;
-      if (sc === null || sc === undefined || sc < filtersState.scoreMin) return false;
-    }
     return true;
   });
   // Mutate the global products array in place so renderTable sees the filtered list
@@ -78,7 +72,6 @@ function buildActiveChips(state) {
   if (state.dateMax) chips.push(['dateMax', `Hasta ${state.dateMax}`]);
   if (state.ratingMin !== null && !isNaN(state.ratingMin)) chips.push(['ratingMin', `Rating ≥ ${state.ratingMin}`]);
   if (state.category) chips.push(['category', `Cat: ${state.category}`]);
-  if (state.scoreMin !== null && !isNaN(state.scoreMin)) chips.push(['scoreMin', `Score ≥ ${state.scoreMin}`]);
   chips.forEach(([key, label]) => {
     const chip = document.createElement('span');
     chip.className = 'chip';
@@ -86,7 +79,7 @@ function buildActiveChips(state) {
     const btn = document.createElement('button');
     btn.textContent = '×';
     btn.onclick = () => {
-      if (['priceMin','priceMax','ratingMin','scoreMin'].includes(key)) {
+      if (['priceMin','priceMax','ratingMin'].includes(key)) {
         filtersState[key] = null;
       } else {
         filtersState[key] = '';
@@ -105,14 +98,12 @@ document.getElementById('applyFilters')?.addEventListener('click', () => {
   const pMinVal = document.getElementById('filterPriceMin').value;
   const pMaxVal = document.getElementById('filterPriceMax').value;
   const rMinVal = document.getElementById('filterRatingMin').value;
-  const sMinVal = document.getElementById('filterScoreMin').value;
   filtersState.priceMin = pMinVal ? parseFloat(pMinVal) : null;
   filtersState.priceMax = pMaxVal ? parseFloat(pMaxVal) : null;
   filtersState.dateMin = document.getElementById('filterDateMin').value;
   filtersState.dateMax = document.getElementById('filterDateMax').value;
   filtersState.ratingMin = rMinVal ? parseFloat(rMinVal) : null;
   filtersState.category = document.getElementById('filterCategory').value.trim().toLowerCase();
-  filtersState.scoreMin = sMinVal ? parseFloat(sMinVal) : null;
   applyFiltersFromState();
   closeDrawer();
 });
@@ -124,8 +115,7 @@ document.getElementById('clearFilters')?.addEventListener('click', () => {
   document.getElementById('filterDateMax').value = '';
   document.getElementById('filterRatingMin').value = '';
   document.getElementById('filterCategory').value = '';
-  document.getElementById('filterScoreMin').value = '';
-  filtersState = { priceMin: null, priceMax: null, dateMin: '', dateMax: '', ratingMin: null, category: '', scoreMin: null };
+  filtersState = { priceMin: null, priceMax: null, dateMin: '', dateMax: '', ratingMin: null, category: '' };
   applyFiltersFromState();
 });
 

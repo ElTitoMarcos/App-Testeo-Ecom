@@ -329,6 +329,105 @@ def evaluate_product(
     return result
 
 
+# ---------------- Winner Score v2 evaluation -----------------
+
+
+WINNER_SCORE_V2_FIELDS = [
+    "magnitud_deseo",
+    "nivel_consciencia",
+    "saturacion_mercado",
+    "facilidad_anuncio",
+    "facilidad_logistica",
+    "escalabilidad",
+    "engagement_shareability",
+    "durabilidad_recurrencia",
+]
+
+
+def build_winner_score_prompt(product: Dict[str, Any]) -> str:
+    """Construct the Winner Score v2 prompt for a product.
+
+    The prompt requests the model to rate eight variables from 1 to 5 based on
+    the product's title, description and category. The model must answer with a
+    JSON object containing the integer scores for each variable.
+
+    Args:
+        product: Mapping with optional keys ``title``/``name``, ``description``
+            and ``category`` describing the product.
+
+    Returns:
+        A Spanish prompt string to send to the model.
+    """
+
+    title = product.get("title") or product.get("name") or ""
+    description = product.get("description") or ""
+    category = product.get("category") or ""
+    prompt = f"""
+Eres un analista de producto para e-commerce.
+Te doy un título, descripción y categoría.
+Evalúa del 1 al 5 (solo números enteros) cada una de estas variables:
+- Magnitud del deseo
+- Nivel de consciencia del mercado
+- Saturación / sofisticación (estima según categoría y competencia implícita)
+- Facilidad de explicar en un anuncio
+- Facilidad logística (peso/envío/fragilidad, estima por categoría)
+- Escalabilidad (aplica a mucha gente o a pocos)
+- Engagement / shareability (atractivo visual o viral)
+- Durabilidad / recurrencia de compra
+
+Título: {title}
+Descripción: {description}
+Categoría: {category}
+
+Devuelve en formato JSON:
+{{
+  "magnitud_deseo": x,
+  "nivel_consciencia": x,
+  "saturacion_mercado": x,
+  "facilidad_anuncio": x,
+  "facilidad_logistica": x,
+  "escalabilidad": x,
+  "engagement_shareability": x,
+  "durabilidad_recurrencia": x
+}}
+"""
+    return prompt.strip()
+
+
+def evaluate_winner_score(
+    api_key: str, model: str, product: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Call OpenAI to obtain Winner Score v2 sub-scores for a product.
+
+    Args:
+        api_key: OpenAI API key.
+        model: Identifier of the chat model to use.
+        product: Mapping with product information.
+
+    Returns:
+        Parsed JSON dictionary with the eight variables. Missing or invalid
+        values are left as-is for the caller to handle.
+
+    Raises:
+        OpenAIError: If the API call fails or returns invalid content.
+    """
+
+    prompt = build_winner_score_prompt(product)
+    messages = [
+        {
+            "role": "system",
+            "content": "Eres un asistente que responde únicamente con JSON válido.",
+        },
+        {"role": "user", "content": prompt},
+    ]
+    resp_json = call_openai_chat(api_key, model, messages)
+    try:
+        content = resp_json["choices"][0]["message"]["content"].strip()
+        result = json.loads(content)
+    except Exception as exc:
+        raise OpenAIError(f"La respuesta de la IA no está en formato JSON válido: {exc}") from exc
+    return result
+
 def simplify_product_names(api_key: str, model: str, names: List[str], *, temperature: float = 0.2) -> Dict[str, str]:
     """
     Simplify a list of product names by removing brand names and extra descriptors.
