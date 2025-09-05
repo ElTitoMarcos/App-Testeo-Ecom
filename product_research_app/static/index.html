@@ -338,6 +338,7 @@ async function fetchProducts() {
   products = [...allProducts];
   window.allProducts = allProducts;
   window.products = products;
+  selection.clear();
   renderTable();
 }
 
@@ -882,6 +883,7 @@ async function loadList(id){
     products = [...allProducts];
     window.allProducts = allProducts;
     window.products = products;
+    selection.clear();
     renderTable();
     // refresh lists to highlight active group
     loadLists();

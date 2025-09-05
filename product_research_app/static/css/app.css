@@ -67,8 +67,8 @@ body.dark .drawer.right {
 
 .legend-btn {
   position: fixed;
-  left: 16px;
-  bottom: 16px;
+  right: 16px;
+  top: calc(var(--header-h, 60px) + 16px);
   background: #e0f0ff;
   border: 1px solid #0077cc;
   border-radius: 8px;
@@ -82,8 +82,8 @@ body.dark .legend-btn {
 
 .popover {
   position: fixed;
-  left: 16px;
-  bottom: 56px;
+  right: 16px;
+  top: calc(var(--header-h, 60px) + 56px);
   background: #fff;
   border: 1px solid #ccc;
   padding: 10px 12px;
