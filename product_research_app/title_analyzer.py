@@ -54,8 +54,9 @@ DEFAULT_WEIGHTS = {
 SIZE_PATTERN = re.compile(
     r"\b\d+\s*(?:pack|pcs|pieces|x|oz|ml|l|g|kg|lb|cm|mm|in(?:ch(?:es)?)?|ft|pairs?)\b"
 )
-COMPAT_PATTERN = re.compile(r"for\s+([a-z0-9]+(?:\s+[a-z0-9]+){0,3})")
-
+COMPAT_PATTERN = re.compile(
+    r"for\s+([a-z0-9]+(?:\s+[a-z0-9]+){0,3})", re.IGNORECASE
+)
 
 def _normalize(text: str) -> str:
     text = text.lower()
@@ -67,7 +68,7 @@ def _tokenize(text: str) -> List[str]:
     tokens = re.findall(r"\b\w+\b", text.lower())
     tokens = [t for t in tokens if t not in EN_STOPWORDS and t not in ES_STOPWORDS]
     return tokens
-
+  
 def _compute_quantiles(values: List[float]) -> Tuple[Optional[float], Optional[float]]:
     """Return approximate 33%% and 66%% quantiles for ``values``."""
     if not values:
@@ -98,13 +99,15 @@ def _generate_summary(
     price: Optional[float],
     bucket: Optional[str],
 ) -> str:
+    """Craft the Spanish summary string for a product."""
+
     comentarios = []
     if claims:
         comentarios.append("claims: " + ", ".join(sorted(set(claims))))
-    if signals.get("sizes"):
-        comentarios.append("tamaños: " + ", ".join(signals["sizes"]))
-    if signals.get("compatibility"):
-        comentarios.append("compatibilidad: " + ", ".join(signals["compatibility"]))
+    if signals.get("value"):
+        comentarios.append("tamaños: " + ", ".join(signals["value"]))
+    if signals.get("compat"):
+        comentarios.append("compatibilidad: " + ", ".join(signals["compat"]))
     comentarios_str = "; ".join(comentarios) if comentarios else "sin señales claras"
 
     pros = []
@@ -112,9 +115,9 @@ def _generate_summary(
         pros.append("valor percibido")
     if signals.get("materials"):
         pros.append("señales de calidad")
-    if signals.get("compatibility"):
+    if signals.get("compat"):
         pros.append("target claro")
-    if signals.get("sizes"):
+    if signals.get("value"):
         pros.append("resuelve dudas de tamaño")
     pros_str = "; ".join(pros) if pros else "ninguno"
 
@@ -125,11 +128,11 @@ def _generate_summary(
         contras.append("claims genéricos")
     if risks.get("ip_risk"):
         contras.append("riesgo de marca")
-    if not signals:
+    if not any(signals.values()):
         contras.append("falta diferenciación")
     contras_str = "; ".join(contras) if contras else "sin contras visibles"
 
-    if signals:
+    if any(signals.values()):
         compet = "Mejor que la competencia: incluye señales diferenciadoras."
     else:
         compet = "Peor que la competencia: título genérico."
@@ -154,10 +157,11 @@ def analyze_titles(
     items: List[Dict[str, Any]], weights: Optional[Mapping[str, float]] = None
 ) -> List[Dict[str, Any]]:
     """Analyze a list of product title entries.
-
-    Returns each entry annotated with normalized tokens, extracted signals,
-    risk flags, pricing bucket, a summary in Spanish and an aggregate
-    ``title_score`` based on adjustable weights.
+    Each output item follows the schema required for the Title Analyzer with
+    ``signals`` (value, claims, materials, compat), ``flags`` for risks, a
+    Spanish ``summary`` including ``price_bucket`` and a numeric ``titleScore``.
+    Optional ``product_id``, ``price`` and ``rating`` fields from the input are
+    preserved when possible.  Weights can be overridden via ``weights``.
     """
     results: List[Dict[str, Any]] = []
     w = dict(DEFAULT_WEIGHTS)
@@ -181,27 +185,25 @@ def analyze_titles(
         if not title:
             continue
         lower = title.lower()
-        normalized = _normalize(title)
         tokens = _tokenize(title)
 
         sizes = SIZE_PATTERN.findall(lower)
-        compatibility = COMPAT_PATTERN.findall(lower)
+        compatibility = ["for " + m.strip() for m in COMPAT_PATTERN.findall(title)]
         materials = [t for t in tokens if t in MATERIALS]
         claims = [t for t in tokens if t in CLAIMS]
 
-        signals: Dict[str, Any] = {}
-        if sizes:
-            signals["sizes"] = sizes
-        if compatibility:
-            signals["compatibility"] = compatibility
-        if materials:
-            signals["materials"] = materials
-        if claims:
-            signals["claims"] = claims
+        signals: Dict[str, Any] = {
+            "value": sizes or [],
+            "claims": claims or [],
+            "materials": materials or [],
+            "compat": compatibility or [],
+        }
 
         seo_bloat = len(title) > 120
         genericity = False
-        if not signals and tokens and all(t in GENERIC_ADJECTIVES for t in tokens):
+        if not any(signals.values()) and tokens and all(
+            t in GENERIC_ADJECTIVES for t in tokens
+        ):
             genericity = True
         brand_hits = [b for b in BRANDS if b in lower]
         ip_risk = bool(brand_hits) and not any(w in lower for w in BRAND_OK_WORDS)
@@ -233,16 +235,22 @@ def analyze_titles(
             signals, risks, tokens, claims, repeats, price_val, bucket
         )
 
-        analysis = {
-            "normalized": normalized,
-            "tokens": tokens,
+        rating_val = None
+        if entry.get("rating") is not None:
+            try:
+                rating_val = float(str(entry["rating"]).replace(",", "."))
+            except Exception:
+                rating_val = None
+
+        result_item = {
+            "product_id": entry.get("product_id") or entry.get("id"),
+            "title": title,
+            "price": price_val,
+            "rating": rating_val,
             "signals": signals,
-            "risks": risks,
-            "title_score": title_score,
-            "price_bucket": bucket,
-            "summary_text": summary_text,
+            "flags": risks,
+            "summary": {"text": summary_text, "price_bucket": bucket},
+            "titleScore": title_score,
         }
-        new_entry = dict(entry)
-        new_entry["analysis"] = analysis
-        results.append(new_entry)
+        results.append(result_item)
     return results

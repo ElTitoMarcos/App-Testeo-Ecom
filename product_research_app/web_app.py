@@ -481,8 +481,8 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         Accepts either JSON array of objects or a CSV/XLSX file upload under
         multipart/form-data.  Each item must include a ``title`` field and may
-        optionally include ``price`` and ``rating``.  Returns a JSON response
-        with the normalized items and placeholder analysis results.
+        optionally include ``product_id``, ``price`` and ``rating``.  Returns a
+        JSON response with the items annotated by the Title Analyzer.
         """
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
@@ -506,6 +506,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                         if not title:
                             continue
                         item = {'title': title}
+                        pid = obj.get('product_id') or obj.get('id')
+                        if pid is not None:
+                            item['product_id'] = str(pid)
                         if obj.get('price') is not None:
                             item['price'] = obj.get('price')
                         if obj.get('rating') is not None:
@@ -540,6 +543,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 reader = csv.DictReader(text.splitlines())
                 headers = reader.fieldnames or []
                 title_col = find_key(headers, ['title', 'name', 'productname', 'product_name'])
+                id_col = find_key(headers, ['product_id', 'productid', 'id'])
                 price_col = find_key(headers, ['price'])
                 rating_col = find_key(headers, ['rating', 'stars'])
                 for row in reader:
@@ -547,6 +551,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                     if not title:
                         continue
                     item = {'title': title}
+                    if id_col and row.get(id_col):
+                        item['product_id'] = str(row[id_col]).strip()
                     if price_col and row.get(price_col):
                         try:
                             item['price'] = float(str(row[price_col]).replace(',', '.'))
@@ -572,9 +578,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                 except StopIteration:
                     headers = []
                 title_col = find_key(headers, ['title', 'name', 'productname', 'product_name'])
+                id_col = find_key(headers, ['product_id', 'productid', 'id'])
                 price_col = find_key(headers, ['price'])
                 rating_col = find_key(headers, ['rating', 'stars'])
                 title_idx = headers.index(title_col) if title_col in headers else None
+                id_idx = headers.index(id_col) if id_col in headers else None
                 price_idx = headers.index(price_col) if price_col in headers else None
                 rating_idx = headers.index(rating_col) if rating_col in headers else None
                 for row in rows:
@@ -584,6 +592,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                     if not title:
                         continue
                     item = {'title': title}
+                    if id_idx is not None and id_idx < len(row) and row[id_idx] is not None:
+                        item['product_id'] = str(row[id_idx]).strip()
                     if price_idx is not None and price_idx < len(row) and row[price_idx] is not None:
                         try:
                             item['price'] = float(str(row[price_idx]).replace(',', '.'))
