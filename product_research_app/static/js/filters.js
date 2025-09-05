@@ -62,6 +62,8 @@ function applyFiltersFromState() {
   window.products = products;
   buildActiveChips(filtersState);
   if (typeof startProgress === 'function') startProgress();
+  selection.clear();
+  updateMasterState();
   renderTable();
 }
 

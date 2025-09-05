@@ -202,7 +202,6 @@ body.dark #scoreInfo { background:#262a51; }
   </thead>
   <tbody></tbody>
 </table>
-<button id="legendBtn" class="legend-btn">ℹ️</button>
 <div id="legendPop" class="popover hidden">
   <div>• Fila roja: duplicado</div>
   <div>• 🔥 x1–x5: tendencia en el nombre</div>
@@ -338,6 +337,8 @@ async function fetchProducts() {
   products = [...allProducts];
   window.allProducts = allProducts;
   window.products = products;
+  selection.clear();
+  updateMasterState();
   renderTable();
 }
 
@@ -377,11 +378,13 @@ function renderTable() {
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.classList.add('rowCheck');
-    cb.dataset.id = item.id;
-    cb.checked = selection.has(item.id);
+    const rowId = String(item.id);
+    cb.dataset.id = rowId;
+    cb.checked = selection.has(rowId);
     tr.classList.toggle('selected', cb.checked);
     cb.addEventListener('change', () => {
-      if (cb.checked) selection.add(item.id); else selection.delete(item.id);
+      const id = cb.dataset.id;
+      if (cb.checked) selection.add(id); else selection.delete(id);
       tr.classList.toggle('selected', cb.checked);
       updateMasterState();
     });
@@ -475,7 +478,7 @@ function renderTable() {
     tr.appendChild(tdDel);
     tbody.appendChild(tr);
   });
-  currentPageIds = products.map(p => p.id);
+  currentPageIds = products.map(p => String(p.id));
   document.getElementById('listMeta').textContent = `${currentPageIds.length} resultados • Vista: Tabla ▾ (Tarjetas)`; // TODO: implementar vista Tarjetas
   if (window.refreshColumns) window.refreshColumns();
   if (window.applyColumnVisibility) window.applyColumnVisibility();
@@ -732,7 +735,7 @@ async function deleteProduct(id){
 
 // Delete selected products
 document.getElementById('btnDelete').onclick = () => {
-  const ids = Array.from(selection);
+  const ids = Array.from(selection, Number);
   if(!ids.length){ toast.info('Selecciona al menos un producto para eliminar'); return; }
   toast.info('¿Eliminar los productos seleccionados?', {actionText:'Eliminar', onAction: async () => {
     try{
@@ -753,7 +756,7 @@ document.getElementById('btnDelete').onclick = () => {
 
 // Export selected products as CSV
 document.getElementById('btnExport').onclick = async () => {
-  const ids = Array.from(selection);
+  const ids = Array.from(selection, Number);
   if(!ids.length){ toast.info('Selecciona productos para exportar'); return; }
   // Build query string
   const params = new URLSearchParams();
@@ -882,6 +885,8 @@ async function loadList(id){
     products = [...allProducts];
     window.allProducts = allProducts;
     window.products = products;
+    selection.clear();
+    updateMasterState();
     renderTable();
     // refresh lists to highlight active group
     loadLists();
@@ -904,7 +909,7 @@ document.getElementById('btnAddToGroup').onclick = async () => {
   const listSelect = document.getElementById('groupSelect');
   const lid = parseInt(listSelect.value);
   if(!lid){ toast.info('Selecciona un grupo'); return; }
-  const ids = Array.from(selection);
+  const ids = Array.from(selection, Number);
   if(!ids.length){ toast.info('Selecciona productos para añadir'); return; }
   try{
     const data = await fetchJson('/add_to_list', {method:'POST', body: JSON.stringify({id: lid, ids: ids})});
