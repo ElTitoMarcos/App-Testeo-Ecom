@@ -41,8 +41,6 @@ details summary { cursor:pointer; font-weight:600; color:#0062ff; }
 body.dark details summary { color:#80b3ff; }
 pre { white-space:pre-wrap; background:#f5f7ff; padding:8px; border-radius:4px; }
 body.dark pre { background:#2e315f; }
-/* Analysis drawer */
-.tab-section { white-space:pre-wrap; font-family:monospace; }
 /* Weight slider styling */
 .weight-slider {
   width:120px;
@@ -180,12 +178,6 @@ body.dark #scoreInfo { background:#262a51; }
   </div>
 </div>
 
-<!-- Analysis drawer with tabbed content -->
-<div id="analysisDrawer" class="drawer right hidden">
-  <div style="text-align:right;"><button id="closeAnalysis" style="background:none;border:none;font-size:20px;cursor:pointer;">✖</button></div>
-  <div id="analysisContent" style="white-space:pre-wrap; overflow-y:auto; max-height:80vh;"></div>
-  <button id="analysisExport">Exportar</button>
-</div>
 <div id="table-toolbar" class="table-toolbar">
   <div style="display:flex; align-items:center; gap:8px;">
     <input type="checkbox" id="selectAll">
@@ -254,7 +246,6 @@ body.dark #scoreInfo { background:#262a51; }
 <script src="/static/js/table.js"></script>
 <script type="module">
 import { fetchJson } from "/static/js/net.js";
-import { openAnalysis } from "/static/js/analyze.js";
 window.addEventListener('beforeunload', () => navigator.sendBeacon('/shutdown'));
 // Global arrays to hold all products and the current filtered list
 let allProducts = [];
@@ -432,21 +423,6 @@ function renderTable() {
       }
       tr.appendChild(td);
     });
-    // Analysis button cell
-    const tdAnal = document.createElement('td');
-    const btnAnal = document.createElement('button');
-    btnAnal.textContent = '🔍';
-    btnAnal.title = 'Analizar producto';
-    btnAnal.style.background = 'transparent';
-    btnAnal.style.border = 'none';
-    btnAnal.style.cursor = 'pointer';
-    btnAnal.style.fontSize = '16px';
-    btnAnal.dataset.id = item.id;
-    btnAnal.onclick = () => {
-      openAnalysis(item);
-    };
-    tdAnal.appendChild(btnAnal);
-    tr.appendChild(tdAnal);
     // Delete button
     const tdDel = document.createElement('td');
     const btn = document.createElement('button');
