@@ -53,7 +53,6 @@ NEGATIVE_WORDS = {
     "issue",
 }
 
-
 def fetch_reddit_posts(query: str, limit: int = 10) -> Dict[str, List[str]]:
     """Return basic posts related to ``query`` from Reddit.
 
@@ -141,7 +140,6 @@ def fetch_youtube_comments(
     except Exception:
         return {"comments": [], "video_count": 0}
 
-
 def fetch_web_reviews(query: str, limit: int = 5) -> Dict[str, List[str]]:
     """Retrieve snippets from general web search results for ``query``.
 
@@ -179,7 +177,6 @@ def fetch_web_reviews(query: str, limit: int = 5) -> Dict[str, List[str]]:
     except Exception:
         return {"comments": [], "sources": []}
     return {"comments": comments, "sources": sources}
-
 
 def extract_keywords(texts: List[str], top_n: int = 10) -> List[str]:
     """Extract the most common keywords from ``texts``.
@@ -228,7 +225,6 @@ def summarize_comments(comments: List[str]) -> Dict[str, List[str]]:
     except Exception:
         return _basic_summary(comments)
 
-
 def _basic_summary(comments: List[str]) -> Dict[str, List[str]]:
     """Provide a naive pros/cons summary without external API calls."""
     pros: List[str] = []
@@ -247,7 +243,6 @@ def find_repeated_comments(comments: List[str], min_count: int = 2) -> List[str]
     """Return comments that appear at least ``min_count`` times."""
     counter: Counter[str] = Counter(c.strip().lower() for c in comments)
     return [c for c, cnt in counter.items() if cnt >= min_count]
-
 
 __all__ = [
     "fetch_reddit_posts",
