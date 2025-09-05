@@ -63,6 +63,7 @@ body.dark .drawer.right {
 }
 
 .hidden { display: none; }
+.col-hidden{ display:none; }
 
 .legend-btn {
   position: fixed;
@@ -93,6 +94,12 @@ body.dark .legend-btn {
 body.dark .popover {
   background: #0F1424;
   border: 1px solid #34456B;
+}
+
+#columnsPanel {
+  position: absolute;
+  left: auto;
+  bottom: auto;
 }
 
 .selected .fires { filter: grayscale(1); opacity: .6; }

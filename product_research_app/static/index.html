@@ -188,8 +188,9 @@ body.dark #scoreInfo { background:#262a51; }
       <button id="btnAddToGroup">Añadir</button>
     </div>
   </div>
-  <div id="listMeta">0 resultados • Vista: Tabla ▾</div>
+  <div id="listMeta">0 resultados • Vista: Tabla ▾ (Tarjetas)</div>
   <div>
+    <button id="btnColumns">Columnas</button>
     <button id="btnDelete" disabled>Eliminar</button>
     <button id="btnExport" disabled>Exportar</button>
   </div>
@@ -206,6 +207,7 @@ body.dark #scoreInfo { background:#262a51; }
   <div>• Fila roja: duplicado</div>
   <div>• 🔥 x1–x5: tendencia en el nombre</div>
 </div>
+<div id="columnsPanel" class="popover hidden"></div>
 
 <!-- Overlay for viewing images in larger size -->
 <div id="imgOverlay" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background: rgba(0,0,0,0.8); justify-content:center; align-items:center; z-index:1000;">
@@ -244,6 +246,7 @@ body.dark #scoreInfo { background:#262a51; }
 </style>
 <script src="/static/js/toast.js"></script>
 <script src="/static/js/table.js"></script>
+<script src="/static/js/columns.js"></script>
 <script type="module">
 import { fetchJson } from "/static/js/net.js";
 window.addEventListener('beforeunload', () => navigator.sendBeacon('/shutdown'));
@@ -356,6 +359,7 @@ function renderTable() {
     columns.forEach(col => {
       const td = document.createElement('td');
       const key = col.key;
+      td.setAttribute('data-key', key);
       let value = '';
       if (['id','name','category','price','image_url','score'].includes(key)) {
         value = item[key];
@@ -441,7 +445,9 @@ function renderTable() {
     tbody.appendChild(tr);
   });
   currentPageIds = products.map(p => p.id);
-  document.getElementById('listMeta').textContent = `${currentPageIds.length} resultados • Vista: Tabla ▾`;
+  document.getElementById('listMeta').textContent = `${currentPageIds.length} resultados • Vista: Tabla ▾ (Tarjetas)`; // TODO: implementar vista Tarjetas
+  if (window.refreshColumns) window.refreshColumns();
+  if (window.applyColumnVisibility) window.applyColumnVisibility();
   updateMasterState();
 }
 
