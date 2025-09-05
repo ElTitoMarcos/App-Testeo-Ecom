@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import io
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
@@ -33,6 +34,7 @@ from typing import Dict, Any
 from . import database
 from . import config
 from . import gpt
+from . import title_analyzer
 
 APP_DIR = Path(__file__).resolve().parent
 DB_PATH = APP_DIR / "data.sqlite3"
@@ -436,6 +438,9 @@ class RequestHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path == "/api/analyze/titles":
+            self.handle_analyze_titles()
+            return
         if path == "/upload":
             self.handle_upload()
             return
@@ -470,6 +475,130 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.handle_shutdown()
             return
         self.send_error(404)
+
+    def handle_analyze_titles(self):
+        """Endpoint for Title Analyzer.
+
+        Accepts either JSON array of objects or a CSV/XLSX file upload under
+        multipart/form-data.  Each item must include a ``title`` field and may
+        optionally include ``price`` and ``rating``.  Returns a JSON response
+        with the normalized items and placeholder analysis results.
+        """
+        ctype = self.headers.get('Content-Type', '')
+        items = []
+        if ctype.startswith('application/json'):
+            length = int(self.headers.get('Content-Length', 0))
+            raw = self.rfile.read(length)
+            try:
+                data = json.loads(raw.decode('utf-8'))
+                if isinstance(data, list):
+                    for obj in data:
+                        title = (obj.get('title') or obj.get('name') or '').strip()
+                        if not title:
+                            continue
+                        item = {'title': title}
+                        if obj.get('price') is not None:
+                            item['price'] = obj.get('price')
+                        if obj.get('rating') is not None:
+                            item['rating'] = obj.get('rating')
+                        items.append(item)
+                else:
+                    raise ValueError('Expected list')
+            except Exception:
+                self.send_error(400, 'Invalid JSON')
+                return
+        elif ctype.startswith('multipart/form-data'):
+            form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={'REQUEST_METHOD': 'POST'})
+            fileitem = form['file'] if 'file' in form else None
+            if fileitem is None or not getattr(fileitem, 'filename', None):
+                self.send_error(400, 'No file provided')
+                return
+            filename = Path(fileitem.filename).name
+            data = fileitem.file.read()
+            ext = Path(filename).suffix.lower()
+
+            def find_key(keys, patterns):
+                for k in keys:
+                    sanitized = ''.join(ch.lower() for ch in k if ch.isalnum())
+                    for p in patterns:
+                        if p in sanitized:
+                            return k
+                return None
+
+            if ext == '.csv':
+                import csv
+                text = data.decode('utf-8', errors='ignore')
+                reader = csv.DictReader(text.splitlines())
+                headers = reader.fieldnames or []
+                title_col = find_key(headers, ['title', 'name', 'productname', 'product_name'])
+                price_col = find_key(headers, ['price'])
+                rating_col = find_key(headers, ['rating', 'stars'])
+                for row in reader:
+                    title = (row.get(title_col) or '').strip() if title_col else ''
+                    if not title:
+                        continue
+                    item = {'title': title}
+                    if price_col and row.get(price_col):
+                        try:
+                            item['price'] = float(str(row[price_col]).replace(',', '.'))
+                        except Exception:
+                            pass
+                    if rating_col and row.get(rating_col):
+                        try:
+                            item['rating'] = float(str(row[rating_col]).replace(',', '.'))
+                        except Exception:
+                            pass
+                    items.append(item)
+            elif ext in ('.xlsx', '.xlsm', '.xltx', '.xltm'):
+                try:
+                    import openpyxl
+                except Exception:
+                    self.send_error(500, 'openpyxl is required for XLSX files')
+                    return
+                wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True)
+                ws = wb.active
+                rows = ws.iter_rows(values_only=True)
+                try:
+                    headers = [str(h).strip() if h else '' for h in next(rows)]
+                except StopIteration:
+                    headers = []
+                title_col = find_key(headers, ['title', 'name', 'productname', 'product_name'])
+                price_col = find_key(headers, ['price'])
+                rating_col = find_key(headers, ['rating', 'stars'])
+                title_idx = headers.index(title_col) if title_col in headers else None
+                price_idx = headers.index(price_col) if price_col in headers else None
+                rating_idx = headers.index(rating_col) if rating_col in headers else None
+                for row in rows:
+                    if title_idx is None or title_idx >= len(row):
+                        continue
+                    title = (str(row[title_idx]).strip() if row[title_idx] else '')
+                    if not title:
+                        continue
+                    item = {'title': title}
+                    if price_idx is not None and price_idx < len(row) and row[price_idx] is not None:
+                        try:
+                            item['price'] = float(str(row[price_idx]).replace(',', '.'))
+                        except Exception:
+                            pass
+                    if rating_idx is not None and rating_idx < len(row) and row[rating_idx] is not None:
+                        try:
+                            item['rating'] = float(str(row[rating_idx]).replace(',', '.'))
+                        except Exception:
+                            pass
+                    items.append(item)
+            else:
+                self.send_error(400, 'Unsupported file type')
+                return
+        else:
+            self.send_error(400, 'Unsupported Content-Type')
+            return
+
+        result = title_analyzer.analyze_titles(items)
+        resp = json.dumps({'items': result}).encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.end_headers()
+        self.wfile.write(resp)
 
     def handle_upload(self):
         # handle multipart form data
