@@ -8,7 +8,8 @@ risks such as SEO bloat or trademark issues.
 from __future__ import annotations
 
 import re
-from typing import List, Dict, Any, Mapping, Optional
+from collections import Counter
+from typing import List, Dict, Any, Mapping, Optional, Tuple
 
 # Minimal stopword lists to avoid external dependencies
 EN_STOPWORDS = {
@@ -49,6 +50,7 @@ DEFAULT_WEIGHTS = {
     "w5": 0.1,   # seo_bloat
     "w6": 0.2,   # ip_risk
 }
+
 SIZE_PATTERN = re.compile(
     r"\b\d+\s*(?:pack|pcs|pieces|x|oz|ml|l|g|kg|lb|cm|mm|in(?:ch(?:es)?)?|ft|pairs?)\b"
 )
@@ -66,19 +68,115 @@ def _tokenize(text: str) -> List[str]:
     tokens = [t for t in tokens if t not in EN_STOPWORDS and t not in ES_STOPWORDS]
     return tokens
 
+def _compute_quantiles(values: List[float]) -> Tuple[Optional[float], Optional[float]]:
+    """Return approximate 33%% and 66%% quantiles for ``values``."""
+    if not values:
+        return None, None
+    values = sorted(values)
+    n = len(values)
+    q1_idx = max(0, min(n - 1, int(n * 0.33)))
+    q2_idx = max(0, min(n - 1, int(n * 0.66)))
+    return values[q1_idx], values[q2_idx]
+
+
+def _price_bucket(price: Optional[float], q1: Optional[float], q2: Optional[float]) -> Optional[str]:
+    if price is None or q1 is None or q2 is None:
+        return None
+    if price <= q1:
+        return "low"
+    if price <= q2:
+        return "mid"
+    return "high"
+
+
+def _generate_summary(
+    signals: Dict[str, Any],
+    risks: Dict[str, bool],
+    tokens: List[str],
+    claims: List[str],
+    repeats: List[str],
+    price: Optional[float],
+    bucket: Optional[str],
+) -> str:
+    comentarios = []
+    if claims:
+        comentarios.append("claims: " + ", ".join(sorted(set(claims))))
+    if signals.get("sizes"):
+        comentarios.append("tamaños: " + ", ".join(signals["sizes"]))
+    if signals.get("compatibility"):
+        comentarios.append("compatibilidad: " + ", ".join(signals["compatibility"]))
+    comentarios_str = "; ".join(comentarios) if comentarios else "sin señales claras"
+
+    pros = []
+    if claims:
+        pros.append("valor percibido")
+    if signals.get("materials"):
+        pros.append("señales de calidad")
+    if signals.get("compatibility"):
+        pros.append("target claro")
+    if signals.get("sizes"):
+        pros.append("resuelve dudas de tamaño")
+    pros_str = "; ".join(pros) if pros else "ninguno"
+
+    contras = []
+    if risks.get("seo_bloat"):
+        contras.append("título largo (SEO bloat)")
+    if risks.get("genericity"):
+        contras.append("claims genéricos")
+    if risks.get("ip_risk"):
+        contras.append("riesgo de marca")
+    if not signals:
+        contras.append("falta diferenciación")
+    contras_str = "; ".join(contras) if contras else "sin contras visibles"
+
+    if signals:
+        compet = "Mejor que la competencia: incluye señales diferenciadoras."
+    else:
+        compet = "Peor que la competencia: título genérico."
+
+    repeats_str = ", ".join(repeats) if repeats else "ninguna"
+    claims_str = ", ".join(sorted(set(claims))) if claims else "ninguno"
+
+    if price is None:
+        price_comment = "Precio no disponible"
+    elif bucket:
+        price_comment = f"Precio {price} ({bucket})"
+    else:
+        price_comment = f"Precio {price}"
+
+    summary = (
+        f"Comentarios: {comentarios_str}. Pros: {pros_str}. Contras: {contras_str}. "
+        f"{compet} Palabras repetidas: {repeats_str}. Claims: {claims_str}. {price_comment}."
+    )
+    return summary
+
 def analyze_titles(
     items: List[Dict[str, Any]], weights: Optional[Mapping[str, float]] = None
 ) -> List[Dict[str, Any]]:
     """Analyze a list of product title entries.
 
     Returns each entry annotated with normalized tokens, extracted signals,
-    risk flags and an aggregate ``title_score`` based on adjustable weights.
+    risk flags, pricing bucket, a summary in Spanish and an aggregate
+    ``title_score`` based on adjustable weights.
     """
     results: List[Dict[str, Any]] = []
     w = dict(DEFAULT_WEIGHTS)
     if weights:
         w.update({k: float(v) for k, v in weights.items() if k in w})
+
+    # Pre-compute price quantiles
+    prices: List[Optional[float]] = []
     for entry in items:
+        price_val = None
+        if entry.get("price") is not None:
+            try:
+                price_val = float(str(entry["price"]).replace(",", "."))
+            except Exception:
+                price_val = None
+        prices.append(price_val)
+    q1, q2 = _compute_quantiles([p for p in prices if p is not None])
+
+    for entry, price_val in zip(items, prices):
         title = entry.get("title")
         if not title:
             continue
@@ -91,7 +189,7 @@ def analyze_titles(
         materials = [t for t in tokens if t in MATERIALS]
         claims = [t for t in tokens if t in CLAIMS]
 
-        signals = {}
+        signals: Dict[str, Any] = {}
         if sizes:
             signals["sizes"] = sizes
         if compatibility:
@@ -113,6 +211,7 @@ def analyze_titles(
             "genericity": genericity,
             "ip_risk": ip_risk,
         }
+
         claim_strength = len(set(claims))
         value_signals = len(sizes)
         targeting = 1 if compatibility else 0
@@ -127,12 +226,21 @@ def analyze_titles(
             - seo_bloat_int * w["w5"]
             - ip_risk_int * w["w6"]
         )
+
+        repeats = [t for t, c in Counter(tokens).items() if c > 1]
+        bucket = _price_bucket(price_val, q1, q2)
+        summary_text = _generate_summary(
+            signals, risks, tokens, claims, repeats, price_val, bucket
+        )
+
         analysis = {
             "normalized": normalized,
             "tokens": tokens,
             "signals": signals,
             "risks": risks,
             "title_score": title_score,
+            "price_bucket": bucket,
+            "summary_text": summary_text,
         }
         new_entry = dict(entry)
         new_entry["analysis"] = analysis
