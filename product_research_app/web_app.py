@@ -1210,6 +1210,12 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps({"ok": True}).encode('utf-8'))
         threading.Thread(target=self.server.shutdown, daemon=True).start()
 
+    def handle_shutdown(self):
+        """Shutdown the HTTP server."""
+        self._set_json()
+        self.wfile.write(json.dumps({"ok": True}).encode('utf-8'))
+        threading.Thread(target=self.server.shutdown, daemon=True).start()
+
     def handle_delete(self):
         """Delete one or more products specified in the request body.
 
