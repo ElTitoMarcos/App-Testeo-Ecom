@@ -63,6 +63,7 @@ function applyFiltersFromState() {
   buildActiveChips(filtersState);
   if (typeof startProgress === 'function') startProgress();
   selection.clear();
+  updateMasterState();
   renderTable();
 }
 

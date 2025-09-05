@@ -66,18 +66,15 @@ body.dark .drawer.right {
 .col-hidden{ display:none; }
 
 .legend-btn {
-  position: fixed;
-  right: 16px;
-  top: calc(var(--header-h, 60px) + 16px);
-  background: #e0f0ff;
-  border: 1px solid #0077cc;
-  border-radius: 8px;
-  padding: 4px 8px;
-  z-index: 900;
+    background: #e0f0ff;
+    border: 1px solid #0077cc;
+    border-radius: 8px;
+    padding: 4px 8px;
+    cursor: pointer;
 }
 body.dark .legend-btn {
-  background: #1F2A44;
-  border: 1px solid #34456B;
+    background: #1F2A44;
+    border: 1px solid #34456B;
 }
 
 .popover {
@@ -94,6 +91,12 @@ body.dark .legend-btn {
 body.dark .popover {
   background: #0F1424;
   border: 1px solid #34456B;
+}
+#legendPop {
+  left: 16px;
+  bottom: 56px;
+  right: auto;
+  top: auto;
 }
 
 #columnsPanel {
