@@ -484,6 +484,15 @@ class RequestHandler(BaseHTTPRequestHandler):
         optionally include ``price`` and ``rating``.  Returns a JSON response
         with the normalized items and placeholder analysis results.
         """
+        parsed = urlparse(self.path)
+        params = parse_qs(parsed.query)
+        weights = {}
+        for key in ("w1", "w2", "w3", "w4", "w5", "w6"):
+            if key in params:
+                try:
+                    weights[key] = float(params[key][0])
+                except Exception:
+                    pass
         ctype = self.headers.get('Content-Type', '')
         items = []
         if ctype.startswith('application/json'):
@@ -593,7 +602,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.send_error(400, 'Unsupported Content-Type')
             return
 
-        result = title_analyzer.analyze_titles(items)
+        result = title_analyzer.analyze_titles(items, weights=weights or None)
         resp = json.dumps({'items': result}).encode('utf-8')
         self.send_response(200)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
