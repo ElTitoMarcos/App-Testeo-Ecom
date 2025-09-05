@@ -35,6 +35,17 @@ import sqlite3
 APP_DIR = Path(__file__).resolve().parent
 DB_PATH = APP_DIR / "data.sqlite3"
 
+WINNER_V2_FIELDS = [
+    "magnitud_deseo",
+    "nivel_consciencia",
+    "saturacion_mercado",
+    "facilidad_anuncio",
+    "facilidad_logistica",
+    "escalabilidad",
+    "engagement_shareability",
+    "durabilidad_recurrencia",
+]
+
 
 def ensure_database() -> sqlite3.Connection:
     """Create or open the database and ensure tables exist."""
@@ -299,37 +310,73 @@ def evaluate_product(conn: database.sqlite3.Connection) -> None:
     model = config.get_model()
     print(f"Evaluando producto '{product['name']}' con el modelo {model}...")
     try:
-        result = gpt.evaluate_product(api_key, model, dict(product))
-        total_score = float(result.get("totalScore"))
-        momentum = float(result.get("momentum_score"))
-        saturation = float(result.get("saturation_score"))
-        differentiation = float(result.get("differentiation_score"))
-        social = float(result.get("social_proof_score"))
-        margin = float(result.get("margin_score"))
-        logistics = float(result.get("logistics_score"))
-        summary = result.get("summary", "")
-        explanations = {
-            "momentum": result.get("momentum_explanation"),
-            "saturation": result.get("saturation_explanation"),
-            "differentiation": result.get("differentiation_explanation"),
-            "social_proof": result.get("social_proof_explanation"),
-            "margin": result.get("margin_explanation"),
-            "logistics": result.get("logistics_explanation"),
-        }
-        _ = database.insert_score(
-            conn,
-            product_id=pid,
-            model=model,
-            total_score=total_score,
-            momentum=momentum,
-            saturation=saturation,
-            differentiation=differentiation,
-            social_proof=social,
-            margin=margin,
-            logistics=logistics,
-            summary=summary,
-            explanations=explanations,
-        )
+        if config.is_scoring_v2_enabled():
+            resp = gpt.evaluate_winner_score(api_key, model, dict(product))
+            weights_map = config.get_scoring_v2_weights()
+            scores = {}
+            for field in WINNER_V2_FIELDS:
+                try:
+                    val = int(resp.get(field, 3))
+                except Exception:
+                    val = 3
+                if val < 1:
+                    val = 1
+                if val > 5:
+                    val = 5
+                scores[field] = val
+            weighted = sum(scores[f] * weights_map.get(f, 0.0) for f in WINNER_V2_FIELDS)
+            raw_score = weighted * 8.0
+            pct = ((raw_score - 8.0) / 32.0) * 100.0
+            breakdown = {"scores": scores, "weights": weights_map}
+            database.insert_score(
+                conn,
+                product_id=pid,
+                model=model,
+                total_score=0,
+                momentum=0,
+                saturation=0,
+                differentiation=0,
+                social_proof=0,
+                margin=0,
+                logistics=0,
+                summary="",
+                explanations={},
+                winner_score_v2_raw=raw_score,
+                winner_score_v2_pct=pct,
+                winner_score_v2_breakdown=breakdown,
+            )
+        else:
+            result = gpt.evaluate_product(api_key, model, dict(product))
+            total_score = float(result.get("totalScore"))
+            momentum = float(result.get("momentum_score"))
+            saturation = float(result.get("saturation_score"))
+            differentiation = float(result.get("differentiation_score"))
+            social = float(result.get("social_proof_score"))
+            margin = float(result.get("margin_score"))
+            logistics = float(result.get("logistics_score"))
+            summary = result.get("summary", "")
+            explanations = {
+                "momentum": result.get("momentum_explanation"),
+                "saturation": result.get("saturation_explanation"),
+                "differentiation": result.get("differentiation_explanation"),
+                "social_proof": result.get("social_proof_explanation"),
+                "margin": result.get("margin_explanation"),
+                "logistics": result.get("logistics_explanation"),
+            }
+            database.insert_score(
+                conn,
+                product_id=pid,
+                model=model,
+                total_score=total_score,
+                momentum=momentum,
+                saturation=saturation,
+                differentiation=differentiation,
+                social_proof=social,
+                margin=margin,
+                logistics=logistics,
+                summary=summary,
+                explanations=explanations,
+            )
         print("Evaluación completada y guardada.")
     except gpt.OpenAIError as exc:
         print(f"Error al evaluar con OpenAI: {exc}")

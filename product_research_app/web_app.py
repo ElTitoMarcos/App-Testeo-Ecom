@@ -36,6 +36,17 @@ from . import config
 from . import gpt
 from . import title_analyzer
 
+WINNER_V2_FIELDS = [
+    "magnitud_deseo",
+    "nivel_consciencia",
+    "saturacion_mercado",
+    "facilidad_anuncio",
+    "facilidad_logistica",
+    "escalabilidad",
+    "engagement_shareability",
+    "durabilidad_recurrencia",
+]
+
 APP_DIR = Path(__file__).resolve().parent
 DB_PATH = APP_DIR / "data.sqlite3"
 STATIC_DIR = APP_DIR / "static"
@@ -913,6 +924,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                     name_map = {}
                     api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
                     model = config.get_model()
+                    weights_map = (
+                        config.get_scoring_v2_weights()
+                        if config.is_scoring_v2_enabled()
+                        else {}
+                    )
                     if api_key and model and names_list:
                         try:
                             name_map = gpt.simplify_product_names(api_key, model, names_list)
@@ -1048,6 +1064,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                     name_map = {}
                     api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
                     model = config.get_model()
+                    weights_map = (
+                        config.get_scoring_v2_weights()
+                        if config.is_scoring_v2_enabled()
+                        else {}
+                    )
                     if api_key and model and names_list:
                         try:
                             name_map = gpt.simplify_product_names(api_key, model, names_list)
@@ -1089,6 +1110,58 @@ class RequestHandler(BaseHTTPRequestHandler):
                             source=filename,
                             extra=extra,
                         )
+                        if (
+                            config.is_scoring_v2_enabled()
+                            and api_key
+                            and model
+                        ):
+                            try:
+                                resp = gpt.evaluate_winner_score(
+                                    api_key,
+                                    model,
+                                    {
+                                        "title": simplified,
+                                        "description": description,
+                                        "category": category,
+                                    },
+                                )
+                                scores = {}
+                                for field in WINNER_V2_FIELDS:
+                                    try:
+                                        val = int(resp.get(field, 3))
+                                    except Exception:
+                                        val = 3
+                                    if val < 1:
+                                        val = 1
+                                    if val > 5:
+                                        val = 5
+                                    scores[field] = val
+                                weighted = sum(
+                                    scores[f] * weights_map.get(f, 0.0)
+                                    for f in WINNER_V2_FIELDS
+                                )
+                                raw_score = weighted * 8.0
+                                pct = ((raw_score - 8.0) / 32.0) * 100.0
+                                breakdown = {"scores": scores, "weights": weights_map}
+                                database.insert_score(
+                                    conn,
+                                    product_id=pid,
+                                    model=model,
+                                    total_score=0,
+                                    momentum=0,
+                                    saturation=0,
+                                    differentiation=0,
+                                    social_proof=0,
+                                    margin=0,
+                                    logistics=0,
+                                    summary="",
+                                    explanations={},
+                                    winner_score_v2_raw=raw_score,
+                                    winner_score_v2_pct=pct,
+                                    winner_score_v2_breakdown=breakdown,
+                                )
+                            except Exception:
+                                pass
                         inserted += 1
                         inserted_ids.append(pid)
                 except Exception as exc:
@@ -1207,16 +1280,66 @@ class RequestHandler(BaseHTTPRequestHandler):
         api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
         model = config.get_model()
         evaluated = 0
+        if config.is_scoring_v2_enabled():
+            weights_map = config.get_scoring_v2_weights()
+            for p in database.list_products(conn):
+                if database.get_scores_for_product(conn, p['id']):
+                    continue
+                if not (api_key and model):
+                    continue
+                try:
+                    resp = gpt.evaluate_winner_score(api_key, model, dict(p))
+                    scores = {}
+                    for field in WINNER_V2_FIELDS:
+                        try:
+                            val = int(resp.get(field, 3))
+                        except Exception:
+                            val = 3
+                        if val < 1:
+                            val = 1
+                        if val > 5:
+                            val = 5
+                        scores[field] = val
+                    weighted = sum(
+                        scores[f] * weights_map.get(f, 0.0) for f in WINNER_V2_FIELDS
+                    )
+                    raw_score = weighted * 8.0
+                    pct = ((raw_score - 8.0) / 32.0) * 100.0
+                    breakdown = {"scores": scores, "weights": weights_map}
+                    database.insert_score(
+                        conn,
+                        product_id=p['id'],
+                        model=model,
+                        total_score=0,
+                        momentum=0,
+                        saturation=0,
+                        differentiation=0,
+                        social_proof=0,
+                        margin=0,
+                        logistics=0,
+                        summary="",
+                        explanations={},
+                        winner_score_v2_raw=raw_score,
+                        winner_score_v2_pct=pct,
+                        winner_score_v2_breakdown=breakdown,
+                    )
+                    evaluated += 1
+                except Exception:
+                    continue
+            self._set_json()
+            self.wfile.write(json.dumps({"evaluated": evaluated}).encode('utf-8'))
+            return
+        # Fallback to legacy evaluation if v2 is disabled
+        evaluated = 0
+        weights_map = config.get_weights()
+        sum_weights = sum(weights_map.values()) or 1.0
         for p in database.list_products(conn):
-            # Skip if already evaluated
             if database.get_scores_for_product(conn, p['id']):
                 continue
             metrics = None
-            # Try GPT evaluation first if API key and model exist
             if api_key:
                 try:
                     result = gpt.evaluate_product(api_key, model, dict(p))
-                    # Build metrics from GPT response
                     metrics = {
                         'momentum': float(result.get('momentum_score', 5.0)),
                         'saturation': float(result.get('saturation_score', 5.0)),
@@ -1237,7 +1360,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                 except Exception:
                     metrics = None
             if metrics is None:
-                # offline heuristic evaluation
                 offline = offline_evaluate(dict(p))
                 metrics = {
                     'momentum': offline['momentum'],
@@ -1249,9 +1371,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                 }
                 summary = offline['summary']
                 explanations = offline['explanations']
-            # compute weighted total score
-            weights_map = config.get_weights()
-            sum_weights = sum(weights_map.values()) or 1.0
             weighted_total = (
                 metrics['momentum'] * weights_map.get('momentum', 1.0)
                 + metrics['saturation'] * weights_map.get('saturation', 1.0)
@@ -1260,7 +1379,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                 + metrics['margin'] * weights_map.get('margin', 1.0)
                 + metrics['logistics'] * weights_map.get('logistics', 1.0)
             ) / sum_weights
-            # Convert weighted_total (approx 1-9) to integer 0-100
             try:
                 score_int = int(round(((weighted_total - 1.0) / 8.0) * 100))
                 if score_int < 0:
