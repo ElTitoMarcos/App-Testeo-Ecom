@@ -68,7 +68,6 @@ def _tokenize(text: str) -> List[str]:
     tokens = [t for t in tokens if t not in EN_STOPWORDS and t not in ES_STOPWORDS]
     return tokens
 
-
 def _compute_quantiles(values: List[float]) -> Tuple[Optional[float], Optional[float]]:
     """Return approximate 33%% and 66%% quantiles for ``values``."""
     if not values:
@@ -150,7 +149,6 @@ def _generate_summary(
         f"{compet} Palabras repetidas: {repeats_str}. Claims: {claims_str}. {price_comment}."
     )
     return summary
-
 
 def analyze_titles(
     items: List[Dict[str, Any]], weights: Optional[Mapping[str, float]] = None
