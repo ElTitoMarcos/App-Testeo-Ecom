@@ -27,6 +27,7 @@ GENERIC_ADJECTIVES = {
     "good", "great", "amazing", "awesome", "nice", "cool", "best",
     "quality", "premium", "perfect", "excellent", "ideal", "top"
 }
+GENERIC_NOUNS = {"kitchen", "set", "kit", "product", "item"}
 MATERIALS = {
     "stainless", "steel", "silicone", "glass", "plastic", "rubber",
     "wood", "leather", "cotton", "nylon", "aluminum", "metal"
@@ -34,7 +35,7 @@ MATERIALS = {
 CLAIMS = {
     "waterproof", "portable", "leakproof", "leak-proof", "eco", "eco-friendly",
     "rechargeable", "wireless", "durable", "lightweight", "heavy", "duty",
-    "breathable", "smart", "flexible", "foldable", "compact", "premium"
+    "breathable", "smart", "flexible", "foldable", "compact"
 }
 BRANDS = {
     "iphone", "samsung", "apple", "playstation", "nintendo", "lego",
@@ -68,7 +69,7 @@ def _tokenize(text: str) -> List[str]:
     tokens = re.findall(r"\b\w+\b", text.lower())
     tokens = [t for t in tokens if t not in EN_STOPWORDS and t not in ES_STOPWORDS]
     return tokens
-
+  
 def _compute_quantiles(values: List[float]) -> Tuple[Optional[float], Optional[float]]:
     """Return approximate 33%% and 66%% quantiles for ``values``."""
     if not values:
@@ -202,7 +203,7 @@ def analyze_titles(
         seo_bloat = len(title) > 120
         genericity = False
         if not any(signals.values()) and tokens and all(
-            t in GENERIC_ADJECTIVES for t in tokens
+            t in GENERIC_ADJECTIVES or t in GENERIC_NOUNS for t in tokens
         ):
             genericity = True
         brand_hits = [b for b in BRANDS if b in lower]
