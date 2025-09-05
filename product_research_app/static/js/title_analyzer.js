@@ -6,6 +6,20 @@ const table = document.getElementById('taTable');
 const tbody = table.querySelector('tbody');
 const summaryDiv = document.getElementById('taSummary');
 
+let detailDialog = document.getElementById('taDetailDialog');
+if (!detailDialog) {
+  detailDialog = document.createElement('dialog');
+  detailDialog.id = 'taDetailDialog';
+  const pre = document.createElement('pre');
+  pre.id = 'taDetailText';
+  const closeBtn = document.createElement('button');
+  closeBtn.textContent = 'Cerrar';
+  closeBtn.addEventListener('click', () => detailDialog.close());
+  detailDialog.appendChild(pre);
+  detailDialog.appendChild(closeBtn);
+  document.body.appendChild(detailDialog);
+}
+
 analyzeBtn?.addEventListener('click', async () => {
   const file = fileInput.files[0];
   if (!file) {
@@ -99,16 +113,19 @@ function renderTable(items) {
 
     const tdDetail = document.createElement('td');
     const btnDetail = document.createElement('button');
+    btnDetail.className = 'ta-detail-btn';
     btnDetail.textContent = '🔍';
     btnDetail.title = 'Ver análisis detallado';
     btnDetail.addEventListener('click', async () => {
       try {
-        const resp = await fetchJson('/api/analyze/title_detail', {
+        const resp = await fetchJson('/api/analyze/product_detail', {
           method: 'POST',
           body: JSON.stringify(item),
           headers: { 'Content-Type': 'application/json' }
         });
-        alert(resp.detail);
+        const pre = document.getElementById('taDetailText');
+        if (pre) pre.textContent = resp.detail || '';
+        detailDialog.showModal();
       } catch (err) {
         if (window.toast) toast.error('No se pudo obtener el detalle');
       }
