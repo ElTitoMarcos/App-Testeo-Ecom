@@ -54,7 +54,7 @@ body.dark .weight-slider {
 body.dark #scoreInfo { background:#262a51; }
 </style>
 </head>
-<body>
+<body class="dark">
 <div id="topBar">
   <header style="padding:8px 15px; display:flex; align-items:center; justify-content:space-between;">
     <div style="display:flex; align-items:center; gap:8px;">
@@ -163,17 +163,17 @@ body.dark #scoreInfo { background:#262a51; }
 <!-- Chart container for simple bar graph of top products -->
 <div id="chartContainer" class="card" style="display:none;">
   <div style="display:flex; flex-wrap:wrap; gap:10px; justify-content:space-around;">
-    <div style="flex:1; min-width:300px; text-align:center;">
-      <h3 style="margin-bottom:4px; font-size:14px;">Ingresos vs Unidades</h3>
-      <canvas id="chartCanvas" width="400" height="250"></canvas>
+    <div style="flex:1; min-width:400px; text-align:center;">
+      <h3 style="margin-bottom:4px; font-size:16px;">Ingresos vs Unidades</h3>
+      <canvas id="chartCanvas" width="600" height="350"></canvas>
     </div>
-    <div style="flex:1; min-width:300px; text-align:center;">
-      <h3 style="margin-bottom:4px; font-size:14px;"># Productos por categoría</h3>
-      <canvas id="catCountCanvas" width="400" height="250"></canvas>
+    <div style="flex:1; min-width:400px; text-align:center;">
+      <h3 style="margin-bottom:4px; font-size:16px;"># Productos por categoría</h3>
+      <canvas id="catCountCanvas" width="600" height="350"></canvas>
     </div>
-    <div style="flex:1; min-width:300px; text-align:center;">
-      <h3 style="margin-bottom:4px; font-size:14px;">Ingresos medios por categoría</h3>
-      <canvas id="catRevenueCanvas" width="400" height="250"></canvas>
+    <div style="flex:1; min-width:400px; text-align:center;">
+      <h3 style="margin-bottom:4px; font-size:16px;">Ingresos medios por categoría</h3>
+      <canvas id="catRevenueCanvas" width="600" height="350"></canvas>
     </div>
   </div>
 </div>
@@ -1001,34 +1001,51 @@ document.getElementById('trendsBtn').onclick = async () => {
     // simple bar chart: compute scaling
     const maxRev = Math.max(...revenues);
     const maxUnit = Math.max(...units);
-    const barWidth = canvas.width / (labels.length * 2);
+    const barWidth = (canvas.width - 40) / (labels.length * 2);
     labels.forEach((lbl, idx) => {
-      const x = idx * 2 * barWidth + barWidth * 0.5;
+      const x = 40 + idx * 2 * barWidth + barWidth * 0.5;
       // revenue bar (blue)
-      const hRev = maxRev > 0 ? (revenues[idx] / maxRev) * (canvas.height - 40) : 0;
+      const hRev = maxRev > 0 ? (revenues[idx] / maxRev) * (canvas.height - 60) : 0;
       ctx.fillStyle = '#42a5f5';
-      ctx.fillRect(x, canvas.height - hRev - 20, barWidth * 0.4, hRev);
+      ctx.fillRect(x, canvas.height - hRev - 40, barWidth * 0.4, hRev);
+      // value for revenue
+      ctx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
+      ctx.font = '12px sans-serif';
+      ctx.fillText(revenues[idx].toFixed(0), x + barWidth * 0.2, canvas.height - hRev - 45);
       // units bar (green)
-      const hUnit = maxUnit > 0 ? (units[idx] / maxUnit) * (canvas.height - 40) : 0;
+      const hUnit = maxUnit > 0 ? (units[idx] / maxUnit) * (canvas.height - 60) : 0;
       ctx.fillStyle = '#66bb6a';
-      ctx.fillRect(x + barWidth * 0.45, canvas.height - hUnit - 20, barWidth * 0.4, hUnit);
+      ctx.fillRect(x + barWidth * 0.45, canvas.height - hUnit - 40, barWidth * 0.4, hUnit);
+      // value for units
+      ctx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
+      ctx.font = '12px sans-serif';
+      ctx.fillText(units[idx].toFixed(0), x + barWidth * 0.65, canvas.height - hUnit - 45);
       // label rotated
       ctx.save();
-      ctx.translate(x + barWidth * 0.4, canvas.height - 5);
+      ctx.translate(x + barWidth * 0.4, canvas.height - 25);
       ctx.rotate(-Math.PI / 4);
       ctx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
-      ctx.font = '10px sans-serif';
-      ctx.fillText(lbl.substring(0, 10) + (lbl.length > 10 ? '…' : ''), 0, 0);
+      ctx.font = '12px sans-serif';
+      ctx.fillText(lbl.substring(0, 15) + (lbl.length > 15 ? '…' : ''), 0, 0);
       ctx.restore();
     });
     // axis lines
     ctx.strokeStyle = document.body.classList.contains('dark') ? '#aaa' : '#333';
     ctx.beginPath();
-    ctx.moveTo(0, canvas.height - 20);
-    ctx.lineTo(canvas.width, canvas.height - 20);
-    ctx.moveTo(0, 0);
-    ctx.lineTo(0, canvas.height - 20);
+    ctx.moveTo(40, canvas.height - 40);
+    ctx.lineTo(canvas.width, canvas.height - 40);
+    ctx.moveTo(40, 0);
+    ctx.lineTo(40, canvas.height - 40);
     ctx.stroke();
+    // axis labels
+    ctx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
+    ctx.font = '14px sans-serif';
+    ctx.fillText('Productos', canvas.width / 2, canvas.height - 10);
+    ctx.save();
+    ctx.translate(15, canvas.height / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText('Ingresos / Unidades', 0, 0);
+    ctx.restore();
   }
   // draw category charts
   const catCountCanvas = document.getElementById('catCountCanvas');
@@ -1060,28 +1077,40 @@ document.getElementById('trendsBtn').onclick = async () => {
   catCountCtx.clearRect(0, 0, catCountCanvas.width, catCountCanvas.height);
   if (catLabels.length > 0) {
     const maxCount = Math.max(...catValues);
-    const barWidth = catCountCanvas.width / (catLabels.length * 2);
+    const barWidth = (catCountCanvas.width - 40) / (catLabels.length * 2);
     catLabels.forEach((lbl, idx) => {
-      const x = idx * 2 * barWidth + barWidth * 0.5;
-      const h = maxCount > 0 ? (catValues[idx] / maxCount) * (catCountCanvas.height - 40) : 0;
+      const x = 40 + idx * 2 * barWidth + barWidth * 0.5;
+      const h = maxCount > 0 ? (catValues[idx] / maxCount) * (catCountCanvas.height - 60) : 0;
       catCountCtx.fillStyle = '#ffb74d';
-      catCountCtx.fillRect(x, catCountCanvas.height - h - 20, barWidth * 0.8, h);
+      catCountCtx.fillRect(x, catCountCanvas.height - h - 40, barWidth * 0.8, h);
+      // value
+      catCountCtx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
+      catCountCtx.font = '12px sans-serif';
+      catCountCtx.fillText(catValues[idx], x + barWidth * 0.4, catCountCanvas.height - h - 45);
       catCountCtx.save();
-      catCountCtx.translate(x + barWidth * 0.4, catCountCanvas.height - 5);
+      catCountCtx.translate(x + barWidth * 0.4, catCountCanvas.height - 25);
       catCountCtx.rotate(-Math.PI / 4);
       catCountCtx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
-      catCountCtx.font = '10px sans-serif';
-      catCountCtx.fillText(lbl.substring(0, 10) + (lbl.length > 10 ? '…' : ''), 0, 0);
+      catCountCtx.font = '12px sans-serif';
+      catCountCtx.fillText(lbl.substring(0, 15) + (lbl.length > 15 ? '…' : ''), 0, 0);
       catCountCtx.restore();
     });
     // axis
     catCountCtx.strokeStyle = document.body.classList.contains('dark') ? '#aaa' : '#333';
     catCountCtx.beginPath();
-    catCountCtx.moveTo(0, catCountCanvas.height - 20);
-    catCountCtx.lineTo(catCountCanvas.width, catCountCanvas.height - 20);
-    catCountCtx.moveTo(0, 0);
-    catCountCtx.lineTo(0, catCountCanvas.height - 20);
+    catCountCtx.moveTo(40, catCountCanvas.height - 40);
+    catCountCtx.lineTo(catCountCanvas.width, catCountCanvas.height - 40);
+    catCountCtx.moveTo(40, 0);
+    catCountCtx.lineTo(40, catCountCanvas.height - 40);
     catCountCtx.stroke();
+    catCountCtx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
+    catCountCtx.font = '14px sans-serif';
+    catCountCtx.fillText('Categorías', catCountCanvas.width / 2, catCountCanvas.height - 10);
+    catCountCtx.save();
+    catCountCtx.translate(15, catCountCanvas.height / 2);
+    catCountCtx.rotate(-Math.PI / 2);
+    catCountCtx.fillText('# Productos', 0, 0);
+    catCountCtx.restore();
   }
   // compute average revenue per category for top categories
   const avgRev = catLabels.map(cat => {
@@ -1093,27 +1122,39 @@ document.getElementById('trendsBtn').onclick = async () => {
   catRevenueCtx.clearRect(0, 0, catRevenueCanvas.width, catRevenueCanvas.height);
   if (catLabels.length > 0) {
     const maxRevAvg = Math.max(...avgRev);
-    const barWidth2 = catRevenueCanvas.width / (catLabels.length * 2);
+    const barWidth2 = (catRevenueCanvas.width - 40) / (catLabels.length * 2);
     catLabels.forEach((lbl, idx) => {
-      const x = idx * 2 * barWidth2 + barWidth2 * 0.5;
-      const h = maxRevAvg > 0 ? (avgRev[idx] / maxRevAvg) * (catRevenueCanvas.height - 40) : 0;
+      const x = 40 + idx * 2 * barWidth2 + barWidth2 * 0.5;
+      const h = maxRevAvg > 0 ? (avgRev[idx] / maxRevAvg) * (catRevenueCanvas.height - 60) : 0;
       catRevenueCtx.fillStyle = '#4db6ac';
-      catRevenueCtx.fillRect(x, catRevenueCanvas.height - h - 20, barWidth2 * 0.8, h);
+      catRevenueCtx.fillRect(x, catRevenueCanvas.height - h - 40, barWidth2 * 0.8, h);
+      // value
+      catRevenueCtx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
+      catRevenueCtx.font = '12px sans-serif';
+      catRevenueCtx.fillText(avgRev[idx].toFixed(0), x + barWidth2 * 0.4, catRevenueCanvas.height - h - 45);
       catRevenueCtx.save();
-      catRevenueCtx.translate(x + barWidth2 * 0.4, catRevenueCanvas.height - 5);
+      catRevenueCtx.translate(x + barWidth2 * 0.4, catRevenueCanvas.height - 25);
       catRevenueCtx.rotate(-Math.PI / 4);
       catRevenueCtx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
-      catRevenueCtx.font = '10px sans-serif';
-      catRevenueCtx.fillText(lbl.substring(0, 10) + (lbl.length > 10 ? '…' : ''), 0, 0);
+      catRevenueCtx.font = '12px sans-serif';
+      catRevenueCtx.fillText(lbl.substring(0, 15) + (lbl.length > 15 ? '…' : ''), 0, 0);
       catRevenueCtx.restore();
     });
     catRevenueCtx.strokeStyle = document.body.classList.contains('dark') ? '#aaa' : '#333';
     catRevenueCtx.beginPath();
-    catRevenueCtx.moveTo(0, catRevenueCanvas.height - 20);
-    catRevenueCtx.lineTo(catRevenueCanvas.width, catRevenueCanvas.height - 20);
-    catRevenueCtx.moveTo(0, 0);
-    catRevenueCtx.lineTo(0, catRevenueCanvas.height - 20);
+    catRevenueCtx.moveTo(40, catRevenueCanvas.height - 40);
+    catRevenueCtx.lineTo(catRevenueCanvas.width, catRevenueCanvas.height - 40);
+    catRevenueCtx.moveTo(40, 0);
+    catRevenueCtx.lineTo(40, catRevenueCanvas.height - 40);
     catRevenueCtx.stroke();
+    catRevenueCtx.fillStyle = document.body.classList.contains('dark') ? '#eaeaea' : '#000';
+    catRevenueCtx.font = '14px sans-serif';
+    catRevenueCtx.fillText('Categorías', catRevenueCanvas.width / 2, catRevenueCanvas.height - 10);
+    catRevenueCtx.save();
+    catRevenueCtx.translate(15, catRevenueCanvas.height / 2);
+    catRevenueCtx.rotate(-Math.PI / 2);
+    catRevenueCtx.fillText('Ingresos medios', 0, 0);
+    catRevenueCtx.restore();
   }
   chartDiv.style.display = 'block';
   // re-render table to show outlines for trending products
