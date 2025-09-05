@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any, Dict, List, Optional
+from collections import Counter
 
 import requests
 
@@ -375,4 +376,75 @@ def simplify_product_names(api_key: str, model: str, names: List[str], *, temper
     except Exception:
         # If parsing or the API call fails, return an empty mapping
         return {}
+
+
+def generate_detailed_summary(
+    api_key: str,
+    model: str,
+    product: dict,
+    analysis: dict,
+) -> str:
+    """Generate a detailed Spanish summary for a product.
+
+    The prompt integrates the original title, extracted signals and risks,
+    repeated words, and price information.  It asks the model to produce a
+    single, relatively long text that synthesizes buyer comments, pros and
+    cons, comparisons with the competition, mentions repeated words and
+    comments on the price.
+
+    Args:
+        api_key: OpenAI API key.
+        model: Identifier of the chat model to call.
+        product: Dictionary containing at least ``title`` and optionally ``price``.
+        analysis: Dictionary produced by the title analyzer with ``signals``,
+            ``flags`` and ``summary`` fields.
+
+    Returns:
+        The text returned by the model.
+
+    Raises:
+        OpenAIError: If the API call fails or returns unexpected data.
+    """
+
+    title = product.get("title", "")
+    price = analysis.get("price", product.get("price"))
+    bucket = analysis.get("summary", {}).get("price_bucket")
+    signals = analysis.get("signals", {})
+    flags = analysis.get("flags", {})
+    repeats = analysis.get("repeats") or analysis.get("repeated_words")
+    if not repeats:
+        tokens = title.lower().split()
+        repeats = [tok for tok, c in Counter(tokens).items() if c > 1]
+
+    signals_str = json.dumps(signals, ensure_ascii=False)
+    flags_str = json.dumps(flags, ensure_ascii=False)
+    repeats_str = ", ".join(repeats) if repeats else "ninguna"
+    price_str = "desconocido" if price is None else str(price)
+    bucket_str = bucket or "sin datos"
+
+    prompt = (
+        "Con los datos siguientes, escribe un único texto detallado en español. "
+        "Debes resumir los comentarios más frecuentes de los compradores, "
+        "enumerar los principales pros y contras, explicar qué hace mejor y "
+        "peor que la competencia, mencionar las palabras repetidas detectadas y "
+        "comentar el precio.\n\n"
+        f"Título original: {title}\n"
+        f"Señales extraídas: {signals_str}\n"
+        f"Riesgos detectados: {flags_str}\n"
+        f"Palabras repetidas: {repeats_str}\n"
+        f"Precio: {price_str} (bucket: {bucket_str})\n"
+    )
+
+    messages = [
+        {
+            "role": "system",
+            "content": "Eres un analista experto en productos de comercio electrónico.",
+        },
+        {"role": "user", "content": prompt},
+    ]
+    resp = call_openai_chat(api_key, model, messages)
+    try:
+        return resp["choices"][0]["message"]["content"].strip()
+    except Exception as exc:
+        raise OpenAIError(f"Respuesta inesperada de OpenAI: {exc}") from exc
 
