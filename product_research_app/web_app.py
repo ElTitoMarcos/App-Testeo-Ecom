@@ -468,6 +468,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/analysis":
             self.handle_analysis()
             return
+        if path == "/shutdown":
+            self.handle_shutdown()
+            return
         self.send_error(404)
 
     def handle_upload(self):
@@ -1199,6 +1202,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             analysis = self.simple_analysis(p)
         self._set_json()
         self.wfile.write(json.dumps(analysis, ensure_ascii=False).encode('utf-8'))
+
+    def handle_shutdown(self):
+        """Shutdown the HTTP server."""
+        self._set_json()
+        self.wfile.write(json.dumps({"ok": True}).encode('utf-8'))
+        threading.Thread(target=self.server.shutdown, daemon=True).start()
 
     def handle_delete(self):
         """Delete one or more products specified in the request body.
