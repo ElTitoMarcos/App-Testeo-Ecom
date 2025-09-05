@@ -162,6 +162,18 @@ body.dark #scoreInfo { background:#262a51; }
 <div id="trends" class="card" style="display:none;"></div>
 <!-- Chart container for trends -->
 <div id="chartContainer" class="card" style="display:none;">
+  <div id="trendControls" style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; margin-bottom:20px;">
+    <div><label>Desde: <input type="date" id="trendStart"></label></div>
+    <div><label>Hasta: <input type="date" id="trendEnd"></label></div>
+    <div><label>Métrica:
+      <select id="metricSelect">
+        <option value="revenue">Ingresos</option>
+        <option value="units">Unidades</option>
+        <option value="avg_price">Avg. Unit Price</option>
+      </select>
+    </label></div>
+    <button id="applyTrendFilters">Aplicar</button>
+  </div>
   <div id="kpiPanel" style="display:flex; flex-wrap:wrap; gap:20px; justify-content:space-around; margin-bottom:20px;"></div>
   <div style="width:100%; margin-bottom:20px;">
     <h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Comparativo por categoría</h3>
@@ -946,165 +958,136 @@ window.addEventListener('DOMContentLoaded', () => {
   loadLists();
 });
 
-// trends button
+// trends button & analytics rendering
+let trendsData = null;
+let currentMetric = 'revenue';
 document.getElementById('trendsBtn').onclick = async () => {
   const cont = document.getElementById('trends');
-  // toggle visibility
-  if(cont.style.display === 'block'){
+  if (cont.style.display === 'block') {
     cont.style.display = 'none';
     cont.innerHTML = '';
-    // hide and clear charts
-    const chartDiv = document.getElementById('chartContainer');
-    if(chartDiv) chartDiv.style.display = 'none';
-    const canvases = ['catCompareCanvas','catRevenueGrowthCanvas','catUnitGrowthCanvas','catRevPerUnitCanvas','keywordTrendCanvas','brandTrendCanvas','ratingRevenueCanvas','priceRevenueCanvas'];
-    canvases.forEach(id => {
-      const cv = document.getElementById(id);
-      if(cv){
-        const cx = cv.getContext('2d');
-        cx && cx.clearRect(0,0,cv.width,cv.height);
-      }
-    });
-    const kpiDiv = document.getElementById('kpiPanel');
-    if(kpiDiv) kpiDiv.innerHTML = '';
-    const sumTbl = document.getElementById('categorySummaryTable');
-    if(sumTbl) sumTbl.innerHTML = '';
+    document.getElementById('chartContainer').style.display = 'none';
     return;
   }
-  const data = await fetchJson('/trends');
-  if(data.error){
-    cont.style.display = 'block';
-    cont.textContent = 'Error al cargar tendencias: '+data.error;
-    return;
-  }
-  // store trending keywords for highlighting
-  trendingWords = (data.keywords || []).map(([word]) => word.toLowerCase());
+  cont.style.display = 'block';
+  cont.innerHTML = '<h3>Tendencias</h3>';
+  await loadTrends();
+};
+document.getElementById('applyTrendFilters').onclick = () => loadTrends();
+document.getElementById('metricSelect').onchange = e => {
+  currentMetric = e.target.value;
+  renderTrends();
+};
+
+async function loadTrends(){
+  const cont = document.getElementById('trends');
+  const start = document.getElementById('trendStart').value;
+  const end = document.getElementById('trendEnd').value;
+  let url = '/trends';
+  const params=[];
+  if(start) params.push('start='+encodeURIComponent(start));
+  if(end) params.push('end='+encodeURIComponent(end));
+  if(params.length) url += '?' + params.join('&');
+  const data = await fetchJson(url);
+  if(data.error){ cont.textContent = 'Error al cargar tendencias: '+data.error; return; }
+  trendsData = data;
+  trendingWords = (data.keywords || []).map(([w])=>w.toLowerCase());
   let html = '<h3>Tendencias</h3>';
   if(data.top_products && data.top_products.length){
     html += '<strong>Top productos por puntuación:</strong><ol>';
-    data.top_products.forEach(item => {
-      html += `<li>${item.name} (Score: ${item.score.toFixed(2)})</li>`;
-    });
+    data.top_products.forEach(item=>{ html += `<li>${item.name} (Score: ${item.score.toFixed(2)})</li>`; });
     html += '</ol>';
   }
   cont.innerHTML = html;
-  cont.style.display = 'block';
+  renderTrends();
+}
+
+function renderTrends(){
+  if(!trendsData) return;
   const chartDiv = document.getElementById('chartContainer');
-  const kpiDiv = document.getElementById('kpiPanel');
-  if(kpiDiv){
-    const k = data.kpis || {};
-    kpiDiv.innerHTML = `
-      <div><strong>Ingresos totales:</strong> ${k.total_revenue ? k.total_revenue.toFixed(2) : 0}</div>
-      <div><strong>Unidades totales:</strong> ${k.total_units || 0}</div>
-      <div><strong>Precio medio:</strong> ${k.avg_price ? k.avg_price.toFixed(2) : 0}</div>
-      <div><strong>Categoría top:</strong> ${k.top_category || '-'}</div>
-      <div><strong>Producto top:</strong> ${k.top_product || '-'}</div>`;
-  }
+  chartDiv.style.display='block';
+  const k = trendsData.kpis || {};
+  document.getElementById('kpiPanel').innerHTML = `
+    <div><strong>Ingresos totales:</strong> ${k.total_revenue ? k.total_revenue.toFixed(2) : 0}</div>
+    <div><strong>Unidades totales:</strong> ${k.total_units || 0}</div>
+    <div><strong>Precio medio:</strong> ${k.avg_price ? k.avg_price.toFixed(2) : 0}</div>
+    <div><strong>Categoría top:</strong> ${k.top_category || '-'}</div>
+    <div><strong>Producto top:</strong> ${k.top_product || '-'}</div>`;
+  const tooltip = document.getElementById('chartTooltip');
   const drawHorizontal = (canvasId, entries, color, axisLabel) => {
     const canvas = document.getElementById(canvasId);
     const ctx = canvas.getContext('2d');
-    const labels = entries.map(e => e[0]);
-    const values = entries.map(e => e[1]);
-    const paddingLeft = 120;
-    const paddingTop = 20;
-    const paddingBottom = 40;
-    const barHeight = 28;
-    const gap = 12;
+    const padL=120,padT=20,padB=40,barH=28,gap=12;
     const width = chartDiv.clientWidth - 40;
     canvas.width = width;
-    canvas.height = paddingTop + paddingBottom + labels.length * (barHeight + gap);
-    ctx.fillStyle = '#fafafa';
-    ctx.fillRect(0,0,canvas.width,canvas.height);
-    const maxVal = Math.max(...values, 0);
-    ctx.font = '14px sans-serif';
-    ctx.textBaseline = 'middle';
-    labels.forEach((lbl, idx) => {
-      const y = paddingTop + idx*(barHeight+gap);
-      const barLen = maxVal ? (values[idx]/maxVal)*(canvas.width - paddingLeft - 40) : 0;
-      ctx.fillStyle = color;
-      ctx.fillRect(paddingLeft, y, barLen, barHeight);
-      ctx.fillStyle = '#000';
-      ctx.fillText(values[idx], paddingLeft + barLen + 5, y + barHeight/2);
-      ctx.fillText(lbl, 10, y + barHeight/2);
+    canvas.height = padT + padB + entries.length*(barH+gap);
+    ctx.fillStyle='#fafafa'; ctx.fillRect(0,0,canvas.width,canvas.height);
+    const maxVal = Math.max(...entries.map(e=>e.value),0);
+    ctx.font='14px sans-serif'; ctx.textBaseline='middle';
+    const rects=[];
+    entries.forEach((e,i)=>{
+      const y=padT+i*(barH+gap);
+      const len=maxVal?(e.value/maxVal)*(canvas.width-padL-40):0;
+      ctx.fillStyle=color; ctx.fillRect(padL,y,len,barH);
+      ctx.fillStyle='#000'; ctx.fillText(e.value,padL+len+5,y+barH/2);
+      ctx.fillText(e.label,10,y+barH/2);
+      rects.push({x:padL,y:y,w:len,h:barH,data:e});
     });
-    ctx.strokeStyle = '#666';
-    ctx.beginPath();
-    ctx.moveTo(paddingLeft, paddingTop - 10);
-    ctx.lineTo(paddingLeft, canvas.height - paddingBottom);
-    ctx.lineTo(canvas.width - 20, canvas.height - paddingBottom);
-    ctx.stroke();
-    ctx.font = '16px sans-serif';
-    ctx.fillStyle = '#000';
-    if(axisLabel) ctx.fillText(axisLabel, canvas.width / 2, canvas.height - 10);
+    ctx.strokeStyle='#666'; ctx.beginPath();
+    ctx.moveTo(padL,padT-10); ctx.lineTo(padL,canvas.height-padB); ctx.lineTo(canvas.width-20,canvas.height-padB); ctx.stroke();
+    ctx.font='16px sans-serif'; ctx.fillStyle='#000'; if(axisLabel) ctx.fillText(axisLabel,canvas.width/2,canvas.height-10);
+    canvas.onmousemove=ev=>{
+      const r=canvas.getBoundingClientRect(); const mx=ev.clientX-r.left,my=ev.clientY-r.top;
+      const hit=rects.find(b=>mx>=b.x && mx<=b.x+b.w && my>=b.y && my<=b.y+b.h);
+      if(hit){ tooltip.style.display='block'; tooltip.textContent=hit.data.tooltip||`${hit.data.label}: ${hit.data.value}`; tooltip.style.left=ev.pageX+10+'px'; tooltip.style.top=ev.pageY+10+'px'; }
+      else tooltip.style.display='none'; };
+    canvas.onmouseleave=()=>tooltip.style.display='none';
   };
   const drawScatter = (canvasId, points, color, xLabel, yLabel) => {
-    const canvas = document.getElementById(canvasId);
-    const ctx = canvas.getContext('2d');
-    const paddingLeft = 60;
-    const paddingBottom = 40;
-    const paddingTop = 20;
-    const width = chartDiv.clientWidth - 40;
-    const height = 400;
-    canvas.width = width;
-    canvas.height = height;
-    ctx.fillStyle = '#fafafa';
-    ctx.fillRect(0,0,width,height);
-    const maxX = Math.max(...points.map(p=>p.x), 0);
-    const maxY = Math.max(...points.map(p=>p.y), 0);
-    const maxR = Math.max(...points.map(p=>p.r || 0), 0);
-    points.forEach(p => {
-      const x = paddingLeft + (maxX ? (p.x/maxX)*(width - paddingLeft - 20) : 0);
-      const y = height - paddingBottom - (maxY ? (p.y/maxY)*(height - paddingTop - paddingBottom) : 0);
-      const r = p.r ? Math.max(4, (p.r/maxR)*20) : 6;
-      ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI*2);
-      ctx.fillStyle = color;
-      ctx.fill();
-      if(p.label){
-        ctx.fillStyle = '#000';
-        ctx.font = '12px sans-serif';
-        ctx.fillText(p.label, x + 5, y - 5);
-      }
-    });
-    ctx.strokeStyle = '#666';
-    ctx.beginPath();
-    ctx.moveTo(paddingLeft, paddingTop);
-    ctx.lineTo(paddingLeft, height - paddingBottom);
-    ctx.lineTo(width - 20, height - paddingBottom);
-    ctx.stroke();
-    ctx.font = '16px sans-serif';
-    ctx.fillStyle = '#000';
-    ctx.fillText(xLabel, width / 2, height - 10);
-    ctx.save();
-    ctx.translate(20, height / 2);
-    ctx.rotate(-Math.PI / 2);
-    ctx.fillText(yLabel, 0, 0);
-    ctx.restore();
+    const canvas=document.getElementById(canvasId); const ctx=canvas.getContext('2d');
+    const padL=60,padB=40,padT=20,width=chartDiv.clientWidth-40,height=400;
+    canvas.width=width; canvas.height=height;
+    ctx.fillStyle='#fafafa'; ctx.fillRect(0,0,width,height);
+    const maxX=Math.max(...points.map(p=>p.x),0), maxY=Math.max(...points.map(p=>p.y),0), maxR=Math.max(...points.map(p=>p.r||0),0);
+    const pts=[];
+    points.forEach(p=>{ const x=padL+(maxX?(p.x/maxX)*(width-padL-20):0); const y=height-padB-(maxY?(p.y/maxY)*(height-padT-padB):0); const r=p.r?Math.max(4,(p.r/maxR)*20):6; ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fillStyle=color; ctx.fill(); pts.push({x,y,r,data:p});});
+    ctx.strokeStyle='#666'; ctx.beginPath(); ctx.moveTo(padL,padT); ctx.lineTo(padL,height-padB); ctx.lineTo(width-20,height-padB); ctx.stroke();
+    ctx.font='16px sans-serif'; ctx.fillStyle='#000'; ctx.fillText(xLabel,width/2,height-10); ctx.save(); ctx.translate(20,height/2); ctx.rotate(-Math.PI/2); ctx.fillText(yLabel,0,0); ctx.restore();
+    canvas.onmousemove=ev=>{ const r=canvas.getBoundingClientRect(); const mx=ev.clientX-r.left,my=ev.clientY-r.top; const hit=pts.find(p=>Math.hypot(mx-p.x,my-p.y)<=p.r); if(hit){ const d=hit.data; tooltip.style.display='block'; tooltip.innerHTML=`${d.label||''}<br/>Ingresos: ${d.revenue?.toFixed?d.revenue.toFixed(2):d.y.toFixed(2)}<br/>Unidades: ${d.units||''}<br/>Rating: ${d.rating||''}`; tooltip.style.left=ev.pageX+10+'px'; tooltip.style.top=ev.pageY+10+'px'; } else tooltip.style.display='none'; };
+    canvas.onmouseleave=()=>tooltip.style.display='none';
   };
-  chartDiv.style.display = 'block';
-  drawScatter('catCompareCanvas', (data.category_compare || []).map(c=>({x:c.products,y:c.avg_revenue,label:c.category})), '#26a69a', 'Productos listados', 'Ingresos medios');
-  const sumTbl = document.getElementById('categorySummaryTable');
-  if(sumTbl){
-    let t = '<thead><tr><th>Categoría</th><th>#Productos</th><th>Unidades totales</th><th>Ingresos totales</th><th>Precio promedio</th><th>Rating promedio</th></tr></thead><tbody>';
-    (data.category_summary || []).forEach(r => {
-      t += `<tr><td>${r.category}</td><td>${r.products}</td><td>${r.total_units.toFixed(0)}</td><td>${r.total_revenue.toFixed(2)}</td><td>${r.avg_price.toFixed(2)}</td><td>${r.avg_rating.toFixed(2)}</td></tr>`;
-    });
-    t += '</tbody>';
-    sumTbl.innerHTML = t;
-  }
-  drawHorizontal('catRevenueGrowthCanvas', data.cat_revenue_growth || [], '#42a5f5', 'Crecimiento ingresos');
-  drawHorizontal('catUnitGrowthCanvas', data.cat_units_growth || [], '#66bb6a', 'Crecimiento unidades');
-  drawHorizontal('catRevPerUnitCanvas', data.cat_rev_per_unit || [], '#ffca28', 'Ingresos/unidad');
-  drawHorizontal('keywordTrendCanvas', data.keywords || [], '#29b6f6', 'Frecuencia');
-  drawHorizontal('brandTrendCanvas', data.brands || [], '#ab47bc', 'Frecuencia');
-  drawScatter('ratingRevenueCanvas', data.scatter_rating_revenue || [], '#ef5350', 'Rating', 'Ingresos');
-  drawScatter('priceRevenueCanvas', data.scatter_price_revenue || [], '#7e57c2', 'Precio promedio', 'Ingresos');
-  // re-render table to show outlines for trending products
+  const metricLabel = currentMetric==='units'?'Unidades medias':currentMetric==='avg_price'?'Precio medio':'Ingresos medios';
+  const catPts=(trendsData.category_compare||[]).map(c=>({x:c.products,y:currentMetric==='units'?c.avg_units:currentMetric==='avg_price'?c.avg_price:c.avg_revenue,label:c.category,revenue:c.total_revenue,units:c.total_units,rating:c.avg_rating}));
+  drawScatter('catCompareCanvas',catPts,'#26a69a','Productos listados',metricLabel);
+  renderCategorySummary();
+  drawHorizontal('catRevenueGrowthCanvas',(trendsData.cat_revenue_growth||[]).map(e=>({label:e[0],value:e[1]})),'#42a5f5','Crecimiento ingresos');
+  drawHorizontal('catUnitGrowthCanvas',(trendsData.cat_units_growth||[]).map(e=>({label:e[0],value:e[1]})),'#66bb6a','Crecimiento unidades');
+  drawHorizontal('catRevPerUnitCanvas',(trendsData.cat_rev_per_unit||[]).map(e=>({label:e[0],value:e[1]})),'#ffca28','Ingresos/unidad');
+  drawHorizontal('keywordTrendCanvas',(trendsData.keywords||[]).map(e=>({label:e[0],value:e[1]})),'#29b6f6','Frecuencia');
+  drawHorizontal('brandTrendCanvas',(trendsData.brands||[]).map(e=>({label:e[0],value:e[1]})),'#ab47bc','Frecuencia');
+  drawScatter('ratingRevenueCanvas',trendsData.scatter_rating_revenue||[],'#ef5350','Rating','Ingresos');
+  drawScatter('priceRevenueCanvas',trendsData.scatter_price_revenue||[],'#7e57c2','Precio promedio','Ingresos');
   renderTable();
-};
+}
+
+let catSort={key:'category',asc:true};
+function renderCategorySummary(){
+  const table=document.getElementById('categorySummaryTable');
+  if(!table) return;
+  let rows=[...(trendsData.category_summary||[])];
+  rows.sort((a,b)=>{const k=catSort.key;const va=a[k],vb=b[k];if(typeof va==='string') return catSort.asc?va.localeCompare(vb):vb.localeCompare(va);return catSort.asc?va-vb:vb-va;});
+  let head=`<thead><tr><th data-key="category">Categoría</th><th data-key="products">#Productos</th><th data-key="total_units">Unidades totales</th><th data-key="total_revenue">Ingresos totales</th><th data-key="avg_price">Precio promedio</th><th data-key="avg_rating">Rating promedio</th></tr></thead>`;
+  let body='<tbody>';
+  rows.forEach(r=>{body+=`<tr><td>${r.category}</td><td>${r.products}</td><td>${r.total_units.toFixed(0)}</td><td>${r.total_revenue.toFixed(2)}</td><td>${r.avg_price.toFixed(2)}</td><td>${r.avg_rating.toFixed(2)}</td></tr>`;});
+  body+='</tbody>'; table.innerHTML=head+body;
+  table.querySelectorAll('th').forEach(th=>{th.style.cursor='pointer';th.onclick=()=>{const key=th.dataset.key;if(catSort.key===key) catSort.asc=!catSort.asc; else {catSort.key=key;catSort.asc=true;} renderCategorySummary();};});
+}
+
 window.renderTable = renderTable;
 window.startProgress = startProgress;
 window.parseDate = parseDate;
 </script>
+<div id="chartTooltip" style="position:absolute; background:#fff; border:1px solid #333; padding:4px; font-size:12px; border-radius:4px; pointer-events:none; display:none; z-index:2000;"></div>
 <script src="/static/js/filters.js"></script>
 </body>
 </html>

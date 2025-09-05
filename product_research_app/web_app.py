@@ -323,6 +323,24 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return
         # trends endpoint: compute analytics for categories, keywords and scatter plots
         if path == "/trends":
+            qs = parse_qs(parsed.query)
+            start_str = qs.get("start", [None])[0]
+            end_str = qs.get("end", [None])[0]
+            from datetime import datetime
+
+            def parse_date_str(val: str | None):
+                if not val:
+                    return None
+                for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d/%m/%Y"):
+                    try:
+                        return datetime.strptime(val, fmt)
+                    except Exception:
+                        continue
+                return None
+
+            start_dt = parse_date_str(start_str)
+            end_dt = parse_date_str(end_str)
+
             conn = ensure_db()
             prods = database.list_products(conn)
             from collections import Counter, defaultdict
@@ -363,6 +381,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                     extras = json.loads(p["extra"]) if p["extra"] else {}
                 except Exception:
                     extras = {}
+
+                launch_val = extras.get("Launch Date")
+                launch_dt = parse_date_str(str(launch_val)) if launch_val else None
+                if start_dt and (launch_dt is None or launch_dt < start_dt):
+                    continue
+                if end_dt and (launch_dt is None or launch_dt > end_dt):
+                    continue
                 cat = (p["category"] or "").strip().lower()
                 if cat:
                     cat_product_count[cat] += 1
@@ -410,7 +435,15 @@ class RequestHandler(BaseHTTPRequestHandler):
                 rating = parse_float(extras.get("Product Rating"))
                 if rating is not None:
                     if revenue is not None and item_sold is not None:
-                        scatter_rating_revenue.append({"x": rating, "y": revenue, "r": item_sold})
+                        scatter_rating_revenue.append({
+                            "x": rating,
+                            "y": revenue,
+                            "r": item_sold,
+                            "label": p["name"],
+                            "units": item_sold,
+                            "rating": rating,
+                            "revenue": revenue,
+                        })
                     if cat:
                         cat_rating_total[cat] += rating
                         cat_rating_count[cat] += 1
@@ -427,7 +460,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                         cat_price_total[cat] += avg_price
                         cat_price_count[cat] += 1
                     if revenue is not None:
-                        scatter_price_revenue.append({"x": avg_price, "y": revenue})
+                        scatter_price_revenue.append({
+                            "x": avg_price,
+                            "y": revenue,
+                            "label": p["name"],
+                            "units": item_sold,
+                            "rating": rating,
+                            "revenue": revenue,
+                        })
 
             cat_rev_per_unit = []
             for cat, rev in cat_rev.items():
@@ -445,19 +485,25 @@ class RequestHandler(BaseHTTPRequestHandler):
             if cat_rev:
                 top_cat = max(cat_rev.items(), key=lambda x: x[1])[0]
             category_compare = []
+            category_summary = []
             for cat, count in cat_product_count.items():
-                avg_rev = cat_rev[cat] / count if count else 0.0
+                total_r = cat_rev.get(cat, 0.0)
+                total_u = cat_units.get(cat, 0.0)
+                avg_rev = total_r / count if count else 0.0
+                avg_units = total_u / count if count else 0.0
+                avg_p = cat_price_total[cat] / cat_price_count[cat] if cat_price_count[cat] else 0.0
+                avg_r = cat_rating_total[cat] / cat_rating_count[cat] if cat_rating_count[cat] else 0.0
                 category_compare.append({
                     "category": cat.title(),
                     "products": count,
                     "avg_revenue": avg_rev,
+                    "avg_units": avg_units,
+                    "avg_price": avg_p,
+                    "total_revenue": total_r,
+                    "total_units": total_u,
+                    "avg_rating": avg_r,
                 })
-            category_summary = []
-            for cat, count in cat_product_count.items():
-                total_u = cat_units.get(cat, 0.0)
-                total_r = cat_rev.get(cat, 0.0)
-                avg_p = cat_price_total[cat] / cat_price_count[cat] if cat_price_count[cat] else 0.0
-                avg_r = cat_rating_total[cat] / cat_rating_count[cat] if cat_rating_count[cat] else 0.0
+                
                 category_summary.append({
                     "category": cat.title(),
                     "products": count,
