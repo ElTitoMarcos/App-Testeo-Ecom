@@ -100,59 +100,41 @@ def _generate_summary(
     price: Optional[float],
     bucket: Optional[str],
 ) -> str:
-    """Craft the Spanish summary string for a product."""
+    """Craft a concise Spanish summary string for a product."""
 
-    comentarios = []
+    parts: List[str] = []
+
+    # Core signals
+    sig_details: List[str] = []
     if claims:
-        comentarios.append("claims: " + ", ".join(sorted(set(claims))))
+        sig_details.append("claims " + ", ".join(sorted(set(claims[:2]))))
     if signals.get("value"):
-        comentarios.append("tamaños: " + ", ".join(signals["value"]))
+        sig_details.append("tamaños " + ", ".join(signals["value"][:2]))
     if signals.get("compat"):
-        comentarios.append("compatibilidad: " + ", ".join(signals["compat"]))
-    comentarios_str = "; ".join(comentarios) if comentarios else "sin señales claras"
-
-    pros = []
-    if claims:
-        pros.append("valor percibido")
+        sig_details.append("compat " + ", ".join(signals["compat"][:2]))
     if signals.get("materials"):
-        pros.append("señales de calidad")
-    if signals.get("compat"):
-        pros.append("target claro")
-    if signals.get("value"):
-        pros.append("resuelve dudas de tamaño")
-    pros_str = "; ".join(pros) if pros else "ninguno"
-
-    contras = []
-    if risks.get("seo_bloat"):
-        contras.append("título largo (SEO bloat)")
-    if risks.get("genericity"):
-        contras.append("claims genéricos")
-    if risks.get("ip_risk"):
-        contras.append("riesgo de marca")
-    if not any(signals.values()):
-        contras.append("falta diferenciación")
-    contras_str = "; ".join(contras) if contras else "sin contras visibles"
-
-    if any(signals.values()):
-        compet = "Mejor que la competencia: incluye señales diferenciadoras."
-    else:
-        compet = "Peor que la competencia: título genérico."
-
-    repeats_str = ", ".join(repeats) if repeats else "ninguna"
-    claims_str = ", ".join(sorted(set(claims))) if claims else "ninguno"
-
-    if price is None:
-        price_comment = "Precio no disponible"
-    elif bucket:
-        price_comment = f"Precio {price} ({bucket})"
-    else:
-        price_comment = f"Precio {price}"
-
-    summary = (
-        f"Comentarios: {comentarios_str}. Pros: {pros_str}. Contras: {contras_str}. "
-        f"{compet} Palabras repetidas: {repeats_str}. Claims: {claims_str}. {price_comment}."
+        sig_details.append("materiales " + ", ".join(signals["materials"][:2]))
+    parts.append(
+        "Señales: " + ("; ".join(sig_details) if sig_details else "sin señales claras")
     )
-    return summary
+
+    # Risks
+    risk_list = [name for name, flag in risks.items() if flag]
+    if risk_list:
+        parts.append("Riesgos: " + ", ".join(risk_list))
+
+    # Repeated words
+    if repeats:
+        parts.append("Repetidas: " + ", ".join(repeats[:3]))
+
+    # Price information
+    if price is not None:
+        price_txt = f"{price}"
+        if bucket:
+            price_txt += f" ({bucket})"
+        parts.append("Precio " + price_txt)
+
+    return " | ".join(parts)
 
 def analyze_titles(
     items: List[Dict[str, Any]], weights: Optional[Mapping[str, float]] = None
