@@ -441,6 +441,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/api/analyze/titles":
             self.handle_analyze_titles()
             return
+        if path == "/api/analyze/title_detail":
+            self.handle_title_detail()
+            return
         if path == "/upload":
             self.handle_upload()
             return
@@ -1159,6 +1162,30 @@ class RequestHandler(BaseHTTPRequestHandler):
             content = resp['choices'][0]['message']['content']
             self._set_json()
             self.wfile.write(json.dumps({"response": content}).encode('utf-8'))
+        except Exception as exc:
+            self._set_json(500)
+            self.wfile.write(json.dumps({"error": str(exc)}).encode('utf-8'))
+
+    def handle_title_detail(self):
+        length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(length).decode('utf-8')
+        try:
+            data = json.loads(body)
+        except Exception:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+            return
+        api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
+        model = config.get_model()
+        if not api_key:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "No API key configured"}).encode('utf-8'))
+            return
+        try:
+            product = {"title": data.get("title"), "price": data.get("price")}
+            detail = gpt.generate_detailed_summary(api_key, model, product, data)
+            self._set_json()
+            self.wfile.write(json.dumps({"detail": detail}).encode('utf-8'))
         except Exception as exc:
             self._set_json(500)
             self.wfile.write(json.dumps({"error": str(exc)}).encode('utf-8'))
