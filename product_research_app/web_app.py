@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import io
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
@@ -33,6 +34,7 @@ from typing import Dict, Any
 from . import database
 from . import config
 from . import gpt
+from . import title_analyzer
 
 APP_DIR = Path(__file__).resolve().parent
 DB_PATH = APP_DIR / "data.sqlite3"
@@ -436,6 +438,9 @@ class RequestHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path == "/api/analyze/titles":
+            self.handle_analyze_titles()
+            return
         if path == "/upload":
             self.handle_upload()
             return
@@ -466,13 +471,134 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/add_to_list":
             self.handle_add_to_list()
             return
-        if path == "/analysis":
-            self.handle_analysis()
-            return
         if path == "/shutdown":
             self.handle_shutdown()
             return
         self.send_error(404)
+
+    def handle_analyze_titles(self):
+        """Endpoint for Title Analyzer.
+
+        Accepts either JSON array of objects or a CSV/XLSX file upload under
+        multipart/form-data.  Each item must include a ``title`` field and may
+        optionally include ``price`` and ``rating``.  Returns a JSON response
+        with the normalized items and placeholder analysis results.
+        """
+        ctype = self.headers.get('Content-Type', '')
+        items = []
+        if ctype.startswith('application/json'):
+            length = int(self.headers.get('Content-Length', 0))
+            raw = self.rfile.read(length)
+            try:
+                data = json.loads(raw.decode('utf-8'))
+                if isinstance(data, list):
+                    for obj in data:
+                        title = (obj.get('title') or obj.get('name') or '').strip()
+                        if not title:
+                            continue
+                        item = {'title': title}
+                        if obj.get('price') is not None:
+                            item['price'] = obj.get('price')
+                        if obj.get('rating') is not None:
+                            item['rating'] = obj.get('rating')
+                        items.append(item)
+                else:
+                    raise ValueError('Expected list')
+            except Exception:
+                self.send_error(400, 'Invalid JSON')
+                return
+        elif ctype.startswith('multipart/form-data'):
+            form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={'REQUEST_METHOD': 'POST'})
+            fileitem = form['file'] if 'file' in form else None
+            if fileitem is None or not getattr(fileitem, 'filename', None):
+                self.send_error(400, 'No file provided')
+                return
+            filename = Path(fileitem.filename).name
+            data = fileitem.file.read()
+            ext = Path(filename).suffix.lower()
+
+            def find_key(keys, patterns):
+                for k in keys:
+                    sanitized = ''.join(ch.lower() for ch in k if ch.isalnum())
+                    for p in patterns:
+                        if p in sanitized:
+                            return k
+                return None
+
+            if ext == '.csv':
+                import csv
+                text = data.decode('utf-8', errors='ignore')
+                reader = csv.DictReader(text.splitlines())
+                headers = reader.fieldnames or []
+                title_col = find_key(headers, ['title', 'name', 'productname', 'product_name'])
+                price_col = find_key(headers, ['price'])
+                rating_col = find_key(headers, ['rating', 'stars'])
+                for row in reader:
+                    title = (row.get(title_col) or '').strip() if title_col else ''
+                    if not title:
+                        continue
+                    item = {'title': title}
+                    if price_col and row.get(price_col):
+                        try:
+                            item['price'] = float(str(row[price_col]).replace(',', '.'))
+                        except Exception:
+                            pass
+                    if rating_col and row.get(rating_col):
+                        try:
+                            item['rating'] = float(str(row[rating_col]).replace(',', '.'))
+                        except Exception:
+                            pass
+                    items.append(item)
+            elif ext in ('.xlsx', '.xlsm', '.xltx', '.xltm'):
+                try:
+                    import openpyxl
+                except Exception:
+                    self.send_error(500, 'openpyxl is required for XLSX files')
+                    return
+                wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True)
+                ws = wb.active
+                rows = ws.iter_rows(values_only=True)
+                try:
+                    headers = [str(h).strip() if h else '' for h in next(rows)]
+                except StopIteration:
+                    headers = []
+                title_col = find_key(headers, ['title', 'name', 'productname', 'product_name'])
+                price_col = find_key(headers, ['price'])
+                rating_col = find_key(headers, ['rating', 'stars'])
+                title_idx = headers.index(title_col) if title_col in headers else None
+                price_idx = headers.index(price_col) if price_col in headers else None
+                rating_idx = headers.index(rating_col) if rating_col in headers else None
+                for row in rows:
+                    if title_idx is None or title_idx >= len(row):
+                        continue
+                    title = (str(row[title_idx]).strip() if row[title_idx] else '')
+                    if not title:
+                        continue
+                    item = {'title': title}
+                    if price_idx is not None and price_idx < len(row) and row[price_idx] is not None:
+                        try:
+                            item['price'] = float(str(row[price_idx]).replace(',', '.'))
+                        except Exception:
+                            pass
+                    if rating_idx is not None and rating_idx < len(row) and row[rating_idx] is not None:
+                        try:
+                            item['rating'] = float(str(row[rating_idx]).replace(',', '.'))
+                        except Exception:
+                            pass
+                    items.append(item)
+            else:
+                self.send_error(400, 'Unsupported file type')
+                return
+        else:
+            self.send_error(400, 'Unsupported Content-Type')
+            return
+
+        result = title_analyzer.analyze_titles(items)
+        resp = json.dumps({'items': result}).encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.end_headers()
+        self.wfile.write(resp)
 
     def handle_upload(self):
         # handle multipart form data
@@ -1152,64 +1278,6 @@ class RequestHandler(BaseHTTPRequestHandler):
         self._set_json()
         self.wfile.write(json.dumps({"added": len(ids)}).encode('utf-8'))
 
-    def handle_analysis(self):
-        """Analyse a single product using GPT and return insights."""
-        length = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(length).decode('utf-8') if length else ''
-        try:
-            data = json.loads(body) if body else {}
-        except Exception:
-            self._set_json(400)
-            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
-            return
-        try:
-            pid = int(data.get('id'))
-        except Exception:
-            self._set_json(400)
-            self.wfile.write(json.dumps({"error": "ID inválido"}).encode('utf-8'))
-            return
-        conn = ensure_db()
-        p = database.get_product(conn, pid)
-        if not p:
-            self._set_json(404)
-            self.wfile.write(json.dumps({"error": "Producto no encontrado"}).encode('utf-8'))
-            return
-        # Build product dict for analysis
-        prod = {
-            "name": p["name"],
-            "description": p["description"],
-            "category": p["category"],
-            "extras": None,
-        }
-        extra_json = p["extra"] or "{}"
-        try:
-            prod["extras"] = json.loads(extra_json)
-        except Exception:
-            prod["extras"] = {}
-        api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
-        model = config.get_model()
-        # if no API key, fallback to simple heuristic analysis
-        if not api_key:
-            analysis = self.simple_analysis_text(p)
-            self._set_json()
-            self.wfile.write(json.dumps({"analysis": analysis}, ensure_ascii=False).encode('utf-8'))
-            return
-        # call the GPT analysis; if fails fallback to simple heuristic
-        try:
-            analysis = gpt.analyze_product(api_key, model, prod)
-        except Exception:
-            analysis = None
-        if not analysis:
-            analysis = self.simple_analysis_text(p)
-        self._set_json()
-        self.wfile.write(json.dumps({"analysis": analysis}, ensure_ascii=False).encode('utf-8'))
-
-    def handle_shutdown(self):
-        """Shutdown the HTTP server."""
-        self._set_json()
-        self.wfile.write(json.dumps({"ok": True}).encode('utf-8'))
-        threading.Thread(target=self.server.shutdown, daemon=True).start()
-
     def handle_shutdown(self):
         """Shutdown the HTTP server."""
         self._set_json()
@@ -1291,127 +1359,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                 continue
         self._set_json()
         self.wfile.write(json.dumps({"removed": removed}).encode('utf-8'))
-
-    def simple_analysis(self, prod: sqlite3.Row) -> Dict[str, Any]:
-        """
-        Generate a heuristic analysis when GPT is unavailable.  Returns a dict with
-        keys: pros, cons, opinions, competitors, summary.
-
-        The heuristics use available data such as price, rating, revenue, creator count
-        and trending words to infer strengths and weaknesses.
-        """
-        # convert sqlite3.Row to normal dict to avoid attribute errors
-        prod_dict = {}
-        try:
-            # Row behaves like mapping but doesn't implement get()
-            prod_dict = {k: prod[k] for k in prod.keys()}
-        except Exception:
-            # fallback: treat as mapping via attribute access
-            prod_dict = dict(prod)
-        pros: list[str] = []  # type: ignore
-        cons: list[str] = []  # type: ignore
-        opinions: list[str] = []
-        competitors: list[str] = []
-        extras = {}
-        try:
-            # handle missing 'extra' safely
-            extra_json = prod_dict.get('extra') if isinstance(prod_dict, dict) else None
-            extras = json.loads(extra_json) if extra_json else {}
-        except Exception:
-            extras = {}
-        price = prod_dict.get('price') if isinstance(prod_dict, dict) else None
-        # Determine rating
-        rating = None
-        if extras and 'Product Rating' in extras:
-            try:
-                rating = float(str(extras['Product Rating']).replace(',', '.'))
-            except Exception:
-                rating = None
-        # Creator number (saturation)
-        creator_num = None
-        if extras and 'Creator Number' in extras:
-            try:
-                # handle numbers like "5.3k" converting to float
-                val = str(extras['Creator Number']).lower()
-                if 'k' in val:
-                    creator_num = float(val.replace('k','')) * 1000
-                elif 'm' in val:
-                    creator_num = float(val.replace('m','')) * 1000000
-                else:
-                    creator_num = float(val.replace(',', ''))
-            except Exception:
-                creator_num = None
-        # Trending words count
-        name = str(prod_dict.get('name') or '').lower()
-        import re
-        words = re.split(r"[^a-z0-9áéíóúüñ]+", name)
-        # simple trending words list similar to frontend filter; using common marketing words
-        trend_words = set(["glow", "peptides", "skincare", "serum", "protein", "flush", "collagen", "vitamin", "thermo", "patch"])
-        trend_count = sum(1 for w in words if w in trend_words)
-        # Build pros/cons
-        if price is not None:
-            if price <= 30:
-                pros.append("Precio accesible")
-            elif price >= 100:
-                cons.append("Precio elevado")
-            else:
-                pros.append("Precio medio")
-        if rating is not None:
-            if rating >= 4.5:
-                pros.append("Alta valoración de clientes")
-            elif rating < 3.0:
-                cons.append("Valoración baja de clientes")
-        if creator_num is not None:
-            if creator_num <= 500:
-                pros.append("Baja competencia")
-            elif creator_num > 3000:
-                cons.append("Alta competencia")
-        if trend_count > 0:
-            pros.append("Producto en tendencia")
-        # Sample opinions and competitors based on category or name
-        if extras and 'Category' in extras:
-            cat = extras['Category']
-            opinions.append(f"Popular en la categoría {cat}")
-        # Competitors: names of other products in same category (first 3) - simplified
-        try:
-            conn = database.get_connection(DB_PATH)
-            if extras and 'Category' in extras:
-                cat = extras['Category']
-                cur = conn.cursor()
-                cur.execute("SELECT name FROM products WHERE category = ? AND id != ? LIMIT 3", (cat, prod['id']))
-                competitors = [row['name'] for row in cur.fetchall()]
-        except Exception:
-            competitors = []
-        summary_parts = []
-        if pros:
-            summary_parts.append("Pros destacados: " + ", ".join(pros))
-        if cons:
-            summary_parts.append("Contras: " + ", ".join(cons))
-        summary = ". ".join(summary_parts) if summary_parts else "Análisis basado en parámetros disponibles."
-        return {
-            "pros": pros,
-            "cons": cons,
-            "opinions": opinions,
-            "competitors": competitors,
-            "summary": summary
-        }
-
-    def simple_analysis_text(self, prod: sqlite3.Row) -> str:
-        """Generate readable text from :func:`simple_analysis`."""
-        data = self.simple_analysis(prod)
-        parts: list[str] = []
-        if data.get("pros"):
-            parts.append("Pros: " + ", ".join(data["pros"]) + ".")
-        if data.get("cons"):
-            parts.append("Contras: " + ", ".join(data["cons"]) + ".")
-        if data.get("opinions"):
-            parts.append("Opiniones: " + ", ".join(data["opinions"]) + ".")
-        if data.get("competitors"):
-            parts.append("Competidores: " + ", ".join(data["competitors"]) + ".")
-        if data.get("summary"):
-            parts.append("Resumen: " + data["summary"])
-        parts.append("Fuentes, economía, riesgos y creatividad no disponibles en modo sin API.")
-        return "\n".join(parts)
 
 
 def run(host: str = '127.0.0.1', port: int = 8000):
