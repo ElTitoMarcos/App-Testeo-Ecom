@@ -55,8 +55,8 @@ if(exportBtn){
 
 export async function openAnalysis(product){
   try{
-    const res = await fetchJson('/api/analyze', {method:'POST', body: JSON.stringify(product)});
-    currentData = res.result || {};
+    const res = await fetchJson('/analysis', {method:'POST', body: JSON.stringify(product)});
+    currentData = res.result || res || {};
     sections.resumen.textContent = JSON.stringify({
       producto: currentData.producto,
       demanda_y_tendencia: currentData.demanda_y_tendencia,
