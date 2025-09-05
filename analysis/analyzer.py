@@ -14,17 +14,46 @@ def analyze(product: dict) -> dict:
         or product.get("Product Name")
         or ""
     )
-    reddit_data = social_scraper.fetch_reddit_posts(name) if name else {"comments": [], "post_count": 0}
+    reddit_data = (
+        social_scraper.fetch_reddit_posts(name)
+        if name
+        else {"comments": [], "post_count": 0}
+    )
     yt_key = os.environ.get("YOUTUBE_API_KEY")
-    youtube_data = social_scraper.fetch_youtube_comments(yt_key, name) if name else {"comments": [], "video_count": 0}
-    web_data = social_scraper.fetch_web_reviews(name) if name else {"comments": [], "sources": []}
-    comments = reddit_data["comments"] + youtube_data["comments"] + web_data["comments"]
+    youtube_data = (
+        social_scraper.fetch_youtube_comments(yt_key, name)
+        if name
+        else {"comments": [], "video_count": 0}
+    )
+    web_data = (
+        social_scraper.fetch_web_reviews(name)
+        if name
+        else {"comments": [], "sources": []}
+    )
+    amazon_data = (
+        social_scraper.fetch_amazon_reviews(name)
+        if name
+        else {"comments": [], "review_count": 0}
+    )
+    comments = (
+        reddit_data["comments"]
+        + youtube_data["comments"]
+        + web_data["comments"]
+        + amazon_data["comments"]
+    )
     keywords = social_scraper.extract_keywords(comments)
-    summary = social_scraper.summarize_comments(comments)
-    pros = summary.get("pros", [])
-    contras = summary.get("contras", [])
-    related = summary.get("productos_relacionados", [])
     repeated = social_scraper.find_repeated_comments(comments)
+    price_comments = social_scraper.extract_price_comments(comments)
+    summary_data = social_scraper.summarize_comments(
+        comments,
+        keywords=keywords,
+        repeated=repeated,
+        price_comments=price_comments,
+    )
+    pros = summary_data.get("pros", [])
+    contras = summary_data.get("contras", [])
+    related = summary_data.get("productos_relacionados", [])
+    summary = summary_data.get("summary", "")
 
     return {
         "producto": {
@@ -56,7 +85,7 @@ def analyze(product: dict) -> dict:
             },
             "amazon": {
                 "avg_rating": product.get("rating", 0),
-                "n_reviews": product.get("reviews", 0),
+                "n_reviews": amazon_data.get("review_count", product.get("reviews", 0)),
             },
             "otros": web_data.get("sources", []),
         },
@@ -83,6 +112,7 @@ def analyze(product: dict) -> dict:
         "palabras_clave": keywords,
         "productos_relacionados": related,
         "comentarios_frecuentes": repeated,
+        "summary": summary,
         "veredicto": {
             "apto_para_test": True,
             "prioridad": "media",
@@ -93,6 +123,6 @@ def analyze(product: dict) -> dict:
             {"tipo": "youtube", "omitida": youtube_data.get("video_count", 0) == 0},
             {"tipo": "reddit", "omitida": reddit_data.get("post_count", 0) == 0},
             {"tipo": "web", "omitida": len(web_data.get("sources", [])) == 0},
-            {"tipo": "amazon", "omitida": True},
+            {"tipo": "amazon", "omitida": amazon_data.get("review_count", 0) == 0},
         ],
     }

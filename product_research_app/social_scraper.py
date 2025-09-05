@@ -14,7 +14,7 @@ import json
 import os
 import re
 from collections import Counter
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import requests
 from bs4 import BeautifulSoup
@@ -52,6 +52,12 @@ NEGATIVE_WORDS = {
     "problema",
     "issue",
 }
+
+# Regex to detect mentions of price in comments
+PRICE_RE = re.compile(
+    r"(?:\$|€|eur|usd|dólar|dollar|euros?)\s?\d|\d+\s?(?:usd|dólares|dollars|euros?|€)",
+    re.IGNORECASE,
+)
 
 def fetch_reddit_posts(query: str, limit: int = 10) -> Dict[str, List[str]]:
     """Return basic posts related to ``query`` from Reddit.
@@ -178,6 +184,45 @@ def fetch_web_reviews(query: str, limit: int = 5) -> Dict[str, List[str]]:
         return {"comments": [], "sources": []}
     return {"comments": comments, "sources": sources}
 
+def fetch_amazon_reviews(query: str, max_reviews: int = 20) -> Dict[str, List[str]]:
+    """Retrieve review snippets from Amazon for ``query``.
+
+    This is a best-effort scraper that searches Amazon for the product and then
+    fetches the first product's review page.  If any request fails an empty
+    result is returned.  Amazon's markup changes frequently so this may not
+    always succeed.
+    """
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        search = requests.get("https://www.amazon.com/s", params={"k": query}, headers=headers, timeout=10)
+        if search.status_code != 200:
+            return {"comments": [], "review_count": 0}
+        soup = BeautifulSoup(search.text, "html.parser")
+        first = soup.select_one("div.s-result-item h2 a.a-link-normal")
+        if not first or not first.get("href"):
+            return {"comments": [], "review_count": 0}
+        href = first["href"]
+        m = re.search(r"/dp/([A-Z0-9]{10})", href)
+        if not m:
+            return {"comments": [], "review_count": 0}
+        asin = m.group(1)
+        rev_resp = requests.get(
+            f"https://www.amazon.com/product-reviews/{asin}", headers=headers, timeout=10
+        )
+        if rev_resp.status_code != 200:
+            return {"comments": [], "review_count": 0}
+        rsoup = BeautifulSoup(rev_resp.text, "html.parser")
+        comments: List[str] = []
+        for rev in rsoup.select("div.review"):
+            text = rev.select_one("span.review-text-content")
+            if text:
+                comments.append(text.get_text(" ", strip=True))
+            if len(comments) >= max_reviews:
+                break
+        return {"comments": comments, "review_count": len(comments)}
+    except Exception:
+        return {"comments": [], "review_count": 0}
+
 def extract_keywords(texts: List[str], top_n: int = 10) -> List[str]:
     """Extract the most common keywords from ``texts``.
 
@@ -191,24 +236,41 @@ def extract_keywords(texts: List[str], top_n: int = 10) -> List[str]:
             counter[word] += 1
     return [w for w, _ in counter.most_common(top_n)]
 
+def extract_price_comments(texts: List[str]) -> List[str]:
+    """Return comments that mention prices or currency symbols."""
+    return [t for t in texts if PRICE_RE.search(t)]
 
-def summarize_comments(comments: List[str]) -> Dict[str, List[str]]:
-    """Use OpenAI to summarise comments into pros, cons and related products.
+
+def summarize_comments(
+    comments: List[str],
+    *,
+    keywords: Optional[List[str]] = None,
+    repeated: Optional[List[str]] = None,
+    price_comments: Optional[List[str]] = None,
+) -> Dict[str, List[str]]:
+    """Use OpenAI to summarise comments into structured insights and a summary.
 
     The OpenAI API key and model are read from the application's configuration.
-    If the API key is missing or the call fails, empty lists are returned.
+    If the API key is missing or the call fails, a fallback summary is used.
     """
     api_key = config.get_api_key()
     model = config.get_model()
     if not comments:
-        return {"pros": [], "contras": [], "productos_relacionados": []}
+        return {"pros": [], "contras": [], "productos_relacionados": [], "summary": ""}
     if not api_key:
-        return _basic_summary(comments)
+        return _basic_summary(
+            comments, keywords=keywords, repeated=repeated, price_comments=price_comments
+        )
     joined = "\n".join(comments[:100])
     prompt = (
         "Analiza los siguientes comentarios de usuarios sobre un producto. "
-        "Resume los pros y contras más mencionados y enumera otros productos que se mencionan como alternativas. "
-        "Responde únicamente con un objeto JSON con las claves 'pros', 'contras' y 'productos_relacionados'.\n\n"
+        "Resume los pros y contras más mencionados, comenta qué hace mejor y peor que la competencia, "
+        "menciona referencias al precio y otros productos alternativos. "
+        "Responde únicamente con un objeto JSON con las claves 'pros', 'contras', "
+        "'productos_relacionados' y 'summary'.\n\n"
+        f"Palabras clave frecuentes: {', '.join(keywords or [])}\n"
+        f"Comentarios repetidos: {', '.join(repeated or [])}\n"
+        f"Comentarios sobre precio: {', '.join(price_comments or [])}\n\n"
         f"Comentarios:\n{joined}"
     )
     messages = [{"role": "user", "content": prompt}]
@@ -221,11 +283,21 @@ def summarize_comments(comments: List[str]) -> Dict[str, List[str]]:
                 "pros": data.get("pros", []) or [],
                 "contras": data.get("contras", []) or [],
                 "productos_relacionados": data.get("productos_relacionados", []) or [],
+                "summary": data.get("summary", ""),
             }
     except Exception:
-        return _basic_summary(comments)
+        return _basic_summary(
+            comments, keywords=keywords, repeated=repeated, price_comments=price_comments
+        )
 
-def _basic_summary(comments: List[str]) -> Dict[str, List[str]]:
+
+def _basic_summary(
+    comments: List[str],
+    *,
+    keywords: Optional[List[str]] = None,
+    repeated: Optional[List[str]] = None,
+    price_comments: Optional[List[str]] = None,
+) -> Dict[str, List[str]]:
     """Provide a naive pros/cons summary without external API calls."""
     pros: List[str] = []
     cons: List[str] = []
@@ -235,20 +307,36 @@ def _basic_summary(comments: List[str]) -> Dict[str, List[str]]:
             pros.append(c)
         if any(n in lc for n in NEGATIVE_WORDS):
             cons.append(c)
-    # Limit number of examples to keep output concise
-    return {"pros": pros[:5], "contras": cons[:5], "productos_relacionados": []}
-
+    parts: List[str] = []
+    if pros:
+        parts.append("Pros destacados: " + ", ".join(pros[:3]))
+    if cons:
+        parts.append("Contras frecuentes: " + ", ".join(cons[:3]))
+    if repeated:
+        parts.append("Comentarios repetidos: " + ", ".join(repeated[:3]))
+    if keywords:
+        parts.append("Palabras clave: " + ", ".join(keywords[:5]))
+    if price_comments:
+        parts.append("Menciones sobre precio: " + "; ".join(price_comments[:2]))
+    summary = ". ".join(parts)
+    return {
+        "pros": pros[:5],
+        "contras": cons[:5],
+        "productos_relacionados": [],
+        "summary": summary,
+    }
 
 def find_repeated_comments(comments: List[str], min_count: int = 2) -> List[str]:
     """Return comments that appear at least ``min_count`` times."""
     counter: Counter[str] = Counter(c.strip().lower() for c in comments)
     return [c for c, cnt in counter.items() if cnt >= min_count]
-
 __all__ = [
     "fetch_reddit_posts",
     "fetch_youtube_comments",
     "fetch_web_reviews",
+    "fetch_amazon_reviews",
     "extract_keywords",
+    "extract_price_comments",
     "summarize_comments",
     "find_repeated_comments",
 ]
