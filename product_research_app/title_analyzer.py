@@ -58,10 +58,8 @@ def _tokenize(text: str) -> List[str]:
     tokens = [t for t in tokens if t not in EN_STOPWORDS and t not in ES_STOPWORDS]
     return tokens
 
-
 def analyze_titles(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Analyze a list of product title entries.
-
     Returns each entry annotated with normalized tokens, extracted signals and
     risk flags.
     """
