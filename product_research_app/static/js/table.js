@@ -15,17 +15,17 @@ function updateMasterState(){
   document.getElementById('btnDelete').disabled = selection.size===0;
   document.getElementById('btnExport').disabled = selection.size===0;
   if(bottomBar){
+    document.getElementById('selCount').textContent = `${selection.size} seleccionados`;
     if(selection.size>0){
       bottomBar.classList.remove('hidden');
-      document.getElementById('selCount').textContent = `${selection.size} seleccionados`;
     }else{
       bottomBar.classList.add('hidden');
     }
   }
 }
 master.addEventListener('change', ()=>{
-  if(master.checked){ currentPageIds.forEach(id=>selection.add(id)); }
-  else { currentPageIds.forEach(id=>selection.delete(id)); }
+  if(master.checked){ currentPageIds.forEach(id=>selection.add(String(id))); }
+  else { currentPageIds.forEach(id=>selection.delete(String(id))); }
   renderTable();
   updateMasterState();
 });
