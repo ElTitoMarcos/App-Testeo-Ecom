@@ -105,7 +105,6 @@ def is_scoring_v2_enabled() -> bool:
     except Exception:
         return True
 
-
 # ---------------- Winner Score v2 weights -----------------
 
 SCORING_V2_DEFAULT_WEIGHTS: Dict[str, float] = {
@@ -153,4 +152,3 @@ def set_scoring_v2_weights(weights: Dict[str, float]) -> None:
     cfg = load_config()
     cfg["scoring_v2_weights"] = weights
     save_config(cfg)
-
