@@ -223,7 +223,10 @@ body.dark #scoreInfo { background:#262a51; }
   </div>
 </div>
 <div id="filtersDrawer" class="drawer right hidden">
-  <h3>Filtros</h3>
+  <div style="display:flex; justify-content:space-between; align-items:center;">
+    <h3>Filtros</h3>
+    <button id="closeFilters">×</button>
+  </div>
   <div style="display:flex; flex-direction:column; gap:8px;">
     <label>Precio mín<br><input type="number" id="filterPriceMin"></label>
     <label>Precio máx<br><input type="number" id="filterPriceMax"></label>
@@ -255,6 +258,8 @@ let allProducts = [];
 let products = [];
 let sortField = null;
 let sortDir = 1;
+window.allProducts = allProducts;
+window.products = products;
 const columns = [
   { key: 'id', label: 'ID', type: 'number' },
   { key: 'image_url', label: 'Imagen', type: 'image' },
@@ -271,6 +276,34 @@ const columns = [
 ];
 
 let trendingWords = [];
+
+async function loadConfig() {
+  try {
+    const cfg = await fetchJson('/config');
+    if (cfg.model) {
+      document.getElementById('modelSelect').value = cfg.model;
+    }
+    if (cfg.weights) {
+      const keys = ['momentum','saturation','differentiation','social_proof','margin','logistics'];
+      keys.forEach(k => {
+        if (cfg.weights[k] !== undefined) {
+          const el = document.getElementById('w_' + k);
+          if (el) {
+            el.value = cfg.weights[k];
+            el.dispatchEvent(new Event('input'));
+          }
+        }
+      });
+    }
+    if (cfg.has_api_key) {
+      const apiInput = document.getElementById('apiKey');
+      apiInput.style.display = 'none';
+      document.getElementById('toggleApiKey').style.display = 'inline-block';
+    }
+  } catch (err) {
+    console.error('Error loading config', err);
+  }
+}
 
 // Microinteraction progress bar
 function startProgress() {
@@ -303,6 +336,8 @@ async function fetchProducts() {
   // keep a copy of all products for filtering
   allProducts = data;
   products = [...allProducts];
+  window.allProducts = allProducts;
+  window.products = products;
   renderTable();
 }
 
@@ -323,13 +358,9 @@ function renderTable() {
       th.onclick = () => sortBy(col.key, col.type);
       headerRow.appendChild(th);
     });
-      // Analysis column header
-      const thAnal = document.createElement('th');
-      thAnal.textContent = '🔍';
-      headerRow.appendChild(thAnal);
-      // Add delete column header
-      const thDel = document.createElement('th');
-      headerRow.appendChild(thDel);
+    // Add delete column header
+    const thDel = document.createElement('th');
+    headerRow.appendChild(thDel);
   }
   // Clear body
   tbody.innerHTML = '';
@@ -487,7 +518,7 @@ function sortBy(field, type) {
 }
 
 document.getElementById('refreshBtn').onclick = fetchProducts;
-window.onload = fetchProducts;
+window.onload = () => { loadConfig(); fetchProducts(); };
 // Toggle config panel
 document.getElementById('configBtn').onclick = () => {
   const cfg = document.getElementById('config');
@@ -849,6 +880,8 @@ async function loadList(id){
     const data = await fetchJson('/list/' + id);
     allProducts = data;
     products = [...allProducts];
+    window.allProducts = allProducts;
+    window.products = products;
     renderTable();
     // refresh lists to highlight active group
     loadLists();
@@ -1081,6 +1114,9 @@ document.getElementById('trendsBtn').onclick = async () => {
   // re-render table to show outlines for trending products
   renderTable();
 };
+window.renderTable = renderTable;
+window.startProgress = startProgress;
+window.parseDate = parseDate;
 </script>
 <script src="/static/js/filters.js"></script>
 </body>

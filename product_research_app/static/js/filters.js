@@ -29,7 +29,7 @@ function closeDrawer() {
 function applyFiltersFromState() {
   const dMin = filtersState.dateMin ? parseDate(filtersState.dateMin) : null;
   const dMax = filtersState.dateMax ? parseDate(filtersState.dateMax) : null;
-  products = allProducts.filter(item => {
+  const filtered = allProducts.filter(item => {
     if (!isNaN(filtersState.priceMin)) {
       if (item.price === null || item.price === undefined || item.price < filtersState.priceMin) return false;
     }
@@ -57,6 +57,9 @@ function applyFiltersFromState() {
     }
     return true;
   });
+  // Mutate the global products array in place so renderTable sees the filtered list
+  products.splice(0, products.length, ...filtered);
+  window.products = products;
   buildActiveChips(filtersState);
   if (typeof startProgress === 'function') startProgress();
   renderTable();
@@ -95,6 +98,7 @@ function buildActiveChips(state) {
 }
 
 document.getElementById('btnFilters')?.addEventListener('click', toggleDrawer);
+document.getElementById('closeFilters')?.addEventListener('click', closeDrawer);
 document.getElementById('applyFilters')?.addEventListener('click', () => {
   filtersState.priceMin = parseFloat(document.getElementById('filterPriceMin').value);
   filtersState.priceMax = parseFloat(document.getElementById('filterPriceMax').value);
