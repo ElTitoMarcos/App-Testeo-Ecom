@@ -58,7 +58,6 @@ COMPAT_PATTERN = re.compile(
     r"for\s+([a-z0-9]+(?:\s+[a-z0-9]+){0,3})", re.IGNORECASE
 )
 
-
 def _normalize(text: str) -> str:
     text = text.lower()
     text = re.sub(r"[^a-z0-9]+", " ", text)
@@ -69,7 +68,6 @@ def _tokenize(text: str) -> List[str]:
     tokens = re.findall(r"\b\w+\b", text.lower())
     tokens = [t for t in tokens if t not in EN_STOPWORDS and t not in ES_STOPWORDS]
     return tokens
-
 
 def _compute_quantiles(values: List[float]) -> Tuple[Optional[float], Optional[float]]:
     """Return approximate 33%% and 66%% quantiles for ``values``."""
@@ -155,12 +153,10 @@ def _generate_summary(
     )
     return summary
 
-
 def analyze_titles(
     items: List[Dict[str, Any]], weights: Optional[Mapping[str, float]] = None
 ) -> List[Dict[str, Any]]:
     """Analyze a list of product title entries.
-
     Each output item follows the schema required for the Title Analyzer with
     ``signals`` (value, claims, materials, compat), ``flags`` for risks, a
     Spanish ``summary`` including ``price_bucket`` and a numeric ``titleScore``.
