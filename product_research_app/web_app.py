@@ -29,6 +29,7 @@ from pathlib import Path
 import cgi
 import threading
 import sqlite3
+import math
 from typing import Dict, Any
 
 from . import database
@@ -277,6 +278,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             data = {
                 "model": cfg.get("model", "gpt-4o"),
                 "weights": cfg.get("weights", {}),
+                "scoring_v2_weights": cfg.get("scoring_v2_weights", {}),
                 "has_api_key": bool(cfg.get("api_key")),
                 # do not include the API key for security
             }
@@ -664,6 +666,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/auto_weights":
             self.handle_auto_weights()
+            return
+        if path == "/auto_weights_v2_gpt":
+            self.handle_auto_weights_v2_gpt()
+            return
+        if path == "/auto_weights_v2_stat":
+            self.handle_auto_weights_v2_stat()
             return
         if path == "/delete":
             self.handle_delete()
@@ -1428,6 +1436,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                 except Exception:
                     continue
             cfg['weights'] = weights
+        if 'scoring_v2_weights' in data and isinstance(data['scoring_v2_weights'], dict):
+            weights_v2 = cfg.get('scoring_v2_weights', {})
+            for k, v in data['scoring_v2_weights'].items():
+                try:
+                    weights_v2[k] = float(v)
+                except Exception:
+                    continue
+            cfg['scoring_v2_weights'] = weights_v2
         config.save_config(cfg)
         self._set_json()
         self.wfile.write(json.dumps({"status": "ok"}).encode('utf-8'))
@@ -1527,6 +1543,98 @@ class RequestHandler(BaseHTTPRequestHandler):
             factor = float(len(metrics)) / total
             for k in weights:
                 weights[k] *= factor
+        self._set_json()
+        self.wfile.write(json.dumps(weights).encode('utf-8'))
+
+    def _collect_samples_for_weights(self):
+        """Gather products with Winner Score v2 breakdown and success metric."""
+        conn = ensure_db()
+        rows = database.list_products(conn)
+        samples = []
+        metric_key = None
+        for p in rows:
+            try:
+                extra = json.loads(p["extra"] or "{}")
+            except Exception:
+                extra = {}
+            success = None
+            if metric_key and metric_key in extra:
+                try:
+                    success = float(extra[metric_key])
+                except Exception:
+                    success = None
+            if success is None:
+                for key in ("orders", "revenue", "gmv", "sales", "units"):
+                    if key in extra:
+                        try:
+                            success = float(extra[key])
+                            metric_key = metric_key or key
+                            break
+                        except Exception:
+                            continue
+            if success is None:
+                continue
+            scores_rows = database.get_scores_for_product(conn, p["id"])
+            if not scores_rows:
+                continue
+            srow = scores_rows[0]
+            try:
+                breakdown = json.loads(srow["winner_score_v2_breakdown"] or "{}")
+                scores = breakdown.get("scores") or {}
+            except Exception:
+                continue
+            if not scores or any(k not in scores for k in WINNER_V2_FIELDS):
+                continue
+            sample = {k: float(scores[k]) for k in WINNER_V2_FIELDS}
+            sample[metric_key] = success
+            samples.append(sample)
+            if len(samples) >= 50:
+                break
+        return samples, metric_key
+
+    def handle_auto_weights_v2_gpt(self):
+        samples, metric_key = self._collect_samples_for_weights()
+        if not samples or not metric_key:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "Datos insuficientes"}).encode('utf-8'))
+            return
+        api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
+        model = config.get_model()
+        if not api_key or not model:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "No API key configured"}).encode('utf-8'))
+            return
+        try:
+            weights = gpt.recommend_winner_weights(api_key, model, samples, metric_key)
+        except Exception as exc:
+            self._set_json(500)
+            self.wfile.write(json.dumps({"error": str(exc)}).encode('utf-8'))
+            return
+        config.set_scoring_v2_weights(weights)
+        self._set_json()
+        self.wfile.write(json.dumps(weights).encode('utf-8'))
+
+    def handle_auto_weights_v2_stat(self):
+        samples, metric_key = self._collect_samples_for_weights()
+        if not samples or not metric_key or len(samples) < 2:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "Datos insuficientes"}).encode('utf-8'))
+            return
+        # compute Pearson correlation between each variable and success
+        ys = [s[metric_key] for s in samples]
+        mean_y = sum(ys) / len(ys)
+        denom_y = math.sqrt(sum((y - mean_y) ** 2 for y in ys)) or 1.0
+        weights = {}
+        for field in WINNER_V2_FIELDS:
+            xs = [s[field] for s in samples]
+            mean_x = sum(xs) / len(xs)
+            denom_x = math.sqrt(sum((x - mean_x) ** 2 for x in xs)) or 1.0
+            num = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+            corr = abs(num / (denom_x * denom_y)) if denom_x and denom_y else 0.0
+            weights[field] = corr
+        total = sum(weights.values()) or 1.0
+        weights = {k: v / total for k, v in weights.items()}
+        config.set_scoring_v2_weights(weights)
         self._set_json()
         self.wfile.write(json.dumps(weights).encode('utf-8'))
 

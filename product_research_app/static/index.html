@@ -94,6 +94,15 @@ body.dark .weight-slider {
   </label>
   <button id="saveConfig">Guardar configuración</button>
 </div>
+<div id="weightsCard" class="card" style="display:none; max-width:420px;">
+  <strong>Ponderaciones Winner Score</strong>
+  <div id="weightsContainer" style="margin-top:8px; display:flex; flex-direction:column; gap:6px;"></div>
+  <div style="margin-top:10px; display:flex; flex-wrap:wrap; gap:6px;">
+    <button id="autoWeightsGpt">Ajustar por IA</button>
+    <button id="autoWeightsStat">Ajustar estadístico</button>
+    <button id="saveWeights">Guardar</button>
+  </div>
+</div>
 <div id="custom">
   <textarea id="customPrompt" rows="3" placeholder="Escribe tu consulta personalizada a GPT"></textarea><br/>
   <button id="sendPrompt">Enviar consulta a GPT</button>
@@ -250,6 +259,43 @@ const columns = [
 
 let trendingWords = [];
 
+const weightFields = [
+  'magnitud_deseo',
+  'nivel_consciencia',
+  'saturacion_mercado',
+  'facilidad_anuncio',
+  'facilidad_logistica',
+  'escalabilidad',
+  'engagement_shareability',
+  'durabilidad_recurrencia'
+];
+
+function renderWeights(weights){
+  const container = document.getElementById('weightsContainer');
+  if (!container) return;
+  container.innerHTML = '';
+  weightFields.forEach(key => {
+    const row = document.createElement('div');
+    row.style.display = 'flex';
+    row.style.alignItems = 'center';
+    row.style.gap = '6px';
+    const label = document.createElement('label');
+    label.textContent = key;
+    label.style.minWidth = '160px';
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.step = '0.01';
+    input.min = '0';
+    input.max = '1';
+    input.value = (weights[key] ?? 0).toFixed(3);
+    input.dataset.key = key;
+    input.className = 'weight-slider';
+    row.appendChild(label);
+    row.appendChild(input);
+    container.appendChild(row);
+  });
+}
+
 async function loadConfig() {
   try {
     const cfg = await fetchJson('/config');
@@ -261,6 +307,7 @@ async function loadConfig() {
       apiInput.style.display = 'none';
       document.getElementById('toggleApiKey').style.display = 'inline-block';
     }
+    renderWeights(cfg.scoring_v2_weights || {});
   } catch (err) {
     console.error('Error loading config', err);
   }
@@ -487,8 +534,42 @@ window.onload = () => { loadConfig(); fetchProducts(); };
 // Toggle config panel
 document.getElementById('configBtn').onclick = () => {
   const cfg = document.getElementById('config');
-  if (!cfg) return;
-  cfg.style.display = (cfg.style.display === 'none' || cfg.style.display === '') ? 'block' : 'none';
+  const wcard = document.getElementById('weightsCard');
+  if (!cfg || !wcard) return;
+  const show = (cfg.style.display === 'none' || cfg.style.display === '') ? 'block' : 'none';
+  cfg.style.display = show;
+  wcard.style.display = show;
+};
+
+async function saveWeightsConfig(weights){
+  await fetchJson('/setconfig',{method:'POST', body: JSON.stringify({scoring_v2_weights: weights})});
+}
+
+async function saveWeights(){
+  const inputs = document.querySelectorAll('#weightsContainer input');
+  const weights = {};
+  let total = 0;
+  inputs.forEach(inp => {
+    const v = parseFloat(inp.value) || 0;
+    weights[inp.dataset.key] = v;
+    total += v;
+  });
+  if (total <= 0){ toast.error('Pesos inválidos'); return; }
+  Object.keys(weights).forEach(k => weights[k] = weights[k] / total);
+  await saveWeightsConfig(weights);
+  toast.success('Pesos guardados');
+}
+
+document.getElementById('saveWeights').onclick = saveWeights;
+document.getElementById('autoWeightsGpt').onclick = async () => {
+  const w = await fetchJson('/auto_weights_v2_gpt',{method:'POST'});
+  renderWeights(w);
+  await saveWeightsConfig(w);
+};
+document.getElementById('autoWeightsStat').onclick = async () => {
+  const w = await fetchJson('/auto_weights_v2_stat',{method:'POST'});
+  renderWeights(w);
+  await saveWeightsConfig(w);
 };
 // Handle file upload: clicking the upload button opens file chooser
 const fileInputEl = document.getElementById('fileInput');

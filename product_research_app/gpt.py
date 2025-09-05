@@ -475,3 +475,72 @@ def simplify_product_names(api_key: str, model: str, names: List[str], *, temper
         # If parsing or the API call fails, return an empty mapping
         return {}
 
+
+def recommend_winner_weights(
+    api_key: str,
+    model: str,
+    samples: List[Dict[str, Any]],
+    success_key: str,
+) -> Dict[str, float]:
+    """Ask GPT to propose weights for Winner Score variables.
+
+    This helper sends a list of sample products, each containing the eight
+    Winner Score variables and a real-world success metric (``success_key``),
+    and asks the model to return a JSON object with normalized weights that
+    best correlate with the provided metric.
+
+    Args:
+        api_key: OpenAI API key.
+        model: Chat model identifier.
+        samples: List of mappings with the eight variables and a success value.
+        success_key: Name of the success metric (e.g. ``orders`` or ``revenue``)
+            included in each sample.
+
+    Returns:
+        Mapping of variable name to weight, normalized so the sum equals 1. If
+        the model does not return valid weights, a uniform distribution is
+        returned instead.
+    """
+
+    if not samples:
+        # no data -> uniform weights
+        return {k: 1.0 / len(WINNER_SCORE_V2_FIELDS) for k in WINNER_SCORE_V2_FIELDS}
+
+    sample_json = json.dumps(samples[:20], ensure_ascii=False)
+    prompt = (
+        "Analiza la siguiente muestra de productos representada como un array JSON. "
+        f"Cada producto incluye un valor '{success_key}' que indica su éxito real y las ocho subpuntuaciones de Winner Score v2. "
+        "Devuelve únicamente un objeto JSON con pesos normalizados (suma=1) para las claves: "
+        + ", ".join(WINNER_SCORE_V2_FIELDS) + "."
+        " Los pesos deben maximizar la correlación con el éxito."\
+    )
+    prompt += "\nMuestra:\n" + sample_json
+    messages = [
+        {"role": "system", "content": "Eres un analista experto en estadística de productos."},
+        {"role": "user", "content": prompt},
+    ]
+    try:
+        resp = call_openai_chat(api_key, model, messages)
+        content = resp["choices"][0]["message"]["content"].strip()
+        weights = json.loads(content)
+        if not isinstance(weights, dict):
+            raise ValueError("Respuesta no es un objeto JSON")
+    except Exception:
+        # fallback to uniform weights
+        return {k: 1.0 / len(WINNER_SCORE_V2_FIELDS) for k in WINNER_SCORE_V2_FIELDS}
+
+    total = 0.0
+    cleaned: Dict[str, float] = {}
+    for key in WINNER_SCORE_V2_FIELDS:
+        try:
+            val = float(weights.get(key, 0.0))
+            if val < 0:
+                val = 0.0
+        except Exception:
+            val = 0.0
+        cleaned[key] = val
+        total += val
+    if total <= 0:
+        return {k: 1.0 / len(WINNER_SCORE_V2_FIELDS) for k in WINNER_SCORE_V2_FIELDS}
+    return {k: v / total for k, v in cleaned.items()}
+
