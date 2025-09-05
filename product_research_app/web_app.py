@@ -321,41 +321,152 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._set_json()
                 self.wfile.write(json.dumps(rows).encode("utf-8"))
                 return
-        # trends endpoint: compute simple trends from product names and categories
+        # trends endpoint: compute analytics for categories, keywords and scatter plots
         if path == "/trends":
             conn = ensure_db()
             prods = database.list_products(conn)
-            from collections import Counter
-            cat_counter = Counter()
+            from collections import Counter, defaultdict
+
+            cat_rev_growth: Dict[str, float] = defaultdict(float)
+            cat_unit_growth: Dict[str, float] = defaultdict(float)
+            cat_rev: Dict[str, float] = defaultdict(float)
+            cat_units: Dict[str, float] = defaultdict(float)
+            cat_product_count: Dict[str, int] = defaultdict(int)
+            cat_price_total: Dict[str, float] = defaultdict(float)
+            cat_price_count: Dict[str, int] = defaultdict(int)
+            cat_rating_total: Dict[str, float] = defaultdict(float)
+            cat_rating_count: Dict[str, int] = defaultdict(int)
             word_counter = Counter()
+            brand_counter = Counter()
+            scatter_rating_revenue = []
+            scatter_price_revenue = []
+            total_revenue = 0.0
+            total_units = 0.0
+            price_sum = 0.0
+            price_count = 0
+            top_product_name = None
+            top_product_rev = 0.0
+
             stopwords = set([
-                "the", "and", "for", "with", "a", "an", "de", "la", "el", "para", "y", "con", "un", "una", "los", "las", "en", "por", "to", "of"
+                "the", "and", "for", "with", "a", "an", "de", "la", "el", "para", "y", "con", "un", "una", "los", "las", "en", "por", "to", "of",
             ])
+
+            def parse_float(val):
+                try:
+                    return float(str(val).replace("%", "").replace("$", "").replace(",", "").strip())
+                except Exception:
+                    return None
+            import re
+
             for p in prods:
-                # category count
-                cat = ''
                 try:
-                    cat = (p["category"] or '').strip().lower()
+                    extras = json.loads(p["extra"]) if p["extra"] else {}
                 except Exception:
-                    pass
+                    extras = {}
+                cat = (p["category"] or "").strip().lower()
                 if cat:
-                    cat_counter[cat] += 1
-                # keyword count from product name
-                name = ''
-                try:
-                    name = (p["name"] or '').lower()
-                except Exception:
-                    pass
-                import re
+                    cat_product_count[cat] += 1
+                rev_growth = None
+                unit_growth = None
+                for k, v in extras.items():
+                    lk = k.lower()
+                    if rev_growth is None and "revenue" in lk and "growth" in lk:
+                        rev_growth = parse_float(v)
+                    if unit_growth is None and ("item" in lk or "unit" in lk) and "growth" in lk:
+                        unit_growth = parse_float(v)
+                if rev_growth is not None and cat:
+                    cat_rev_growth[cat] += rev_growth
+                if unit_growth is not None and cat:
+                    cat_unit_growth[cat] += unit_growth
+                revenue = None
+                for key in ["Revenue($)", "Revenue"]:
+                    if key in extras:
+                        revenue = parse_float(extras[key])
+                        if revenue is not None:
+                            break
+                item_sold = parse_float(extras.get("Item Sold"))
+                if revenue is not None:
+                    total_revenue += revenue
+                    if cat:
+                        cat_rev[cat] += revenue
+                    if revenue > top_product_rev:
+                        top_product_rev = revenue
+                        top_product_name = p["name"]
+                if item_sold is not None:
+                    total_units += item_sold
+                    if cat:
+                        cat_units[cat] += item_sold
+                name = (p["name"] or "").lower()
                 words = re.split(r"[^a-záéíóúüñ0-9]+", name)
                 for w in words:
                     if not w or w in stopwords or len(w) < 3:
                         continue
                     word_counter[w] += 1
-            # prepare top categories and keywords
-            top_cats = cat_counter.most_common(10)
+                tokens = re.split(r"[^A-Za-z0-9]+", p["name"] or "")
+                if tokens:
+                    brand = tokens[0].lower()
+                    if brand and brand not in stopwords and len(brand) >= 3:
+                        brand_counter[brand] += 1
+                rating = parse_float(extras.get("Product Rating"))
+                if rating is not None:
+                    if revenue is not None and item_sold is not None:
+                        scatter_rating_revenue.append({"x": rating, "y": revenue, "r": item_sold})
+                    if cat:
+                        cat_rating_total[cat] += rating
+                        cat_rating_count[cat] += 1
+                avg_price = None
+                for key in ["Avg. Unit Price($)", "Avg Unit Price($)", "Avg. Unit Price"]:
+                    if key in extras:
+                        avg_price = parse_float(extras[key])
+                        if avg_price is not None:
+                            break
+                if avg_price is not None:
+                    price_sum += avg_price
+                    price_count += 1
+                    if cat:
+                        cat_price_total[cat] += avg_price
+                        cat_price_count[cat] += 1
+                    if revenue is not None:
+                        scatter_price_revenue.append({"x": avg_price, "y": revenue})
+
+            cat_rev_per_unit = []
+            for cat, rev in cat_rev.items():
+                units = cat_units.get(cat, 0)
+                if units:
+                    cat_rev_per_unit.append((cat, rev / units))
+
+            top_rev_growth = sorted(cat_rev_growth.items(), key=lambda x: x[1], reverse=True)[:10]
+            top_unit_growth = sorted(cat_unit_growth.items(), key=lambda x: x[1], reverse=True)[:10]
+            cat_rev_per_unit.sort(key=lambda x: x[1], reverse=True)
             top_words = word_counter.most_common(10)
-            # compute top scored products by score
+            top_brands = [(b.title(), c) for b, c in brand_counter.most_common(10)]
+            avg_price = price_sum / price_count if price_count else 0.0
+            top_cat = None
+            if cat_rev:
+                top_cat = max(cat_rev.items(), key=lambda x: x[1])[0]
+            category_compare = []
+            for cat, count in cat_product_count.items():
+                avg_rev = cat_rev[cat] / count if count else 0.0
+                category_compare.append({
+                    "category": cat.title(),
+                    "products": count,
+                    "avg_revenue": avg_rev,
+                })
+            category_summary = []
+            for cat, count in cat_product_count.items():
+                total_u = cat_units.get(cat, 0.0)
+                total_r = cat_rev.get(cat, 0.0)
+                avg_p = cat_price_total[cat] / cat_price_count[cat] if cat_price_count[cat] else 0.0
+                avg_r = cat_rating_total[cat] / cat_rating_count[cat] if cat_rating_count[cat] else 0.0
+                category_summary.append({
+                    "category": cat.title(),
+                    "products": count,
+                    "total_units": total_u,
+                    "total_revenue": total_r,
+                    "avg_price": avg_p,
+                    "avg_rating": avg_r,
+                })
+
             rows = []
             for p in prods:
                 scores = database.get_scores_for_product(conn, p["id"])
@@ -368,17 +479,30 @@ class RequestHandler(BaseHTTPRequestHandler):
                 if score_val is not None:
                     rows.append((p["id"], p["name"], score_val))
             rows.sort(key=lambda x: x[2], reverse=True)
-            top_products = [
-                {"id": r[0], "name": r[1], "score": r[2]} for r in rows[:10]
-            ]
+            top_products = [{"id": r[0], "name": r[1], "score": r[2]} for r in rows[:10]]
+
             self._set_json()
             self.wfile.write(json.dumps({
-                "categories": top_cats,
+                "kpis": {
+                    "total_revenue": total_revenue,
+                    "total_units": total_units,
+                    "avg_price": avg_price,
+                    "top_category": top_cat.title() if top_cat else None,
+                    "top_product": top_product_name,
+                },
+                "category_compare": category_compare,
+                "category_summary": category_summary,
+                "cat_revenue_growth": top_rev_growth,
+                "cat_units_growth": top_unit_growth,
+                "cat_rev_per_unit": cat_rev_per_unit[:10],
                 "keywords": top_words,
+                "brands": top_brands,
                 "top_products": top_products,
+                "scatter_rating_revenue": scatter_rating_revenue,
+                "scatter_price_revenue": scatter_price_revenue,
             }).encode("utf-8"))
             return
-        # export selected or all products
+# export selected or all products
         if path == "/export":
             # Export selected products as CSV; ids provided via query params (?ids=1,2,3)
             qs = parse_qs(parsed.query)
