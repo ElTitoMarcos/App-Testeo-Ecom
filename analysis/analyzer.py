@@ -8,16 +8,23 @@ def analyze(product: dict) -> dict:
     score = product.get("score", 0)
     trending = max(0, min(5, round((product.get("trend_signal", 0) or score / 20))))
 
-    name = product.get("name", "")
+    name = (
+        product.get("name")
+        or product.get("title")
+        or product.get("Product Name")
+        or ""
+    )
     reddit_data = social_scraper.fetch_reddit_posts(name) if name else {"comments": [], "post_count": 0}
     yt_key = os.environ.get("YOUTUBE_API_KEY")
     youtube_data = social_scraper.fetch_youtube_comments(yt_key, name) if name else {"comments": [], "video_count": 0}
-    comments = reddit_data["comments"] + youtube_data["comments"]
+    web_data = social_scraper.fetch_web_reviews(name) if name else {"comments": [], "sources": []}
+    comments = reddit_data["comments"] + youtube_data["comments"] + web_data["comments"]
     keywords = social_scraper.extract_keywords(comments)
     summary = social_scraper.summarize_comments(comments)
     pros = summary.get("pros", [])
     contras = summary.get("contras", [])
     related = summary.get("productos_relacionados", [])
+    repeated = social_scraper.find_repeated_comments(comments)
 
     return {
         "producto": {
@@ -51,7 +58,7 @@ def analyze(product: dict) -> dict:
                 "avg_rating": product.get("rating", 0),
                 "n_reviews": product.get("reviews", 0),
             },
-            "otros": [],
+            "otros": web_data.get("sources", []),
         },
         "logistica_y_riesgos": {
             "peso_volumen": "",
@@ -75,6 +82,7 @@ def analyze(product: dict) -> dict:
         "contras": contras,
         "palabras_clave": keywords,
         "productos_relacionados": related,
+        "comentarios_frecuentes": repeated,
         "veredicto": {
             "apto_para_test": True,
             "prioridad": "media",
@@ -84,6 +92,7 @@ def analyze(product: dict) -> dict:
         "fuentes": [
             {"tipo": "youtube", "omitida": youtube_data.get("video_count", 0) == 0},
             {"tipo": "reddit", "omitida": reddit_data.get("post_count", 0) == 0},
+            {"tipo": "web", "omitida": len(web_data.get("sources", [])) == 0},
             {"tipo": "amazon", "omitida": True},
         ],
     }

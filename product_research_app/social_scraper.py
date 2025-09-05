@@ -17,6 +17,7 @@ from collections import Counter
 from typing import Dict, List
 
 import requests
+from bs4 import BeautifulSoup
 
 from . import gpt, config
 
@@ -28,6 +29,29 @@ STOPWORDS = {
     "las", "los", "del", "sus", "más", "por", "sin", "una", "un", "al",
 }
 
+# Basic lists of positive and negative words for crude sentiment estimation
+POSITIVE_WORDS = {
+    "bueno",
+    "excelente",
+    "genial",
+    "love",
+    "great",
+    "fantastic",
+    "buen",
+    "recomendado",
+    "amazing",
+}
+NEGATIVE_WORDS = {
+    "malo",
+    "terrible",
+    "bad",
+    "worst",
+    "defectuoso",
+    "poor",
+    "horrible",
+    "problema",
+    "issue",
+}
 
 def fetch_reddit_posts(query: str, limit: int = 10) -> Dict[str, List[str]]:
     """Return basic posts related to ``query`` from Reddit.
@@ -116,6 +140,43 @@ def fetch_youtube_comments(
     except Exception:
         return {"comments": [], "video_count": 0}
 
+def fetch_web_reviews(query: str, limit: int = 5) -> Dict[str, List[str]]:
+    """Retrieve snippets from general web search results for ``query``.
+
+    DuckDuckGo's HTML endpoint is used as it does not require an API key.  The
+    function collects short descriptions from search results and, when
+    possible, fetches the linked pages to extract paragraph text.  It is a
+    best-effort approach and may return an empty list if requests fail.
+    """
+    comments: List[str] = []
+    sources: List[str] = []
+    try:
+        params = {"q": f"{query} review", "kl": "es-es"}
+        resp = requests.get("https://duckduckgo.com/html/", params=params, timeout=10)
+        if resp.status_code != 200:
+            return {"comments": [], "sources": []}
+        soup = BeautifulSoup(resp.text, "html.parser")
+        results = soup.select("div.result")[:limit]
+        for r in results:
+            link = r.find("a", href=True)
+            snippet = r.find("a", class_="result__snippet") or r.find("div", class_="result__snippet")
+            if snippet:
+                comments.append(snippet.get_text(" "))
+            if link and link["href"]:
+                sources.append(link["href"])
+                try:
+                    page = requests.get(link["href"], timeout=10)
+                    if page.status_code == 200:
+                        psoup = BeautifulSoup(page.text, "html.parser")
+                        for p in psoup.find_all("p")[:3]:
+                            text = p.get_text(" ")
+                            if text:
+                                comments.append(text)
+                except Exception:
+                    continue
+    except Exception:
+        return {"comments": [], "sources": []}
+    return {"comments": comments, "sources": sources}
 
 def extract_keywords(texts: List[str], top_n: int = 10) -> List[str]:
     """Extract the most common keywords from ``texts``.
@@ -139,8 +200,10 @@ def summarize_comments(comments: List[str]) -> Dict[str, List[str]]:
     """
     api_key = config.get_api_key()
     model = config.get_model()
-    if not api_key or not comments:
+    if not comments:
         return {"pros": [], "contras": [], "productos_relacionados": []}
+    if not api_key:
+        return _basic_summary(comments)
     joined = "\n".join(comments[:100])
     prompt = (
         "Analiza los siguientes comentarios de usuarios sobre un producto. "
@@ -160,13 +223,32 @@ def summarize_comments(comments: List[str]) -> Dict[str, List[str]]:
                 "productos_relacionados": data.get("productos_relacionados", []) or [],
             }
     except Exception:
-        pass
-    return {"pros": [], "contras": [], "productos_relacionados": []}
+        return _basic_summary(comments)
 
+def _basic_summary(comments: List[str]) -> Dict[str, List[str]]:
+    """Provide a naive pros/cons summary without external API calls."""
+    pros: List[str] = []
+    cons: List[str] = []
+    for c in comments:
+        lc = c.lower()
+        if any(p in lc for p in POSITIVE_WORDS):
+            pros.append(c)
+        if any(n in lc for n in NEGATIVE_WORDS):
+            cons.append(c)
+    # Limit number of examples to keep output concise
+    return {"pros": pros[:5], "contras": cons[:5], "productos_relacionados": []}
+
+
+def find_repeated_comments(comments: List[str], min_count: int = 2) -> List[str]:
+    """Return comments that appear at least ``min_count`` times."""
+    counter: Counter[str] = Counter(c.strip().lower() for c in comments)
+    return [c for c, cnt in counter.items() if cnt >= min_count]
 
 __all__ = [
     "fetch_reddit_posts",
     "fetch_youtube_comments",
+    "fetch_web_reviews",
     "extract_keywords",
     "summarize_comments",
+    "find_repeated_comments",
 ]
