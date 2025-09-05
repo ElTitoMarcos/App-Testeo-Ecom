@@ -49,7 +49,6 @@ DEFAULT_WEIGHTS = {
     "w5": 0.1,   # seo_bloat
     "w6": 0.2,   # ip_risk
 }
-
 SIZE_PATTERN = re.compile(
     r"\b\d+\s*(?:pack|pcs|pieces|x|oz|ml|l|g|kg|lb|cm|mm|in(?:ch(?:es)?)?|ft|pairs?)\b"
 )
@@ -66,7 +65,6 @@ def _tokenize(text: str) -> List[str]:
     tokens = re.findall(r"\b\w+\b", text.lower())
     tokens = [t for t in tokens if t not in EN_STOPWORDS and t not in ES_STOPWORDS]
     return tokens
-
 
 def analyze_titles(
     items: List[Dict[str, Any]], weights: Optional[Mapping[str, float]] = None
@@ -115,7 +113,6 @@ def analyze_titles(
             "genericity": genericity,
             "ip_risk": ip_risk,
         }
-
         claim_strength = len(set(claims))
         value_signals = len(sizes)
         targeting = 1 if compatibility else 0
@@ -130,7 +127,6 @@ def analyze_titles(
             - seo_bloat_int * w["w5"]
             - ip_risk_int * w["w6"]
         )
-
         analysis = {
             "normalized": normalized,
             "tokens": tokens,
