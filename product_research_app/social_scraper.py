@@ -59,7 +59,6 @@ PRICE_RE = re.compile(
     re.IGNORECASE,
 )
 
-
 def fetch_reddit_posts(query: str, limit: int = 10) -> Dict[str, List[str]]:
     """Return basic posts related to ``query`` from Reddit.
 
@@ -147,7 +146,6 @@ def fetch_youtube_comments(
     except Exception:
         return {"comments": [], "video_count": 0}
 
-
 def fetch_web_reviews(query: str, limit: int = 5) -> Dict[str, List[str]]:
     """Retrieve snippets from general web search results for ``query``.
 
@@ -185,7 +183,6 @@ def fetch_web_reviews(query: str, limit: int = 5) -> Dict[str, List[str]]:
     except Exception:
         return {"comments": [], "sources": []}
     return {"comments": comments, "sources": sources}
-
 
 def fetch_amazon_reviews(query: str, max_reviews: int = 20) -> Dict[str, List[str]]:
     """Retrieve review snippets from Amazon for ``query``.
@@ -226,7 +223,6 @@ def fetch_amazon_reviews(query: str, max_reviews: int = 20) -> Dict[str, List[st
     except Exception:
         return {"comments": [], "review_count": 0}
 
-
 def extract_keywords(texts: List[str], top_n: int = 10) -> List[str]:
     """Extract the most common keywords from ``texts``.
 
@@ -239,7 +235,6 @@ def extract_keywords(texts: List[str], top_n: int = 10) -> List[str]:
                 continue
             counter[word] += 1
     return [w for w, _ in counter.most_common(top_n)]
-
 
 def extract_price_comments(texts: List[str]) -> List[str]:
     """Return comments that mention prices or currency symbols."""
@@ -331,13 +326,10 @@ def _basic_summary(
         "summary": summary,
     }
 
-
 def find_repeated_comments(comments: List[str], min_count: int = 2) -> List[str]:
     """Return comments that appear at least ``min_count`` times."""
     counter: Counter[str] = Counter(c.strip().lower() for c in comments)
     return [c for c, cnt in counter.items() if cnt >= min_count]
-
-
 __all__ = [
     "fetch_reddit_posts",
     "fetch_youtube_comments",
