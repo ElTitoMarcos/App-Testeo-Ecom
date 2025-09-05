@@ -1153,5 +1153,10 @@ document.getElementById('trendsBtn').onclick = async () => {
 };
 </script>
 <script src="/static/js/filters.js"></script>
+<script>
+  window.addEventListener('beforeunload', () => {
+    navigator.sendBeacon('/shutdown');
+  });
+</script>
 </body>
 </html>
