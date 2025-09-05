@@ -95,6 +95,7 @@ function buildActiveChips(state) {
 }
 
 document.getElementById('btnFilters')?.addEventListener('click', toggleDrawer);
+document.getElementById('closeFilters')?.addEventListener('click', closeDrawer);
 document.getElementById('applyFilters')?.addEventListener('click', () => {
   filtersState.priceMin = parseFloat(document.getElementById('filterPriceMin').value);
   filtersState.priceMax = parseFloat(document.getElementById('filterPriceMax').value);

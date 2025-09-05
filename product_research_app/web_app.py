@@ -257,6 +257,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             data = {
                 "model": cfg.get("model", "gpt-4o"),
                 "weights": cfg.get("weights", {}),
+                "has_api_key": bool(cfg.get("api_key")),
                 # do not include the API key for security
             }
             self._set_json()
