@@ -867,11 +867,23 @@ class RequestHandler(BaseHTTPRequestHandler):
         if not ctype or not ctype.startswith('multipart/form-data'):
             self.send_error(400, "Expected multipart/form-data")
             return
-        # Only provide the request method to FieldStorage.  Specifying
-        # CONTENT_LENGTH or CONTENT_TYPE can interfere with streaming form
-        # parsing for large uploads.  FieldStorage will read until it
-        # encounters the multipart boundary.
-        form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={'REQUEST_METHOD': 'POST'})
+        # Only provide the request method and content type to FieldStorage.
+        # Providing CONTENT_LENGTH explicitly can interfere with streaming
+        # parsing for large uploads, but the content type is required so
+        # FieldStorage can detect the multipart boundary correctly.  Omitting
+        # CONTENT_TYPE causes FieldStorage to treat the body as a URL encoded
+        # form and attempt to read until EOF, which can lead to hanging
+        # connections.  Therefore we include CONTENT_TYPE but avoid setting
+        # CONTENT_LENGTH.  FieldStorage will read until it encounters the
+        # multipart boundary defined in the Content‑Type header.
+        form = cgi.FieldStorage(
+            fp=self.rfile,
+            headers=self.headers,
+            environ={
+                'REQUEST_METHOD': 'POST',
+                'CONTENT_TYPE': self.headers.get('Content-Type')
+            }
+        )
         # ``form" may contain multiple fields; we look up 'file' key safely
         fileitem = form['file'] if 'file' in form else None
         # ``fileitem" must not be evaluated in boolean context
