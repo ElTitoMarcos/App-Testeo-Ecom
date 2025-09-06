@@ -763,15 +763,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self.send_error(400, 'Invalid JSON')
                 return
         elif ctype.startswith('multipart/form-data'):
-            form = cgi.FieldStorage(
-                fp=self.rfile,
-                headers=self.headers,
-                environ={
-                    'REQUEST_METHOD': 'POST',
-                    'CONTENT_TYPE': self.headers.get('Content-Type'),
-                    'CONTENT_LENGTH': self.headers.get('Content-Length'),
-                },
-            )
+            form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={'REQUEST_METHOD': 'POST'})
             fileitem = form['file'] if 'file' in form else None
             if fileitem is None or not getattr(fileitem, 'filename', None):
                 self.send_error(400, 'No file provided')
@@ -865,19 +857,21 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def handle_upload(self):
         # handle multipart form data
-        ctype, pdict = cgi.parse_header(self.headers.get('Content-Type'))
-        if ctype != 'multipart/form-data':
+        # Determine the incoming content type.  cgi.parse_header() returns
+        # just the main type (e.g. 'multipart/form-data') and a dictionary of
+        # parameters (e.g. the boundary).  We accept any variation that
+        # starts with 'multipart/form-data'.  Without this prefix check the
+        # exact string comparison would reject valid requests that include
+        # boundary or charset parameters.
+        ctype, _pdict = cgi.parse_header(self.headers.get('Content-Type', ''))
+        if not ctype or not ctype.startswith('multipart/form-data'):
             self.send_error(400, "Expected multipart/form-data")
             return
-        form = cgi.FieldStorage(
-            fp=self.rfile,
-            headers=self.headers,
-            environ={
-                'REQUEST_METHOD': 'POST',
-                'CONTENT_TYPE': self.headers.get('Content-Type'),
-                'CONTENT_LENGTH': self.headers.get('Content-Length'),
-            },
-        )
+        # Only provide the request method to FieldStorage.  Specifying
+        # CONTENT_LENGTH or CONTENT_TYPE can interfere with streaming form
+        # parsing for large uploads.  FieldStorage will read until it
+        # encounters the multipart boundary.
+        form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={'REQUEST_METHOD': 'POST'})
         # ``form" may contain multiple fields; we look up 'file' key safely
         fileitem = form['file'] if 'file' in form else None
         # ``fileitem" must not be evaluated in boolean context

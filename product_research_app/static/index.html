@@ -224,7 +224,20 @@ body.dark .weight-slider {
 <script src="/static/js/columns.js"></script>
 <script type="module">
 import { fetchJson } from "/static/js/net.js";
-window.addEventListener('beforeunload', () => navigator.sendBeacon('/shutdown'));
+// Ensure the server shuts down cleanly when the tab or window is closed.
+// Using fetch with `keepalive` guarantees the request completes even during unload.
+window.addEventListener('beforeunload', () => {
+  try {
+    // Use fetch() instead of sendBeacon() because some browsers
+    // drop beacon requests when no payload is provided. The `keepalive`
+    // option allows the request to continue in the background while
+    // the page is unloading.
+    fetch('/shutdown', { method: 'POST', keepalive: true });
+  } catch (err) {
+    // As a fallback, attempt a minimal beacon with an empty payload.
+    try { navigator.sendBeacon('/shutdown', ''); } catch (e) {}
+  }
+});
 // Global arrays to hold all products and the current filtered list
 let allProducts = [];
 let products = [];
