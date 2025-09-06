@@ -24,7 +24,6 @@ body.dark button { background: linear-gradient(90deg,#3a3cad,#7a53d6); color:#ff
 body.dark #btnFilters { background:#2a2d5c; border-color:#7a53d6; color:#a9a9ff; }
 select, input[type="text"], input[type="password"] { padding:6px; border-radius:4px; border:1px solid #ccc; }
 body.dark select, body.dark input[type="text"], body.dark input[type="password"] { background:#1f2344; color:#eaeaea; border-color:#444; }
-table { width:100%; border-collapse:collapse; margin-top:10px; }
 th, td { padding:8px; border:1px solid #ccc; }
 body.dark th, body.dark td { border-color:#444; }
 tbody tr:nth-child(even) { background:#f2f6ff; }
@@ -73,16 +72,11 @@ body.dark .weight-slider {
     <button id="searchBtn">Buscar</button>
     <button id="btnFilters">Filtros</button>
     <div id="activeFilterChips"></div>
-    <div style="display:flex; gap:6px; align-items:center;">
-      <select id="groupSelect" aria-label="Seleccionar grupo"></select>
-      <button id="btnAddToGroup">Añadir</button>
-    </div>
+    <select id="groupSelect" aria-label="Seleccionar grupo"></select>
     <input type="text" id="newListName" placeholder="Nombre del grupo" style="padding:4px; min-width:120px;">
     <button id="createListBtn">Crear</button>
+    <textarea id="gptPrompt" rows="1" maxlength="2000" placeholder="Escribe consulta para GPT..." aria-label="Escribe consulta para GPT..."></textarea>
     <button id="sendPrompt">Enviar consulta a GPT</button>
-    <button id="btnColumns">Columnas</button>
-    <button id="btnDelete" disabled>Eliminar</button>
-    <button id="btnExport" disabled>Exportar</button>
     <div id="searchRowRight">
       <div id="listMeta">0 resultados • Vista: Tabla</div>
       <select id="viewGroup" aria-label="Filtrar por grupo"></select>
@@ -111,7 +105,6 @@ body.dark .weight-slider {
   </div>
 </div>
 <div id="custom" style="display:none;">
-  <textarea id="customPrompt" rows="3" placeholder="Escribe tu consulta personalizada a GPT"></textarea><br/>
   <div id="history" style="margin-top:10px;"></div>
 </div>
 <div id="trends" class="card" style="display:none;"></div>
@@ -174,6 +167,18 @@ body.dark .weight-slider {
   </thead>
   <tbody></tbody>
 </table>
+<div id="bottomBar" class="bottombar hidden">
+  <div style="display:flex; align-items:center; gap:8px;">
+    <button id="legendBtn" class="legend-btn" title="Mostrar leyenda" aria-label="Mostrar leyenda">ℹ️</button>
+    <span id="selCount"></span>
+  </div>
+  <div style="display:flex; gap:8px; align-items:center;">
+    <button id="btnDelete" disabled title="Eliminar seleccionados" aria-label="Eliminar seleccionados">Eliminar</button>
+    <button id="btnExport" disabled title="Exportar seleccionados" aria-label="Exportar seleccionados">Exportar</button>
+    <button id="btnAddToGroup" disabled title="Añadir seleccionados al grupo" aria-label="Añadir seleccionados al grupo">Añadir a grupo</button>
+    <button id="btnColumns" title="Gestionar columnas" aria-label="Gestionar columnas">Columnas</button>
+  </div>
+</div>
 <div id="legendPop" class="popover hidden">
   <div>• Fila roja: duplicado</div>
   <div>• 🔥 x1–x5: tendencia en el nombre</div>
@@ -698,21 +703,62 @@ document.getElementById('searchBtn').onclick = () => {
   });
   updateResultsBadge(visible);
 };
-document.getElementById('sendPrompt').onclick = async () => {
-  const prompt = document.getElementById('customPrompt').value.trim();
+const gptField = document.getElementById('gptPrompt');
+const sendPromptBtn = document.getElementById('sendPrompt');
+
+function autoGrow(el){
+  el.style.height = 'auto';
+  el.style.height = el.scrollHeight + 'px';
+}
+
+if(gptField){
+  const saved = localStorage.getItem('lastGptPrompt');
+  if(saved){
+    gptField.value = saved;
+    autoGrow(gptField);
+  }
+  gptField.addEventListener('input', () => {
+    autoGrow(gptField);
+    localStorage.setItem('lastGptPrompt', gptField.value);
+  });
+  gptField.addEventListener('keydown', e => {
+    if(e.key === 'Enter' && (e.ctrlKey || e.metaKey)){
+      e.preventDefault();
+      sendPromptHandler();
+    }
+  });
+}
+
+async function sendPromptHandler(){
+  const prompt = gptField.value.trim();
   if(!prompt){ toast.info('Escribe una consulta'); return; }
-  const data = await fetchJson('/custom_gpt', {method:'POST', body: JSON.stringify({prompt: prompt})});
-  const history = document.getElementById('history');
-  const details = document.createElement('details');
-  const summary = document.createElement('summary');
-  const shortPrompt = prompt.length > 40 ? prompt.substring(0,37) + '...' : prompt;
-  summary.textContent = shortPrompt;
-  const pre = document.createElement('pre');
-  pre.textContent = data.response || data.error;
-  details.appendChild(summary);
-  details.appendChild(pre);
-  history.prepend(details);
-};
+  sendPromptBtn.disabled = true;
+  try {
+    const data = await fetchJson('/custom_gpt', {method:'POST', body: JSON.stringify({prompt})});
+    const history = document.getElementById('history');
+    if(history){
+      const details = document.createElement('details');
+      const summary = document.createElement('summary');
+      const shortPrompt = prompt.length > 40 ? prompt.substring(0,37) + '...' : prompt;
+      summary.textContent = shortPrompt;
+      const pre = document.createElement('pre');
+      pre.textContent = data.response || data.error;
+      details.appendChild(summary);
+      details.appendChild(pre);
+      history.prepend(details);
+    }
+    toast.success('Consulta enviada');
+    gptField.value = '';
+    localStorage.removeItem('lastGptPrompt');
+    autoGrow(gptField);
+  } catch(err) {
+    toast.error(err.message || 'Error al enviar');
+  } finally {
+    sendPromptBtn.disabled = false;
+  }
+}
+
+sendPromptBtn.onclick = sendPromptHandler;
 document.getElementById('darkToggle').onclick = () => {
   document.body.classList.toggle('dark');
 };
