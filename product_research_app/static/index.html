@@ -221,11 +221,14 @@ body.dark .weight-slider {
   100% { transform: rotate(360deg); }
 }
 </style>
+<script src="/static/js/overlay.js"></script>
 <script src="/static/js/toast.js"></script>
 <script src="/static/js/table.js"></script>
 <script src="/static/js/columns.js"></script>
+<script src="/static/js/add-group.js"></script>
 <script type="module">
 import { fetchJson } from "/static/js/net.js";
+window.fetchJson = fetchJson;
 // Ensure the server shuts down cleanly when the tab or window is closed.
 // Using fetch with `keepalive` guarantees the request completes even during unload.
 window.addEventListener('beforeunload', () => {
@@ -802,12 +805,12 @@ document.getElementById('imgOverlay').onclick = (e) => {
 // Delete a single product by ID
 async function deleteProduct(id){
   try {
-    if (typeof currentListId !== 'undefined' && currentListId > 0) {
+    if (typeof currentGroupFilter !== 'undefined' && currentGroupFilter > 0) {
       // remove only from current list
-      const data = await fetchJson('/remove_from_list', {method:'POST', body: JSON.stringify({list_id: currentListId, ids: [id]})});
+      const data = await fetchJson('/remove_from_list', {method:'POST', body: JSON.stringify({list_id: currentGroupFilter, ids: [id]})});
       if(data.error){ toast.error('Error al eliminar del grupo: '+data.error); }
       // reload current list
-      loadList(currentListId);
+      applyGroupFilter(currentGroupFilter);
     } else {
       const data = await fetchJson('/delete', {method:'POST', body: JSON.stringify({ids: [id]})});
       if(data.error){ toast.error('Error al eliminar: '+data.error); }
@@ -822,11 +825,11 @@ document.getElementById('btnDelete').onclick = () => {
   if(!ids.length){ toast.info('Selecciona al menos un producto para eliminar'); return; }
   toast.info('¿Eliminar los productos seleccionados?', {actionText:'Eliminar', onAction: async () => {
     try{
-      if (typeof currentListId !== 'undefined' && currentListId > 0) {
-        const data = await fetchJson('/remove_from_list', {method:'POST', body: JSON.stringify({list_id: currentListId, ids: ids})});
+      if (typeof currentGroupFilter !== 'undefined' && currentGroupFilter > 0) {
+        const data = await fetchJson('/remove_from_list', {method:'POST', body: JSON.stringify({list_id: currentGroupFilter, ids: ids})});
         if(data.error){ toast.error('Error al eliminar del grupo: '+data.error); } else { toast.success('Eliminados del grupo: '+data.removed); }
         startProgress();
-        loadList(currentListId);
+        applyGroupFilter(currentGroupFilter);
       } else {
         const data = await fetchJson('/delete', {method:'POST', body: JSON.stringify({ids: ids})});
         if(data.error){ toast.error('Error al eliminar: '+data.error); } else { toast.success('Productos eliminados: '+data.deleted); }
@@ -870,14 +873,15 @@ document.getElementById('btnExport').onclick = async () => {
   } catch(err){ console.error(err); toast.error('Error al exportar'); }
 };
 
-// -------- List management --------
-let currentListId = -1; // -1 indicates all products
+// -------- Group management --------
+let currentGroupFilter = -1; // -1 indicates all products
 
 async function loadLists() {
   try {
     const select = document.getElementById('groupSelect');
     if (!select) return;
     const lists = await fetchJson('/lists');
+    window.listCache = lists;
     select.innerHTML = '';
 
     const allOpt = document.createElement('option');
@@ -892,38 +896,40 @@ async function loadLists() {
       select.appendChild(opt);
     });
 
-    select.value = currentListId.toString();
+    select.value = currentGroupFilter.toString();
     select.onchange = (e) => {
       const id = parseInt(e.target.value);
-      loadList(id);
+      applyGroupFilter(id);
     };
   } catch(err) {
     console.error(err);
   }
 }
 
+window.loadLists = loadLists;
+
 async function deleteList(id){
   try{
     const data = await fetchJson('/delete_list', {method:'POST', body: JSON.stringify({id:id})});
     loadLists();
-    if(currentListId === id){
-      currentListId = -1;
+    if(currentGroupFilter === id){
+      currentGroupFilter = -1;
       fetchProducts();
     }
   }catch(err){ console.error(err); toast.error('Error al eliminar grupo'); }
 }
 
-async function loadList(id){
+async function applyGroupFilter(id){
   if(id === -1){
     // load all products
-    currentListId = -1;
+    currentGroupFilter = -1;
     fetchProducts();
     // refresh lists to update active styling
     loadLists();
     return;
   }
   try{
-    currentListId = id;
+    currentGroupFilter = id;
     const data = await fetchJson('/list/' + id);
     allProducts = data;
     products = [...allProducts];
@@ -946,20 +952,6 @@ document.getElementById('createListBtn').onclick = async () => {
     document.getElementById('newListName').value = '';
     loadLists();
   }catch(err){ console.error(err); toast.error('Error al crear grupo'); }
-};
-
-// assign selected products to list
-document.getElementById('btnAddToGroup').onclick = async () => {
-  const listSelect = document.getElementById('groupSelect');
-  const lid = parseInt(listSelect.value);
-  if(!lid || lid < 0){ toast.info('Selecciona un grupo'); return; }
-  const ids = Array.from(selection, Number);
-  if(!ids.length){ toast.info('Selecciona productos para añadir'); return; }
-  try{
-    const data = await fetchJson('/add_to_list', {method:'POST', body: JSON.stringify({id: lid, ids: ids})});
-    toast.success('Productos añadidos al grupo');
-    loadLists();
-  }catch(err){ console.error(err); toast.error('Error al añadir al grupo'); }
 };
 
 // load lists on page load

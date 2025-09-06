@@ -51,6 +51,8 @@ if(bottomBar){
   const legendBtn = document.getElementById('legendBtn');
   const legendPop = document.getElementById('legendPop');
   if(legendBtn && legendPop){
+    const overlay = window.ensureOverlayRoot ? window.ensureOverlayRoot() : document.body;
+    if(legendPop.parentNode !== overlay){ overlay.appendChild(legendPop); }
     legendBtn.addEventListener('click', ()=>legendPop.classList.toggle('hidden'));
     document.addEventListener('click', (e)=>{
       if(!legendPop.contains(e.target) && e.target!==legendBtn) legendPop.classList.add('hidden');
