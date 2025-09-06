@@ -96,6 +96,11 @@ body.dark .weight-slider {
 <div id="weightsCard" class="card" style="display:none; max-width:420px;">
   <strong>Ponderaciones Winner Score</strong>
   <div id="weightsContainer" style="margin-top:8px; display:flex; flex-direction:column; gap:6px;"></div>
+  <div style="margin-top:8px;">
+    <label style="display:flex; align-items:center; gap:4px;">
+      <input type="checkbox" id="lockWeights"> Bloquear pesos
+    </label>
+  </div>
   <div style="margin-top:10px; display:flex; flex-wrap:wrap; gap:6px;">
     <button id="autoWeightsGpt">Ajustar pesos con IA</button>
     <button id="autoWeightsStat">Ajustar estadístico</button>
@@ -332,6 +337,26 @@ const weightFields = [
   'engagement_shareability',
   'durabilidad_recurrencia'
 ];
+const WEIGHTS_LS_KEY = 'winnerScoreWeights:v1';
+let weightStore = {};
+let persistTimer;
+let backendWeightsEnabled = true;
+
+function defaultWeights(){
+  const w = {};
+  const v = 1 / weightFields.length;
+  weightFields.forEach(k => w[k] = v);
+  return w;
+}
+
+function normalizeWeights(obj){
+  let total = 0;
+  weightFields.forEach(k => { total += parseFloat(obj[k]) || 0; });
+  if(total <= 0) return defaultWeights();
+  const out = {};
+  weightFields.forEach(k => { out[k] = ((parseFloat(obj[k]) || 0) / total); });
+  return out;
+}
 
 function renderWeights(weights){
   const container = document.getElementById('weightsContainer');
@@ -353,27 +378,80 @@ function renderWeights(weights){
     input.value = (weights[key] ?? 0).toFixed(3);
     input.dataset.key = key;
     input.className = 'weight-slider';
+    input.addEventListener('input', e => {
+      weightStore[e.target.dataset.key] = parseFloat(e.target.value) || 0;
+      scheduleWeightPersist();
+    });
     row.appendChild(label);
     row.appendChild(input);
     container.appendChild(row);
   });
 }
 
+function scheduleWeightPersist(){
+  clearTimeout(persistTimer);
+  persistTimer = setTimeout(persistWeights, 400);
+}
+
+async function persistWeights(){
+  weightStore = normalizeWeights(weightStore);
+  if(backendWeightsEnabled){
+    try{
+      await fetchJson('/setconfig',{method:'POST', body: JSON.stringify({scoring_v2_weights: weightStore})});
+    }catch(e){
+      backendWeightsEnabled = false;
+      localStorage.setItem(WEIGHTS_LS_KEY, JSON.stringify(weightStore));
+    }
+  }else{
+    localStorage.setItem(WEIGHTS_LS_KEY, JSON.stringify(weightStore));
+  }
+  renderWeights(weightStore);
+}
+
+function initWeights(cfgWeights){
+  let weights = cfgWeights;
+  if(!weights || Object.keys(weights).length === 0){
+    try{
+      const saved = localStorage.getItem(WEIGHTS_LS_KEY);
+      if(saved) weights = JSON.parse(saved);
+    }catch(e){}
+  }
+  if(!weights) weights = defaultWeights();
+  weightStore = {...weights};
+  renderWeights(weightStore);
+}
+
+async function applyWeights(newWeights, persistNow = true){
+  if(document.getElementById('lockWeights')?.checked){
+    toast.info('Pesos bloqueados');
+    return;
+  }
+  weightStore = {...newWeights};
+  renderWeights(weightStore);
+  if(persistNow){
+    clearTimeout(persistTimer);
+    await persistWeights();
+    toast.success('Pesos guardados');
+  }
+}
+
 async function loadConfig() {
+  let cfg = {};
   try {
-    const cfg = await fetchJson('/config');
-    if (cfg.model) {
-      document.getElementById('modelSelect').value = cfg.model;
-    }
-    if (cfg.has_api_key) {
-      const apiInput = document.getElementById('apiKey');
-      apiInput.style.display = 'none';
-      document.getElementById('toggleApiKey').style.display = 'inline-block';
-    }
-    renderWeights(cfg.scoring_v2_weights || {});
+    cfg = await fetchJson('/config');
   } catch (err) {
+    backendWeightsEnabled = false;
     console.error('Error loading config', err);
   }
+  if (cfg.model) {
+    document.getElementById('modelSelect').value = cfg.model;
+  }
+  if (cfg.has_api_key) {
+    const apiInput = document.getElementById('apiKey');
+    apiInput.style.display = 'none';
+    document.getElementById('toggleApiKey').style.display = 'inline-block';
+  }
+  initWeights(cfg.scoring_v2_weights);
 }
 
 // Microinteraction progress bar
@@ -623,46 +701,82 @@ document.getElementById('configBtn').onclick = () => {
   wcard.style.display = show;
 };
 
-async function saveWeightsConfig(weights){
-  await fetchJson('/setconfig',{method:'POST', body: JSON.stringify({scoring_v2_weights: weights})});
+async function saveWeights(){
+  clearTimeout(persistTimer);
+  await persistWeights();
+  toast.success('Pesos guardados');
 }
 
-async function saveWeights(){
-  const inputs = document.querySelectorAll('#weightsContainer input');
-  const weights = {};
-  let total = 0;
-  inputs.forEach(inp => {
-    const v = parseFloat(inp.value) || 0;
-    weights[inp.dataset.key] = v;
-    total += v;
-  });
-  if (total <= 0){ toast.error('Pesos inválidos'); return; }
-  Object.keys(weights).forEach(k => weights[k] = weights[k] / total);
-  await saveWeightsConfig(weights);
-  toast.success('Pesos guardados');
+const autoGptBtn = document.getElementById('autoWeightsGpt');
+const autoStatBtn = document.getElementById('autoWeightsStat');
+
+function buildWeightPayload(){
+  const sample = [];
+  let targetKey = '';
+  for(const p of products){
+    const row = {};
+    let ok = true;
+    weightFields.forEach(k => {
+      const v = p?.winner_score_v2_breakdown?.scores?.[k];
+      if(typeof v !== 'number') ok = false; else row[k] = v;
+    });
+    let tVal = null;
+    if(p.extras){
+      for(const key of ['revenue','sales','gmv','orders','units']){
+        const v = p.extras[key];
+        if(v !== undefined){
+          tVal = parseFloat(v);
+          if(!isNaN(tVal)) { targetKey = targetKey || key; }
+          break;
+        }
+      }
+    }
+    if(!ok || tVal===null || isNaN(tVal)) continue;
+    row.target = tVal;
+    sample.push(row);
+    if(sample.length >= 200) break;
+  }
+  return {
+    features: weightFields,
+    data_sample: sample,
+    target: targetKey || 'revenue',
+    constraints: { non_negative: true, normalize: 'sum1' },
+    context: { locale: 'es-ES' }
+  };
+}
+
+async function handleAutoWeights(endpoint, type){
+  const payload = buildWeightPayload();
+  if(payload.data_sample.length === 0){
+    toast.error('Datos insuficientes');
+    return;
+  }
+  const gptLabel = autoGptBtn.textContent;
+  const statLabel = autoStatBtn.textContent;
+  autoGptBtn.disabled = autoStatBtn.disabled = true;
+  autoGptBtn.classList.add('loading');
+  autoStatBtn.classList.add('loading');
+  autoGptBtn.textContent = autoStatBtn.textContent = 'Ajustando…';
+  try{
+    const res = await fetchJson(endpoint,{method:'POST', body: JSON.stringify(payload)});
+    const weights = {};
+    weightFields.forEach(f => { weights[f] = parseFloat(res.weights?.[f]) || 0; });
+    await applyWeights(weights, true);
+    toast.success(type==='gpt' ? 'Pesos ajustados con IA' : 'Pesos ajustados estadístico');
+  }catch(err){
+    // errores ya mostrados por fetchJson
+  }finally{
+    autoGptBtn.textContent = gptLabel;
+    autoStatBtn.textContent = statLabel;
+    autoGptBtn.classList.remove('loading');
+    autoStatBtn.classList.remove('loading');
+    autoGptBtn.disabled = autoStatBtn.disabled = false;
+  }
 }
 
 document.getElementById('saveWeights').onclick = saveWeights;
-document.getElementById('autoWeightsGpt').onclick = async () => {
-  const res = await fetchJson('/scoring/v2/auto-weights-gpt',{method:'POST'});
-  if(res.error) { toast.error(res.error); return; }
-  const msg = 'Pesos sugeridos por IA:\n'
-    + JSON.stringify(res.weights, null, 2) + '\n'
-    + (res.justification ? ('Justificación: '+res.justification+'\n') : '')
-    + '¿Aplicarlos?';
-  if(await confirmDialog(msg)){
-    renderWeights(res.weights);
-    await saveWeightsConfig(res.weights);
-    toast.success('Pesos guardados');
-  }
-};
-document.getElementById('autoWeightsStat').onclick = async () => {
-  const res = await fetchJson('/scoring/v2/auto-weights-stat',{method:'POST'});
-  if(res.error){ toast.error(res.error); return; }
-  renderWeights(res.weights);
-  await saveWeightsConfig(res.weights);
-  toast.success('Pesos guardados');
-};
+autoGptBtn.onclick = () => handleAutoWeights('/scoring/v2/auto-weights-gpt','gpt');
+autoStatBtn.onclick = () => handleAutoWeights('/scoring/v2/auto-weights-stat','stat');
 // Handle file upload: clicking the upload button opens file chooser
 const fileInputEl = document.getElementById('fileInput');
 document.getElementById('uploadBtn').onclick = () => {

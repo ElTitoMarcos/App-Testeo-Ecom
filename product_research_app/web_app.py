@@ -201,11 +201,17 @@ class RequestHandler(BaseHTTPRequestHandler):
     def _set_json(self, status=200):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.end_headers()
 
     def _set_html(self, status=200):
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.end_headers()
 
     def _serve_static(self, rel_path: str):
@@ -252,6 +258,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                 data = part.get_payload(decode=True)
                 return filename, data
         return None, None
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.end_headers()
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -1673,11 +1686,28 @@ class RequestHandler(BaseHTTPRequestHandler):
         return samples, metric_key
 
     def handle_scoring_v2_auto_weights_gpt(self):
-        samples, metric_key = self._collect_samples_for_weights()
-        if not samples or not metric_key:
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length).decode("utf-8") if length else ""
+        try:
+            data = json.loads(body) if body else {}
+        except Exception:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+            return
+        features = data.get("features") or WINNER_V2_FIELDS
+        samples_in = data.get("data_sample") or []
+        target = data.get("target") or ""
+        if not samples_in or not target:
             self._set_json(400)
             self.wfile.write(json.dumps({"error": "Datos insuficientes"}).encode('utf-8'))
             return
+        samples = []
+        for s in samples_in:
+            if "target" not in s:
+                continue
+            row = {k: float(s.get(k, 0.0)) for k in features}
+            row[target] = float(s.get("target", 0.0))
+            samples.append(row)
         api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
         model = config.get_model()
         if not api_key or not model:
@@ -1685,27 +1715,43 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"error": "No API key configured"}).encode('utf-8'))
             return
         try:
-            result = gpt.recommend_winner_weights(api_key, model, samples, metric_key)
+            result = gpt.recommend_winner_weights(api_key, model, samples, target)
+            weights = result.get("weights", {})
+            notes = result.get("justification", "")
         except Exception as exc:
             self._set_json(500)
             self.wfile.write(json.dumps({"error": str(exc)}).encode('utf-8'))
             return
+        resp = {
+            "weights": {k: weights.get(k, 0.0) for k in features},
+            "method": "gpt",
+            "diagnostics": {"notes": notes},
+        }
         self._set_json()
-        self.wfile.write(json.dumps(result).encode('utf-8'))
+        self.wfile.write(json.dumps(resp).encode('utf-8'))
 
     def handle_scoring_v2_auto_weights_stat(self):
-        samples, metric_key = self._collect_samples_for_weights()
-        if not samples or not metric_key or len(samples) < 2:
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length).decode("utf-8") if length else ""
+        try:
+            data = json.loads(body) if body else {}
+        except Exception:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+            return
+        features = data.get("features") or WINNER_V2_FIELDS
+        samples_in = data.get("data_sample") or []
+        target = data.get("target") or ""
+        if not samples_in or not target or len(samples_in) < 2:
             self._set_json(400)
             self.wfile.write(json.dumps({"error": "Datos insuficientes"}).encode('utf-8'))
             return
-        # compute Pearson correlation between each variable and success
-        ys = [s[metric_key] for s in samples]
+        ys = [float(s.get("target", 0.0)) for s in samples_in]
         mean_y = sum(ys) / len(ys)
         denom_y = math.sqrt(sum((y - mean_y) ** 2 for y in ys)) or 1.0
-        weights = {}
-        for field in WINNER_V2_FIELDS:
-            xs = [s[field] for s in samples]
+        weights: Dict[str, float] = {}
+        for field in features:
+            xs = [float(s.get(field, 0.0)) for s in samples_in]
             mean_x = sum(xs) / len(xs)
             denom_x = math.sqrt(sum((x - mean_x) ** 2 for x in xs)) or 1.0
             num = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
@@ -1713,8 +1759,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             weights[field] = corr
         total = sum(weights.values()) or 1.0
         weights = {k: v / total for k, v in weights.items()}
+        resp = {"weights": {k: weights.get(k, 0.0) for k in features}, "method": "stat", "diagnostics": {"n": len(samples_in)}}
         self._set_json()
-        self.wfile.write(json.dumps({"weights": weights}).encode('utf-8'))
+        self.wfile.write(json.dumps(resp).encode('utf-8'))
 
     def handle_scoring_v2_gpt_evaluate(self):
         """Endpoint that evaluates Winner Score v2 variables via GPT."""
