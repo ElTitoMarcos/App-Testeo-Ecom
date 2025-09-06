@@ -107,9 +107,14 @@ body.dark .popover {
 }
 
 #columnsPanel {
-  position: absolute;
-  left: auto;
+  position: fixed;
+  left: 0;
+  top: 0;
+  right: auto;
   bottom: auto;
+  max-height: 60vh;
+  overflow: auto;
+  z-index: 1500;
 }
 
 .selected .fires { filter: grayscale(1); opacity: .6; }
