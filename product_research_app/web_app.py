@@ -255,13 +255,19 @@ class RequestHandler(BaseHTTPRequestHandler):
                         if config.is_scoring_v2_enabled()
                         else "total_score"
                     )
-                    score_value = score.get(key)
+                    if key in score.keys():
+                        score_value = score[key]
+                    else:
+                        score_value = None
                     breakdown_data = {}
                     if config.is_scoring_v2_enabled():
                         try:
-                            breakdown_data = json.loads(
-                                score.get("winner_score_v2_breakdown") or "{}"
+                            raw_breakdown = (
+                                score["winner_score_v2_breakdown"]
+                                if "winner_score_v2_breakdown" in score.keys()
+                                else None
                             )
+                            breakdown_data = json.loads(raw_breakdown or "{}")
                         except Exception:
                             breakdown_data = {}
                 row = {
@@ -348,13 +354,19 @@ class RequestHandler(BaseHTTPRequestHandler):
                             if config.is_scoring_v2_enabled()
                             else "total_score"
                         )
-                        score_value = score.get(key)
+                        if key in score.keys():
+                            score_value = score[key]
+                        else:
+                            score_value = None
                         breakdown_data = {}
                         if config.is_scoring_v2_enabled():
                             try:
-                                breakdown_data = json.loads(
-                                    score.get("winner_score_v2_breakdown") or "{}"
+                                raw_breakdown = (
+                                    score["winner_score_v2_breakdown"]
+                                    if "winner_score_v2_breakdown" in score.keys()
+                                    else None
                                 )
+                                breakdown_data = json.loads(raw_breakdown or "{}")
                             except Exception:
                                 breakdown_data = {}
                     row = {
