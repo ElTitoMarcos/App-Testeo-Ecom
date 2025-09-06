@@ -151,6 +151,8 @@ body.dark .table tbody tr:nth-child(odd) { background: #11192B; }
   padding: 8px 12px;
   gap: 8px;
   flex-wrap: wrap;
+  width: 100%;
+  box-sizing: border-box;
 }
 body.dark #pageBar, body.dark #tableToolbar {
   background: #0F1424;

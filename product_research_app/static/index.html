@@ -89,13 +89,13 @@ body.dark #pageBar, body.dark #tableToolbar {
     </div>
   </header>
 </div>
-<div id="pageBar" role="toolbar">
+<div id="pageBar" role="toolbar" aria-label="Controles de página" tabindex="0">
   <div class="left"></div>
   <div class="right">
-    <button id="sendPrompt">Consulta a GPT</button>
+    <button id="sendPrompt" type="button" aria-haspopup="dialog" aria-controls="promptDrawer">Consulta a GPT</button>
   </div>
 </div>
-<div id="tableToolbar" role="toolbar">
+<div id="tableToolbar" role="toolbar" aria-label="Herramientas de tabla" tabindex="0">
   <div class="left"></div>
   <div class="right"></div>
 </div>
@@ -121,7 +121,7 @@ body.dark #pageBar, body.dark #tableToolbar {
   </div>
 </div>
 <!-- Drawer for custom GPT prompts -->
-<div id="promptDrawer" class="drawer right hidden">
+<div id="promptDrawer" class="drawer right hidden" role="dialog" aria-modal="true">
   <div style="display:flex; justify-content:space-between; align-items:center;">
     <h3>Consulta a GPT</h3>
     <button id="closePrompt">×</button>
@@ -701,9 +701,12 @@ document.getElementById('saveConfig').onclick = async () => {
 };
 const promptDrawer = document.getElementById('promptDrawer');
 const promptInput = document.getElementById('customPrompt');
-document.getElementById('sendPrompt').onclick = async () => {
+const sendPromptBtn = document.getElementById('sendPrompt');
+sendPromptBtn.setAttribute('aria-expanded', 'false');
+sendPromptBtn.onclick = async () => {
   if (promptDrawer.classList.contains('hidden')) {
     promptDrawer.classList.remove('hidden');
+    sendPromptBtn.setAttribute('aria-expanded', 'true');
     promptInput.focus();
     return;
   }
@@ -724,6 +727,7 @@ document.getElementById('sendPrompt').onclick = async () => {
 };
 document.getElementById('closePrompt').onclick = () => {
   promptDrawer.classList.add('hidden');
+  sendPromptBtn.setAttribute('aria-expanded', 'false');
 };
 document.getElementById('darkToggle').onclick = () => {
   document.body.classList.toggle('dark');

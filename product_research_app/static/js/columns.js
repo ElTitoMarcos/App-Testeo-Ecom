@@ -4,6 +4,10 @@
   const panel = document.getElementById('columnsPanel');
   if(!btn || !panel) return;
 
+  panel.setAttribute('role', 'dialog');
+  panel.setAttribute('aria-label', 'Columnas visibles');
+  btn.setAttribute('aria-expanded', 'false');
+
   function loadState(){
     try{ return JSON.parse(localStorage.columnsVisibility || '{}'); }catch(e){ return {}; }
   }
@@ -57,6 +61,7 @@
   btn.addEventListener('click', () => {
     if (panel.classList.contains('hidden')) {
       panel.classList.remove('hidden');
+      btn.setAttribute('aria-expanded', 'true');
       // allow measuring without flashing in place
       panel.style.visibility = 'hidden';
       panel.style.right = 'auto';
@@ -78,12 +83,14 @@
       panel.style.visibility = '';
     } else {
       panel.classList.add('hidden');
+      btn.setAttribute('aria-expanded', 'false');
     }
   });
 
   document.addEventListener('click', e => {
     if(!panel.contains(e.target) && e.target !== btn){
       panel.classList.add('hidden');
+      btn.setAttribute('aria-expanded', 'false');
     }
   });
 

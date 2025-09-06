@@ -18,6 +18,7 @@ function updateMasterState(){
     const btn = document.getElementById(id);
     if(btn) btn.disabled = disable;
   });
+  master.setAttribute('aria-checked', master.indeterminate ? 'mixed' : master.checked ? 'true' : 'false');
   if(selCountEl){ selCountEl.textContent = selection.size ? `${selection.size} seleccionados` : ''; }
   if(bottomBar){ bottomBar.style.display = selection.size ? '' : 'none'; }
 }

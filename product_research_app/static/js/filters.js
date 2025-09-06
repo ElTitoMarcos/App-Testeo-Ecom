@@ -25,6 +25,11 @@ const chipsContainer = pageBar?.querySelector('#activeFilterChips');
 const listMeta = pageBar?.querySelector('#listMeta');
 const groupSelect = pageBar?.querySelector('#groupSelect');
 
+searchInput?.setAttribute('aria-label', 'Buscar en tabla');
+searchBtn?.setAttribute('aria-label', 'Ejecutar búsqueda');
+btnFilters?.setAttribute('aria-label', 'Abrir filtros');
+chipsContainer?.setAttribute('role', 'list');
+
 function toggleDrawer() {
   document.getElementById('filtersDrawer').classList.toggle('hidden');
 }
@@ -84,9 +89,11 @@ function buildActiveChips(state) {
   chips.forEach(([key, label]) => {
     const chip = document.createElement('span');
     chip.className = 'chip';
+    chip.setAttribute('role', 'listitem');
     chip.textContent = label;
     const btn = document.createElement('button');
     btn.textContent = '×';
+    btn.setAttribute('aria-label', 'Eliminar filtro');
     btn.onclick = () => {
       if (['priceMin','priceMax','ratingMin'].includes(key)) {
         filtersState[key] = null;
