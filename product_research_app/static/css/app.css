@@ -86,6 +86,8 @@ body.dark .popover {
   position: absolute;
   left: auto;
   bottom: auto;
+  top: auto;
+  right: auto;
 }
 
 .selected .fires { filter: grayscale(1); opacity: .6; }

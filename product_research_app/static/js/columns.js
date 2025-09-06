@@ -65,6 +65,7 @@
       // allow measuring without flashing in place
       panel.style.visibility = 'hidden';
       panel.style.right = 'auto';
+      panel.style.bottom = 'auto';
 
       const btnRect = btn.getBoundingClientRect();
       const panelRect = panel.getBoundingClientRect();
@@ -76,6 +77,12 @@
       }
       if (top + panelRect.height > window.scrollY + window.innerHeight) {
         top = btnRect.top + window.scrollY - panelRect.height;
+      }
+      if (left < window.scrollX) {
+        left = window.scrollX;
+      }
+      if (top < window.scrollY) {
+        top = window.scrollY;
       }
 
       panel.style.top = `${top}px`;
