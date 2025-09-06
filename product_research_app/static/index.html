@@ -221,11 +221,14 @@ body.dark .weight-slider {
   100% { transform: rotate(360deg); }
 }
 </style>
+<script src="/static/js/overlay.js"></script>
 <script src="/static/js/toast.js"></script>
 <script src="/static/js/table.js"></script>
 <script src="/static/js/columns.js"></script>
+<script src="/static/js/add-group.js"></script>
 <script type="module">
 import { fetchJson } from "/static/js/net.js";
+window.fetchJson = fetchJson;
 // Ensure the server shuts down cleanly when the tab or window is closed.
 // Using fetch with `keepalive` guarantees the request completes even during unload.
 window.addEventListener('beforeunload', () => {
@@ -878,6 +881,7 @@ async function loadLists() {
     const select = document.getElementById('groupSelect');
     if (!select) return;
     const lists = await fetchJson('/lists');
+    window.listCache = lists;
     select.innerHTML = '';
 
     const allOpt = document.createElement('option');
@@ -901,6 +905,8 @@ async function loadLists() {
     console.error(err);
   }
 }
+
+window.loadLists = loadLists;
 
 async function deleteList(id){
   try{
@@ -946,20 +952,6 @@ document.getElementById('createListBtn').onclick = async () => {
     document.getElementById('newListName').value = '';
     loadLists();
   }catch(err){ console.error(err); toast.error('Error al crear grupo'); }
-};
-
-// assign selected products to list
-document.getElementById('btnAddToGroup').onclick = async () => {
-  const listSelect = document.getElementById('groupSelect');
-  const lid = parseInt(listSelect.value);
-  if(!lid || lid < 0){ toast.info('Selecciona un grupo'); return; }
-  const ids = Array.from(selection, Number);
-  if(!ids.length){ toast.info('Selecciona productos para añadir'); return; }
-  try{
-    const data = await fetchJson('/add_to_list', {method:'POST', body: JSON.stringify({id: lid, ids: ids})});
-    toast.success('Productos añadidos al grupo');
-    loadLists();
-  }catch(err){ console.error(err); toast.error('Error al añadir al grupo'); }
 };
 
 // load lists on page load
