@@ -14,8 +14,6 @@ body.dark header { background: linear-gradient(90deg, #2e2e78, #6547a6); }
 .container { max-width: 1200px; margin: 0 auto; padding: 10px; }
 .card { background:#fff; border-radius:8px; box-shadow:0 0 10px rgba(0,0,0,0.1); padding:15px; margin-bottom:15px; }
 body.dark .card { background:#262a51; box-shadow:0 0 10px rgba(0,0,0,0.4); }
-/* Controls */
-#controls { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
 button { padding:8px 14px; border:none; border-radius:4px; cursor:pointer; background: linear-gradient(90deg,#0062ff,#00c8ff); color:#fff; font-weight:600; box-shadow:0 3px 5px rgba(0,0,0,0.2); transition:opacity 0.2s; }
 button:hover { opacity:0.85; }
 body.dark button { background: linear-gradient(90deg,#3a3cad,#7a53d6); color:#fff; }
@@ -24,7 +22,7 @@ body.dark button { background: linear-gradient(90deg,#3a3cad,#7a53d6); color:#ff
 body.dark #btnFilters { background:#2a2d5c; border-color:#7a53d6; color:#a9a9ff; }
 select, input[type="text"], input[type="password"] { padding:6px; border-radius:4px; border:1px solid #ccc; }
 body.dark select, body.dark input[type="text"], body.dark input[type="password"] { background:#1f2344; color:#eaeaea; border-color:#444; }
-table { width:100%; border-collapse:collapse; margin-top:10px; }
+table { width:100%; border-collapse:collapse; }
 th, td { padding:8px; border:1px solid #ccc; }
 body.dark th, body.dark td { border-color:#444; }
 tbody tr:nth-child(even) { background:#f2f6ff; }
@@ -68,6 +66,27 @@ body.dark .weight-slider {
     </div>
   </header>
 </div>
+<!-- Unified control bar replacing page and table toolbars -->
+<div id="controlBar" role="toolbar" aria-label="Barra de controles">
+  <div class="left">
+    <input type="text" id="searchInput" placeholder="Buscar producto o palabra clave..." />
+    <button id="searchBtn">Buscar</button>
+    <button id="btnFilters">Filtros</button>
+    <div id="activeFilterChips"></div>
+    <div id="listMeta">0 resultados</div>
+  </div>
+  <div class="right">
+    <button id="legendBtn" class="legend-btn" aria-label="Información de columnas">ℹ️</button>
+    <span id="selCount" aria-live="polite"></span>
+    <select id="groupSelect" aria-label="Seleccionar grupo"></select>
+    <button id="btnAddToGroup" aria-label="Añadir a grupo" disabled>Añadir a grupo</button>
+    <button id="sendPrompt" type="button" aria-haspopup="dialog" aria-controls="promptDrawer">Consulta a GPT</button>
+    <button id="btnColumns">Columnas</button>
+    <button id="btnExport" disabled>Exportar</button>
+    <button id="btnDelete" disabled>Eliminar</button>
+  </div>
+</div>
+<input type="checkbox" id="selectAll" aria-label="Seleccionar todo" style="display:none;">
 <div id="config" style="display:none;">
   <label>API Key: <input type="password" id="apiKey" /></label>
   <button id="toggleApiKey" style="display:none;">Cambiar API Key</button>
@@ -89,9 +108,13 @@ body.dark .weight-slider {
     <button id="saveWeights">Guardar</button>
   </div>
 </div>
-<div id="custom">
-  <textarea id="customPrompt" rows="3" placeholder="Escribe tu consulta personalizada a GPT"></textarea><br/>
-  <button id="sendPrompt">Enviar consulta a GPT</button>
+<!-- Drawer for custom GPT prompts -->
+<div id="promptDrawer" class="drawer right hidden" role="dialog" aria-modal="true">
+  <div style="display:flex; justify-content:space-between; align-items:center;">
+    <h3>Consulta a GPT</h3>
+    <button id="closePrompt">×</button>
+  </div>
+  <textarea id="customPrompt" rows="3" placeholder="Escribe tu consulta personalizada a GPT"></textarea>
   <div id="history" style="margin-top:10px;"></div>
 </div>
 <div id="trends" class="card" style="display:none;"></div>
@@ -148,28 +171,6 @@ body.dark .weight-slider {
   </div>
 </div>
 
-<div id="bottomBar" class="bottombar">
-  <div class="controls">
-    <button id="legendBtn" class="legend-btn">ℹ️</button>
-    <input type="checkbox" id="selectAll">
-    <input type="text" id="searchInput" placeholder="Buscar producto o palabra clave..." style="flex:1; min-width:200px; padding:8px; border-radius:20px; border:1px solid #ccc; font-size:14px;" />
-    <button id="searchBtn">Buscar</button>
-    <button id="btnFilters">Filtros</button>
-    <div id="activeFilterChips" style="display:flex; flex-wrap:wrap;"></div>
-    <div id="listsContainer" style="display:flex; flex-wrap:wrap; gap:6px;"></div>
-    <input type="text" id="newListName" placeholder="Nombre del grupo" style="padding:4px; min-width:120px;" />
-    <button id="createListBtn">Crear</button>
-    <select id="groupSelect"></select>
-    <span id="selCount"></span>
-    <div id="listMeta">0 resultados</div>
-  </div>
-  <div class="actions">
-    <button id="btnAddToGroup" disabled>Añadir a grupo</button>
-    <button id="btnColumns">Columnas</button>
-    <button id="btnDelete" disabled>Eliminar</button>
-    <button id="btnExport" disabled>Exportar</button>
-  </div>
-</div>
 <table id="productTable">
   <thead class="sticky-thead">
     <tr id="headerRow"></tr>
@@ -356,6 +357,15 @@ function renderTable() {
   if (!headerRow.hasChildNodes()) {
     // Add select column header (no label)
     const thSel = document.createElement('th');
+    thSel.style.textAlign = 'center';
+    thSel.setAttribute('scope', 'col');
+    thSel.setAttribute('aria-label', 'Seleccionar todas las filas');
+    const master = document.getElementById('selectAll');
+    if (master) {
+      master.style.display = '';
+      master.title = 'Seleccionar todas las filas visibles';
+      thSel.appendChild(master);
+    }
     headerRow.appendChild(thSel);
     // Add dynamic columns
     columns.forEach(col => {
@@ -382,6 +392,7 @@ function renderTable() {
     // trending highlighting is now indicated by fire emojis instead of row outline
     // Selection checkbox
     const tdSel = document.createElement('td');
+    tdSel.style.textAlign = 'center';
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.classList.add('rowCheck');
@@ -664,24 +675,21 @@ document.getElementById('saveConfig').onclick = async () => {
     }
   }
 };
-// search feature
-document.getElementById('searchBtn').onclick = () => {
-  const term = document.getElementById('searchInput').value.trim().toLowerCase();
-  const tbody = document.querySelector('#productTable tbody');
-  Array.from(tbody.rows).forEach(row => {
-    if (!term) {
-      row.style.display = '';
-      return;
-    }
-    const cells = Array.from(row.cells).map(td => td.textContent.toLowerCase());
-    const match = cells.some(text => text.includes(term));
-    row.style.display = match ? '' : 'none';
-  });
-};
-document.getElementById('sendPrompt').onclick = async () => {
-  const prompt = document.getElementById('customPrompt').value.trim();
+const promptDrawer = document.getElementById('promptDrawer');
+const promptInput = document.getElementById('customPrompt');
+const sendPromptBtn = document.getElementById('sendPrompt');
+sendPromptBtn.setAttribute('aria-expanded', 'false');
+sendPromptBtn.onclick = async () => {
+  if (promptDrawer.classList.contains('hidden')) {
+    promptDrawer.classList.remove('hidden');
+    sendPromptBtn.setAttribute('aria-expanded', 'true');
+    promptInput.focus();
+    return;
+  }
+  const prompt = promptInput.value.trim();
   if(!prompt){ toast.info('Escribe una consulta'); return; }
-  const data = await fetchJson('/custom_gpt', {method:'POST', body: JSON.stringify({prompt: prompt})});
+  const context = 'global'; // Hook: supply selection/page context when API supports it
+  const data = await fetchJson('/custom_gpt', {method:'POST', body: JSON.stringify({prompt: prompt /*, context */})});
   const history = document.getElementById('history');
   const details = document.createElement('details');
   const summary = document.createElement('summary');
@@ -692,6 +700,10 @@ document.getElementById('sendPrompt').onclick = async () => {
   details.appendChild(summary);
   details.appendChild(pre);
   history.prepend(details);
+};
+document.getElementById('closePrompt').onclick = () => {
+  promptDrawer.classList.add('hidden');
+  sendPromptBtn.setAttribute('aria-expanded', 'false');
 };
 document.getElementById('darkToggle').onclick = () => {
   document.body.classList.toggle('dark');
