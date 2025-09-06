@@ -89,13 +89,7 @@ body.dark #pageBar, body.dark #tableToolbar {
     </div>
   </header>
 </div>
-<div id="pageBar" role="toolbar" aria-label="Controles de página" tabindex="0">
-  <div class="left"></div>
-  <div class="right">
-    <button id="sendPrompt" type="button" aria-haspopup="dialog" aria-controls="promptDrawer">Consulta a GPT</button>
-  </div>
-</div>
-<div id="tableToolbar" role="toolbar" aria-label="Herramientas de tabla" tabindex="0">
+<div id="controlBar" role="toolbar" aria-label="Barra de controles" tabindex="0">
   <div class="left"></div>
   <div class="right"></div>
 </div>
@@ -191,18 +185,16 @@ body.dark #pageBar, body.dark #tableToolbar {
     <button id="searchBtn">Buscar</button>
     <button id="btnFilters">Filtros</button>
     <div id="activeFilterChips" style="display:flex; flex-wrap:wrap;"></div>
-    <div id="listsContainer" style="display:flex; flex-wrap:wrap; gap:6px;"></div>
-    <input type="text" id="newListName" placeholder="Nombre del grupo" style="padding:4px; min-width:120px;" />
-    <button id="createListBtn">Crear</button>
     <select id="groupSelect"></select>
     <span id="selCount"></span>
     <div id="listMeta">0 resultados</div>
   </div>
   <div class="actions">
     <button id="btnAddToGroup" disabled>Añadir a grupo</button>
+    <button id="sendPrompt" type="button" aria-haspopup="dialog" aria-controls="promptDrawer">Consulta a GPT</button>
     <button id="btnColumns">Columnas</button>
-    <button id="btnDelete" disabled>Eliminar</button>
     <button id="btnExport" disabled>Exportar</button>
+    <button id="btnDelete" disabled>Eliminar</button>
   </div>
 </div>
 <table id="productTable">
@@ -1133,29 +1125,26 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     return bar;
   }
-  const pageBar = ensureBar('pageBar');
-  const tableToolbar = ensureBar('tableToolbar');
+  const controlBar = ensureBar('controlBar');
   const zones = {
-    pageLeft: pageBar.querySelector('.left'),
-    pageRight: pageBar.querySelector('.right'),
-    tableLeft: tableToolbar.querySelector('.left'),
-    tableRight: tableToolbar.querySelector('.right')
+    left: controlBar.querySelector('.left'),
+    right: controlBar.querySelector('.right')
   };
   const moves = [
-    ['searchInput', zones.pageLeft],
-    ['searchBtn', zones.pageLeft],
-    ['btnFilters', zones.pageLeft],
-    ['activeFilterChips', zones.pageLeft],
-    ['listMeta', zones.pageLeft],
-    ['newListName', zones.pageRight],
-    ['createListBtn', zones.pageRight],
-    ['groupSelect', zones.pageRight],
-    ['sendPrompt', zones.pageRight],
-    ['selectAll', zones.tableLeft],
-    ['btnColumns', zones.tableRight],
-    ['btnAddToGroup', zones.tableRight],
-    ['btnExport', zones.tableRight],
-    ['btnDelete', zones.tableRight]
+    ['searchInput', zones.left],
+    ['searchBtn', zones.left],
+    ['btnFilters', zones.left],
+    ['activeFilterChips', zones.left],
+    ['listMeta', zones.left],
+    ['legendBtn', zones.right],
+    ['selectAll', zones.right],
+    ['selCount', zones.right],
+    ['groupSelect', zones.right],
+    ['btnAddToGroup', zones.right],
+    ['sendPrompt', zones.right],
+    ['btnColumns', zones.right],
+    ['btnExport', zones.right],
+    ['btnDelete', zones.right]
   ];
   moves.forEach(([id, target]) => {
     const el = document.getElementById(id);
@@ -1163,6 +1152,8 @@ document.addEventListener('DOMContentLoaded', () => {
       target.appendChild(el);
     }
   });
+  const bottomBar = document.getElementById('bottomBar');
+  bottomBar?.remove();
 });
 </script>
 </body>

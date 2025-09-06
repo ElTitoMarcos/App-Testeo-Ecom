@@ -1,15 +1,10 @@
 # UI Migration Notes
 
-The interface now features two persistent toolbars:
-
-- **pageBar** — page-level controls
-- **tableToolbar** — table-level actions
+The interface now features a single persistent `controlBar` beneath the global app bar.
 
 ## Control mapping
-- pageBar/left: `searchInput`, `searchBtn`, `btnFilters`, `activeFilterChips`, `listMeta`
-- pageBar/right: `newListName`, `createListBtn`, `groupSelect`, `sendPrompt`
-- tableToolbar/left: `selectAll`
-- tableToolbar/right: `btnColumns`, `btnAddToGroup`, `btnExport`, `btnDelete`
+- controlBar/left: `searchInput`, `searchBtn`, `btnFilters`, `activeFilterChips`, `listMeta`
+- controlBar/right: `legendBtn`, `selectAll`, `selCount`, `groupSelect`, `btnAddToGroup`, `sendPrompt`, `btnColumns`, `btnExport`, `btnDelete`
 
 ## Shortcuts
 - `/` — focus search box

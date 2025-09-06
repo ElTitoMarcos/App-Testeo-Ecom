@@ -14,9 +14,8 @@ body.dark {
 
 :root {
   --appbar-h: 60px;
-  --pagebar-h: 52px;
-  --tabletoolbar-h: 44px;
-  --table-offset: calc(var(--appbar-h) + var(--pagebar-h) + var(--tabletoolbar-h));
+  --controlbar-h: 52px;
+  --table-offset: calc(var(--appbar-h) + var(--controlbar-h));
 }
 
 .sticky-thead {
@@ -119,18 +118,11 @@ body.dark .chip button { color: #A9B4D0; }
 
 #topBar { position: sticky; top: 0; z-index: 40; }
 
-#pageBar {
+#controlBar {
   position: sticky;
   top: var(--appbar-h);
   z-index: 30;
-  min-height: var(--pagebar-h);
-}
-
-#tableToolbar {
-  position: sticky;
-  top: calc(var(--appbar-h) + var(--pagebar-h));
-  z-index: 20;
-  min-height: var(--tabletoolbar-h);
+  min-height: var(--controlbar-h);
 }
 
 .table tr { height: 52px; }
@@ -142,7 +134,7 @@ body.dark .table tbody tr:nth-child(odd) { background: #11192B; }
 .score-amber { background: #3A3119; color: #F1B44C; }
 .score-red { background: #3A1E1E; color: #F16969; }
 
-#pageBar, #tableToolbar {
+#controlBar {
   background: #f8fbff;
   border-bottom: 1px solid #ccc;
   display: flex;
@@ -154,12 +146,12 @@ body.dark .table tbody tr:nth-child(odd) { background: #11192B; }
   width: 100%;
   box-sizing: border-box;
 }
-body.dark #pageBar, body.dark #tableToolbar {
+body.dark #controlBar {
   background: #0F1424;
   border-bottom: 1px solid #243150;
   color: #E5EAF5;
 }
-#pageBar .left, #pageBar .right, #tableToolbar .left, #tableToolbar .right {
+#controlBar .left, #controlBar .right {
   display: flex;
   align-items: center;
   gap: 8px;

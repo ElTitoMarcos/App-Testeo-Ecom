@@ -16,14 +16,14 @@ const idMap = {
   category: 'filterCategory'
 };
 
-// References to elements now housed inside the persistent page bar
-const pageBar = document.getElementById('pageBar');
-const searchInput = pageBar?.querySelector('#searchInput');
-const searchBtn = pageBar?.querySelector('#searchBtn');
-const btnFilters = pageBar?.querySelector('#btnFilters');
-const chipsContainer = pageBar?.querySelector('#activeFilterChips');
-const listMeta = pageBar?.querySelector('#listMeta');
-const groupSelect = pageBar?.querySelector('#groupSelect');
+// References to elements now housed inside the persistent control bar
+const controlBar = document.getElementById('controlBar');
+const searchInput = controlBar?.querySelector('#searchInput');
+const searchBtn = controlBar?.querySelector('#searchBtn');
+const btnFilters = controlBar?.querySelector('#btnFilters');
+const chipsContainer = controlBar?.querySelector('#activeFilterChips');
+const listMeta = controlBar?.querySelector('#listMeta');
+const groupSelect = controlBar?.querySelector('#groupSelect');
 
 searchInput?.setAttribute('aria-label', 'Buscar en tabla');
 searchBtn?.setAttribute('aria-label', 'Ejecutar búsqueda');
@@ -175,15 +175,12 @@ searchBtn?.addEventListener('click', () => {
 let tableOffset = 0;
 function updateStickyOffsets() {
   const appBar = document.getElementById('topBar');
-  const page = document.getElementById('pageBar');
-  const tableTb = document.getElementById('tableToolbar');
+  const control = document.getElementById('controlBar');
   const a = appBar?.offsetHeight || 0;
-  const p = page?.offsetHeight || 0;
-  const t = tableTb?.offsetHeight || 0;
+  const c = control?.offsetHeight || 0;
   document.documentElement.style.setProperty('--appbar-h', `${a}px`);
-  document.documentElement.style.setProperty('--pagebar-h', `${p}px`);
-  document.documentElement.style.setProperty('--tabletoolbar-h', `${t}px`);
-  tableOffset = a + p + t;
+  document.documentElement.style.setProperty('--controlbar-h', `${c}px`);
+  tableOffset = a + c;
   document.documentElement.style.setProperty('--table-offset', `${tableOffset}px`);
 }
 window.getTableOffset = () => tableOffset;

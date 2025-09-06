@@ -1,7 +1,6 @@
 const selection = new Set();
 let currentPageIds = [];
 const master = document.getElementById('selectAll');
-const bottomBar = document.getElementById('bottomBar');
 const selCountEl = document.getElementById('selCount');
 
 import('./format.js').then(m => {
@@ -20,7 +19,6 @@ function updateMasterState(){
   });
   master.setAttribute('aria-checked', master.indeterminate ? 'mixed' : master.checked ? 'true' : 'false');
   if(selCountEl){ selCountEl.textContent = selection.size ? `${selection.size} seleccionados` : ''; }
-  if(bottomBar){ bottomBar.style.display = selection.size ? '' : 'none'; }
 }
 master.addEventListener('change', ()=>{
   if(master.checked){ currentPageIds.forEach(id=>selection.add(String(id))); }
