@@ -68,6 +68,14 @@ body.dark .weight-slider {
     </div>
   </header>
 </div>
+<div id="pageBar" role="toolbar">
+  <div class="left"></div>
+  <div class="right"></div>
+</div>
+<div id="tableToolbar" role="toolbar">
+  <div class="left"></div>
+  <div class="right"></div>
+</div>
 <div id="config" style="display:none;">
   <label>API Key: <input type="password" id="apiKey" /></label>
   <button id="toggleApiKey" style="display:none;">Cambiar API Key</button>
@@ -1074,5 +1082,60 @@ window.parseDate = parseDate;
 </script>
 <div id="chartTooltip" style="position:absolute; background:#fff; border:1px solid #333; padding:4px; font-size:12px; border-radius:4px; pointer-events:none; display:none; z-index:2000;"></div>
 <script src="/static/js/filters.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  function ensureBar(id) {
+    let bar = document.getElementById(id);
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = id;
+      bar.setAttribute('role', 'toolbar');
+      bar.innerHTML = '<div class="left"></div><div class="right"></div>';
+      document.body.insertBefore(bar, document.body.firstChild);
+    }
+    if (!bar.querySelector('.left')) {
+      const left = document.createElement('div');
+      left.className = 'left';
+      bar.appendChild(left);
+    }
+    if (!bar.querySelector('.right')) {
+      const right = document.createElement('div');
+      right.className = 'right';
+      bar.appendChild(right);
+    }
+    return bar;
+  }
+  const pageBar = ensureBar('pageBar');
+  const tableToolbar = ensureBar('tableToolbar');
+  const zones = {
+    pageLeft: pageBar.querySelector('.left'),
+    pageRight: pageBar.querySelector('.right'),
+    tableLeft: tableToolbar.querySelector('.left'),
+    tableRight: tableToolbar.querySelector('.right')
+  };
+  const moves = [
+    ['searchInput', zones.pageLeft],
+    ['searchBtn', zones.pageLeft],
+    ['btnFilters', zones.pageLeft],
+    ['activeFilterChips', zones.pageLeft],
+    ['listMeta', zones.pageLeft],
+    ['newListName', zones.pageRight],
+    ['createListBtn', zones.pageRight],
+    ['groupSelect', zones.pageRight],
+    ['sendPrompt', zones.pageRight],
+    ['selectAll', zones.tableLeft],
+    ['btnColumns', zones.tableRight],
+    ['btnAddToGroup', zones.tableRight],
+    ['btnExport', zones.tableRight],
+    ['btnDelete', zones.tableRight]
+  ];
+  moves.forEach(([id, target]) => {
+    const el = document.getElementById(id);
+    if (el && target && el.parentElement !== target) {
+      target.appendChild(el);
+    }
+  });
+});
+</script>
 </body>
 </html>
