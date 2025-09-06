@@ -68,6 +68,16 @@ body.dark .weight-slider {
     </div>
   </header>
 </div>
+<div id="pageBar" role="toolbar">
+  <div class="left"></div>
+  <div class="right">
+    <button id="sendPrompt">Consulta a GPT</button>
+  </div>
+</div>
+<div id="tableToolbar" role="toolbar">
+  <div class="left"></div>
+  <div class="right"></div>
+</div>
 <div id="config" style="display:none;">
   <label>API Key: <input type="password" id="apiKey" /></label>
   <button id="toggleApiKey" style="display:none;">Cambiar API Key</button>
@@ -89,9 +99,13 @@ body.dark .weight-slider {
     <button id="saveWeights">Guardar</button>
   </div>
 </div>
-<div id="custom">
-  <textarea id="customPrompt" rows="3" placeholder="Escribe tu consulta personalizada a GPT"></textarea><br/>
-  <button id="sendPrompt">Enviar consulta a GPT</button>
+<!-- Drawer for custom GPT prompts -->
+<div id="promptDrawer" class="drawer right hidden">
+  <div style="display:flex; justify-content:space-between; align-items:center;">
+    <h3>Consulta a GPT</h3>
+    <button id="closePrompt">×</button>
+  </div>
+  <textarea id="customPrompt" rows="3" placeholder="Escribe tu consulta personalizada a GPT"></textarea>
   <div id="history" style="margin-top:10px;"></div>
 </div>
 <div id="trends" class="card" style="display:none;"></div>
@@ -664,24 +678,18 @@ document.getElementById('saveConfig').onclick = async () => {
     }
   }
 };
-// search feature
-document.getElementById('searchBtn').onclick = () => {
-  const term = document.getElementById('searchInput').value.trim().toLowerCase();
-  const tbody = document.querySelector('#productTable tbody');
-  Array.from(tbody.rows).forEach(row => {
-    if (!term) {
-      row.style.display = '';
-      return;
-    }
-    const cells = Array.from(row.cells).map(td => td.textContent.toLowerCase());
-    const match = cells.some(text => text.includes(term));
-    row.style.display = match ? '' : 'none';
-  });
-};
+const promptDrawer = document.getElementById('promptDrawer');
+const promptInput = document.getElementById('customPrompt');
 document.getElementById('sendPrompt').onclick = async () => {
-  const prompt = document.getElementById('customPrompt').value.trim();
+  if (promptDrawer.classList.contains('hidden')) {
+    promptDrawer.classList.remove('hidden');
+    promptInput.focus();
+    return;
+  }
+  const prompt = promptInput.value.trim();
   if(!prompt){ toast.info('Escribe una consulta'); return; }
-  const data = await fetchJson('/custom_gpt', {method:'POST', body: JSON.stringify({prompt: prompt})});
+  const context = 'global'; // Hook: supply selection/page context when API supports it
+  const data = await fetchJson('/custom_gpt', {method:'POST', body: JSON.stringify({prompt: prompt /*, context */})});
   const history = document.getElementById('history');
   const details = document.createElement('details');
   const summary = document.createElement('summary');
@@ -692,6 +700,9 @@ document.getElementById('sendPrompt').onclick = async () => {
   details.appendChild(summary);
   details.appendChild(pre);
   history.prepend(details);
+};
+document.getElementById('closePrompt').onclick = () => {
+  promptDrawer.classList.add('hidden');
 };
 document.getElementById('darkToggle').onclick = () => {
   document.body.classList.toggle('dark');
@@ -1074,5 +1085,60 @@ window.parseDate = parseDate;
 </script>
 <div id="chartTooltip" style="position:absolute; background:#fff; border:1px solid #333; padding:4px; font-size:12px; border-radius:4px; pointer-events:none; display:none; z-index:2000;"></div>
 <script src="/static/js/filters.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  function ensureBar(id) {
+    let bar = document.getElementById(id);
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = id;
+      bar.setAttribute('role', 'toolbar');
+      bar.innerHTML = '<div class="left"></div><div class="right"></div>';
+      document.body.insertBefore(bar, document.body.firstChild);
+    }
+    if (!bar.querySelector('.left')) {
+      const left = document.createElement('div');
+      left.className = 'left';
+      bar.appendChild(left);
+    }
+    if (!bar.querySelector('.right')) {
+      const right = document.createElement('div');
+      right.className = 'right';
+      bar.appendChild(right);
+    }
+    return bar;
+  }
+  const pageBar = ensureBar('pageBar');
+  const tableToolbar = ensureBar('tableToolbar');
+  const zones = {
+    pageLeft: pageBar.querySelector('.left'),
+    pageRight: pageBar.querySelector('.right'),
+    tableLeft: tableToolbar.querySelector('.left'),
+    tableRight: tableToolbar.querySelector('.right')
+  };
+  const moves = [
+    ['searchInput', zones.pageLeft],
+    ['searchBtn', zones.pageLeft],
+    ['btnFilters', zones.pageLeft],
+    ['activeFilterChips', zones.pageLeft],
+    ['listMeta', zones.pageLeft],
+    ['newListName', zones.pageRight],
+    ['createListBtn', zones.pageRight],
+    ['groupSelect', zones.pageRight],
+    ['sendPrompt', zones.pageRight],
+    ['selectAll', zones.tableLeft],
+    ['btnColumns', zones.tableRight],
+    ['btnAddToGroup', zones.tableRight],
+    ['btnExport', zones.tableRight],
+    ['btnDelete', zones.tableRight]
+  ];
+  moves.forEach(([id, target]) => {
+    const el = document.getElementById(id);
+    if (el && target) {
+      target.appendChild(el);
+    }
+  });
+});
+</script>
 </body>
 </html>
