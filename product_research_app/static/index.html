@@ -91,7 +91,9 @@ body.dark #pageBar, body.dark #tableToolbar {
 </div>
 <div id="pageBar" role="toolbar">
   <div class="left"></div>
-  <div class="right"></div>
+  <div class="right">
+    <button id="sendPrompt">Consulta a GPT</button>
+  </div>
 </div>
 <div id="tableToolbar" role="toolbar">
   <div class="left"></div>
@@ -118,9 +120,13 @@ body.dark #pageBar, body.dark #tableToolbar {
     <button id="saveWeights">Guardar</button>
   </div>
 </div>
-<div id="custom">
-  <textarea id="customPrompt" rows="3" placeholder="Escribe tu consulta personalizada a GPT"></textarea><br/>
-  <button id="sendPrompt">Enviar consulta a GPT</button>
+<!-- Drawer for custom GPT prompts -->
+<div id="promptDrawer" class="drawer right hidden">
+  <div style="display:flex; justify-content:space-between; align-items:center;">
+    <h3>Consulta a GPT</h3>
+    <button id="closePrompt">×</button>
+  </div>
+  <textarea id="customPrompt" rows="3" placeholder="Escribe tu consulta personalizada a GPT"></textarea>
   <div id="history" style="margin-top:10px;"></div>
 </div>
 <div id="trends" class="card" style="display:none;"></div>
@@ -693,10 +699,18 @@ document.getElementById('saveConfig').onclick = async () => {
     }
   }
 };
+const promptDrawer = document.getElementById('promptDrawer');
+const promptInput = document.getElementById('customPrompt');
 document.getElementById('sendPrompt').onclick = async () => {
-  const prompt = document.getElementById('customPrompt').value.trim();
+  if (promptDrawer.classList.contains('hidden')) {
+    promptDrawer.classList.remove('hidden');
+    promptInput.focus();
+    return;
+  }
+  const prompt = promptInput.value.trim();
   if(!prompt){ toast.info('Escribe una consulta'); return; }
-  const data = await fetchJson('/custom_gpt', {method:'POST', body: JSON.stringify({prompt: prompt})});
+  const context = 'global'; // Hook: supply selection/page context when API supports it
+  const data = await fetchJson('/custom_gpt', {method:'POST', body: JSON.stringify({prompt: prompt /*, context */})});
   const history = document.getElementById('history');
   const details = document.createElement('details');
   const summary = document.createElement('summary');
@@ -707,6 +721,9 @@ document.getElementById('sendPrompt').onclick = async () => {
   details.appendChild(summary);
   details.appendChild(pre);
   history.prepend(details);
+};
+document.getElementById('closePrompt').onclick = () => {
+  promptDrawer.classList.add('hidden');
 };
 document.getElementById('darkToggle').onclick = () => {
   document.body.classList.toggle('dark');
@@ -1138,7 +1155,7 @@ document.addEventListener('DOMContentLoaded', () => {
   ];
   moves.forEach(([id, target]) => {
     const el = document.getElementById(id);
-    if (el && target && el.parentElement !== target) {
+    if (el && target) {
       target.appendChild(el);
     }
   });
