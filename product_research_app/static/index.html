@@ -48,45 +48,6 @@ body.dark pre { background:#2e315f; }
 body.dark .weight-slider {
   accent-color:#7a53d6;
 }
-:root { --app-topbar-h: 0px; --topbars-h: 0px; }
-/* Sticky top bars */
-.app-topbar, .table-toolbar {
-  position: sticky;
-  z-index: 1000;
-  display:flex;
-  justify-content:space-between;
-  align-items:center;
-  flex-wrap:wrap;
-  gap:8px;
-  background:#f8fbff;
-  border-bottom:1px solid #ccc;
-  padding:8px 12px;
-}
-.app-topbar { top: 0; }
-.table-toolbar { top: var(--app-topbar-h); z-index: 900; }
-body.dark .app-topbar, body.dark .table-toolbar {
-  background:#0F1424;
-  border-bottom:1px solid #243150;
-  color:#E5EAF5;
-}
-.app-topbar .left, .app-topbar .right, .table-toolbar .left, .table-toolbar .right {
-  display:flex;
-  align-items:center;
-  gap:8px;
-  flex-wrap:wrap;
-}
-/* Smaller search input */
-.app-topbar #searchInput { width: 200px; max-width: 220px; }
-/* Sticky table header below the top bars */
-.sticky-thead th {
-  position: sticky;
-  top: var(--topbars-h);
-  background: #f8fbff;
-  z-index: 500;
-}
-body.dark .sticky-thead th {
-  background: #0F1424;
-}
 </style>
 </head>
 <body class="dark">
@@ -218,7 +179,7 @@ body.dark .sticky-thead th {
 </div>
 </div>
 <table id="productTable">
-<thead class="sticky-thead">
+<thead>
 <tr id="headerRow"></tr>
 </thead>
 <tbody></tbody>
@@ -1133,16 +1094,6 @@ window.parseDate = parseDate;
 <script src="/static/js/filters.js"></script>
 <script>
 document.addEventListener('DOMContentLoaded', () => {
-  function updateHeights(){
-    const appTop = document.querySelector('.app-topbar');
-    const tblBar = document.querySelector('.table-toolbar');
-    const h1 = appTop ? appTop.offsetHeight : 0;
-    const h2 = tblBar ? tblBar.offsetHeight : 0;
-    document.documentElement.style.setProperty('--app-topbar-h', h1 + 'px');
-    document.documentElement.style.setProperty('--topbars-h', (h1 + h2) + 'px');
-  }
-  updateHeights();
-  window.addEventListener('resize', updateHeights);
 
   const nameInp = document.getElementById('newListName');
   const createBtn = document.getElementById('createListBtn');

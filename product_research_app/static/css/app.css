@@ -13,19 +13,59 @@ body.dark {
 }
 
 :root {
-  --appbar-h: 60px;
-  --controlbar-h: 52px;
+  --topbar-h: 56px;
+  --toolbar-h: 44px;
 }
 
-.sticky-thead {
+/* Sticky top bars */
+.app-topbar, .table-toolbar {
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:8px;
+  padding:8px 12px;
+  background:#f8fbff;
+  border-bottom:1px solid #ccc;
+  box-shadow:0 2px 4px rgba(0,0,0,0.05);
+}
+.app-topbar {
   position: sticky;
-  top: calc(var(--appbar-h) + var(--controlbar-h));
+  top: 0;
+  z-index: 1000;
+  min-height: var(--topbar-h);
+}
+.table-toolbar {
+  position: sticky;
+  top: var(--topbar-h, 56px);
+  z-index: 999;
+  min-height: var(--toolbar-h);
+}
+body.dark .app-topbar, body.dark .table-toolbar {
+  background:#0F1424;
+  border-bottom:1px solid #243150;
+  color:#E5EAF5;
+}
+.app-topbar .left, .app-topbar .right, .table-toolbar .left, .table-toolbar .right {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  flex-wrap:wrap;
+}
+/* Smaller search input */
+.app-topbar #searchInput { width: 200px; max-width: 220px; }
+/* Sticky table header below the top bars */
+table thead th {
+  position: sticky;
+  top: calc(var(--topbar-h, 56px) + var(--toolbar-h, 44px));
   background: #f8fbff;
-  z-index: 10;
+  z-index: 998;
 }
-body.dark .sticky-thead {
-  background: #131A2E;
+body.dark table thead th {
+  background: #0F1424;
 }
+
+
 
 .drawer.right {
   position: fixed;
@@ -63,7 +103,7 @@ body.dark .legend-btn {
 .popover {
   position: fixed;
   right: 16px;
-  top: calc(var(--appbar-h) + var(--controlbar-h) + 56px);
+  top: calc(var(--topbar-h, 56px) + var(--toolbar-h, 44px) + 56px);
   background: #fff;
   border: 1px solid #ccc;
   padding: 10px 12px;
@@ -144,20 +184,7 @@ body.dark .chip button { color: #A9B4D0; }
 
 /* Control bar sticks beneath the app bar */
 #controlBar {
-  position: sticky;
-  top: var(--appbar-h);
-  z-index: 30;
-  background: #432874;
-  color: #fff;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 8px 12px;
-  gap: 8px;
-  flex-wrap: wrap;
-  width: 100%;
-  box-sizing: border-box;
-  min-height: var(--controlbar-h);
+  /* deprecated */
 }
 
 .table tr { height: 52px; }
