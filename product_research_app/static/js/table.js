@@ -57,3 +57,51 @@ if(bottomBar){
     });
   }
 }
+
+const tbody = table ? table.querySelector('tbody') : null;
+let lastClickedCheck = null;
+
+if (tbody) {
+  tbody.addEventListener('click', (e) => {
+    const checkbox = e.target.closest('input.rowCheck');
+    if (checkbox) {
+      if (e.shiftKey && lastClickedCheck) {
+        e.preventDefault();
+        const boxes = Array.from(tbody.querySelectorAll('input.rowCheck'));
+        const start = boxes.indexOf(checkbox);
+        const end = boxes.indexOf(lastClickedCheck);
+        const [min, max] = start < end ? [start, end] : [end, start];
+        const state = lastClickedCheck.checked;
+        for (let i = min; i <= max; i++) {
+          boxes[i].checked = state;
+          boxes[i].dispatchEvent(new Event('change'));
+        }
+      }
+      lastClickedCheck = checkbox;
+      return;
+    }
+
+    if (e.target.closest('button, a, input, select, textarea, label, img')) return;
+
+    const row = e.target.closest('tr');
+    if (!row) return;
+    const cb = row.querySelector('input.rowCheck');
+    if (!cb) return;
+
+    if (e.shiftKey && lastClickedCheck) {
+      const boxes = Array.from(tbody.querySelectorAll('input.rowCheck'));
+      const start = boxes.indexOf(cb);
+      const end = boxes.indexOf(lastClickedCheck);
+      const [min, max] = start < end ? [start, end] : [end, start];
+      const state = lastClickedCheck.checked;
+      for (let i = min; i <= max; i++) {
+        boxes[i].checked = state;
+        boxes[i].dispatchEvent(new Event('change'));
+      }
+    } else {
+      cb.checked = !cb.checked;
+      cb.dispatchEvent(new Event('change'));
+    }
+    lastClickedCheck = cb;
+  });
+}

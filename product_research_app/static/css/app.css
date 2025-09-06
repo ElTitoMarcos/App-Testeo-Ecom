@@ -112,6 +112,9 @@ body.dark .popover {
 
 .selected .fires { filter: grayscale(1); opacity: .6; }
 
+.table tbody tr.selected { background: #cde8ff; }
+body.dark .table tbody tr.selected { background: #243150; }
+
 .chip {
   display: inline-flex;
   align-items: center;
