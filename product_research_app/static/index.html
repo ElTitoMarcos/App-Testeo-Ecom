@@ -49,6 +49,27 @@ body.dark pre { background:#2e315f; }
 body.dark .weight-slider {
   accent-color:#7a53d6;
 }
+#pageBar, #tableToolbar {
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:8px;
+  background:#f8fbff;
+  border-bottom:1px solid #ccc;
+  padding:8px 12px;
+}
+body.dark #pageBar, body.dark #tableToolbar {
+  background:#0F1424;
+  border-bottom:1px solid #243150;
+  color:#E5EAF5;
+}
+#pageBar .left, #pageBar .right, #tableToolbar .left, #tableToolbar .right {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  flex-wrap:wrap;
+}
 </style>
 </head>
 <body class="dark">
@@ -1084,5 +1105,63 @@ window.parseDate = parseDate;
 </script>
 <div id="chartTooltip" style="position:absolute; background:#fff; border:1px solid #333; padding:4px; font-size:12px; border-radius:4px; pointer-events:none; display:none; z-index:2000;"></div>
 <script src="/static/js/filters.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  function ensureBar(id) {
+    let bar = document.getElementById(id);
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = id;
+      bar.setAttribute('role', 'toolbar');
+      bar.innerHTML = '<div class="left"></div><div class="right"></div>';
+      document.body.insertBefore(bar, document.body.firstChild);
+    }
+    if (!bar.querySelector('.left')) {
+      const left = document.createElement('div');
+      left.className = 'left';
+      bar.appendChild(left);
+    }
+    if (!bar.querySelector('.right')) {
+      const right = document.createElement('div');
+      right.className = 'right';
+      bar.appendChild(right);
+    }
+    return bar;
+  }
+  const controlBar = ensureBar('controlBar');
+  const zones = {
+    left: controlBar.querySelector('.left'),
+    right: controlBar.querySelector('.right')
+  };
+  const moves = [
+    ['searchInput', zones.left],
+    ['searchBtn', zones.left],
+    ['btnFilters', zones.left],
+    ['activeFilterChips', zones.left],
+    ['listMeta', zones.left],
+    ['legendBtn', zones.right],
+    ['selCount', zones.right],
+    ['groupSelect', zones.right],
+    ['btnAddToGroup', zones.right],
+    ['sendPrompt', zones.right],
+    ['btnColumns', zones.right],
+    ['btnExport', zones.right],
+    ['btnDelete', zones.right]
+  ];
+  moves.forEach(([id, target]) => {
+    const el = document.getElementById(id);
+    if (el && target) {
+      target.appendChild(el);
+    }
+  });
+  const bottomBar = document.getElementById('bottomBar');
+  const master = document.getElementById('selectAll');
+  if (master) {
+    master.style.display = 'none';
+    document.body.appendChild(master);
+  }
+  bottomBar?.remove();
+});
+</script>
 </body>
 </html>
