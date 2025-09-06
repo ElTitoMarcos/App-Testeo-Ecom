@@ -1,10 +1,11 @@
 <!DOCTYPE html>
+
 <html lang="es">
 <head>
-<meta charset="UTF-8">
+<meta charset="utf-8"/>
 <title>Product Research Copilot</title>
-<link rel="stylesheet" href="/static/css/app.css">
-<link rel="stylesheet" href="/static/css/toast.css">
+<link href="/static/css/app.css" rel="stylesheet"/>
+<link href="/static/css/toast.css" rel="stylesheet"/>
 <style>
 /* Basic layout */
 body { margin:0; padding:0; font-family: 'Segoe UI', Tahoma, sans-serif; color:#222; background: linear-gradient(to bottom, #f8fbff, #e9f0ff); }
@@ -68,172 +69,209 @@ body.dark #pageBar, body.dark #tableToolbar {
   gap:8px;
   flex-wrap:wrap;
 }
+
+:root { --controlbar-h: 54px; }
+/* Make unified control bar sticky and compact */
+#controlBar {
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:8px;
+  background:#f8fbff;
+  border-bottom:1px solid #ccc;
+  padding:8px 12px;
+}
+body.dark #controlBar {
+  background:#0F1424;
+  border-bottom:1px solid #243150;
+  color:#E5EAF5;
+}
+#controlBar .left, #controlBar .right {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  flex-wrap:wrap;
+}
+/* Smaller search input to avoid overlap */
+#controlBar #searchInput { width: 240px; max-width: 260px; }
+/* Sticky table header below the control bar */
+.sticky-thead th {
+  position: sticky;
+  top: var(--controlbar-h);
+  background: #f8fbff;
+  z-index: 500;
+}
+body.dark .sticky-thead th {
+  background: #0F1424;
+}
 </style>
 </head>
 <body class="dark">
 <div id="topBar">
-  <header style="padding:8px 15px; display:flex; align-items:center; justify-content:space-between;">
-    <div style="display:flex; align-items:center; gap:8px;">
-      <h1 style="margin:0; font-size:1.4rem;">Ecom Testing App</h1>
-      <p style="margin:0;font-size:12px; opacity:0.8;">By El Tito 🤙</p>
-    </div>
-    <div style="flex:1; display:flex; justify-content:flex-end; gap:8px; align-items:center;">
-      <input type="file" id="fileInput" style="display:none;" />
-      <button id="uploadBtn" title="Subir archivo">📤</button>
-      <button id="refreshBtn" title="Actualizar lista">🔄</button>
-      <button id="trendsBtn" title="Ver tendencias">📊</button>
-      <button id="darkToggle" title="Modo oscuro">🌙</button>
-      <button id="configBtn" title="Configuración avanzada">⚙️</button>
-    </div>
-  </header>
+<header style="padding:8px 15px; display:flex; align-items:center; justify-content:space-between;">
+<div style="display:flex; align-items:center; gap:8px;">
+<h1 style="margin:0; font-size:1.4rem;">Ecom Testing App</h1>
+<p style="margin:0;font-size:12px; opacity:0.8;">By El Tito 🤙</p>
+</div>
+<div style="flex:1; display:flex; justify-content:flex-end; gap:8px; align-items:center;">
+<input id="fileInput" style="display:none;" type="file"/>
+<button id="uploadBtn" title="Subir archivo">📤</button>
+<button id="refreshBtn" title="Actualizar lista">🔄</button>
+<button id="trendsBtn" title="Ver tendencias">📊</button>
+<button id="darkToggle" title="Modo oscuro">🌙</button>
+<button id="configBtn" title="Configuración avanzada">⚙️</button>
+</div>
+</header>
 </div>
 <!-- Unified control bar replacing page and table toolbars -->
-<div id="controlBar" role="toolbar" aria-label="Barra de controles">
-  <div class="left">
-    <input type="text" id="searchInput" placeholder="Buscar producto o palabra clave..." />
-    <button id="searchBtn">Buscar</button>
-    <button id="btnFilters">Filtros</button>
-    <div id="activeFilterChips"></div>
-    <div id="listMeta">0 resultados</div>
-  </div>
-  <div class="right">
-    <button id="legendBtn" class="legend-btn" aria-label="Información de columnas">ℹ️</button>
-    <span id="selCount" aria-live="polite"></span>
-    <select id="groupSelect" aria-label="Seleccionar grupo"></select>
-    <button id="btnAddToGroup" aria-label="Añadir a grupo" disabled>Añadir a grupo</button>
-    <button id="sendPrompt" type="button" aria-haspopup="dialog" aria-controls="promptDrawer">Consulta a GPT</button>
-    <button id="btnColumns">Columnas</button>
-    <button id="btnExport" disabled>Exportar</button>
-    <button id="btnDelete" disabled>Eliminar</button>
-  </div>
+<div aria-label="Barra de controles" id="controlBar" role="toolbar">
+<div class="left">
+<input id="searchInput" placeholder="Buscar producto o palabra clave..." type="text"/>
+<button id="searchBtn">Buscar</button>
+<button id="btnFilters">Filtros</button>
+<div id="activeFilterChips"></div>
+<div id="listMeta">0 resultados</div>
 </div>
-<input type="checkbox" id="selectAll" aria-label="Seleccionar todo" style="display:none;">
+<div class="right">
+<button aria-label="Información de columnas" class="legend-btn" id="legendBtn">ℹ️</button>
+<span aria-live="polite" id="selCount"></span>
+<select aria-label="Seleccionar grupo" id="groupSelect"></select>
+<button aria-label="Añadir a grupo" disabled="" id="btnAddToGroup">Añadir a grupo</button>
+<button aria-controls="promptDrawer" aria-haspopup="dialog" id="sendPrompt" type="button">Consulta a GPT</button>
+<button id="btnColumns">Columnas</button>
+<button disabled="" id="btnExport">Exportar</button>
+<button disabled="" id="btnDelete">Eliminar</button>
+</div>
+</div>
+<input aria-label="Seleccionar todo" id="selectAll" style="display:none;" type="checkbox"/>
 <div id="config" style="display:none;">
-  <label>API Key: <input type="password" id="apiKey" /></label>
-  <button id="toggleApiKey" style="display:none;">Cambiar API Key</button>
-  <label>Modelo:
+<label>API Key: <input id="apiKey" type="password"/></label>
+<button id="toggleApiKey" style="display:none;">Cambiar API Key</button>
+<label>Modelo:
     <select id="modelSelect">
-      <option value="gpt-4o">GPT-4o</option>
-      <option value="gpt-4">GPT-4</option>
-      <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
-    </select>
-  </label>
-  <button id="saveConfig">Guardar configuración</button>
+<option value="gpt-4o">GPT-4o</option>
+<option value="gpt-4">GPT-4</option>
+<option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
+</select>
+</label>
+<button id="saveConfig">Guardar configuración</button>
 </div>
-<div id="weightsCard" class="card" style="display:none; max-width:420px;">
-  <strong>Ponderaciones Winner Score</strong>
-  <div id="weightsContainer" style="margin-top:8px; display:flex; flex-direction:column; gap:6px;"></div>
-  <div style="margin-top:10px; display:flex; flex-wrap:wrap; gap:6px;">
-    <button id="autoWeightsGpt">Ajustar pesos con IA</button>
-    <button id="autoWeightsStat">Ajustar estadístico</button>
-    <button id="saveWeights">Guardar</button>
-  </div>
+<div class="card" id="weightsCard" style="display:none; max-width:420px;">
+<strong>Ponderaciones Winner Score</strong>
+<div id="weightsContainer" style="margin-top:8px; display:flex; flex-direction:column; gap:6px;"></div>
+<div style="margin-top:10px; display:flex; flex-wrap:wrap; gap:6px;">
+<button id="autoWeightsGpt">Ajustar pesos con IA</button>
+<button id="autoWeightsStat">Ajustar estadístico</button>
+<button id="saveWeights">Guardar</button>
+</div>
 </div>
 <!-- Drawer for custom GPT prompts -->
-<div id="promptDrawer" class="drawer right hidden" role="dialog" aria-modal="true">
-  <div style="display:flex; justify-content:space-between; align-items:center;">
-    <h3>Consulta a GPT</h3>
-    <button id="closePrompt">×</button>
-  </div>
-  <textarea id="customPrompt" rows="3" placeholder="Escribe tu consulta personalizada a GPT"></textarea>
-  <div id="history" style="margin-top:10px;"></div>
+<div aria-modal="true" class="drawer right hidden" id="promptDrawer" role="dialog">
+<div style="display:flex; justify-content:space-between; align-items:center;">
+<h3>Consulta a GPT</h3>
+<button id="closePrompt">×</button>
 </div>
-<div id="trends" class="card" style="display:none;"></div>
+<textarea id="customPrompt" placeholder="Escribe tu consulta personalizada a GPT" rows="3"></textarea>
+<div id="history" style="margin-top:10px;"></div>
+</div>
+<div class="card" id="trends" style="display:none;"></div>
 <!-- Chart container for trends -->
-<div id="chartContainer" class="card" style="display:none;">
-  <div id="trendControls" style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; margin-bottom:20px;">
-    <div><label>Desde: <input type="date" id="trendStart"></label></div>
-    <div><label>Hasta: <input type="date" id="trendEnd"></label></div>
-    <div><label>Métrica:
+<div class="card" id="chartContainer" style="display:none;">
+<div id="trendControls" style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; margin-bottom:20px;">
+<div><label>Desde: <input id="trendStart" type="date"/></label></div>
+<div><label>Hasta: <input id="trendEnd" type="date"/></label></div>
+<div><label>Métrica:
       <select id="metricSelect">
-        <option value="revenue">Ingresos</option>
-        <option value="units">Unidades</option>
-        <option value="avg_price">Avg. Unit Price</option>
-      </select>
-    </label></div>
-    <button id="applyTrendFilters">Aplicar</button>
-  </div>
-  <div id="kpiPanel" style="display:flex; flex-wrap:wrap; gap:20px; justify-content:space-around; margin-bottom:20px;"></div>
-  <div style="width:100%; margin-bottom:20px;">
-    <h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Comparativo por categoría</h3>
-    <canvas id="catCompareCanvas" style="width:100%; height:400px;"></canvas>
-  </div>
-  <div style="width:100%; margin-bottom:20px;">
-    <h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Resumen por categoría</h3>
-    <table id="categorySummaryTable"></table>
-  </div>
-  <div style="width:100%; margin-bottom:20px;">
-    <h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Top categorías por crecimiento en ingresos</h3>
-    <canvas id="catRevenueGrowthCanvas" style="width:100%;"></canvas>
-  </div>
-  <div style="width:100%; margin-bottom:20px;">
-    <h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Top categorías por crecimiento en unidades</h3>
-    <canvas id="catUnitGrowthCanvas" style="width:100%;"></canvas>
-  </div>
-  <div style="width:100%; margin-bottom:20px;">
-    <h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Ingresos/unidades por categoría</h3>
-    <canvas id="catRevPerUnitCanvas" style="width:100%;"></canvas>
-  </div>
-  <div style="width:100%; margin-bottom:20px;">
-    <h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Palabras clave destacadas</h3>
-    <canvas id="keywordTrendCanvas" style="width:100%;"></canvas>
-  </div>
-  <div style="width:100%; margin-bottom:20px;">
-    <h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Marcas más repetidas</h3>
-    <canvas id="brandTrendCanvas" style="width:100%;"></canvas>
-  </div>
-  <div style="width:100%; margin-bottom:20px;">
-    <h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Rating vs Ingresos</h3>
-    <canvas id="ratingRevenueCanvas" style="width:100%; height:400px;"></canvas>
-  </div>
-  <div style="width:100%;">
-    <h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Precio promedio vs Ingresos</h3>
-    <canvas id="priceRevenueCanvas" style="width:100%; height:400px;"></canvas>
-  </div>
+<option value="revenue">Ingresos</option>
+<option value="units">Unidades</option>
+<option value="avg_price">Avg. Unit Price</option>
+</select>
+</label></div>
+<button id="applyTrendFilters">Aplicar</button>
 </div>
-
+<div id="kpiPanel" style="display:flex; flex-wrap:wrap; gap:20px; justify-content:space-around; margin-bottom:20px;"></div>
+<div style="width:100%; margin-bottom:20px;">
+<h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Comparativo por categoría</h3>
+<canvas id="catCompareCanvas" style="width:100%; height:400px;"></canvas>
+</div>
+<div style="width:100%; margin-bottom:20px;">
+<h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Resumen por categoría</h3>
+<table id="categorySummaryTable"></table>
+</div>
+<div style="width:100%; margin-bottom:20px;">
+<h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Top categorías por crecimiento en ingresos</h3>
+<canvas id="catRevenueGrowthCanvas" style="width:100%;"></canvas>
+</div>
+<div style="width:100%; margin-bottom:20px;">
+<h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Top categorías por crecimiento en unidades</h3>
+<canvas id="catUnitGrowthCanvas" style="width:100%;"></canvas>
+</div>
+<div style="width:100%; margin-bottom:20px;">
+<h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Ingresos/unidades por categoría</h3>
+<canvas id="catRevPerUnitCanvas" style="width:100%;"></canvas>
+</div>
+<div style="width:100%; margin-bottom:20px;">
+<h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Palabras clave destacadas</h3>
+<canvas id="keywordTrendCanvas" style="width:100%;"></canvas>
+</div>
+<div style="width:100%; margin-bottom:20px;">
+<h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Marcas más repetidas</h3>
+<canvas id="brandTrendCanvas" style="width:100%;"></canvas>
+</div>
+<div style="width:100%; margin-bottom:20px;">
+<h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Rating vs Ingresos</h3>
+<canvas id="ratingRevenueCanvas" style="width:100%; height:400px;"></canvas>
+</div>
+<div style="width:100%;">
+<h3 style="margin-bottom:8px; font-size:18px; text-align:center;">Precio promedio vs Ingresos</h3>
+<canvas id="priceRevenueCanvas" style="width:100%; height:400px;"></canvas>
+</div>
+</div>
 <table id="productTable">
-  <thead class="sticky-thead">
-    <tr id="headerRow"></tr>
-  </thead>
-  <tbody></tbody>
+<thead class="sticky-thead">
+<tr id="headerRow"></tr>
+</thead>
+<tbody></tbody>
 </table>
-<div id="legendPop" class="popover hidden">
-  <div>• Fila roja: duplicado</div>
-  <div>• 🔥 x1–x5: tendencia en el nombre</div>
+<div class="popover hidden" id="legendPop">
+<div>• Fila roja: duplicado</div>
+<div>• 🔥 x1–x5: tendencia en el nombre</div>
 </div>
-<div id="columnsPanel" class="popover hidden"></div>
-
+<div class="popover hidden" id="columnsPanel"></div>
 <!-- Overlay for viewing images in larger size -->
 <div id="imgOverlay" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background: rgba(0,0,0,0.8); justify-content:center; align-items:center; z-index:1000;">
-  <img id="overlayImg" src="" style="max-width:90%; max-height:90%; box-shadow:0 0 10px #000; border-radius:8px;" />
+<img id="overlayImg" src="" style="max-width:90%; max-height:90%; box-shadow:0 0 10px #000; border-radius:8px;"/>
 </div>
 <!-- Progress bar for micro interactions -->
 <div id="progressBar" style="position:fixed; top:0; left:0; height:3px; background:#0077cc; width:0%; display:none; z-index:3000;"></div>
 <!-- Loading overlay shown during file uploads -->
 <div id="loadingOverlay" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.6); color:#fff; font-size:20px; align-items:center; justify-content:center; z-index:2000;">
-  <div style="text-align:center;">
-    <div class="spinner" style="margin-bottom:10px; width:40px; height:40px; border:5px solid #f3f3f3; border-top:5px solid #0062ff; border-radius:50%; animation: spin 1s linear infinite;"></div>
-    <div>Cargando archivo...</div>
-  </div>
+<div style="text-align:center;">
+<div class="spinner" style="margin-bottom:10px; width:40px; height:40px; border:5px solid #f3f3f3; border-top:5px solid #0062ff; border-radius:50%; animation: spin 1s linear infinite;"></div>
+<div>Cargando archivo...</div>
 </div>
-<div id="filtersDrawer" class="drawer right hidden">
-  <div style="display:flex; justify-content:space-between; align-items:center;">
-    <h3>Filtros</h3>
-    <button id="closeFilters">×</button>
-  </div>
-  <div style="display:flex; flex-direction:column; gap:8px;">
-    <label>Precio mín<br><input type="number" id="filterPriceMin"></label>
-    <label>Precio máx<br><input type="number" id="filterPriceMax"></label>
-    <label>Fecha desde<br><input type="date" id="filterDateMin"></label>
-    <label>Fecha hasta<br><input type="date" id="filterDateMax"></label>
-    <label>Rating mín<br><input type="number" id="filterRatingMin" step="0.1" min="0" max="5"></label>
-    <label>Categoría<br><input type="text" id="filterCategory"></label>
-  </div>
-  <div style="display:flex; gap:8px; margin-top:12px;">
-    <button id="applyFilters" style="flex:1;">Aplicar</button>
-    <button id="clearFilters" style="flex:1;">Limpiar</button>
-  </div>
+</div>
+<div class="drawer right hidden" id="filtersDrawer">
+<div style="display:flex; justify-content:space-between; align-items:center;">
+<h3>Filtros</h3>
+<button id="closeFilters">×</button>
+</div>
+<div style="display:flex; flex-direction:column; gap:8px;">
+<label>Precio mín<br/><input id="filterPriceMin" type="number"/></label>
+<label>Precio máx<br/><input id="filterPriceMax" type="number"/></label>
+<label>Fecha desde<br/><input id="filterDateMin" type="date"/></label>
+<label>Fecha hasta<br/><input id="filterDateMax" type="date"/></label>
+<label>Rating mín<br/><input id="filterRatingMin" max="5" min="0" step="0.1" type="number"/></label>
+<label>Categoría<br/><input id="filterCategory" type="text"/></label>
+</div>
+<div style="display:flex; gap:8px; margin-top:12px;">
+<button id="applyFilters" style="flex:1;">Aplicar</button>
+<button id="clearFilters" style="flex:1;">Limpiar</button>
+</div>
 </div>
 <style>
 @keyframes spin {
@@ -972,9 +1010,9 @@ document.getElementById('btnAddToGroup').onclick = async () => {
 };
 
 // load lists on page load
-window.addEventListener('DOMContentLoaded', () => {
-  loadLists();
-});
+// The groups dropdown and group creation button are now inserted programmatically
+// from within the control bar setup. See the DOMContentLoaded handler below.
+
 
 // trends button & analytics rendering
 let trendsData = null;
@@ -1131,6 +1169,12 @@ document.addEventListener('DOMContentLoaded', () => {
     return bar;
   }
   const controlBar = ensureBar('controlBar');
+  function setControlBarHeightVar(){
+    const h = controlBar.offsetHeight || 54;
+    document.documentElement.style.setProperty('--controlbar-h', h + 'px');
+  }
+  setControlBarHeightVar();
+  window.addEventListener('resize', setControlBarHeightVar);
   const zones = {
     left: controlBar.querySelector('.left'),
     right: controlBar.querySelector('.right')
@@ -1156,14 +1200,34 @@ document.addEventListener('DOMContentLoaded', () => {
       target.appendChild(el);
     }
   });
+  // Ensure group creation controls are visible and in the control bar
+  const nameInp = document.getElementById('newListName');
+  const createBtn = document.getElementById('createListBtn');
+  if (nameInp && createBtn) {
+    nameInp.style.display = '';
+    nameInp.placeholder = nameInp.placeholder || 'Nuevo grupo';
+    nameInp.style.width = nameInp.style.width || '140px';
+    zones.right.appendChild(nameInp);
+    createBtn.style.display = '';
+    zones.right.appendChild(createBtn);
+    nameInp.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') {
+        createBtn.click();
+      }
+    });
+  }
+
   const bottomBar = document.getElementById('bottomBar');
   const master = document.getElementById('selectAll');
   if (master) {
     master.style.display = 'none';
     document.body.appendChild(master);
   }
-  bottomBar?.remove();
+  
+  // Populate groups after controls are placed
+  if (typeof loadLists === 'function') { loadLists(); }
+bottomBar?.remove();
 });
 </script>
-</body>
+<div id="listsContainer" style="display:none;"></div><input id="newListName" style="display:none;" type="text"/><button id="createListBtn" style="display:none;">Crear grupo</button></body>
 </html>
