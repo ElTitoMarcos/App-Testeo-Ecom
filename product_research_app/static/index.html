@@ -648,7 +648,7 @@ document.getElementById('autoWeightsGpt').onclick = async () => {
     + JSON.stringify(res.weights, null, 2) + '\n'
     + (res.justification ? ('Justificación: '+res.justification+'\n') : '')
     + '¿Aplicarlos?';
-  if(confirm(msg)){
+  if(await confirmDialog(msg)){
     renderWeights(res.weights);
     await saveWeightsConfig(res.weights);
     toast.success('Pesos guardados');
@@ -959,6 +959,8 @@ async function deleteGroup(id, opts={}){
     if(![200,204,404].includes(res.status)) throw new Error('bad status '+res.status);
     // purge local caches
     window.listCache = (window.listCache || []).filter(g => g.id !== id);
+    if(window.groupsMap) delete window.groupsMap[id];
+    if(window.groupsList) window.groupsList = (window.groupsList || []).filter(g => g.id !== id);
     try{
       const cache = JSON.parse(localStorage.getItem('groupsCache') || '[]');
       localStorage.setItem('groupsCache', JSON.stringify(cache.filter(g => g.id !== id)));
@@ -973,7 +975,6 @@ async function deleteGroup(id, opts={}){
     document.dispatchEvent(new CustomEvent('groups-updated'));
   }catch(err){
     console.error(err);
-    toast.error('Error al eliminar grupo');
     delete deleteInFlight[id];
     throw err;
   }
