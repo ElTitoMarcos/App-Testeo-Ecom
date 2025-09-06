@@ -7,9 +7,16 @@ body {
   color: #222;
 }
 
+:root {
+  --dup-bg: #ffe5e5;
+  --dup-accent: #ff3b30;
+}
+
 body.dark {
   background: #1a1b2e;
   color: #eaeaea;
+  --dup-bg: #2A0000;
+  --dup-accent: #FF3B30;
 }
 
 table {
@@ -114,6 +121,20 @@ body.dark .popover {
 
 .table tbody tr.selected { background: #cde8ff; }
 body.dark .table tbody tr.selected { background: #243150; }
+
+.table tbody tr.is-duplicate {
+  background: var(--dup-bg);
+  border-left: 4px solid var(--dup-accent);
+}
+
+.table tbody tr.is-duplicate.selected {
+  background: var(--dup-bg);
+  border-left: 6px solid var(--dup-accent);
+}
+
+.table tbody tr.is-duplicate:hover {
+  background: var(--dup-bg);
+}
 
 .chip {
   display: inline-flex;

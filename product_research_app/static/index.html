@@ -226,6 +226,7 @@ body.dark .weight-slider {
 <script src="/static/js/table.js"></script>
 <script src="/static/js/columns.js"></script>
 <script src="/static/js/add-group.js"></script>
+<script src="/static/js/manage-groups.js"></script>
 <script type="module">
 import { fetchJson } from "/static/js/net.js";
 window.fetchJson = fetchJson;
@@ -282,6 +283,45 @@ const columns = [
 ];
 
 let trendingWords = [];
+
+function mapTrendingScore(raw){
+  const n = Number(raw);
+  if (isNaN(n)) return 0;
+  if (n <= 5) return Math.max(0, Math.round(n));
+  if (n <= 9) return 0;
+  if (n <= 19) return 1;
+  if (n <= 34) return 2;
+  if (n <= 54) return 3;
+  if (n <= 79) return 4;
+  return 5;
+}
+
+function normalizeDupKey(item){
+  const norm = (str) => (str || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+  return norm(item.name) + '|' + norm(item.image_url);
+}
+
+function preprocessProducts(list){
+  const dupMap = new Map();
+  list.forEach(item => {
+    item.trending = mapTrendingScore(item.trendingScore);
+    if (item.extras && item.extras['duplicate_of']) {
+      item.isDuplicate = true;
+      return;
+    }
+    const key = normalizeDupKey(item);
+    item._dupKey = key;
+    const arr = dupMap.get(key);
+    if (arr) arr.push(item); else dupMap.set(key, [item]);
+  });
+  dupMap.forEach(arr => { if (arr.length > 1) arr.forEach(it => it.isDuplicate = true); });
+}
 
 const weightFields = [
   'magnitud_deseo',
@@ -367,6 +407,7 @@ async function fetchProducts() {
   const data = await fetchJson('/products');
   // keep a copy of all products for filtering
   allProducts = data;
+  preprocessProducts(allProducts);
   products = [...allProducts];
   window.allProducts = allProducts;
   window.products = products;
@@ -404,11 +445,9 @@ function renderTable() {
   // Render rows
     products.forEach(item => {
     const tr = document.createElement('tr');
-    // mark duplicate rows
-    if (item.extras && item.extras['duplicate_of']) {
-      tr.style.backgroundColor = 'rgba(255, 230, 230, 0.5)';
+    if (item.isDuplicate) {
+      tr.classList.add('is-duplicate');
     }
-    // trending highlighting is now indicated by fire emojis instead of row outline
     // Selection checkbox
     const tdSel = document.createElement('td');
     const cb = document.createElement('input');
@@ -466,14 +505,17 @@ function renderTable() {
         };
         td.appendChild(img);
       } else if (key === 'name' && value) {
-        const fireText = firesFor(item.trendingScore);
+        const fireCount = item.trending || 0;
+        const fireText = firesFor(fireCount);
         const nameSpan = document.createElement('span');
         nameSpan.textContent = value + (fireText ? ' ' : '');
         td.appendChild(nameSpan);
-        if (fireText) {
+        if (fireCount > 0) {
           const fireSpan = document.createElement('span');
           fireSpan.className = 'fires';
           fireSpan.textContent = fireText;
+          fireSpan.setAttribute('aria-label', `Tendencia: x${fireCount}`);
+          fireSpan.title = `Tendencia: x${fireCount}`;
           td.appendChild(fireSpan);
         }
         // If Kalodata URL exists, add copy link button
@@ -908,14 +950,20 @@ async function loadLists() {
 
 window.loadLists = loadLists;
 
-async function deleteList(id){
+async function deleteList(id, mode='remove', target=null){
   try{
-    const data = await fetchJson('/delete_list', {method:'POST', body: JSON.stringify({id:id})});
-    loadLists();
+    const body = {id:id, mode:mode};
+    if(mode === 'move' && target !== null){ body.targetGroupId = target; }
+    const data = await fetchJson('/delete_list', {method:'POST', body: JSON.stringify(body)});
+    await loadLists();
     if(currentGroupFilter === id){
       currentGroupFilter = -1;
       fetchProducts();
+      toast.info('Grupo eliminado. Vista cambiada a "Todos"');
+    } else {
+      toast.success('Grupo eliminado');
     }
+    return data;
   }catch(err){ console.error(err); toast.error('Error al eliminar grupo'); }
 }
 
