@@ -709,48 +709,117 @@ async function saveWeights(){
 
 const autoGptBtn = document.getElementById('autoWeightsGpt');
 const autoStatBtn = document.getElementById('autoWeightsStat');
-
-function buildWeightPayload(){
-  const sample = [];
+function buildWeightPayload(list){
+  const featureKeys = Object.keys(weightStore || {});
+  const rows = [];
   let targetKey = '';
-  for(const p of products){
-    const row = {};
-    let ok = true;
-    weightFields.forEach(k => {
-      const v = p?.winner_score_v2_breakdown?.scores?.[k];
-      if(typeof v !== 'number') ok = false; else row[k] = v;
-    });
+  for(const p of list){
     let tVal = null;
     if(p.extras){
       for(const key of ['revenue','sales','gmv','orders','units']){
         const v = p.extras[key];
         if(v !== undefined){
-          tVal = parseFloat(v);
-          if(!isNaN(tVal)) { targetKey = targetKey || key; }
+          const num = parseFloat(v);
+          if(!isNaN(num)){ tVal = num; targetKey = targetKey || key; }
           break;
         }
       }
     }
-    if(!ok || tVal===null || isNaN(tVal)) continue;
-    row.target = tVal;
-    sample.push(row);
-    if(sample.length >= 200) break;
+    if(tVal === null || isNaN(tVal)) continue;
+    const row = { target: tVal };
+    featureKeys.forEach(f => {
+      const v = p?.winner_score_v2_breakdown?.scores?.[f];
+      const num = parseFloat(v);
+      row[f] = isNaN(num) ? null : num;
+    });
+    rows.push(row);
   }
+  if(rows.length === 0) return { ok:false, rowsOK:0, featuresOK:0, minRows:0, minFeaturesVivas:3 };
+  const stats = {};
+  featureKeys.forEach(f => {
+    const vals = rows.map(r => r[f]).filter(v => typeof v === 'number');
+    const missRatio = 1 - (vals.length / rows.length);
+    if(vals.length && missRatio <= 0.4){
+      vals.sort((a,b)=>a-b);
+      const mid = Math.floor(vals.length/2);
+      const med = vals.length % 2 ? vals[mid] : (vals[mid-1]+vals[mid])/2;
+      stats[f] = med;
+    }
+  });
+  const features = Object.keys(stats);
+  const rowsOK = rows.length;
+  const minFeaturesVivas = 3;
+  const minRows = Math.max(30, 5 * features.length);
+  if(rowsOK < minRows || features.length < minFeaturesVivas){
+    return { ok:false, rowsOK, featuresOK: features.length, minRows, minFeaturesVivas };
+  }
+  rows.forEach(r => {
+    features.forEach(f => { if(r[f] === null || isNaN(r[f])) r[f] = stats[f]; });
+  });
+  const sampleSize = Math.min(500, rowsOK);
+  const isDiscrete = rows.every(r => Number.isInteger(r.target));
+  const sample = isDiscrete ? stratifiedSample(rows, sampleSize) : randomSample(rows, sampleSize);
   return {
-    features: weightFields,
-    data_sample: sample,
-    target: targetKey || 'revenue',
-    constraints: { non_negative: true, normalize: 'sum1' },
-    context: { locale: 'es-ES' }
+    ok:true,
+    payload:{
+      features,
+      data_sample: sample.map(r => {
+        const obj = { target: r.target };
+        features.forEach(f => obj[f] = r[f]);
+        return obj;
+      }),
+      target: targetKey || 'revenue',
+      constraints: { non_negative: true, normalize: 'sum1' },
+      context: { locale: 'es-ES' }
+    },
+    rowsOK,
+    featuresOK: features.length,
+    minRows,
+    minFeaturesVivas
   };
 }
 
-async function handleAutoWeights(endpoint, type){
-  const payload = buildWeightPayload();
-  if(payload.data_sample.length === 0){
-    toast.error('Datos insuficientes');
-    return;
+function shuffle(arr){
+  for(let i=arr.length-1;i>0;i--){
+    const j=Math.floor(Math.random()*(i+1));
+    [arr[i],arr[j]]=[arr[j],arr[i]];
   }
+}
+
+function randomSample(arr,n){
+  const copy=[...arr];
+  shuffle(copy);
+  return copy.slice(0,n);
+}
+
+function stratifiedSample(rows,n){
+  const groups={};
+  rows.forEach(r=>{ const k=r.target; (groups[k]=groups[k]||[]).push(r); });
+  const keys=Object.keys(groups);
+  const total=rows.length;
+  const sample=[];
+  let taken=0;
+  keys.forEach((k,idx)=>{
+    const g=groups[k];
+    let want=idx===keys.length-1? n-taken : Math.round(g.length/total*n);
+    if(want>g.length) want=g.length;
+    shuffle(g);
+    sample.push(...g.slice(0,want));
+    taken+=want;
+  });
+  return sample;
+}
+
+async function handleAutoWeights(endpoint, type){
+  let res = buildWeightPayload(products);
+  if(!res.ok){
+    res = buildWeightPayload(allProducts);
+    if(!res.ok){
+      toast.error(`Datos insuficientes: necesitas ≥${res.minRows} filas con target y ≥${res.minFeaturesVivas} variables numéricas. Tienes ${res.rowsOK} filas y ${res.featuresOK} variables.`);
+      return;
+    }
+  }
+  const payload = res.payload;
   const gptLabel = autoGptBtn.textContent;
   const statLabel = autoStatBtn.textContent;
   autoGptBtn.disabled = autoStatBtn.disabled = true;
@@ -758,9 +827,9 @@ async function handleAutoWeights(endpoint, type){
   autoStatBtn.classList.add('loading');
   autoGptBtn.textContent = autoStatBtn.textContent = 'Ajustando…';
   try{
-    const res = await fetchJson(endpoint,{method:'POST', body: JSON.stringify(payload)});
-    const weights = {};
-    weightFields.forEach(f => { weights[f] = parseFloat(res.weights?.[f]) || 0; });
+    const resp = await fetchJson(endpoint,{method:'POST', body: JSON.stringify(payload)});
+    const weights = { ...weightStore };
+    payload.features.forEach(f => { weights[f] = parseFloat(resp.weights?.[f]) || 0; });
     await applyWeights(weights, true);
     toast.success(type==='gpt' ? 'Pesos ajustados con IA' : 'Pesos ajustados estadístico');
   }catch(err){
