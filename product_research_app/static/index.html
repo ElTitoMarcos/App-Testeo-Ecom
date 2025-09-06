@@ -254,6 +254,14 @@ const columns = [
   { key: 'Creator Conversion Ratio', label: 'Tasa Conversión', type: 'string' },
   { key: 'Launch Date', label: 'Fecha Lanzamiento', type: 'string' },
   { key: 'Date Range', label: 'Rango Fechas', type: 'string' },
+  { key: 'magnitud_deseo', label: 'Magnitud deseo', type: 'number' },
+  { key: 'nivel_consciencia', label: 'Nivel consciencia', type: 'number' },
+  { key: 'saturacion_mercado', label: 'Saturación mercado', type: 'number' },
+  { key: 'facilidad_anuncio', label: 'Facilidad anuncio', type: 'number' },
+  { key: 'facilidad_logistica', label: 'Facilidad logística', type: 'number' },
+  { key: 'escalabilidad', label: 'Escalabilidad', type: 'number' },
+  { key: 'engagement_shareability', label: 'Engagement/shareability', type: 'number' },
+  { key: 'durabilidad_recurrencia', label: 'Durabilidad/recurrencia', type: 'number' },
   { key: 'winner_score_v2_pct', label: 'Winner Score', type: 'number' },
 ];
 
@@ -404,7 +412,13 @@ function renderTable() {
       const key = col.key;
       td.setAttribute('data-key', key);
       let value = '';
-      if (['id','name','category','price','image_url','winner_score_v2_pct'].includes(key)) {
+      if (weightFields.includes(key)) {
+        value = item.winner_score_v2_breakdown && item.winner_score_v2_breakdown.scores ? item.winner_score_v2_breakdown.scores[key] : '';
+        if (item.winner_score_v2_breakdown && item.winner_score_v2_breakdown.justifications) {
+          const j = item.winner_score_v2_breakdown.justifications[key];
+          if (j) td.title = 'Justificación: ' + j;
+        }
+      } else if (['id','name','category','price','image_url','winner_score_v2_pct'].includes(key)) {
         value = item[key];
       } else {
         value = item.extras ? item.extras[key] : '';
@@ -512,6 +526,9 @@ function sortBy(field, type) {
     if (field === 'id' || field === 'name' || field === 'category' || field === 'price' || field === 'image_url' || field === 'winner_score_v2_pct') {
       va = a[field];
       vb = b[field];
+    } else if (weightFields.includes(field)) {
+      va = a.winner_score_v2_breakdown && a.winner_score_v2_breakdown.scores ? a.winner_score_v2_breakdown.scores[field] : undefined;
+      vb = b.winner_score_v2_breakdown && b.winner_score_v2_breakdown.scores ? b.winner_score_v2_breakdown.scores[field] : undefined;
     } else {
       va = a.extras ? a.extras[field] : undefined;
       vb = b.extras ? b.extras[field] : undefined;
