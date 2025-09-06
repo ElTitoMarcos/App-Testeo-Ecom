@@ -1,6 +1,8 @@
 const selection = new Set();
 let currentPageIds = [];
 const master = document.getElementById('selectAll');
+const bottomBar = document.getElementById('bottomBar');
+const selCountEl = document.getElementById('selCount');
 
 import('./format.js').then(m => {
   window.abbr = m.abbr;
@@ -12,11 +14,13 @@ function updateMasterState(){
   master.indeterminate = selectedOnPage>0 && selectedOnPage<currentPageIds.length;
   master.checked = selectedOnPage===currentPageIds.length && currentPageIds.length>0;
   const disable = selection.size===0;
-  document.getElementById('btnDelete').disabled = disable;
-  document.getElementById('btnExport').disabled = disable;
-  document.getElementById('btnAddToGroup').disabled = disable;
-  const selCount = document.getElementById('selCount');
-  if(selCount){ selCount.textContent = selection.size ? `${selection.size} seleccionados` : ''; }
+  ['btnDelete','btnExport','btnAddToGroup'].forEach(id=>{
+    const btn = document.getElementById(id);
+    if(btn) btn.disabled = disable;
+  });
+  master.setAttribute('aria-checked', master.indeterminate ? 'mixed' : master.checked ? 'true' : 'false');
+  if(selCountEl){ selCountEl.textContent = selection.size ? `${selection.size} seleccionados` : ''; }
+  if(bottomBar){ bottomBar.style.display = selection.size ? '' : 'none'; }
 }
 master.addEventListener('change', ()=>{
   if(master.checked){ currentPageIds.forEach(id=>selection.add(String(id))); }
@@ -35,3 +39,5 @@ if(legendBtn && legendPop){
   legendBtn.addEventListener('click', ()=>legendPop.classList.toggle('hidden'));
   document.addEventListener('click',(e)=>{ if(!legendPop.contains(e.target) && e.target!==legendBtn) legendPop.classList.add('hidden'); });
 }
+
+updateMasterState();
