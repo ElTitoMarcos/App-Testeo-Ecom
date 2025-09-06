@@ -763,7 +763,15 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self.send_error(400, 'Invalid JSON')
                 return
         elif ctype.startswith('multipart/form-data'):
-            form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={'REQUEST_METHOD': 'POST'})
+            form = cgi.FieldStorage(
+                fp=self.rfile,
+                headers=self.headers,
+                environ={
+                    'REQUEST_METHOD': 'POST',
+                    'CONTENT_TYPE': self.headers.get('Content-Type'),
+                    'CONTENT_LENGTH': self.headers.get('Content-Length'),
+                },
+            )
             fileitem = form['file'] if 'file' in form else None
             if fileitem is None or not getattr(fileitem, 'filename', None):
                 self.send_error(400, 'No file provided')
@@ -861,7 +869,15 @@ class RequestHandler(BaseHTTPRequestHandler):
         if ctype != 'multipart/form-data':
             self.send_error(400, "Expected multipart/form-data")
             return
-        form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={'REQUEST_METHOD':'POST'})
+        form = cgi.FieldStorage(
+            fp=self.rfile,
+            headers=self.headers,
+            environ={
+                'REQUEST_METHOD': 'POST',
+                'CONTENT_TYPE': self.headers.get('Content-Type'),
+                'CONTENT_LENGTH': self.headers.get('Content-Length'),
+            },
+        )
         # ``form" may contain multiple fields; we look up 'file' key safely
         fileitem = form['file'] if 'file' in form else None
         # ``fileitem" must not be evaluated in boolean context
