@@ -4,6 +4,11 @@
   const panel = document.getElementById('columnsPanel');
   if(!btn || !panel) return;
 
+  // ensure panel lives at the end of body to avoid clipping by ancestors
+  if(panel.parentNode !== document.body){
+    document.body.appendChild(panel);
+  }
+
   function loadState(){
     try{ return JSON.parse(localStorage.columnsVisibility || '{}'); }catch(e){ return {}; }
   }
@@ -57,12 +62,29 @@
   btn.addEventListener('click', () => {
     if(panel.classList.contains('hidden')){
       const rect = btn.getBoundingClientRect();
-      panel.style.top = `${rect.bottom + window.scrollY}px`;
-      panel.style.left = `${rect.left + window.scrollX}px`;
       panel.classList.remove('hidden');
+      panel.style.visibility = 'hidden';
+      // initial position anchored to button
+      let top = rect.bottom;
+      let left = rect.left;
+      // measure and clamp within viewport
+      const w = panel.offsetWidth;
+      const h = panel.offsetHeight;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      if(left + w > vw){ left = Math.max(8, vw - w - 8); }
+      if(top + h > vh){ top = Math.max(8, vh - h - 8); }
+      panel.style.left = `${left}px`;
+      panel.style.top = `${top}px`;
+      panel.style.visibility = '';
     } else {
       panel.classList.add('hidden');
     }
+  });
+
+  // close on Esc
+  document.addEventListener('keydown', e => {
+    if(e.key === 'Escape') panel.classList.add('hidden');
   });
 
   document.addEventListener('click', e => {
@@ -70,6 +92,9 @@
       panel.classList.add('hidden');
     }
   });
+
+  // prevent panel scroll from bubbling to page/table
+  panel.addEventListener('wheel', e => e.stopPropagation());
 
   window.refreshColumns = build;
   window.applyColumnVisibility = apply;
