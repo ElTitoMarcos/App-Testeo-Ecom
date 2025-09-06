@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -329,6 +329,209 @@ def evaluate_product(
     return result
 
 
+# ---------------- Winner Score v2 evaluation -----------------
+
+
+WINNER_SCORE_V2_FIELDS = [
+    "magnitud_deseo",
+    "nivel_consciencia",
+    "saturacion_mercado",
+    "facilidad_anuncio",
+    "facilidad_logistica",
+    "escalabilidad",
+    "engagement_shareability",
+    "durabilidad_recurrencia",
+]
+
+
+NUMERIC_FIELD_MAP = {
+    "orders": ("magnitud_deseo", False),
+    "sellers": ("saturacion_mercado", True),
+    "weight": ("facilidad_logistica", True),
+}
+
+
+def compute_numeric_scores(
+    metrics: Dict[str, Any],
+    ranges: Dict[str, Tuple[float, float]],
+) -> Tuple[Dict[str, int], Dict[str, str], Dict[str, str]]:
+    """Derive Winner Score sub-scores from numeric metrics.
+
+    Args:
+        metrics: Mapping of raw metric values for a product.
+        ranges: Precomputed ``min``/``max`` pairs for each metric.
+
+    Returns:
+        Three dictionaries: ``scores`` with integer values 1-5, ``justifications``
+        with short explanations, and ``sources`` marking variables as
+        "data".
+    """
+
+    out_scores: Dict[str, int] = {}
+    out_justifs: Dict[str, str] = {}
+    out_sources: Dict[str, str] = {}
+
+    for metric, (field, reverse) in NUMERIC_FIELD_MAP.items():
+        raw_val = metrics.get(metric)
+        if raw_val is None or raw_val == "":
+            continue
+        try:
+            val = float(str(raw_val).replace(",", "."))
+        except Exception:
+            continue
+        min_val, max_val = ranges.get(metric, (val, val))
+        if max_val == min_val:
+            score = 3.0
+        else:
+            ratio = (val - min_val) / (max_val - min_val)
+            if reverse:
+                ratio = 1.0 - ratio
+            score = 1.0 + ratio * 4.0
+        out_scores[field] = int(round(score))
+        out_justifs[field] = f"Basado en {metric}: {raw_val}"[:120]
+        out_sources[field] = "data"
+
+    return out_scores, out_justifs, out_sources
+
+
+def build_winner_score_prompt(product: Dict[str, Any]) -> str:
+    """Construct the Winner Score v2 prompt for a product.
+
+    The prompt asks the model to rate eight qualitative variables between 1 and
+    5 and provide a brief justification for each.  Optional metrics can be
+    supplied to give the model additional context.
+
+    Args:
+        product: Mapping with keys ``title``/``name``, ``description`` and
+            ``category`` describing the product.  An optional ``metrics``
+            mapping may contain additional numeric information (e.g. orders,
+            revenue).
+
+    Returns:
+        A Spanish prompt string to send to the model.
+    """
+
+    title = product.get("title") or product.get("name") or ""
+    description = product.get("description") or ""
+    category = product.get("category") or ""
+    metrics = product.get("metrics") or {}
+
+    metrics_lines = []
+    if isinstance(metrics, dict) and metrics:
+        metrics_lines.append("Métricas opcionales:")
+        for k, v in metrics.items():
+            metrics_lines.append(f"- {k}: {v}")
+
+    metrics_block = "\n".join(metrics_lines)
+    prompt = f"""
+Eres un analista de producto experto en e-commerce y dropshipping.
+Te doy datos de un producto (título, descripción, categoría, métricas opcionales).
+Evalúa del 1 al 5 cada una de estas variables:
+- Magnitud del deseo
+- Nivel de consciencia del mercado
+- Saturación / sofisticación de mercado
+- Facilidad de explicar en un anuncio
+- Facilidad logística
+- Escalabilidad
+- Engagement / shareability
+- Durabilidad / recurrencia
+
+Título: {title}
+Descripción: {description}
+Categoría: {category}
+{metrics_block}
+
+Devuelve solo en JSON con este formato:
+{{
+  "magnitud_deseo": X,
+  "nivel_consciencia": X,
+  "saturacion_mercado": X,
+  "facilidad_anuncio": X,
+  "facilidad_logistica": X,
+  "escalabilidad": X,
+  "engagement_shareability": X,
+  "durabilidad_recurrencia": X,
+  "justificacion": {{
+    "magnitud_deseo": "...",
+    "nivel_consciencia": "...",
+    "saturacion_mercado": "...",
+    "facilidad_anuncio": "...",
+    "facilidad_logistica": "...",
+    "escalabilidad": "...",
+    "engagement_shareability": "...",
+    "durabilidad_recurrencia": "..."
+  }}
+}}
+
+Las justificaciones deben ser frases cortas (máx 15 palabras).
+"""
+    return prompt.strip()
+
+
+def evaluate_winner_score(
+    api_key: str, model: str, product: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Call OpenAI to obtain Winner Score v2 sub-scores for a product.
+
+    The function returns a mapping with two keys:
+
+    ``scores`` – dictionary of the eight variables with integer values 1–5.
+
+    ``justifications`` – dictionary of short textual explanations for each
+    variable (maximum 15 words, trimmed if necessary).
+
+    Args:
+        api_key: OpenAI API key.
+        model: Identifier of the chat model to use.
+        product: Mapping with product information.
+
+    Raises:
+        OpenAIError: If the API call fails or returns invalid content.
+    """
+
+    prompt = build_winner_score_prompt(product)
+    messages = [
+        {
+            "role": "system",
+            "content": "Eres un asistente que responde únicamente con JSON válido.",
+        },
+        {"role": "user", "content": prompt},
+    ]
+    resp_json = call_openai_chat(api_key, model, messages)
+    try:
+        content = resp_json["choices"][0]["message"]["content"].strip()
+        raw = json.loads(content)
+    except Exception as exc:
+        raise OpenAIError(
+            f"La respuesta de la IA no está en formato JSON válido: {exc}"
+        ) from exc
+
+    scores: Dict[str, int] = {}
+    justifs_raw = raw.get("justificacion") or {}
+    justifs: Dict[str, str] = {}
+    for field in WINNER_SCORE_V2_FIELDS:
+        val = raw.get(field)
+        try:
+            ival = int(val)
+        except Exception:
+            ival = 3
+        if ival < 1:
+            ival = 1
+        if ival > 5:
+            ival = 5
+        scores[field] = ival
+
+        jtxt = ""
+        if isinstance(justifs_raw, dict):
+            jtxt = justifs_raw.get(field, "")
+        if isinstance(jtxt, str):
+            words = jtxt.strip().split()
+            if len(words) > 15:
+                jtxt = " ".join(words[:15])
+            justifs[field] = jtxt
+
+    return {"scores": scores, "justifications": justifs}
+
 def simplify_product_names(api_key: str, model: str, names: List[str], *, temperature: float = 0.2) -> Dict[str, str]:
     """
     Simplify a list of product names by removing brand names and extra descriptors.
@@ -375,4 +578,64 @@ def simplify_product_names(api_key: str, model: str, names: List[str], *, temper
     except Exception:
         # If parsing or the API call fails, return an empty mapping
         return {}
+
+
+def recommend_winner_weights(
+    api_key: str,
+    model: str,
+    samples: List[Dict[str, Any]],
+    success_key: str,
+) -> Dict[str, Any]:
+    """Ask GPT to propose Winner Score weights with justification."""
+
+    if not samples:
+        return {
+            "weights": {k: 1.0 / len(WINNER_SCORE_V2_FIELDS) for k in WINNER_SCORE_V2_FIELDS},
+            "justification": "",
+        }
+
+    sample_json = json.dumps(samples[:20], ensure_ascii=False)
+    prompt = (
+        "Eres un optimizador de modelos para e-commerce. Tengo una tabla de productos con las ocho "
+        f"variables de Winner Score v2 y un valor de éxito real '{success_key}'. "
+        "Quiero pesos normalizados (suma=1) que maximicen la correlación entre el score total y el éxito. "
+        "Devuelve JSON con { 'pesos': {variable: peso}, 'justificacion': 'texto breve' }.\nMuestra:\n"
+        + sample_json
+    )
+    messages = [
+        {"role": "system", "content": "Eres un optimizador de modelos para e-commerce."},
+        {"role": "user", "content": prompt},
+    ]
+    try:
+        resp = call_openai_chat(api_key, model, messages)
+        content = resp["choices"][0]["message"]["content"].strip()
+        parsed = json.loads(content)
+        if not isinstance(parsed, dict):
+            raise ValueError("Respuesta no es un objeto JSON")
+        weights_raw = parsed.get("pesos") or parsed.get("weights") or {}
+        justification = parsed.get("justificacion") or parsed.get("justification") or ""
+    except Exception:
+        return {
+            "weights": {k: 1.0 / len(WINNER_SCORE_V2_FIELDS) for k in WINNER_SCORE_V2_FIELDS},
+            "justification": "",
+        }
+
+    total = 0.0
+    cleaned: Dict[str, float] = {}
+    for key in WINNER_SCORE_V2_FIELDS:
+        try:
+            val = float(weights_raw.get(key, 0.0))
+            if val < 0:
+                val = 0.0
+        except Exception:
+            val = 0.0
+        cleaned[key] = val
+        total += val
+    if total <= 0:
+        return {
+            "weights": {k: 1.0 / len(WINNER_SCORE_V2_FIELDS) for k in WINNER_SCORE_V2_FIELDS},
+            "justification": justification,
+        }
+    normalized = {k: v / total for k, v in cleaned.items()}
+    return {"weights": normalized, "justification": justification}
 

@@ -29,12 +29,24 @@ from pathlib import Path
 import cgi
 import threading
 import sqlite3
+import math
 from typing import Dict, Any
 
 from . import database
 from . import config
 from . import gpt
 from . import title_analyzer
+
+WINNER_V2_FIELDS = [
+    "magnitud_deseo",
+    "nivel_consciencia",
+    "saturacion_mercado",
+    "facilidad_anuncio",
+    "facilidad_logistica",
+    "escalabilidad",
+    "engagement_shareability",
+    "durabilidad_recurrencia",
+]
 
 APP_DIR = Path(__file__).resolve().parent
 DB_PATH = APP_DIR / "data.sqlite3"
@@ -231,22 +243,41 @@ class RequestHandler(BaseHTTPRequestHandler):
             for p in database.list_products(conn):
                 scores = database.get_scores_for_product(conn, p["id"])
                 score = scores[0] if scores else None
-                # flatten some important extra fields
-                # ``extra" column is stored as JSON text. Use indexing since sqlite3.Row has no .get().
                 extra = p["extra"] if "extra" in p.keys() else {}
                 try:
                     extra_dict = json.loads(extra) if isinstance(extra, str) else (extra or {})
                 except Exception:
-                    extra_dict = {}  # fallback on parse error
+                    extra_dict = {}
+                score_value = None
+                if score:
+                    key = (
+                        "winner_score_v2_pct"
+                        if config.is_scoring_v2_enabled()
+                        else "total_score"
+                    )
+                    score_value = score.get(key)
+                    breakdown_data = {}
+                    if config.is_scoring_v2_enabled():
+                        try:
+                            breakdown_data = json.loads(
+                                score.get("winner_score_v2_breakdown") or "{}"
+                            )
+                        except Exception:
+                            breakdown_data = {}
                 row = {
                     "id": p["id"],
                     "name": p["name"],
                     "category": p["category"],
                     "price": p["price"],
                     "image_url": p["image_url"],
-                    "score": score["total_score"] if score else None,
                     "extras": extra_dict,
                 }
+                if config.is_scoring_v2_enabled():
+                    row["winner_score_v2_pct"] = score_value
+                    if score:
+                        row["winner_score_v2_breakdown"] = breakdown_data
+                else:
+                    row["score"] = score_value
                 rows.append(row)
             self._set_json()
             self.wfile.write(json.dumps(rows).encode("utf-8"))
@@ -257,6 +288,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             data = {
                 "model": cfg.get("model", "gpt-4o"),
                 "weights": cfg.get("weights", {}),
+                "scoring_v2_weights": cfg.get("scoring_v2_weights", {}),
                 "has_api_key": bool(cfg.get("api_key")),
                 # do not include the API key for security
             }
@@ -309,15 +341,37 @@ class RequestHandler(BaseHTTPRequestHandler):
                         extra_dict = json.loads(extra) if isinstance(extra, str) else (extra or {})
                     except Exception:
                         extra_dict = {}
-                    rows.append({
+                    score_value = None
+                    if score:
+                        key = (
+                            "winner_score_v2_pct"
+                            if config.is_scoring_v2_enabled()
+                            else "total_score"
+                        )
+                        score_value = score.get(key)
+                        breakdown_data = {}
+                        if config.is_scoring_v2_enabled():
+                            try:
+                                breakdown_data = json.loads(
+                                    score.get("winner_score_v2_breakdown") or "{}"
+                                )
+                            except Exception:
+                                breakdown_data = {}
+                    row = {
                         "id": p["id"],
                         "name": p["name"],
                         "category": p["category"],
                         "price": p["price"],
                         "image_url": p["image_url"],
-                        "score": score["total_score"] if score else None,
                         "extras": extra_dict,
-                    })
+                    }
+                    if config.is_scoring_v2_enabled():
+                        row["winner_score_v2_pct"] = score_value
+                        if score:
+                            row["winner_score_v2_breakdown"] = breakdown_data
+                    else:
+                        row["score"] = score_value
+                    rows.append(row)
                 self._set_json()
                 self.wfile.write(json.dumps(rows).encode("utf-8"))
                 return
@@ -518,14 +572,20 @@ class RequestHandler(BaseHTTPRequestHandler):
                 scores = database.get_scores_for_product(conn, p["id"])
                 score_val = None
                 if scores:
+                    key = (
+                        "winner_score_v2_pct"
+                        if config.is_scoring_v2_enabled()
+                        else "total_score"
+                    )
                     try:
-                        score_val = scores[0]["total_score"]
+                        score_val = scores[0][key]
                     except Exception:
                         score_val = None
                 if score_val is not None:
                     rows.append((p["id"], p["name"], score_val))
             rows.sort(key=lambda x: x[2], reverse=True)
-            top_products = [{"id": r[0], "name": r[1], "score": r[2]} for r in rows[:10]]
+            key_name = "winner_score_v2_pct" if config.is_scoring_v2_enabled() else "score"
+            top_products = [{"id": r[0], "name": r[1], key_name: r[2]} for r in rows[:10]]
 
             self._set_json()
             self.wfile.write(json.dumps({
@@ -626,6 +686,15 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/auto_weights":
             self.handle_auto_weights()
+            return
+        if path == "/scoring/v2/auto-weights-gpt":
+            self.handle_scoring_v2_auto_weights_gpt()
+            return
+        if path == "/scoring/v2/auto-weights-stat":
+            self.handle_scoring_v2_auto_weights_stat()
+            return
+        if path == "/scoring/v2/gpt-evaluate":
+            self.handle_scoring_v2_gpt_evaluate()
             return
         if path == "/delete":
             self.handle_delete()
@@ -886,6 +955,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                     name_map = {}
                     api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
                     model = config.get_model()
+                    weights_map = (
+                        config.get_scoring_v2_weights()
+                        if config.is_scoring_v2_enabled()
+                        else {}
+                    )
                     if api_key and model and names_list:
                         try:
                             name_map = gpt.simplify_product_names(api_key, model, names_list)
@@ -1021,11 +1095,32 @@ class RequestHandler(BaseHTTPRequestHandler):
                     name_map = {}
                     api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
                     model = config.get_model()
+                    weights_map = (
+                        config.get_scoring_v2_weights()
+                        if config.is_scoring_v2_enabled()
+                        else {}
+                    )
                     if api_key and model and names_list:
                         try:
                             name_map = gpt.simplify_product_names(api_key, model, names_list)
                         except Exception:
                             name_map = {}
+                    metric_vals = {k: [] for k in gpt.NUMERIC_FIELD_MAP}
+                    for item, _ in items_list:
+                        for m in gpt.NUMERIC_FIELD_MAP:
+                            v = item.get(m)
+                            if v is None or v == "":
+                                continue
+                            try:
+                                f = float(str(v).replace(',', '.'))
+                            except Exception:
+                                continue
+                            metric_vals[m].append(f)
+                    metric_ranges = {
+                        m: (min(vals), max(vals))
+                        for m, vals in metric_vals.items()
+                        if vals
+                    }
                     for item, name_key in items_list:
                         original_name = str(item.get(name_key)).strip()
                         simplified = name_map.get(original_name) or original_name
@@ -1062,6 +1157,59 @@ class RequestHandler(BaseHTTPRequestHandler):
                             source=filename,
                             extra=extra,
                         )
+                        if config.is_scoring_v2_enabled() and weights_map:
+                            scores, justifs, sources = gpt.compute_numeric_scores(extra, metric_ranges)
+                            need = [f for f in WINNER_V2_FIELDS if f not in scores]
+                            if need and api_key and model:
+                                try:
+                                    resp = gpt.evaluate_winner_score(
+                                        api_key,
+                                        model,
+                                        {
+                                            "title": simplified,
+                                            "description": description,
+                                            "category": category,
+                                            "metrics": extra,
+                                        },
+                                    )
+                                    rs = resp.get("scores", {})
+                                    js = resp.get("justifications", {})
+                                    for f in need:
+                                        scores[f] = rs.get(f, 3)
+                                        justifs[f] = js.get(f, "")
+                                        sources[f] = "gpt"
+                                except Exception:
+                                    pass
+                            if scores:
+                                weighted = sum(
+                                    scores.get(f, 3) * weights_map.get(f, 0.0)
+                                    for f in WINNER_V2_FIELDS
+                                )
+                                raw_score = weighted * 8.0
+                                pct = ((raw_score - 8.0) / 32.0) * 100.0
+                                breakdown = {
+                                    "scores": scores,
+                                    "justifications": justifs,
+                                    "weights": weights_map,
+                                    "sources": sources,
+                                }
+                                database.insert_score(
+                                    conn,
+                                    product_id=pid,
+                                    model=model or "",
+                                    total_score=0,
+                                    momentum=0,
+                                    saturation=0,
+                                    differentiation=0,
+                                    social_proof=0,
+                                    margin=0,
+                                    logistics=0,
+                                    summary="",
+                                    explanations={},
+                                    winner_score_v2_raw=raw_score,
+                                    winner_score_v2_pct=pct,
+                                    winner_score_v2_breakdown=breakdown,
+                                )
                         inserted += 1
                         inserted_ids.append(pid)
                 except Exception as exc:
@@ -1180,16 +1328,75 @@ class RequestHandler(BaseHTTPRequestHandler):
         api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
         model = config.get_model()
         evaluated = 0
+        if config.is_scoring_v2_enabled():
+            weights_map = config.get_scoring_v2_weights()
+            for p in database.list_products(conn):
+                if database.get_scores_for_product(conn, p['id']):
+                    continue
+                if not (api_key and model):
+                    continue
+                try:
+                    try:
+                        extra = json.loads(p.get("extra") or "{}")
+                    except Exception:
+                        extra = {}
+                    resp = gpt.evaluate_winner_score(
+                        api_key,
+                        model,
+                        {
+                            "title": p.get("name"),
+                            "description": p.get("description"),
+                            "category": p.get("category"),
+                            "metrics": extra,
+                        },
+                    )
+                    scores = resp.get("scores", {})
+                    justifs = resp.get("justifications", {})
+                    weighted = sum(
+                        scores.get(f, 3) * weights_map.get(f, 0.0)
+                        for f in WINNER_V2_FIELDS
+                    )
+                    raw_score = weighted * 8.0
+                    pct = ((raw_score - 8.0) / 32.0) * 100.0
+                    breakdown = {
+                        "scores": scores,
+                        "justifications": justifs,
+                        "weights": weights_map,
+                    }
+                    database.insert_score(
+                        conn,
+                        product_id=p['id'],
+                        model=model,
+                        total_score=0,
+                        momentum=0,
+                        saturation=0,
+                        differentiation=0,
+                        social_proof=0,
+                        margin=0,
+                        logistics=0,
+                        summary="",
+                        explanations={},
+                        winner_score_v2_raw=raw_score,
+                        winner_score_v2_pct=pct,
+                        winner_score_v2_breakdown=breakdown,
+                    )
+                    evaluated += 1
+                except Exception:
+                    continue
+            self._set_json()
+            self.wfile.write(json.dumps({"evaluated": evaluated}).encode('utf-8'))
+            return
+        # Fallback to legacy evaluation if v2 is disabled
+        evaluated = 0
+        weights_map = config.get_weights()
+        sum_weights = sum(weights_map.values()) or 1.0
         for p in database.list_products(conn):
-            # Skip if already evaluated
             if database.get_scores_for_product(conn, p['id']):
                 continue
             metrics = None
-            # Try GPT evaluation first if API key and model exist
             if api_key:
                 try:
                     result = gpt.evaluate_product(api_key, model, dict(p))
-                    # Build metrics from GPT response
                     metrics = {
                         'momentum': float(result.get('momentum_score', 5.0)),
                         'saturation': float(result.get('saturation_score', 5.0)),
@@ -1210,7 +1417,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                 except Exception:
                     metrics = None
             if metrics is None:
-                # offline heuristic evaluation
                 offline = offline_evaluate(dict(p))
                 metrics = {
                     'momentum': offline['momentum'],
@@ -1222,9 +1428,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                 }
                 summary = offline['summary']
                 explanations = offline['explanations']
-            # compute weighted total score
-            weights_map = config.get_weights()
-            sum_weights = sum(weights_map.values()) or 1.0
             weighted_total = (
                 metrics['momentum'] * weights_map.get('momentum', 1.0)
                 + metrics['saturation'] * weights_map.get('saturation', 1.0)
@@ -1233,7 +1436,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                 + metrics['margin'] * weights_map.get('margin', 1.0)
                 + metrics['logistics'] * weights_map.get('logistics', 1.0)
             ) / sum_weights
-            # Convert weighted_total (approx 1-9) to integer 0-100
             try:
                 score_int = int(round(((weighted_total - 1.0) / 8.0) * 100))
                 if score_int < 0:
@@ -1283,6 +1485,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                 except Exception:
                     continue
             cfg['weights'] = weights
+        if 'scoring_v2_weights' in data and isinstance(data['scoring_v2_weights'], dict):
+            weights_v2 = cfg.get('scoring_v2_weights', {})
+            for k, v in data['scoring_v2_weights'].items():
+                try:
+                    weights_v2[k] = float(v)
+                except Exception:
+                    continue
+            cfg['scoring_v2_weights'] = weights_v2
         config.save_config(cfg)
         self._set_json()
         self.wfile.write(json.dumps({"status": "ok"}).encode('utf-8'))
@@ -1384,6 +1594,152 @@ class RequestHandler(BaseHTTPRequestHandler):
                 weights[k] *= factor
         self._set_json()
         self.wfile.write(json.dumps(weights).encode('utf-8'))
+
+    def _collect_samples_for_weights(self):
+        """Gather products with Winner Score v2 breakdown and success metric."""
+        conn = ensure_db()
+        rows = database.list_products(conn)
+        samples = []
+        metric_key = None
+        for p in rows:
+            try:
+                extra = json.loads(p["extra"] or "{}")
+            except Exception:
+                extra = {}
+            success = None
+            if metric_key and metric_key in extra:
+                try:
+                    success = float(extra[metric_key])
+                except Exception:
+                    success = None
+            if success is None:
+                for key in ("orders", "revenue", "gmv", "sales", "units"):
+                    if key in extra:
+                        try:
+                            success = float(extra[key])
+                            metric_key = metric_key or key
+                            break
+                        except Exception:
+                            continue
+            if success is None:
+                continue
+            scores_rows = database.get_scores_for_product(conn, p["id"])
+            if not scores_rows:
+                continue
+            srow = scores_rows[0]
+            try:
+                breakdown = json.loads(srow["winner_score_v2_breakdown"] or "{}")
+                scores = breakdown.get("scores") or {}
+            except Exception:
+                continue
+            if not scores or any(k not in scores for k in WINNER_V2_FIELDS):
+                continue
+            sample = {k: float(scores[k]) for k in WINNER_V2_FIELDS}
+            sample[metric_key] = success
+            samples.append(sample)
+            if len(samples) >= 50:
+                break
+        return samples, metric_key
+
+    def handle_scoring_v2_auto_weights_gpt(self):
+        samples, metric_key = self._collect_samples_for_weights()
+        if not samples or not metric_key:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "Datos insuficientes"}).encode('utf-8'))
+            return
+        api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
+        model = config.get_model()
+        if not api_key or not model:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "No API key configured"}).encode('utf-8'))
+            return
+        try:
+            result = gpt.recommend_winner_weights(api_key, model, samples, metric_key)
+        except Exception as exc:
+            self._set_json(500)
+            self.wfile.write(json.dumps({"error": str(exc)}).encode('utf-8'))
+            return
+        self._set_json()
+        self.wfile.write(json.dumps(result).encode('utf-8'))
+
+    def handle_scoring_v2_auto_weights_stat(self):
+        samples, metric_key = self._collect_samples_for_weights()
+        if not samples or not metric_key or len(samples) < 2:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "Datos insuficientes"}).encode('utf-8'))
+            return
+        # compute Pearson correlation between each variable and success
+        ys = [s[metric_key] for s in samples]
+        mean_y = sum(ys) / len(ys)
+        denom_y = math.sqrt(sum((y - mean_y) ** 2 for y in ys)) or 1.0
+        weights = {}
+        for field in WINNER_V2_FIELDS:
+            xs = [s[field] for s in samples]
+            mean_x = sum(xs) / len(xs)
+            denom_x = math.sqrt(sum((x - mean_x) ** 2 for x in xs)) or 1.0
+            num = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+            corr = abs(num / (denom_x * denom_y)) if denom_x and denom_y else 0.0
+            weights[field] = corr
+        total = sum(weights.values()) or 1.0
+        weights = {k: v / total for k, v in weights.items()}
+        self._set_json()
+        self.wfile.write(json.dumps({"weights": weights}).encode('utf-8'))
+
+    def handle_scoring_v2_gpt_evaluate(self):
+        """Endpoint that evaluates Winner Score v2 variables via GPT."""
+
+        if not config.is_scoring_v2_enabled():
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "scoring v2 disabled"}).encode("utf-8"))
+            return
+
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length).decode("utf-8") if length else ""
+        try:
+            data = json.loads(body) if body else {}
+        except Exception:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode("utf-8"))
+            return
+
+        title = data.get("title") or data.get("name") or ""
+        description = data.get("description") or ""
+        category = data.get("category") or ""
+        metrics = data.get("metrics") or {}
+
+        api_key = config.get_api_key() or os.environ.get("OPENAI_API_KEY")
+        model = config.get_model()
+        scores, justifs, sources = gpt.compute_numeric_scores(metrics, {})
+        need = [f for f in WINNER_V2_FIELDS if f not in scores]
+        if need:
+            if not api_key or not model:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"error": "No API key configured"}).encode("utf-8"))
+                return
+            try:
+                resp = gpt.evaluate_winner_score(
+                    api_key,
+                    model,
+                    {
+                        "title": title,
+                        "description": description,
+                        "category": category,
+                        "metrics": metrics,
+                    },
+                )
+            except Exception as exc:
+                self._set_json(500)
+                self.wfile.write(json.dumps({"error": str(exc)}).encode("utf-8"))
+                return
+            rs = resp.get("scores", {})
+            js = resp.get("justifications", {})
+            for f in need:
+                scores[f] = rs.get(f, 3)
+                justifs[f] = js.get(f, "")
+                sources[f] = "gpt"
+        out = {**scores, "justificacion": justifs, "source": sources}
+        self._set_json()
+        self.wfile.write(json.dumps(out).encode("utf-8"))
 
     def handle_create_list(self):
         """Create a new user defined list (group) of products."""
