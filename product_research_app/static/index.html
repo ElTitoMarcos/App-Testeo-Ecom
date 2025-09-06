@@ -98,7 +98,7 @@ body.dark .weight-slider {
   <strong>Ponderaciones Winner Score</strong>
   <div id="weightsContainer" style="margin-top:8px; display:flex; flex-direction:column; gap:6px;"></div>
   <div style="margin-top:10px; display:flex; flex-wrap:wrap; gap:6px;">
-    <button id="autoWeightsGpt">Ajustar por IA</button>
+    <button id="autoWeightsGpt">Ajustar pesos con IA</button>
     <button id="autoWeightsStat">Ajustar estadístico</button>
     <button id="saveWeights">Guardar</button>
   </div>
@@ -567,14 +567,24 @@ async function saveWeights(){
 
 document.getElementById('saveWeights').onclick = saveWeights;
 document.getElementById('autoWeightsGpt').onclick = async () => {
-  const w = await fetchJson('/auto_weights_v2_gpt',{method:'POST'});
-  renderWeights(w);
-  await saveWeightsConfig(w);
+  const res = await fetchJson('/scoring/v2/auto-weights-gpt',{method:'POST'});
+  if(res.error) { toast.error(res.error); return; }
+  const msg = 'Pesos sugeridos por IA:\n'
+    + JSON.stringify(res.weights, null, 2) + '\n'
+    + (res.justification ? ('Justificación: '+res.justification+'\n') : '')
+    + '¿Aplicarlos?';
+  if(confirm(msg)){
+    renderWeights(res.weights);
+    await saveWeightsConfig(res.weights);
+    toast.success('Pesos guardados');
+  }
 };
 document.getElementById('autoWeightsStat').onclick = async () => {
-  const w = await fetchJson('/auto_weights_v2_stat',{method:'POST'});
-  renderWeights(w);
-  await saveWeightsConfig(w);
+  const res = await fetchJson('/scoring/v2/auto-weights-stat',{method:'POST'});
+  if(res.error){ toast.error(res.error); return; }
+  renderWeights(res.weights);
+  await saveWeightsConfig(res.weights);
+  toast.success('Pesos guardados');
 };
 // Handle file upload: clicking the upload button opens file chooser
 const fileInputEl = document.getElementById('fileInput');

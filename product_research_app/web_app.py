@@ -687,11 +687,11 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/auto_weights":
             self.handle_auto_weights()
             return
-        if path == "/auto_weights_v2_gpt":
-            self.handle_auto_weights_v2_gpt()
+        if path == "/scoring/v2/auto-weights-gpt":
+            self.handle_scoring_v2_auto_weights_gpt()
             return
-        if path == "/auto_weights_v2_stat":
-            self.handle_auto_weights_v2_stat()
+        if path == "/scoring/v2/auto-weights-stat":
+            self.handle_scoring_v2_auto_weights_stat()
             return
         if path == "/scoring/v2/gpt-evaluate":
             self.handle_scoring_v2_gpt_evaluate()
@@ -1620,7 +1620,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 break
         return samples, metric_key
 
-    def handle_auto_weights_v2_gpt(self):
+    def handle_scoring_v2_auto_weights_gpt(self):
         samples, metric_key = self._collect_samples_for_weights()
         if not samples or not metric_key:
             self._set_json(400)
@@ -1633,16 +1633,15 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"error": "No API key configured"}).encode('utf-8'))
             return
         try:
-            weights = gpt.recommend_winner_weights(api_key, model, samples, metric_key)
+            result = gpt.recommend_winner_weights(api_key, model, samples, metric_key)
         except Exception as exc:
             self._set_json(500)
             self.wfile.write(json.dumps({"error": str(exc)}).encode('utf-8'))
             return
-        config.set_scoring_v2_weights(weights)
         self._set_json()
-        self.wfile.write(json.dumps(weights).encode('utf-8'))
+        self.wfile.write(json.dumps(result).encode('utf-8'))
 
-    def handle_auto_weights_v2_stat(self):
+    def handle_scoring_v2_auto_weights_stat(self):
         samples, metric_key = self._collect_samples_for_weights()
         if not samples or not metric_key or len(samples) < 2:
             self._set_json(400)
@@ -1662,9 +1661,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             weights[field] = corr
         total = sum(weights.values()) or 1.0
         weights = {k: v / total for k, v in weights.items()}
-        config.set_scoring_v2_weights(weights)
         self._set_json()
-        self.wfile.write(json.dumps(weights).encode('utf-8'))
+        self.wfile.write(json.dumps({"weights": weights}).encode('utf-8'))
 
     def handle_scoring_v2_gpt_evaluate(self):
         """Endpoint that evaluates Winner Score v2 variables via GPT."""
