@@ -48,66 +48,6 @@ body.dark pre { background:#2e315f; }
 body.dark .weight-slider {
   accent-color:#7a53d6;
 }
-#pageBar, #tableToolbar {
-  display:flex;
-  justify-content:space-between;
-  align-items:center;
-  flex-wrap:wrap;
-  gap:8px;
-  background:#f8fbff;
-  border-bottom:1px solid #ccc;
-  padding:8px 12px;
-}
-body.dark #pageBar, body.dark #tableToolbar {
-  background:#0F1424;
-  border-bottom:1px solid #243150;
-  color:#E5EAF5;
-}
-#pageBar .left, #pageBar .right, #tableToolbar .left, #tableToolbar .right {
-  display:flex;
-  align-items:center;
-  gap:8px;
-  flex-wrap:wrap;
-}
-
-:root { --controlbar-h: 54px; }
-/* Make unified control bar sticky and compact */
-#controlBar {
-  position: sticky;
-  top: 0;
-  z-index: 1000;
-  display:flex;
-  justify-content:space-between;
-  align-items:center;
-  flex-wrap:wrap;
-  gap:8px;
-  background:#f8fbff;
-  border-bottom:1px solid #ccc;
-  padding:8px 12px;
-}
-body.dark #controlBar {
-  background:#0F1424;
-  border-bottom:1px solid #243150;
-  color:#E5EAF5;
-}
-#controlBar .left, #controlBar .right {
-  display:flex;
-  align-items:center;
-  gap:8px;
-  flex-wrap:wrap;
-}
-/* Smaller search input to avoid overlap */
-#controlBar #searchInput { width: 240px; max-width: 260px; }
-/* Sticky table header below the control bar */
-.sticky-thead th {
-  position: sticky;
-  top: var(--controlbar-h);
-  background: #f8fbff;
-  z-index: 500;
-}
-body.dark .sticky-thead th {
-  background: #0F1424;
-}
 </style>
 </head>
 <body class="dark">
@@ -127,25 +67,32 @@ body.dark .sticky-thead th {
 </div>
 </header>
 </div>
-<!-- Unified control bar replacing page and table toolbars -->
-<div aria-label="Barra de controles" id="controlBar" role="toolbar">
-<div class="left">
-<input id="searchInput" placeholder="Buscar producto o palabra clave..." type="text"/>
-<button id="searchBtn">Buscar</button>
-<button id="btnFilters">Filtros</button>
-<div id="activeFilterChips"></div>
-<div id="listMeta">0 resultados</div>
+<div class="app-topbar" role="toolbar">
+  <div class="left">
+    <input id="searchInput" placeholder="Buscar producto o palabra clave..." type="text"/>
+    <button id="searchBtn">Buscar</button>
+  </div>
+  <div class="right">
+    <select aria-label="Seleccionar grupo" id="groupSelect"></select>
+    <button aria-label="Añadir a grupo" disabled="" id="btnAddToGroup">Añadir a grupo</button>
+    <button aria-controls="promptDrawer" aria-haspopup="dialog" id="sendPrompt" type="button">Consulta a GPT</button>
+    <button id="btnColumns">Columnas</button>
+    <button disabled="" id="btnExport">Exportar</button>
+    <button disabled="" id="btnDelete">Eliminar</button>
+    <input id="newListName" style="display:none;" type="text"/>
+    <button id="createListBtn" style="display:none;">Crear grupo</button>
+  </div>
 </div>
-<div class="right">
-<button aria-label="Información de columnas" class="legend-btn" id="legendBtn">ℹ️</button>
-<span aria-live="polite" id="selCount"></span>
-<select aria-label="Seleccionar grupo" id="groupSelect"></select>
-<button aria-label="Añadir a grupo" disabled="" id="btnAddToGroup">Añadir a grupo</button>
-<button aria-controls="promptDrawer" aria-haspopup="dialog" id="sendPrompt" type="button">Consulta a GPT</button>
-<button id="btnColumns">Columnas</button>
-<button disabled="" id="btnExport">Exportar</button>
-<button disabled="" id="btnDelete">Eliminar</button>
-</div>
+<div class="table-toolbar">
+  <div class="left">
+    <button id="btnFilters">Filtros</button>
+    <div id="activeFilterChips"></div>
+    <div id="listMeta">0 resultados</div>
+  </div>
+  <div class="right">
+    <span aria-live="polite" id="selCount"></span>
+    <button aria-label="Información de columnas" class="legend-btn" id="legendBtn">ℹ️</button>
+  </div>
 </div>
 <input aria-label="Seleccionar todo" id="selectAll" style="display:none;" type="checkbox"/>
 <div id="config" style="display:none;">
@@ -232,7 +179,7 @@ body.dark .sticky-thead th {
 </div>
 </div>
 <table id="productTable">
-<thead class="sticky-thead">
+<thead>
 <tr id="headerRow"></tr>
 </thead>
 <tbody></tbody>
@@ -459,12 +406,6 @@ function renderTable() {
     cb.dataset.id = rowId;
     cb.checked = selection.has(rowId);
     tr.classList.toggle('selected', cb.checked);
-    cb.addEventListener('change', () => {
-      const id = cb.dataset.id;
-      if (cb.checked) selection.add(id); else selection.delete(id);
-      tr.classList.toggle('selected', cb.checked);
-      updateMasterState();
-    });
     tdSel.appendChild(cb);
     tr.appendChild(tdSel);
     columns.forEach(col => {
@@ -1147,69 +1088,14 @@ window.parseDate = parseDate;
 <script src="/static/js/filters.js"></script>
 <script>
 document.addEventListener('DOMContentLoaded', () => {
-  function ensureBar(id) {
-    let bar = document.getElementById(id);
-    if (!bar) {
-      bar = document.createElement('div');
-      bar.id = id;
-      bar.setAttribute('role', 'toolbar');
-      bar.innerHTML = '<div class="left"></div><div class="right"></div>';
-      document.body.insertBefore(bar, document.body.firstChild);
-    }
-    if (!bar.querySelector('.left')) {
-      const left = document.createElement('div');
-      left.className = 'left';
-      bar.appendChild(left);
-    }
-    if (!bar.querySelector('.right')) {
-      const right = document.createElement('div');
-      right.className = 'right';
-      bar.appendChild(right);
-    }
-    return bar;
-  }
-  const controlBar = ensureBar('controlBar');
-  function setControlBarHeightVar(){
-    const h = controlBar.offsetHeight || 54;
-    document.documentElement.style.setProperty('--controlbar-h', h + 'px');
-  }
-  setControlBarHeightVar();
-  window.addEventListener('resize', setControlBarHeightVar);
-  const zones = {
-    left: controlBar.querySelector('.left'),
-    right: controlBar.querySelector('.right')
-  };
-  const moves = [
-    ['searchInput', zones.left],
-    ['searchBtn', zones.left],
-    ['btnFilters', zones.left],
-    ['activeFilterChips', zones.left],
-    ['listMeta', zones.left],
-    ['legendBtn', zones.right],
-    ['selCount', zones.right],
-    ['groupSelect', zones.right],
-    ['btnAddToGroup', zones.right],
-    ['sendPrompt', zones.right],
-    ['btnColumns', zones.right],
-    ['btnExport', zones.right],
-    ['btnDelete', zones.right]
-  ];
-  moves.forEach(([id, target]) => {
-    const el = document.getElementById(id);
-    if (el && target) {
-      target.appendChild(el);
-    }
-  });
-  // Ensure group creation controls are visible and in the control bar
+
   const nameInp = document.getElementById('newListName');
   const createBtn = document.getElementById('createListBtn');
   if (nameInp && createBtn) {
     nameInp.style.display = '';
     nameInp.placeholder = nameInp.placeholder || 'Nuevo grupo';
     nameInp.style.width = nameInp.style.width || '140px';
-    zones.right.appendChild(nameInp);
     createBtn.style.display = '';
-    zones.right.appendChild(createBtn);
     nameInp.addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter') {
         createBtn.click();
@@ -1217,17 +1103,8 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  const bottomBar = document.getElementById('bottomBar');
-  const master = document.getElementById('selectAll');
-  if (master) {
-    master.style.display = 'none';
-    document.body.appendChild(master);
-  }
-  
-  // Populate groups after controls are placed
   if (typeof loadLists === 'function') { loadLists(); }
-bottomBar?.remove();
 });
 </script>
-<div id="listsContainer" style="display:none;"></div><input id="newListName" style="display:none;" type="text"/><button id="createListBtn" style="display:none;">Crear grupo</button></body>
+<div id="listsContainer" style="display:none;"></div></body>
 </html>

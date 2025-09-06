@@ -2,6 +2,7 @@ const selection = new Set();
 let currentPageIds = [];
 const master = document.getElementById('selectAll');
 const selCountEl = document.getElementById('selCount');
+const tbody = document.querySelector('#productTable tbody');
 
 import('./format.js').then(m => {
   window.abbr = m.abbr;
@@ -23,8 +24,21 @@ function updateMasterState(){
 master.addEventListener('change', ()=>{
   if(master.checked){ currentPageIds.forEach(id=>selection.add(String(id))); }
   else { currentPageIds.forEach(id=>selection.delete(String(id))); }
-  renderTable();
+  tbody.querySelectorAll('.rowCheck').forEach(cb=>{
+    cb.checked = master.checked;
+    cb.closest('tr').classList.toggle('selected', master.checked);
+  });
   updateMasterState();
+});
+
+tbody.addEventListener('change', e => {
+  if(e.target.classList.contains('rowCheck')){
+    const cb = e.target;
+    const id = cb.dataset.id;
+    if(cb.checked) selection.add(id); else selection.delete(id);
+    cb.closest('tr').classList.toggle('selected', cb.checked);
+    updateMasterState();
+  }
 });
 
 function firesFor(score0to5){
