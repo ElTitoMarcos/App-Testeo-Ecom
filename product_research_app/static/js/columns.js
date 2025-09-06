@@ -4,9 +4,13 @@
   const panel = document.getElementById('columnsPanel');
   if(!btn || !panel) return;
 
-  // ensure panel lives at the end of body to avoid clipping by ancestors
-  if(panel.parentNode !== document.body){
-    document.body.appendChild(panel);
+  const OFFSET = window.POPOVER_OFFSET || 12;
+  const MARGIN = window.POPOVER_MARGIN || 16;
+  const overlay = window.ensureOverlayRoot ? window.ensureOverlayRoot() : document.body;
+
+  // ensure panel lives in overlay portal to avoid clipping by ancestors
+  if(panel.parentNode !== overlay){
+    overlay.appendChild(panel);
   }
 
   function loadState(){
@@ -65,18 +69,19 @@
       panel.classList.remove('hidden');
       panel.style.visibility = 'hidden';
       panel.scrollTop = 0;
-      // initial position anchored to button
-      let top = rect.bottom + 4;
-      let left = rect.left;
-      // measure and clamp within viewport
+      // measure once rendered
       const w = panel.offsetWidth;
       const h = panel.offsetHeight;
       const vw = window.innerWidth;
-      const vh = window.innerHeight;
-      if(left + w > vw){ left = Math.max(8, vw - w - 8); }
-      if(top + h > vh){ top = Math.max(8, vh - h - 8); }
+      let left = rect.left;
+      let top = rect.top - h - OFFSET;
+      // clamp within viewport respecting safe margin
+      if(left + w > vw - MARGIN){ left = vw - w - MARGIN; }
+      if(left < MARGIN){ left = MARGIN; }
+      if(top < MARGIN){ top = MARGIN; }
       panel.style.left = `${left}px`;
       panel.style.top = `${top}px`;
+      panel.style.maxHeight = `${rect.top - OFFSET - MARGIN}px`;
       panel.style.visibility = '';
     } else {
       panel.classList.add('hidden');
