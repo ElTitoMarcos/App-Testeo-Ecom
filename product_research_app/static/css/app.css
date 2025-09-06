@@ -132,7 +132,7 @@ body.dark .chip {
 }
 body.dark .chip button { color: #A9B4D0; }
 
-#topBar { position: sticky; top: 0; z-index: 40; }
+#topBar { position: sticky; top: 0; z-index: 50; }
 #searchRow {
   display: flex;
   flex-wrap: wrap;
@@ -146,14 +146,25 @@ body.dark #searchRow { background: #1a1b2e; }
 #searchRow > * { flex: 0 0 auto; }
 
 #searchInput {
-  flex: 1 0 360px;
-  max-width: 420px;
+  flex: 1 0 300px;
+  max-width: 360px;
   padding: 8px;
   border-radius: 20px;
   border: 1px solid #ccc;
   font-size: 14px;
 }
 body.dark #searchInput { border-color: #444; }
+
+#searchRowRight {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#listMeta { white-space: nowrap; }
+
+#viewGroup { min-width: 120px; }
 
 #activeFilterChips {
   display: flex;
