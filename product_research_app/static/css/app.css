@@ -156,6 +156,8 @@ body.dark #controlBar {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 #controlBar .left {
