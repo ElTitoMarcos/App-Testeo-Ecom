@@ -16,6 +16,20 @@ const idMap = {
   category: 'filterCategory'
 };
 
+// References to elements now housed inside the persistent control bar
+const controlBar = document.getElementById('controlBar');
+const searchInput = controlBar?.querySelector('#searchInput');
+const searchBtn = controlBar?.querySelector('#searchBtn');
+const btnFilters = controlBar?.querySelector('#btnFilters');
+const chipsContainer = controlBar?.querySelector('#activeFilterChips');
+const listMeta = controlBar?.querySelector('#listMeta');
+const groupSelect = controlBar?.querySelector('#groupSelect');
+
+searchInput?.setAttribute('aria-label', 'Buscar en tabla');
+searchBtn?.setAttribute('aria-label', 'Ejecutar búsqueda');
+btnFilters?.setAttribute('aria-label', 'Abrir filtros');
+chipsContainer?.setAttribute('role', 'list');
+
 function toggleDrawer() {
   document.getElementById('filtersDrawer').classList.toggle('hidden');
 }
@@ -59,12 +73,12 @@ function applyFiltersFromState() {
   selection.clear();
   updateMasterState();
   renderTable();
+  if (listMeta) listMeta.textContent = `${products.length} resultados`;
 }
 
 function buildActiveChips(state) {
-  const container = document.getElementById('activeFilterChips');
-  if (!container) return;
-  container.innerHTML = '';
+  if (!chipsContainer) return;
+  chipsContainer.innerHTML = '';
   const chips = [];
   if (state.priceMin !== null && !isNaN(state.priceMin)) chips.push(['priceMin', `≥ ${state.priceMin}`]);
   if (state.priceMax !== null && !isNaN(state.priceMax)) chips.push(['priceMax', `≤ ${state.priceMax}`]);
@@ -75,9 +89,11 @@ function buildActiveChips(state) {
   chips.forEach(([key, label]) => {
     const chip = document.createElement('span');
     chip.className = 'chip';
+    chip.setAttribute('role', 'listitem');
     chip.textContent = label;
     const btn = document.createElement('button');
     btn.textContent = '×';
+    btn.setAttribute('aria-label', 'Eliminar filtro');
     btn.onclick = () => {
       if (['priceMin','priceMax','ratingMin'].includes(key)) {
         filtersState[key] = null;
@@ -88,11 +104,11 @@ function buildActiveChips(state) {
       applyFiltersFromState();
     };
     chip.appendChild(btn);
-    container.appendChild(chip);
+    chipsContainer.appendChild(chip);
   });
 }
 
-document.getElementById('btnFilters')?.addEventListener('click', toggleDrawer);
+btnFilters?.addEventListener('click', toggleDrawer);
 document.getElementById('closeFilters')?.addEventListener('click', closeDrawer);
 document.getElementById('applyFilters')?.addEventListener('click', () => {
   const pMinVal = document.getElementById('filterPriceMin').value;
@@ -122,7 +138,7 @@ document.getElementById('clearFilters')?.addEventListener('click', () => {
 document.addEventListener('keydown', (e) => {
   if (e.key === '/') {
     e.preventDefault();
-    document.getElementById('searchInput')?.focus();
+    searchInput?.focus();
   }
   if (e.key.toLowerCase() === 'f') {
     e.preventDefault();
@@ -130,22 +146,43 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.key.toLowerCase() === 'g') {
     e.preventDefault();
-    document.getElementById('groupSelect')?.focus();
+    groupSelect?.focus();
   }
   if (e.key === 'Escape') {
     closeDrawer();
   }
 });
 
-function updateHeaderHeight() {
-  const topBar = document.getElementById('topBar');
-  if (topBar) {
-    document.documentElement.style.setProperty('--header-h', `${topBar.offsetHeight}px`);
-  }
-  const toolbar = document.getElementById('bottomBar');
-  if (toolbar) {
-    document.documentElement.style.setProperty('--toolbar-h', `${toolbar.offsetHeight}px`);
-  }
+// Basic search within the table rows and list meta update
+searchBtn?.addEventListener('click', () => {
+  const term = searchInput?.value.trim().toLowerCase() || '';
+  const rows = document.querySelectorAll('#productTable tbody tr');
+  let visible = 0;
+  rows.forEach(row => {
+    if (!term) {
+      row.style.display = '';
+      visible++;
+      return;
+    }
+    const text = Array.from(row.cells).map(td => td.textContent.toLowerCase());
+    const match = text.some(t => t.includes(term));
+    row.style.display = match ? '' : 'none';
+    if (match) visible++;
+  });
+  if (listMeta) listMeta.textContent = `${visible} resultados`;
+});
+
+let tableOffset = 0;
+function updateStickyOffsets() {
+  const appBar = document.getElementById('topBar');
+  const control = document.getElementById('controlBar');
+  const a = appBar?.offsetHeight || 0;
+  const c = control?.offsetHeight || 0;
+  document.documentElement.style.setProperty('--appbar-h', `${a}px`);
+  document.documentElement.style.setProperty('--controlbar-h', `${c}px`);
+  tableOffset = a + c;
+  document.documentElement.style.setProperty('--table-offset', `${tableOffset}px`);
 }
-window.addEventListener('load', updateHeaderHeight);
-window.addEventListener('resize', updateHeaderHeight);
+window.getTableOffset = () => tableOffset;
+window.addEventListener('load', updateStickyOffsets);
+window.addEventListener('resize', updateStickyOffsets);
