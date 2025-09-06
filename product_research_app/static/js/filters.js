@@ -16,6 +16,15 @@ const idMap = {
   category: 'filterCategory'
 };
 
+// References to elements now housed inside the persistent page bar
+const pageBar = document.getElementById('pageBar');
+const searchInput = pageBar?.querySelector('#searchInput');
+const searchBtn = pageBar?.querySelector('#searchBtn');
+const btnFilters = pageBar?.querySelector('#btnFilters');
+const chipsContainer = pageBar?.querySelector('#activeFilterChips');
+const listMeta = pageBar?.querySelector('#listMeta');
+const groupSelect = pageBar?.querySelector('#groupSelect');
+
 function toggleDrawer() {
   document.getElementById('filtersDrawer').classList.toggle('hidden');
 }
@@ -59,12 +68,12 @@ function applyFiltersFromState() {
   selection.clear();
   updateMasterState();
   renderTable();
+  if (listMeta) listMeta.textContent = `${products.length} resultados`;
 }
 
 function buildActiveChips(state) {
-  const container = document.getElementById('activeFilterChips');
-  if (!container) return;
-  container.innerHTML = '';
+  if (!chipsContainer) return;
+  chipsContainer.innerHTML = '';
   const chips = [];
   if (state.priceMin !== null && !isNaN(state.priceMin)) chips.push(['priceMin', `≥ ${state.priceMin}`]);
   if (state.priceMax !== null && !isNaN(state.priceMax)) chips.push(['priceMax', `≤ ${state.priceMax}`]);
@@ -88,11 +97,11 @@ function buildActiveChips(state) {
       applyFiltersFromState();
     };
     chip.appendChild(btn);
-    container.appendChild(chip);
+    chipsContainer.appendChild(chip);
   });
 }
 
-document.getElementById('btnFilters')?.addEventListener('click', toggleDrawer);
+btnFilters?.addEventListener('click', toggleDrawer);
 document.getElementById('closeFilters')?.addEventListener('click', closeDrawer);
 document.getElementById('applyFilters')?.addEventListener('click', () => {
   const pMinVal = document.getElementById('filterPriceMin').value;
@@ -122,7 +131,7 @@ document.getElementById('clearFilters')?.addEventListener('click', () => {
 document.addEventListener('keydown', (e) => {
   if (e.key === '/') {
     e.preventDefault();
-    document.getElementById('searchInput')?.focus();
+    searchInput?.focus();
   }
   if (e.key.toLowerCase() === 'f') {
     e.preventDefault();
@@ -130,22 +139,46 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.key.toLowerCase() === 'g') {
     e.preventDefault();
-    document.getElementById('groupSelect')?.focus();
+    groupSelect?.focus();
   }
   if (e.key === 'Escape') {
     closeDrawer();
   }
 });
 
-function updateHeaderHeight() {
-  const topBar = document.getElementById('topBar');
-  if (topBar) {
-    document.documentElement.style.setProperty('--header-h', `${topBar.offsetHeight}px`);
-  }
-  const toolbar = document.getElementById('bottomBar');
-  if (toolbar) {
-    document.documentElement.style.setProperty('--toolbar-h', `${toolbar.offsetHeight}px`);
-  }
+// Basic search within the table rows and list meta update
+searchBtn?.addEventListener('click', () => {
+  const term = searchInput?.value.trim().toLowerCase() || '';
+  const rows = document.querySelectorAll('#productTable tbody tr');
+  let visible = 0;
+  rows.forEach(row => {
+    if (!term) {
+      row.style.display = '';
+      visible++;
+      return;
+    }
+    const text = Array.from(row.cells).map(td => td.textContent.toLowerCase());
+    const match = text.some(t => t.includes(term));
+    row.style.display = match ? '' : 'none';
+    if (match) visible++;
+  });
+  if (listMeta) listMeta.textContent = `${visible} resultados`;
+});
+
+let tableOffset = 0;
+function updateStickyOffsets() {
+  const appBar = document.getElementById('topBar');
+  const page = document.getElementById('pageBar');
+  const tableTb = document.getElementById('tableToolbar');
+  const a = appBar?.offsetHeight || 0;
+  const p = page?.offsetHeight || 0;
+  const t = tableTb?.offsetHeight || 0;
+  document.documentElement.style.setProperty('--appbar-h', `${a}px`);
+  document.documentElement.style.setProperty('--pagebar-h', `${p}px`);
+  document.documentElement.style.setProperty('--tabletoolbar-h', `${t}px`);
+  tableOffset = a + p + t;
+  document.documentElement.style.setProperty('--table-offset', `${tableOffset}px`);
 }
-window.addEventListener('load', updateHeaderHeight);
-window.addEventListener('resize', updateHeaderHeight);
+window.getTableOffset = () => tableOffset;
+window.addEventListener('load', updateStickyOffsets);
+window.addEventListener('resize', updateStickyOffsets);
