@@ -159,6 +159,11 @@ body.dark .popover {
 .table tbody tr.selected { background: #cde8ff; }
 body.dark .table tbody tr.selected { background: #243150; }
 
+/* Spacing for configuration panel */
+#config {
+  padding-top: 16px;
+}
+
 .table tbody tr.is-duplicate {
   background: var(--dup-bg);
   border-left: 4px solid var(--dup-accent);
