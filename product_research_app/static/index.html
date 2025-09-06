@@ -67,20 +67,29 @@ body.dark .weight-slider {
       <button id="configBtn" title="Configuración avanzada">⚙️</button>
     </div>
   </header>
-  <!-- Search bar row -->
-  <div id="searchRow" style="display:flex; justify-content:center; padding:8px 15px; gap:8px;">
+  <!-- Search bar row with controls -->
+  <div id="searchRow" style="display:flex; flex-wrap:wrap; align-items:center; padding:8px 15px; gap:8px;">
     <input type="text" id="searchInput" placeholder="Buscar producto o palabra clave..." style="flex:1; max-width:600px; padding:8px; border-radius:20px; border:1px solid #ccc; font-size:14px;" />
     <button id="searchBtn">Buscar</button>
+    <button id="btnFilters">Filtros</button>
+    <div id="activeFilterChips" style="display:flex; flex-wrap:wrap;"></div>
+    <div style="display:flex; gap:6px; align-items:center;">
+      <select id="groupSelect"></select>
+      <button id="btnAddToGroup">Añadir</button>
+    </div>
+    <input type="text" id="newListName" placeholder="Nombre del grupo" style="padding:4px; min-width:120px;">
+    <button id="createListBtn">Crear</button>
+    <button id="sendPrompt">Enviar consulta a GPT</button>
+    <button id="btnColumns">Columnas</button>
+    <button id="btnDelete" disabled>Eliminar</button>
+    <button id="btnExport" disabled>Exportar</button>
   </div>
+  <div id="listMeta">0 resultados • Vista: Tabla ▾ (Tarjetas)</div>
 </div>
 <!-- Groups/Lists management -->
 <div id="listsSection" class="card" style="margin-top:5px; padding:10px; max-width:420px;">
   <strong>Grupos:</strong>
   <div id="listsContainer" style="margin:6px 0; display:flex; flex-wrap:wrap; gap:6px;"></div>
-  <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center;">
-    <input type="text" id="newListName" placeholder="Nombre del grupo" style="flex:1; padding:4px; min-width:120px;">
-    <button id="createListBtn">Crear</button>
-  </div>
 </div>
 <div id="config" style="display:none;">
   <label>API Key: <input type="password" id="apiKey" /></label>
@@ -105,7 +114,6 @@ body.dark .weight-slider {
 </div>
 <div id="custom">
   <textarea id="customPrompt" rows="3" placeholder="Escribe tu consulta personalizada a GPT"></textarea><br/>
-  <button id="sendPrompt">Enviar consulta a GPT</button>
   <div id="history" style="margin-top:10px;"></div>
 </div>
 <div id="trends" class="card" style="display:none;"></div>
@@ -162,25 +170,7 @@ body.dark .weight-slider {
   </div>
 </div>
 
-<div id="table-toolbar" class="table-toolbar">
-  <div style="display:flex; align-items:center; gap:8px;">
-    <input type="checkbox" id="selectAll">
-    <button id="btnFilters">Filtros</button>
-    <div id="activeFilterChips" style="display:flex; flex-wrap:wrap;"></div>
-    <div>
-      <select id="groupSelect"></select>
-      <button id="btnAddToGroup">Añadir</button>
-    </div>
-  </div>
-  <div id="listMeta">0 resultados • Vista: Tabla ▾ (Tarjetas)</div>
-  <div>
-    <button id="btnColumns">Columnas</button>
-    <button id="btnDelete" disabled>Eliminar</button>
-    <button id="btnExport" disabled>Exportar</button>
-  </div>
-</div>
-
-<table id="productTable">
+  <table id="productTable">
   <thead class="sticky-thead">
     <tr id="headerRow"></tr>
   </thead>
