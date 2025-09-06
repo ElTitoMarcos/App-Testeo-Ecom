@@ -157,3 +157,9 @@ body.dark #controlBar {
   gap: 8px;
   flex-wrap: wrap;
 }
+
+#productTable th:first-child,
+#productTable td:first-child {
+  width: 2.5rem;
+  text-align: center;
+}

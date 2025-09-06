@@ -4,7 +4,8 @@ The interface now features a single persistent `controlBar` beneath the global a
 
 ## Control mapping
 - controlBar/left: `searchInput`, `searchBtn`, `btnFilters`, `activeFilterChips`, `listMeta`
-- controlBar/right: `legendBtn`, `selectAll`, `selCount`, `groupSelect`, `btnAddToGroup`, `sendPrompt`, `btnColumns`, `btnExport`, `btnDelete`
+- controlBar/right: `legendBtn`, `selCount`, `groupSelect`, `btnAddToGroup`, `sendPrompt`, `btnColumns`, `btnExport`, `btnDelete`
+- table header (first column): `selectAll`
 
 ## Shortcuts
 - `/` — focus search box

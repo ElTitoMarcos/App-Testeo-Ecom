@@ -180,7 +180,7 @@ body.dark #pageBar, body.dark #tableToolbar {
 <div id="bottomBar" class="bottombar">
   <div class="controls">
     <button id="legendBtn" class="legend-btn">ℹ️</button>
-    <input type="checkbox" id="selectAll">
+    <input type="checkbox" id="selectAll" aria-label="Seleccionar todo">
     <input type="text" id="searchInput" placeholder="Buscar producto o palabra clave..." style="flex:1; min-width:200px; padding:8px; border-radius:20px; border:1px solid #ccc; font-size:14px;" />
     <button id="searchBtn">Buscar</button>
     <button id="btnFilters">Filtros</button>
@@ -383,6 +383,12 @@ function renderTable() {
   if (!headerRow.hasChildNodes()) {
     // Add select column header (no label)
     const thSel = document.createElement('th');
+    thSel.style.textAlign = 'center';
+    const master = document.getElementById('selectAll');
+    if (master) {
+      master.style.display = '';
+      thSel.appendChild(master);
+    }
     headerRow.appendChild(thSel);
     // Add dynamic columns
     columns.forEach(col => {
@@ -409,6 +415,7 @@ function renderTable() {
     // trending highlighting is now indicated by fire emojis instead of row outline
     // Selection checkbox
     const tdSel = document.createElement('td');
+    tdSel.style.textAlign = 'center';
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.classList.add('rowCheck');
@@ -1137,7 +1144,6 @@ document.addEventListener('DOMContentLoaded', () => {
     ['activeFilterChips', zones.left],
     ['listMeta', zones.left],
     ['legendBtn', zones.right],
-    ['selectAll', zones.right],
     ['selCount', zones.right],
     ['groupSelect', zones.right],
     ['btnAddToGroup', zones.right],
@@ -1153,6 +1159,11 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
   const bottomBar = document.getElementById('bottomBar');
+  const master = document.getElementById('selectAll');
+  if (master) {
+    master.style.display = 'none';
+    document.body.appendChild(master);
+  }
   bottomBar?.remove();
 });
 </script>
