@@ -4,7 +4,7 @@ export function abbr(n){
   return String(n);
 }
 
-export function scoreClass(s){
+export function winnerScoreClass(s){
   if(s>=80) return 'badge score-green';
   if(s>=60) return 'badge score-amber';
   return 'badge score-red';
