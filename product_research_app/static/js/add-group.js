@@ -1,4 +1,6 @@
 // Popover for assigning selected items to a group
+import * as groupsService from './groups-service.js';
+
 (function(){
   const btn = document.getElementById('btnAddToGroup');
   if(!btn) return;
@@ -42,10 +44,10 @@
       const name = await promptDialog('Crear grupo', 'Nombre del grupo');
       if(!name) return;
       try{
-        await fetchJson('/create_list', {method:'POST', body: JSON.stringify({name})});
-        await loadLists();
+        await groupsService.createGroup(name);
         buildList('');
         toast.success(`Grupo "${name}" creado`);
+        loadLists();
       }catch(err){ console.error(err); toast.error('Error al crear grupo'); }
     });
     search.focus();

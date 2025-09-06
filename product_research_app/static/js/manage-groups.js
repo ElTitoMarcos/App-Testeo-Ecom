@@ -1,142 +1,145 @@
-(function(){
-  let overlay;
+import * as groupsService from './groups-service.js';
 
-  function ensureModal(){
-    if(overlay) return overlay;
-    const root = window.ensureOverlayRoot ? window.ensureOverlayRoot() : document.body;
-    overlay = document.createElement('div');
-    overlay.id = 'manageGroupsModal';
-    overlay.className = 'modal-overlay hidden';
-    overlay.innerHTML = `
-      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="mgTitle">
-        <header class="modal-header">
-          <h2 id="mgTitle">Gestionar grupos</h2>
-          <span class="modal-subtitle" id="mgCount"></span>
-          <button class="modal-close" id="mgClose" aria-label="Cerrar">✕</button>
-        </header>
-        <div class="modal-body">
-          <input type="text" id="mgSearch" placeholder="Buscar grupo…" />
-          <div id="mgList" class="group-list"></div>
-        </div>
-        <footer class="modal-footer">
-          <button id="mgCreate">Crear grupo…</button>
-        </footer>
-      </div>`;
-    root.appendChild(overlay);
+let handle;
+let searchFilter = '';
 
-    overlay.addEventListener('click', e => { if(e.target === overlay) close(); });
-    overlay.querySelector('#mgClose').addEventListener('click', close);
-    overlay.querySelector('#mgSearch').addEventListener('input', e => renderList(e.target.value.toLowerCase()));
-    overlay.querySelector('#mgCreate').addEventListener('click', async () => {
-      const name = await promptDialog('Crear grupo', 'Nombre del grupo');
-      if(!name) return;
-      try {
-        await fetchJson('/create_list', {method:'POST', body: JSON.stringify({name})});
-        await loadLists();
-        renderList('');
-        toast.success(`Grupo "${name}" creado`);
-        document.dispatchEvent(new CustomEvent('groups-updated'));
-      } catch(err){ console.error(err); toast.error('Error al crear grupo'); }
-    });
-    return overlay;
+function buildModal(){
+  const modal = document.createElement('div');
+  modal.className = 'modal';
+  modal.setAttribute('role', 'dialog');
+  modal.setAttribute('aria-modal', 'true');
+  modal.innerHTML = `
+    <header class="modal-header">
+      <h2 id="mgTitle">Gestionar grupos</h2>
+      <span class="modal-subtitle" id="mgCount"></span>
+      <button class="modal-close" id="mgClose" aria-label="Cerrar">✕</button>
+    </header>
+    <div class="modal-body">
+      <input type="text" id="mgSearch" placeholder="Buscar grupo…" />
+      <div id="mgList" class="group-list" style="overflow:auto; max-height:320px;"></div>
+    </div>
+    <footer class="modal-footer">
+      <button id="mgCreate">Crear grupo…</button>
+    </footer>`;
+  return modal;
+}
+
+function renderList(filter=''){
+  const lists = window.listCache || [];
+  const listEl = handle.content.querySelector('#mgList');
+  const countEl = handle.content.querySelector('#mgCount');
+  if(countEl) countEl.textContent = `${lists.length} grupos`;
+  const rows = lists.filter(l => l.name.toLowerCase().includes(filter));
+  const scroll = listEl.scrollTop;
+  if(rows.length === 0){
+    listEl.innerHTML = '<p style="padding:8px;">Sin grupos</p>';
+    listEl.scrollTop = scroll;
+    return;
   }
-
-  function trapFocus(container){
-    const focusable = container.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
-    if(!focusable.length) return;
-    const first = focusable[0];
-    const last = focusable[focusable.length-1];
-    container.addEventListener('keydown', e => {
-      if(e.key !== 'Tab') return;
-      if(e.shiftKey){
-        if(document.activeElement === first){ e.preventDefault(); last.focus(); }
-      }else{
-        if(document.activeElement === last){ e.preventDefault(); first.focus(); }
-      }
-    });
-  }
-
-  function confirmDelete(name, id){
-    return new Promise(res => {
-      const wrap = document.createElement('div');
-      wrap.className = 'confirm-overlay';
-      const lists = (window.listCache || []).filter(g => g.id !== id);
-      let opts = '<option value="" disabled selected>Mover a…</option>';
-      lists.forEach(l => { opts += `<option value="${l.id}">${l.name}</option>`; });
-      wrap.innerHTML = `<div class="confirm-box"><p>¿Eliminar grupo \"${name}\"?</p><select id="mgMoveSel">${opts}</select><div class="confirm-actions"><button class="btn-cancel">Cancelar</button><button class="btn-remove">Quitar del grupo</button><button class="btn-move" disabled>Mover y borrar</button></div></div>`;
-      overlay.appendChild(wrap);
-      const sel = wrap.querySelector('#mgMoveSel');
-      const btnMove = wrap.querySelector('.btn-move');
-      sel.addEventListener('change', () => { btnMove.disabled = !sel.value; });
-      wrap.querySelector('.btn-cancel').onclick = () => { wrap.remove(); res(null); };
-      wrap.querySelector('.btn-remove').onclick = () => { wrap.remove(); res({mode:'remove'}); };
-      btnMove.onclick = () => { const targetId = parseInt(sel.value); wrap.remove(); res({mode:'move', targetId}); };
-      wrap.querySelector('.btn-remove').focus();
-    });
-  }
-
-  function renderList(filter=''){
-    const lists = (window.listCache || []);
-    const listEl = overlay.querySelector('#mgList');
-    const countEl = overlay.querySelector('#mgCount');
-    if(countEl) countEl.textContent = `${lists.length} grupos`;
-    const rows = lists.filter(l => l.name.toLowerCase().includes(filter));
-    if(rows.length === 0){
-      listEl.innerHTML = '<p style="padding:8px;">Sin grupos</p>';
-      return;
-    }
-    let html = '';
-    rows.forEach(l => {
-      html += `<div class="group-row" data-id="${l.id}">
+  let html = '';
+  rows.forEach(l => {
+    html += `<div class="group-row" data-id="${l.id}">
         <span class="group-name">${l.name}</span>
         <span class="group-count">${l.count}</span>
         <div class="group-actions"><button class="mg-del" aria-label="Eliminar">Eliminar</button></div>
       </div>`;
-    });
-    listEl.innerHTML = html;
-    listEl.querySelectorAll('.mg-del').forEach(btn => btn.addEventListener('click', handleDelete));
-  }
+  });
+  listEl.innerHTML = html;
+  listEl.scrollTop = scroll;
+}
 
-  async function handleDelete(e){
-    const btn = e.target;
-    const row = btn.closest('.group-row');
-    const id = parseInt(row.dataset.id);
-    const name = row.querySelector('.group-name').textContent;
-    const choice = await confirmDelete(name, id);
-    if(!choice) return;
+async function handleDelete(id, name){
+  const choice = await confirmDelete(name, id);
+  if(!choice) return;
+  const btn = handle.content.querySelector(`.group-row[data-id="${id}"] .mg-del`);
+  if(btn){
     btn.disabled = true;
     btn.classList.add('loading');
-    try {
-      await deleteGroup(id, choice);
-      close();
-      toast.success(`Grupo "${name}" eliminado`);
-    } catch(err){ console.error(err); toast.error(`Error al eliminar grupo: ${err.message}`); btn.disabled = false; btn.classList.remove('loading'); }
   }
-
-  function open(){
-    const modal = ensureModal();
-    renderList('');
-    modal.classList.remove('hidden');
-    requestAnimationFrame(() => modal.classList.add('open'));
-    document.body.style.overflow = 'hidden';
-    const search = modal.querySelector('#mgSearch');
-    if(search) search.focus();
-    trapFocus(modal);
-    document.addEventListener('keydown', escHandler);
+  try{
+    await groupsService.deleteGroup(id, choice);
+    await groupsService.listGroups();
+    renderList(searchFilter);
+    toast.success(`Grupo "${name}" eliminado`);
+  }catch(err){
+    console.error(err);
+    toast.error(`Error al eliminar grupo: ${err.message}`);
+    if(btn){ btn.disabled=false; btn.classList.remove('loading'); }
   }
+}
 
-  function close(){
-    if(!overlay) return;
-    overlay.classList.remove('open');
-    setTimeout(() => overlay.classList.add('hidden'), 120);
-    document.body.style.overflow = '';
-    document.removeEventListener('keydown', escHandler);
-  }
+function confirmDelete(name, id){
+  return new Promise(res => {
+    const wrap = document.createElement('div');
+    wrap.className = 'confirm-overlay';
+    const lists = (window.listCache || []).filter(g => g.id !== id);
+    let opts = '<option value="" disabled selected>Mover a…</option>';
+    lists.forEach(l => { opts += `<option value="${l.id}">${l.name}</option>`; });
+    wrap.innerHTML = `<div class="confirm-box"><p>¿Eliminar grupo \"${name}\"?</p><select id="mgMoveSel">${opts}</select><div class="confirm-actions"><button class="btn-cancel">Cancelar</button><button class="btn-remove">Quitar del grupo</button><button class="btn-move" disabled>Mover y borrar</button></div></div>`;
+    handle.overlay.appendChild(wrap);
+    const sel = wrap.querySelector('#mgMoveSel');
+    const btnMove = wrap.querySelector('.btn-move');
+    sel.addEventListener('change', () => { btnMove.disabled = !sel.value; });
+    wrap.querySelector('.btn-cancel').onclick = () => { wrap.remove(); res(null); };
+    wrap.querySelector('.btn-remove').onclick = () => { wrap.remove(); res({mode:'remove'}); };
+    btnMove.onclick = () => { const targetId = parseInt(sel.value); wrap.remove(); res({mode:'move', targetGroupId:targetId}); };
+    wrap.querySelector('.btn-remove').focus();
+  });
+}
 
-  function escHandler(e){ if(e.key === 'Escape') close(); }
+function openCreate(btn){
+  const inner = document.createElement('div');
+  inner.className = 'modal';
+  inner.innerHTML = `
+    <header class="modal-header"><h3>Crear grupo</h3><button class="modal-close" aria-label="Cerrar">✕</button></header>
+    <div class="modal-body"><input type="text" id="cgName" placeholder="Nombre"/></div>
+    <footer class="modal-footer"><button id="cgSave" disabled>Crear</button></footer>`;
+  const child = modalManager.open(inner, {returnFocus: btn});
+  const input = inner.querySelector('#cgName');
+  const save = inner.querySelector('#cgSave');
+  input.addEventListener('input', () => { save.disabled = !input.value.trim(); });
+  inner.querySelector('.modal-close').addEventListener('click', () => child.close());
+  save.addEventListener('click', async () => {
+    const name = input.value.trim();
+    if(!name) return;
+    save.disabled = true;
+    try{
+      await groupsService.createGroup(name);
+      await groupsService.listGroups();
+      renderList(searchFilter);
+      toast.success(`Grupo "${name}" creado`);
+      child.close();
+    }catch(err){
+      console.error(err);
+      toast.error('Error al crear grupo');
+      save.disabled = false;
+    }
+  });
+  input.focus();
+}
 
-  window.openManageGroups = open;
-  const btn = document.getElementById('btnManageGroups');
-  if(btn) btn.addEventListener('click', open);
-})();
+export async function open(){
+  await groupsService.listGroups();
+  const modal = buildModal();
+  handle = modalManager.open(modal, {returnFocus: triggerBtn});
+  const search = modal.querySelector('#mgSearch');
+  search.value = searchFilter;
+  search.addEventListener('input', e => { searchFilter = e.target.value.toLowerCase(); renderList(searchFilter); });
+  modal.querySelector('#mgClose').addEventListener('click', () => handle.close());
+  modal.querySelector('#mgCreate').addEventListener('click', e => openCreate(e.currentTarget));
+  modal.querySelector('#mgList').addEventListener('click', e => {
+    const row = e.target.closest('.group-row');
+    if(e.target.classList.contains('mg-del') && row){
+      const id = parseInt(row.dataset.id);
+      const name = row.querySelector('.group-name').textContent;
+      handleDelete(id, name);
+    }
+  });
+  renderList(searchFilter);
+  modal.querySelector('#mgSearch').focus();
+}
 
+const triggerBtn = document.getElementById('btnManageGroups');
+if(triggerBtn) triggerBtn.addEventListener('click', open);
+
+window.openManageGroups = open;

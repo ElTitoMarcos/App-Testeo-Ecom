@@ -222,11 +222,13 @@ body.dark .weight-slider {
 <script src="/static/js/toast.js"></script>
 <script src="/static/js/table.js"></script>
 <script src="/static/js/columns.js"></script>
-<script src="/static/js/add-group.js"></script>
-<script src="/static/js/manage-groups.js"></script>
+<script type="module" src="/static/js/add-group.js"></script>
+<script type="module" src="/static/js/manage-groups.js"></script>
 <script type="module">
 import { fetchJson } from "/static/js/net.js";
+import * as groupsService from "/static/js/groups-service.js";
 window.fetchJson = fetchJson;
+window.groupsService = groupsService;
 // Ensure the server shuts down cleanly when the tab or window is closed.
 // Using fetch with `keepalive` guarantees the request completes even during unload.
 window.addEventListener('beforeunload', () => {
@@ -919,8 +921,7 @@ async function loadLists() {
   try {
     const select = document.getElementById('groupSelect');
     if (!select) return;
-    const lists = await fetchJson('/lists');
-    window.listCache = lists;
+    const lists = await groupsService.listGroups();
     select.innerHTML = '';
 
     const allOpt = document.createElement('option');
@@ -946,40 +947,7 @@ async function loadLists() {
 }
 
 window.loadLists = loadLists;
-
-const deleteInFlight = {};
-async function deleteGroup(id, opts={}){
-  if(deleteInFlight[id]) return;
-  deleteInFlight[id] = true;
-  const {mode='remove', target=null} = opts;
-  try{
-    const body = {id, mode};
-    if(mode === 'move' && target !== null){ body.targetGroupId = target; }
-    const res = await fetch('/delete_list', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-    if(![200,204,404].includes(res.status)) throw new Error('bad status '+res.status);
-    // purge local caches
-    window.listCache = (window.listCache || []).filter(g => g.id !== id);
-    if(window.groupsMap) delete window.groupsMap[id];
-    if(window.groupsList) window.groupsList = (window.groupsList || []).filter(g => g.id !== id);
-    try{
-      const cache = JSON.parse(localStorage.getItem('groupsCache') || '[]');
-      localStorage.setItem('groupsCache', JSON.stringify(cache.filter(g => g.id !== id)));
-    }catch(e){/* ignore */}
-    if(currentGroupFilter === id){
-      const next = (mode === 'move' && target !== null) ? target : -1;
-      currentGroupFilter = next;
-      if(next === -1){ await fetchProducts(); }
-      else { await applyGroupFilter(next); }
-    }
-    await loadLists();
-    document.dispatchEvent(new CustomEvent('groups-updated'));
-  }catch(err){
-    console.error(err);
-    delete deleteInFlight[id];
-    throw err;
-  }
-  delete deleteInFlight[id];
-}
+document.addEventListener('groups-updated', () => loadLists());
 
 async function applyGroupFilter(id){
   if(id === -1){
@@ -1010,7 +978,7 @@ document.getElementById('createListBtn').onclick = async () => {
   const name = document.getElementById('newListName').value.trim();
   if(!name){ toast.info('Ingresa un nombre para el grupo'); return; }
   try{
-    const data = await fetchJson('/create_list', {method:'POST', body: JSON.stringify({name:name})});
+    await groupsService.createGroup(name);
     document.getElementById('newListName').value = '';
     loadLists();
   }catch(err){ console.error(err); toast.error('Error al crear grupo'); }
