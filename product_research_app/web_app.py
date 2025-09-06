@@ -26,7 +26,8 @@ import io
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
-import cgi
+from email.parser import BytesParser
+from email.policy import default
 import threading
 import sqlite3
 import math
@@ -225,6 +226,32 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         with open(file_path, "rb") as f:
             self.wfile.write(f.read())
+
+    def _parse_multipart_file(self):
+        ctype = self.headers.get('Content-Type', '')
+        if not ctype.startswith('multipart/form-data'):
+            return None, None
+        boundary_key = 'boundary='
+        if boundary_key not in ctype:
+            return None, None
+        boundary = ctype.split(boundary_key, 1)[1].strip().strip('"')
+        try:
+            length = int(self.headers.get('Content-Length', '0'))
+        except ValueError:
+            length = 0
+        if length <= 0:
+            return None, None
+        body = self.rfile.read(length)
+        parser = BytesParser(policy=default)
+        header_bytes = f'Content-Type: multipart/form-data; boundary={boundary}\r\n\r\n'.encode('utf-8')
+        msg = parser.parsebytes(header_bytes + body)
+        for part in msg.iter_parts():
+            disp = part.get_content_disposition()
+            if disp == 'form-data' and part.get_param('name', header='content-disposition') == 'file':
+                filename = part.get_filename()
+                data = part.get_payload(decode=True)
+                return filename, data
+        return None, None
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -763,13 +790,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self.send_error(400, 'Invalid JSON')
                 return
         elif ctype.startswith('multipart/form-data'):
-            form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={'REQUEST_METHOD': 'POST'})
-            fileitem = form['file'] if 'file' in form else None
-            if fileitem is None or not getattr(fileitem, 'filename', None):
+            filename, data = self._parse_multipart_file()
+            if not filename or data is None:
                 self.send_error(400, 'No file provided')
                 return
-            filename = Path(fileitem.filename).name
-            data = fileitem.file.read()
+            filename = Path(filename).name
             ext = Path(filename).suffix.lower()
 
             def find_key(keys, patterns):
@@ -856,42 +881,11 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(resp)
 
     def handle_upload(self):
-        # handle multipart form data
-        # Determine the incoming content type.  cgi.parse_header() returns
-        # just the main type (e.g. 'multipart/form-data') and a dictionary of
-        # parameters (e.g. the boundary).  We accept any variation that
-        # starts with 'multipart/form-data'.  Without this prefix check the
-        # exact string comparison would reject valid requests that include
-        # boundary or charset parameters.
-        ctype, _pdict = cgi.parse_header(self.headers.get('Content-Type', ''))
-        if not ctype or not ctype.startswith('multipart/form-data'):
-            self.send_error(400, "Expected multipart/form-data")
-            return
-        # Only provide the request method and content type to FieldStorage.
-        # Providing CONTENT_LENGTH explicitly can interfere with streaming
-        # parsing for large uploads, but the content type is required so
-        # FieldStorage can detect the multipart boundary correctly.  Omitting
-        # CONTENT_TYPE causes FieldStorage to treat the body as a URL encoded
-        # form and attempt to read until EOF, which can lead to hanging
-        # connections.  Therefore we include CONTENT_TYPE but avoid setting
-        # CONTENT_LENGTH.  FieldStorage will read until it encounters the
-        # multipart boundary defined in the Content‑Type header.
-        form = cgi.FieldStorage(
-            fp=self.rfile,
-            headers=self.headers,
-            environ={
-                'REQUEST_METHOD': 'POST',
-                'CONTENT_TYPE': self.headers.get('Content-Type')
-            }
-        )
-        # ``form" may contain multiple fields; we look up 'file' key safely
-        fileitem = form['file'] if 'file' in form else None
-        # ``fileitem" must not be evaluated in boolean context
-        if fileitem is None or not getattr(fileitem, 'filename', None):
+        filename, data = self._parse_multipart_file()
+        if not filename or data is None:
             self.send_error(400, "No file provided")
             return
-        filename = Path(fileitem.filename).name
-        data = fileitem.file.read()
+        filename = Path(filename).name
         ext = Path(filename).suffix.lower()
         conn = ensure_db()
         inserted = 0
