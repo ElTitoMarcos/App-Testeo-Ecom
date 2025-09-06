@@ -124,7 +124,6 @@ body.dark .chip button { color: #A9B4D0; }
   position: sticky;
   top: var(--appbar-h);
   z-index: 30;
-  height: var(--controlbar-h);
   background: #f8fbff;
   border-bottom: 1px solid #ccc;
   display: flex;
@@ -135,6 +134,7 @@ body.dark .chip button { color: #A9B4D0; }
   flex-wrap: wrap;
   width: 100%;
   box-sizing: border-box;
+  min-height: var(--controlbar-h);
 }
 
 .table tr { height: 52px; }
@@ -160,20 +160,34 @@ body.dark #controlBar {
   box-sizing: border-box;
 }
 
-#productTable {
-  margin-top: 0;
+#controlBar .left {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
-#productTable th:first-child,
-#productTable td:first-child {
-  width: 2.5rem;
-  text-align: center;
+#controlBar .right {
+  flex: 0 0 auto;
+  justify-content: flex-end;
 }
-#controlBar .left, #controlBar .right {
+
+#searchInput {
+  flex: 1 1 auto;
+  width: clamp(280px, 32vw, 420px);
+  padding: 8px;
+  border-radius: 20px;
+  border: 1px solid #ccc;
+  font-size: 14px;
+}
+
+#activeFilterChips {
   display: flex;
-  align-items: center;
-  gap: 8px;
   flex-wrap: wrap;
+}
+
+#controlBar input[type="text"],
+#controlBar button,
+#controlBar select {
+  height: 36px;
 }
 
 #productTable {
