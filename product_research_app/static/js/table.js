@@ -1,7 +1,7 @@
 const selection = new Set();
 let currentPageIds = [];
 let master = null;
-let bottomBar = null;
+const bottomBar = document.getElementById('bottomBar');
 
 import('./format.js').then(m => {
   window.abbr = m.abbr;
@@ -28,15 +28,17 @@ function updateMasterState(){
   const selectedOnPage = currentPageIds.filter(id => selection.has(id)).length;
   master.indeterminate = selectedOnPage>0 && selectedOnPage<currentPageIds.length;
   master.checked = selectedOnPage===currentPageIds.length && currentPageIds.length>0;
-  document.getElementById('btnDelete').disabled = selection.size===0;
-  document.getElementById('btnExport').disabled = selection.size===0;
+  const disable = selection.size===0;
+  const btnDel = document.getElementById('btnDelete');
+  const btnExp = document.getElementById('btnExport');
+  const btnAdd = document.getElementById('btnAddToGroup');
+  if(btnDel) btnDel.disabled = disable;
+  if(btnExp) btnExp.disabled = disable;
+  if(btnAdd) btnAdd.disabled = disable;
   if(bottomBar){
-    document.getElementById('selCount').textContent = `${selection.size} seleccionados`;
-    if(selection.size>0){
-      bottomBar.classList.remove('hidden');
-    }else{
-      bottomBar.classList.add('hidden');
-    }
+    const selEl = document.getElementById('selCount');
+    if(selEl) selEl.textContent = `${selection.size} seleccionados`;
+    bottomBar.classList.toggle('hidden', disable);
   }
 }
 
@@ -45,19 +47,13 @@ function firesFor(score0to5){
   return '🔥'.repeat(n);
 }
 const table = document.getElementById('productTable');
-if(table){
-  bottomBar = document.createElement('div');
-  bottomBar.id = 'bottomBar';
-  bottomBar.className = 'bottombar hidden';
-    bottomBar.innerHTML = '<div style="display:flex; align-items:center; gap:8px;"><button id="legendBtn" class="legend-btn">ℹ️</button><span id="selCount"></span></div><div><button id="bbDelete">Eliminar</button><button id="bbExport">Exportar</button><button id="bbAddGroup">Añadir a grupo</button></div>';
-  table.parentElement.appendChild(bottomBar);
-    const legendBtn = document.getElementById('legendBtn');
-    const legendPop = document.getElementById('legendPop');
-    if(legendBtn && legendPop){
-      legendBtn.addEventListener('click', ()=>legendPop.classList.toggle('hidden'));
-      document.addEventListener('click',(e)=>{ if(!legendPop.contains(e.target) && e.target!==legendBtn) legendPop.classList.add('hidden'); });
-    }
-  document.getElementById('bbDelete').addEventListener('click', ()=>document.getElementById('btnDelete').click());
-  document.getElementById('bbExport').addEventListener('click', ()=>document.getElementById('btnExport').click());
-  document.getElementById('bbAddGroup').addEventListener('click', ()=>document.getElementById('btnAddToGroup').click());
+if(bottomBar){
+  const legendBtn = document.getElementById('legendBtn');
+  const legendPop = document.getElementById('legendPop');
+  if(legendBtn && legendPop){
+    legendBtn.addEventListener('click', ()=>legendPop.classList.toggle('hidden'));
+    document.addEventListener('click', (e)=>{
+      if(!legendPop.contains(e.target) && e.target!==legendBtn) legendPop.classList.add('hidden');
+    });
+  }
 }
