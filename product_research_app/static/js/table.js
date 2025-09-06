@@ -39,6 +39,11 @@ function updateMasterState(){
     const selEl = document.getElementById('selCount');
     if(selEl) selEl.textContent = `${selection.size} seleccionados`;
     bottomBar.classList.toggle('hidden', disable);
+    if(!disable){
+      document.body.style.paddingBottom = bottomBar.offsetHeight + 'px';
+    } else {
+      document.body.style.paddingBottom = '';
+    }
   }
 }
 
