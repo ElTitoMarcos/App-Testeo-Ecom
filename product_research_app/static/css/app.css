@@ -328,6 +328,7 @@ body.dark .bottombar {
   align-items: center;
   justify-content: space-between;
   padding: 16px 20px 8px;
+  margin-bottom: 12px;
 }
 .modal-header h2 {
   margin: 0;
@@ -349,6 +350,7 @@ body.dark .bottombar {
 .modal-body {
   padding: 0 20px 16px;
   overflow-y: auto;
+  flex: 1 1 auto;
 }
 .modal-body input {
   width: 100%;
@@ -359,19 +361,42 @@ body.dark .bottombar {
   color: #E5EAF5;
   margin-bottom: 12px;
 }
+.modal-body input:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px #3A6FD8;
+}
 .group-list {
   max-height: 50vh;
   overflow-y: auto;
 }
 .group-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0,1fr) 80px min-content;
+  column-gap: 12px;
   align-items: center;
-  justify-content: space-between;
-  padding: 8px 0;
+  min-height: 40px;
   border-bottom: 1px solid #243150;
+}
+.group-row:hover {
+  background: rgba(255,255,255,0.05);
 }
 .group-row:last-child {
   border-bottom: none;
+}
+.group-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.group-count {
+  width: 80px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.group-actions {
+  display: flex;
+  gap: 8px;
 }
 .group-actions button {
   background: none;
@@ -379,6 +404,12 @@ body.dark .bottombar {
   color: #F16969;
   cursor: pointer;
   padding: 4px 8px;
+}
+.group-actions button:focus-visible,
+.modal-footer button:focus-visible,
+.modal-close:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px #3A6FD8;
 }
 .modal-footer {
   padding: 12px 20px;
