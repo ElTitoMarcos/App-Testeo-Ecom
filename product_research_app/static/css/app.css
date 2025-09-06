@@ -483,12 +483,12 @@ body.dark .bottombar {
   color: #E5EAF5;
 }
 
-.mg-del.loading {
+button.loading {
   position: relative;
   color: transparent;
   pointer-events: none;
 }
-.mg-del.loading::after {
+button.loading::after {
   content: '';
   position: absolute;
   top: 50%;

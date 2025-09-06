@@ -707,23 +707,76 @@ async function saveWeights(){
   toast.success('Pesos guardados');
 }
 
-document.getElementById('saveWeights').onclick = saveWeights;
-document.getElementById('autoWeightsGpt').onclick = async () => {
-  const res = await fetchJson('/scoring/v2/auto-weights-gpt',{method:'POST'});
-  if(res.error) { toast.error(res.error); return; }
-  const msg = 'Pesos sugeridos por IA:\n'
-    + JSON.stringify(res.weights, null, 2) + '\n'
-    + (res.justification ? ('Justificación: '+res.justification+'\n') : '')
-    + '¿Aplicarlos?';
-  if(await confirmDialog(msg)){
-    await applyWeights(res.weights);
+const autoGptBtn = document.getElementById('autoWeightsGpt');
+const autoStatBtn = document.getElementById('autoWeightsStat');
+
+function buildWeightPayload(){
+  const sample = [];
+  let targetKey = '';
+  for(const p of products){
+    const row = {};
+    let ok = true;
+    weightFields.forEach(k => {
+      const v = p?.winner_score_v2_breakdown?.scores?.[k];
+      if(typeof v !== 'number') ok = false; else row[k] = v;
+    });
+    let tVal = null;
+    if(p.extras){
+      for(const key of ['revenue','sales','gmv','orders','units']){
+        const v = p.extras[key];
+        if(v !== undefined){
+          tVal = parseFloat(v);
+          if(!isNaN(tVal)) { targetKey = targetKey || key; }
+          break;
+        }
+      }
+    }
+    if(!ok || tVal===null || isNaN(tVal)) continue;
+    row.target = tVal;
+    sample.push(row);
+    if(sample.length >= 200) break;
   }
-};
-document.getElementById('autoWeightsStat').onclick = async () => {
-  const res = await fetchJson('/scoring/v2/auto-weights-stat',{method:'POST'});
-  if(res.error){ toast.error(res.error); return; }
-  await applyWeights(res.weights);
-};
+  return {
+    features: weightFields,
+    data_sample: sample,
+    target: targetKey || 'revenue',
+    constraints: { non_negative: true, normalize: 'sum1' },
+    context: { locale: 'es-ES' }
+  };
+}
+
+async function handleAutoWeights(endpoint, type){
+  const payload = buildWeightPayload();
+  if(payload.data_sample.length === 0){
+    toast.error('Datos insuficientes');
+    return;
+  }
+  const gptLabel = autoGptBtn.textContent;
+  const statLabel = autoStatBtn.textContent;
+  autoGptBtn.disabled = autoStatBtn.disabled = true;
+  autoGptBtn.classList.add('loading');
+  autoStatBtn.classList.add('loading');
+  autoGptBtn.textContent = autoStatBtn.textContent = 'Ajustando…';
+  try{
+    const res = await fetchJson(endpoint,{method:'POST', body: JSON.stringify(payload)});
+    const weights = {};
+    weightFields.forEach(f => { weights[f] = parseFloat(res.weights?.[f]) || 0; });
+    await applyWeights(weights, true);
+    toast.success(type==='gpt' ? 'Pesos ajustados con IA' : 'Pesos ajustados estadístico');
+  }catch(err){
+    // errores ya mostrados por fetchJson
+  }finally{
+    autoGptBtn.textContent = gptLabel;
+    autoStatBtn.textContent = statLabel;
+    autoGptBtn.classList.remove('loading');
+    autoStatBtn.classList.remove('loading');
+    autoGptBtn.disabled = autoStatBtn.disabled = false;
+  }
+}
+
+document.getElementById('saveWeights').onclick = saveWeights;
+autoGptBtn.onclick = () => handleAutoWeights('/scoring/v2/auto-weights-gpt','gpt');
+autoStatBtn.onclick = () => handleAutoWeights('/scoring/v2/auto-weights-stat','stat');
 // Handle file upload: clicking the upload button opens file chooser
 const fileInputEl = document.getElementById('fileInput');
 document.getElementById('uploadBtn').onclick = () => {
