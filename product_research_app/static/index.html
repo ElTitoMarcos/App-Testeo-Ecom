@@ -96,15 +96,9 @@ body.dark .weight-slider {
 <div id="weightsCard" class="card" style="display:none; max-width:420px;">
   <strong>Ponderaciones Winner Score</strong>
   <div id="weightsContainer" style="margin-top:8px; display:flex; flex-direction:column; gap:6px;"></div>
-  <div style="margin-top:8px;">
-    <label style="display:flex; align-items:center; gap:4px;">
-      <input type="checkbox" id="lockWeights"> Bloquear pesos
-    </label>
-  </div>
   <div style="margin-top:10px; display:flex; flex-wrap:wrap; gap:6px;">
     <button id="autoWeightsGpt">Ajustar pesos con IA</button>
     <button id="autoWeightsStat">Ajustar estadístico</button>
-    <button id="saveWeights">Guardar</button>
   </div>
 </div>
 <div id="custom" style="display:none;">
@@ -393,17 +387,24 @@ function scheduleWeightPersist(){
   persistTimer = setTimeout(persistWeights, 400);
 }
 
+let persistRetryDelay = 1000;
 async function persistWeights(){
   weightStore = normalizeWeights(weightStore);
-  if(backendWeightsEnabled){
-    try{
-      await fetchJson('/setconfig',{method:'POST', body: JSON.stringify({scoring_v2_weights: weightStore})});
-    }catch(e){
-      backendWeightsEnabled = false;
-      localStorage.setItem(WEIGHTS_LS_KEY, JSON.stringify(weightStore));
-    }
-  }else{
-    localStorage.setItem(WEIGHTS_LS_KEY, JSON.stringify(weightStore));
+  localStorage.setItem(WEIGHTS_LS_KEY, JSON.stringify(weightStore));
+  if(!backendWeightsEnabled){
+    toast.success('Pesos guardados');
+    renderWeights(weightStore);
+    return;
+  }
+  try{
+    const res = await fetch('/settings/winner-score',{method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(weightStore)});
+    if(!res.ok) throw new Error('bad status');
+    persistRetryDelay = 1000;
+    toast.success('Pesos guardados');
+  }catch(e){
+    toast.error('No se pudieron guardar, reintentaremos');
+    setTimeout(persistWeights, persistRetryDelay);
+    persistRetryDelay = Math.min(persistRetryDelay * 2, 30000);
   }
   renderWeights(weightStore);
 }
@@ -416,22 +417,17 @@ function initWeights(cfgWeights){
       if(saved) weights = JSON.parse(saved);
     }catch(e){}
   }
-  if(!weights) weights = defaultWeights();
-  weightStore = {...weights};
+  if(!weights) weights = {};
+  weightStore = { ...defaultWeights(), ...weights };
   renderWeights(weightStore);
 }
 
 async function applyWeights(newWeights, persistNow = true){
-  if(document.getElementById('lockWeights')?.checked){
-    toast.info('Pesos bloqueados');
-    return;
-  }
   weightStore = {...newWeights};
   renderWeights(weightStore);
   if(persistNow){
     clearTimeout(persistTimer);
     await persistWeights();
-    toast.success('Pesos guardados');
   }
 }
 
@@ -701,11 +697,6 @@ document.getElementById('configBtn').onclick = () => {
   wcard.style.display = show;
 };
 
-async function saveWeights(){
-  clearTimeout(persistTimer);
-  await persistWeights();
-  toast.success('Pesos guardados');
-}
 
 const autoGptBtn = document.getElementById('autoWeightsGpt');
 const autoStatBtn = document.getElementById('autoWeightsStat');
@@ -843,7 +834,6 @@ async function handleAutoWeights(endpoint, type){
   }
 }
 
-document.getElementById('saveWeights').onclick = saveWeights;
 autoGptBtn.onclick = () => handleAutoWeights('/scoring/v2/auto-weights-gpt','gpt');
 autoStatBtn.onclick = () => handleAutoWeights('/scoring/v2/auto-weights-stat','stat');
 // Handle file upload: clicking the upload button opens file chooser

@@ -341,6 +341,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._set_json()
             self.wfile.write(json.dumps(data).encode("utf-8"))
             return
+        if path == "/settings/winner-score":
+            cfg = config.load_config()
+            weights = cfg.get("scoring_v2_weights", {})
+            self._set_json()
+            self.wfile.write(json.dumps(weights).encode("utf-8"))
+            return
         if path.startswith("/score/"):
             try:
                 pid = int(path.split("/")[-1])
@@ -768,6 +774,34 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/shutdown":
             self.handle_shutdown()
+            return
+        self.send_error(404)
+
+    def do_PUT(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path == "/settings/winner-score":
+            length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(length).decode('utf-8')
+            try:
+                data = json.loads(body)
+                if not isinstance(data, dict):
+                    raise ValueError
+            except Exception:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+                return
+            cfg = config.load_config()
+            weights_v2 = cfg.get('scoring_v2_weights', {})
+            for k, v in data.items():
+                try:
+                    weights_v2[k] = float(v)
+                except Exception:
+                    continue
+            cfg['scoring_v2_weights'] = weights_v2
+            config.save_config(cfg)
+            self._set_json()
+            self.wfile.write(json.dumps({"status": "ok"}).encode('utf-8'))
             return
         self.send_error(404)
 
