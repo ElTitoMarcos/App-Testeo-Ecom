@@ -312,6 +312,7 @@ body.dark .bottombar {
   box-shadow: 0 20px 40px rgba(0,0,0,0.4);
   width: 90%;
   max-width: 420px;
+  margin: 24px;
   max-height: 80vh;
   display: flex;
   flex-direction: column;

@@ -25,6 +25,77 @@
   }
 })();
 
+// Simple modal manager with stacking
+(function(){
+  const stack = [];
+  const BASE_Z = 1000;
+
+  function trapFocus(container){
+    const focusable = container.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+    if(!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length-1];
+    container.addEventListener('keydown', e => {
+      if(e.key !== 'Tab') return;
+      if(e.shiftKey){
+        if(document.activeElement === first){ e.preventDefault(); last.focus(); }
+      }else{
+        if(document.activeElement === last){ e.preventDefault(); first.focus(); }
+      }
+    });
+  }
+
+  function open(content, opts={}){
+    const {onClose, returnFocus} = opts;
+    const root = window.ensureOverlayRoot ? window.ensureOverlayRoot() : document.body;
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay hidden';
+    overlay.style.zIndex = BASE_Z + stack.length * 10;
+    overlay.appendChild(content);
+    root.appendChild(overlay);
+
+    if(stack.length){
+      const prev = stack[stack.length-1];
+      prev.content.setAttribute('aria-hidden', 'true');
+      prev.content.inert = true;
+    }
+
+    function close(){
+      document.removeEventListener('keydown', escHandler);
+      overlay.removeEventListener('click', backdropHandler);
+      overlay.classList.remove('open');
+      setTimeout(()=>overlay.remove(), 120);
+      stack.pop();
+      if(stack.length){
+        const prev = stack[stack.length-1];
+        prev.content.removeAttribute('aria-hidden');
+        prev.content.inert = false;
+      } else {
+        document.body.style.overflow = '';
+      }
+      if(returnFocus) returnFocus.focus();
+      if(onClose) onClose();
+    }
+
+    function escHandler(e){ if(e.key === 'Escape') close(); }
+    function backdropHandler(e){ if(e.target === overlay) close(); }
+
+    overlay.addEventListener('click', backdropHandler);
+    document.addEventListener('keydown', escHandler);
+
+    document.body.style.overflow = 'hidden';
+    overlay.classList.remove('hidden');
+    requestAnimationFrame(() => overlay.classList.add('open'));
+    trapFocus(content);
+
+    const handle = {overlay, content, close};
+    stack.push(handle);
+    return handle;
+  }
+
+  window.modalManager = { open };
+})();
+
 (function(){
   function confirmDialog(msg, opts={}){
     const {okText='Aceptar', cancelText='Cancelar'} = opts;
