@@ -693,20 +693,6 @@ document.getElementById('saveConfig').onclick = async () => {
     }
   }
 };
-// search feature
-document.getElementById('searchBtn').onclick = () => {
-  const term = document.getElementById('searchInput').value.trim().toLowerCase();
-  const tbody = document.querySelector('#productTable tbody');
-  Array.from(tbody.rows).forEach(row => {
-    if (!term) {
-      row.style.display = '';
-      return;
-    }
-    const cells = Array.from(row.cells).map(td => td.textContent.toLowerCase());
-    const match = cells.some(text => text.includes(term));
-    row.style.display = match ? '' : 'none';
-  });
-};
 document.getElementById('sendPrompt').onclick = async () => {
   const prompt = document.getElementById('customPrompt').value.trim();
   if(!prompt){ toast.info('Escribe una consulta'); return; }
