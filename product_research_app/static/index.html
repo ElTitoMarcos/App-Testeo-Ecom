@@ -89,6 +89,7 @@ body.dark #pageBar, body.dark #tableToolbar {
     </div>
   </header>
 </div>
+<!-- Unified control bar replacing page and table toolbars -->
 <div id="controlBar" role="toolbar" aria-label="Barra de controles" tabindex="0">
   <div class="left">
     <input type="text" id="searchInput" placeholder="Buscar producto o palabra clave..." style="flex:1; min-width:200px; padding:8px; border-radius:20px; border:1px solid #ccc; font-size:14px;" />
@@ -98,10 +99,10 @@ body.dark #pageBar, body.dark #tableToolbar {
     <div id="listMeta">0 resultados</div>
   </div>
   <div class="right">
-    <button id="legendBtn" class="legend-btn">ℹ️</button>
-    <span id="selCount"></span>
-    <select id="groupSelect"></select>
-    <button id="btnAddToGroup" disabled>Añadir a grupo</button>
+    <button id="legendBtn" class="legend-btn" aria-label="Información de columnas">ℹ️</button>
+    <span id="selCount" aria-live="polite"></span>
+    <select id="groupSelect" aria-label="Seleccionar grupo"></select>
+    <button id="btnAddToGroup" aria-label="Añadir a grupo" disabled>Añadir a grupo</button>
     <button id="sendPrompt" type="button" aria-haspopup="dialog" aria-controls="promptDrawer">Consulta a GPT</button>
     <button id="btnColumns">Columnas</button>
     <button id="btnExport" disabled>Exportar</button>
@@ -380,9 +381,12 @@ function renderTable() {
     // Add select column header (no label)
     const thSel = document.createElement('th');
     thSel.style.textAlign = 'center';
+    thSel.setAttribute('scope', 'col');
+    thSel.setAttribute('aria-label', 'Seleccionar todas las filas');
     const master = document.getElementById('selectAll');
     if (master) {
       master.style.display = '';
+      master.title = 'Seleccionar todas las filas visibles';
       thSel.appendChild(master);
     }
     headerRow.appendChild(thSel);

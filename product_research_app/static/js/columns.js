@@ -64,6 +64,7 @@
       btn.setAttribute('aria-expanded', 'true');
       // allow measuring without flashing in place
       panel.style.visibility = 'hidden';
+      panel.style.position = 'absolute';
       panel.style.right = 'auto';
       panel.style.bottom = 'auto';
 
@@ -71,6 +72,7 @@
       const panelRect = panel.getBoundingClientRect();
       let top = btnRect.bottom + window.scrollY;
       let left = btnRect.left + window.scrollX;
+      const offset = window.getTableOffset ? window.getTableOffset() : 0;
 
       if (left + panelRect.width > window.scrollX + window.innerWidth) {
         left = btnRect.right + window.scrollX - panelRect.width;
@@ -81,8 +83,8 @@
       if (left < window.scrollX) {
         left = window.scrollX;
       }
-      if (top < window.scrollY) {
-        top = window.scrollY;
+      if (top < window.scrollY + offset) {
+        top = window.scrollY + offset;
       }
 
       panel.style.top = `${top}px`;

@@ -1,6 +1,6 @@
 # UI Migration Notes
 
-The interface now features a single persistent `controlBar` beneath the global app bar.
+The interface now has two sticky rows: the global app bar and a unified `controlBar` that replaces the old page and table toolbars.
 
 ## Control mapping
 - controlBar/left: `searchInput`, `searchBtn`, `btnFilters`, `activeFilterChips`, `listMeta`

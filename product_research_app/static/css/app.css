@@ -119,23 +119,12 @@ body.dark .chip button { color: #A9B4D0; }
 
 #topBar { position: sticky; top: 0; z-index: 40; }
 
+/* Control bar sticks beneath the app bar */
 #controlBar {
   position: sticky;
   top: var(--appbar-h);
   z-index: 30;
   height: var(--controlbar-h);
-}
-
-.table tr { height: 52px; }
-.table td, .table th { padding: 8px 12px; }
-body.dark .table tbody tr:nth-child(odd) { background: #11192B; }
-
-.badge { border-radius: 10px; padding: 2px 8px; font-weight: 600; }
-.score-green { background: #183B2D; color: #44C48C; }
-.score-amber { background: #3A3119; color: #F1B44C; }
-.score-red { background: #3A1E1E; color: #F16969; }
-
-#controlBar {
   background: #f8fbff;
   border-bottom: 1px solid #ccc;
   display: flex;
@@ -147,10 +136,38 @@ body.dark .table tbody tr:nth-child(odd) { background: #11192B; }
   width: 100%;
   box-sizing: border-box;
 }
+
+.table tr { height: 52px; }
+.table td, .table th { padding: 8px 12px; }
+body.dark .table tbody tr:nth-child(odd) { background: #11192B; }
+
+.badge { border-radius: 10px; padding: 2px 8px; font-weight: 600; }
+.score-green { background: #183B2D; color: #44C48C; }
+.score-amber { background: #3A3119; color: #F1B44C; }
+.score-red { background: #3A1E1E; color: #F16969; }
+
 body.dark #controlBar {
   background: #0F1424;
   border-bottom: 1px solid #243150;
   color: #E5EAF5;
+}
+#controlBar .left, #controlBar .right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+#productTable {
+  margin-top: 0;
+}
+
+#productTable th:first-child,
+#productTable td:first-child {
+  width: 2.5rem;
+  text-align: center;
 }
 #controlBar .left, #controlBar .right {
   display: flex;
