@@ -24,7 +24,6 @@ body.dark button { background: linear-gradient(90deg,#3a3cad,#7a53d6); color:#ff
 body.dark #btnFilters { background:#2a2d5c; border-color:#7a53d6; color:#a9a9ff; }
 select, input[type="text"], input[type="password"] { padding:6px; border-radius:4px; border:1px solid #ccc; }
 body.dark select, body.dark input[type="text"], body.dark input[type="password"] { background:#1f2344; color:#eaeaea; border-color:#444; }
-table { width:100%; border-collapse:collapse; margin-top:10px; }
 th, td { padding:8px; border:1px solid #ccc; }
 body.dark th, body.dark td { border-color:#444; }
 tbody tr:nth-child(even) { background:#f2f6ff; }
@@ -73,16 +72,10 @@ body.dark .weight-slider {
     <button id="searchBtn">Buscar</button>
     <button id="btnFilters">Filtros</button>
     <div id="activeFilterChips"></div>
-    <div style="display:flex; gap:6px; align-items:center;">
-      <select id="groupSelect" aria-label="Seleccionar grupo"></select>
-      <button id="btnAddToGroup">Añadir</button>
-    </div>
+    <select id="groupSelect" aria-label="Seleccionar grupo"></select>
     <input type="text" id="newListName" placeholder="Nombre del grupo" style="padding:4px; min-width:120px;">
     <button id="createListBtn">Crear</button>
     <button id="sendPrompt">Enviar consulta a GPT</button>
-    <button id="btnColumns">Columnas</button>
-    <button id="btnDelete" disabled>Eliminar</button>
-    <button id="btnExport" disabled>Exportar</button>
     <div id="searchRowRight">
       <div id="listMeta">0 resultados • Vista: Tabla</div>
       <select id="viewGroup" aria-label="Filtrar por grupo"></select>
@@ -174,6 +167,18 @@ body.dark .weight-slider {
   </thead>
   <tbody></tbody>
 </table>
+<div id="bottomBar" class="bottombar hidden">
+  <div style="display:flex; align-items:center; gap:8px;">
+    <button id="legendBtn" class="legend-btn" title="Mostrar leyenda" aria-label="Mostrar leyenda">ℹ️</button>
+    <span id="selCount"></span>
+  </div>
+  <div style="display:flex; gap:8px; align-items:center;">
+    <button id="btnDelete" disabled title="Eliminar seleccionados" aria-label="Eliminar seleccionados">Eliminar</button>
+    <button id="btnExport" disabled title="Exportar seleccionados" aria-label="Exportar seleccionados">Exportar</button>
+    <button id="btnAddToGroup" disabled title="Añadir seleccionados al grupo" aria-label="Añadir seleccionados al grupo">Añadir a grupo</button>
+    <button id="btnColumns" title="Gestionar columnas" aria-label="Gestionar columnas">Columnas</button>
+  </div>
+</div>
 <div id="legendPop" class="popover hidden">
   <div>• Fila roja: duplicado</div>
   <div>• 🔥 x1–x5: tendencia en el nombre</div>
