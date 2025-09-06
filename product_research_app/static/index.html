@@ -358,7 +358,6 @@ async function fetchProducts() {
   window.allProducts = allProducts;
   window.products = products;
   selection.clear();
-  updateMasterState();
   renderTable();
 }
 
@@ -369,6 +368,10 @@ function renderTable() {
   if (!headerRow.hasChildNodes()) {
     // Add select column header (no label)
     const thSel = document.createElement('th');
+    const selectAll = document.createElement('input');
+    selectAll.type = 'checkbox';
+    selectAll.id = 'selectAll';
+    thSel.appendChild(selectAll);
     headerRow.appendChild(thSel);
     // Add dynamic columns
     columns.forEach(col => {

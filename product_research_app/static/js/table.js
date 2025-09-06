@@ -1,6 +1,6 @@
 const selection = new Set();
 let currentPageIds = [];
-const master = document.getElementById('selectAll');
+let master = null;
 let bottomBar = null;
 
 import('./format.js').then(m => {
@@ -8,7 +8,23 @@ import('./format.js').then(m => {
   window.winnerScoreClass = m.winnerScoreClass;
 });
 
+function ensureMaster(){
+  if(!master){
+    master = document.getElementById('selectAll');
+    if(master){
+      master.addEventListener('change', ()=>{
+        if(master.checked){ currentPageIds.forEach(id=>selection.add(String(id))); }
+        else { currentPageIds.forEach(id=>selection.delete(String(id))); }
+        renderTable();
+        updateMasterState();
+      });
+    }
+  }
+}
+
 function updateMasterState(){
+  ensureMaster();
+  if(!master) return;
   const selectedOnPage = currentPageIds.filter(id => selection.has(id)).length;
   master.indeterminate = selectedOnPage>0 && selectedOnPage<currentPageIds.length;
   master.checked = selectedOnPage===currentPageIds.length && currentPageIds.length>0;
@@ -23,12 +39,6 @@ function updateMasterState(){
     }
   }
 }
-master.addEventListener('change', ()=>{
-  if(master.checked){ currentPageIds.forEach(id=>selection.add(String(id))); }
-  else { currentPageIds.forEach(id=>selection.delete(String(id))); }
-  renderTable();
-  updateMasterState();
-});
 
 function firesFor(score0to5){
   const n = Math.max(0, Math.min(5, Math.round(score0to5 || 0)));
