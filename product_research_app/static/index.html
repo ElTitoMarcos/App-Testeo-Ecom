@@ -419,7 +419,12 @@ function renderTable() {
           if (j) td.title = 'Justificación: ' + j;
         }
       } else if (['id','name','category','price','image_url','winner_score_v2_pct'].includes(key)) {
-        value = item[key];
+        if (key === 'id') {
+          // Display sequential IDs independent of database IDs
+          value = idx + 1;
+        } else {
+          value = item[key];
+        }
       } else {
         value = item.extras ? item.extras[key] : '';
       }
