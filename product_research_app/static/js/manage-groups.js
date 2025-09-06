@@ -24,10 +24,16 @@
     dlg.querySelector('#mgClose').addEventListener('click', ()=> dlg.classList.add('hidden'));
     dlg.querySelectorAll('.mg-del').forEach(btn => {
       btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        e.preventDefault();
         const row = e.target.closest('.mg-row');
         const id = parseInt(row.dataset.id);
         const count = parseInt(row.dataset.count);
+        const name = row.querySelector('span').textContent;
+        const prevHtml = btn.innerHTML;
+        row.style.pointerEvents = 'none';
         btn.disabled = true;
+        btn.innerHTML = '⏳';
         try{
           let mode = 'remove';
           let target = null;
@@ -35,17 +41,22 @@
             const move = confirm('Mover productos a otro grupo? Cancelar para quitar');
             if(move){
               const others = (window.listCache||[]).filter(g=>g.id!==id);
-              if(!others.length){ toast.info('No hay grupo destino'); btn.disabled=false; return; }
+              if(!others.length){ toast.info('No hay grupo destino'); throw new Error('no target'); }
               const opt = prompt('ID del grupo destino:\n'+ others.map(g=>`${g.id}: ${g.name}`).join('\n'));
-              if(!opt){ btn.disabled=false; return; }
+              if(!opt) throw new Error('cancel');
               target = parseInt(opt);
               mode = 'move';
             }
-          }else if(!confirm('Eliminar grupo vacío?')){ btn.disabled=false; return; }
-          await deleteList(id, mode, target);
-          buildDialog();
-        }catch(err){ console.error(err); }
-        btn.disabled = false;
+          }else if(!confirm('Eliminar grupo vacío?')){ throw new Error('cancel'); }
+          await deleteGroup(id, {mode, target});
+          dlg.classList.add('hidden');
+          toast.success(`Grupo "${name}" eliminado`);
+        }catch(err){
+          if(err.message!=='cancel') console.error(err);
+          row.style.pointerEvents = '';
+          btn.disabled = false;
+          btn.innerHTML = prevHtml;
+        }
       });
     });
     return dlg;

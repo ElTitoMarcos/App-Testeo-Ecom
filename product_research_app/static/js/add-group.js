@@ -82,4 +82,7 @@
     if(e.key === 'Escape') hide();
   });
   pop.addEventListener('wheel', e => e.stopPropagation());
+  document.addEventListener('groups-updated', () => {
+    if(!pop.classList.contains('hidden')) buildList(pop.querySelector('#grpSearch')?.value.toLowerCase()||'');
+  });
 })();

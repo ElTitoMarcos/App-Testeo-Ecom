@@ -947,21 +947,37 @@ async function loadLists() {
 
 window.loadLists = loadLists;
 
-async function deleteList(id, mode='remove', target=null){
+const deleteInFlight = {};
+async function deleteGroup(id, opts={}){
+  if(deleteInFlight[id]) return;
+  deleteInFlight[id] = true;
+  const {mode='remove', target=null} = opts;
   try{
-    const body = {id:id, mode:mode};
+    const body = {id, mode};
     if(mode === 'move' && target !== null){ body.targetGroupId = target; }
-    const data = await fetchJson('/delete_list', {method:'POST', body: JSON.stringify(body)});
-    await loadLists();
+    const res = await fetch('/delete_list', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    if(![200,204,404].includes(res.status)) throw new Error('bad status '+res.status);
+    // purge local caches
+    window.listCache = (window.listCache || []).filter(g => g.id !== id);
+    try{
+      const cache = JSON.parse(localStorage.getItem('groupsCache') || '[]');
+      localStorage.setItem('groupsCache', JSON.stringify(cache.filter(g => g.id !== id)));
+    }catch(e){/* ignore */}
     if(currentGroupFilter === id){
-      currentGroupFilter = -1;
-      fetchProducts();
-      toast.info('Grupo eliminado. Vista cambiada a "Todos"');
-    } else {
-      toast.success('Grupo eliminado');
+      const next = (mode === 'move' && target !== null) ? target : -1;
+      currentGroupFilter = next;
+      if(next === -1){ await fetchProducts(); }
+      else { await applyGroupFilter(next); }
     }
-    return data;
-  }catch(err){ console.error(err); toast.error('Error al eliminar grupo'); }
+    await loadLists();
+    document.dispatchEvent(new CustomEvent('groups-updated'));
+  }catch(err){
+    console.error(err);
+    toast.error('Error al eliminar grupo');
+    delete deleteInFlight[id];
+    throw err;
+  }
+  delete deleteInFlight[id];
 }
 
 async function applyGroupFilter(id){
