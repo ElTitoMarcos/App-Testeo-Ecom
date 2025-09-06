@@ -4,6 +4,10 @@
   const panel = document.getElementById('columnsPanel');
   if(!btn || !panel) return;
 
+  panel.setAttribute('role', 'dialog');
+  panel.setAttribute('aria-label', 'Columnas visibles');
+  btn.setAttribute('aria-expanded', 'false');
+
   function loadState(){
     try{ return JSON.parse(localStorage.columnsVisibility || '{}'); }catch(e){ return {}; }
   }
@@ -55,19 +59,38 @@
   }
 
   btn.addEventListener('click', () => {
-    if(panel.classList.contains('hidden')){
-      const rect = btn.getBoundingClientRect();
-      panel.style.top = `${rect.bottom + window.scrollY}px`;
-      panel.style.left = `${rect.left + window.scrollX}px`;
+    if (panel.classList.contains('hidden')) {
       panel.classList.remove('hidden');
+      btn.setAttribute('aria-expanded', 'true');
+      // allow measuring without flashing in place
+      panel.style.visibility = 'hidden';
+      panel.style.right = 'auto';
+
+      const btnRect = btn.getBoundingClientRect();
+      const panelRect = panel.getBoundingClientRect();
+      let top = btnRect.bottom + window.scrollY;
+      let left = btnRect.left + window.scrollX;
+
+      if (left + panelRect.width > window.scrollX + window.innerWidth) {
+        left = btnRect.right + window.scrollX - panelRect.width;
+      }
+      if (top + panelRect.height > window.scrollY + window.innerHeight) {
+        top = btnRect.top + window.scrollY - panelRect.height;
+      }
+
+      panel.style.top = `${top}px`;
+      panel.style.left = `${left}px`;
+      panel.style.visibility = '';
     } else {
       panel.classList.add('hidden');
+      btn.setAttribute('aria-expanded', 'false');
     }
   });
 
   document.addEventListener('click', e => {
     if(!panel.contains(e.target) && e.target !== btn){
       panel.classList.add('hidden');
+      btn.setAttribute('aria-expanded', 'false');
     }
   });
 
