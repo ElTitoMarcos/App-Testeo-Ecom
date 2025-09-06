@@ -162,6 +162,22 @@ body.dark #searchRow { background: #1a1b2e; }
 }
 body.dark #searchInput { border-color: #444; }
 
+#gptPrompt {
+  flex: 1 0 200px;
+  max-width: 320px;
+  padding: 6px;
+  border-radius: 4px;
+  border: 1px solid #ccc;
+  font-size: 14px;
+  resize: vertical;
+  overflow: hidden;
+}
+body.dark #gptPrompt {
+  background: #1f2344;
+  color: #eaeaea;
+  border-color: #444;
+}
+
 #searchRowRight {
   margin-left: auto;
   display: flex;
