@@ -24,11 +24,12 @@
     pop.querySelectorAll('.grp-item').forEach(el => {
       el.addEventListener('click', async () => {
         const id = parseInt(el.dataset.id);
+        const groupName = el.textContent;
         const ids = Array.from(selection || [], Number);
         if(!ids.length){ toast.info('Selecciona productos para añadir'); return; }
         try{
           await fetchJson('/add_to_list', {method:'POST', body: JSON.stringify({id, ids})});
-          toast.success('Productos añadidos al grupo');
+          toast.success(`${ids.length} añadidos a ${groupName}`);
           hide();
           loadLists();
         }catch(err){ console.error(err); toast.error('Error al añadir al grupo'); }
