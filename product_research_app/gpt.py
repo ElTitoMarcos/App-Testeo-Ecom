@@ -632,3 +632,50 @@ def recommend_winner_weights(
         }
     normalized = {k: v / total for k, v in cleaned.items()}
     return {"weights": normalized, "justification": justification}
+
+
+def summarize_top_products(api_key: str, model: str, products: List[Dict[str, Any]]) -> str:
+    """Generate a brief report highlighting top products based on their scores.
+
+    Args:
+        api_key: OpenAI API key.
+        model: Chat model identifier.
+        products: List of product dicts. Each item should include ``name`` (or
+            ``title``) and a mapping of scores under ``scores`` or ``variables``.
+
+    Returns:
+        A short natural language summary in Spanish suitable for display in an
+        "Insights IA" panel.
+
+    Raises:
+        OpenAIError: If the OpenAI API call fails.
+    """
+
+    # Build a concise description of each product and its variables
+    lines: List[str] = []
+    for idx, prod in enumerate(products, 1):
+        name = prod.get("name") or prod.get("title") or f"Producto {idx}"
+        scores = prod.get("scores") or prod.get("variables") or {}
+        score_str = ", ".join(f"{k}: {v}" for k, v in scores.items())
+        lines.append(f"{idx}. {name} - {score_str}")
+    products_block = "\n".join(lines)
+
+    prompt = (
+        "Eres un consultor de producto.\n"
+        "A continuación se listan varios productos con sus puntuaciones.\n"
+        "Resume en un informe breve cuáles son los 3 productos con mayor potencial según sus scores.\n"
+        "Explica en pocas frases qué variables son las más decisivas en su puntuación.\n\n"
+        f"{products_block}\n\nInforme breve:"
+    )
+    messages = [
+        {
+            "role": "system",
+            "content": "Eres un analista que redacta conclusiones claras en español.",
+        },
+        {"role": "user", "content": prompt},
+    ]
+    resp = call_openai_chat(api_key, model, messages)
+    try:
+        return resp["choices"][0]["message"]["content"].strip()
+    except Exception as exc:
+        raise OpenAIError(f"Respuesta inesperada de OpenAI: {exc}") from exc
