@@ -406,12 +406,6 @@ function renderTable() {
     cb.dataset.id = rowId;
     cb.checked = selection.has(rowId);
     tr.classList.toggle('selected', cb.checked);
-    cb.addEventListener('change', () => {
-      const id = cb.dataset.id;
-      if (cb.checked) selection.add(id); else selection.delete(id);
-      tr.classList.toggle('selected', cb.checked);
-      updateMasterState();
-    });
     tdSel.appendChild(cb);
     tr.appendChild(tdSel);
     columns.forEach(col => {
