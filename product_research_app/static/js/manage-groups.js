@@ -56,28 +56,22 @@
     });
   }
 
-  async function confirmDialog(msg){
+  function confirmDelete(name, id){
     return new Promise(res => {
       const wrap = document.createElement('div');
       wrap.className = 'confirm-overlay';
-      wrap.innerHTML = `<div class="confirm-box"><p>${msg}</p><div class="confirm-actions"><button class="btn-cancel">Cancelar</button><button class="btn-ok">Eliminar</button></div></div>`;
+      const lists = (window.listCache || []).filter(g => g.id !== id);
+      let opts = '<option value="" disabled selected>Mover a…</option>';
+      lists.forEach(l => { opts += `<option value="${l.id}">${l.name}</option>`; });
+      wrap.innerHTML = `<div class="confirm-box"><p>¿Eliminar grupo \"${name}\"?</p><select id="mgMoveSel">${opts}</select><div class="confirm-actions"><button class="btn-cancel">Cancelar</button><button class="btn-remove">Quitar del grupo</button><button class="btn-move" disabled>Mover y borrar</button></div></div>`;
       overlay.appendChild(wrap);
-      wrap.querySelector('.btn-cancel').onclick = () => { wrap.remove(); res(false); };
-      wrap.querySelector('.btn-ok').onclick = () => { wrap.remove(); res(true); };
-      wrap.querySelector('.btn-ok').focus();
-    });
-  }
-
-  async function promptDialog(title, placeholder){
-    return new Promise(res => {
-      const wrap = document.createElement('div');
-      wrap.className = 'confirm-overlay';
-      wrap.innerHTML = `<div class="confirm-box"><h3>${title}</h3><input class="prompt-input" placeholder="${placeholder}"><div class="confirm-actions"><button class="btn-cancel">Cancelar</button><button class="btn-ok">Aceptar</button></div></div>`;
-      overlay.appendChild(wrap);
-      const input = wrap.querySelector('input');
-      input.focus();
+      const sel = wrap.querySelector('#mgMoveSel');
+      const btnMove = wrap.querySelector('.btn-move');
+      sel.addEventListener('change', () => { btnMove.disabled = !sel.value; });
       wrap.querySelector('.btn-cancel').onclick = () => { wrap.remove(); res(null); };
-      wrap.querySelector('.btn-ok').onclick = () => { const v = input.value.trim(); wrap.remove(); res(v || null); };
+      wrap.querySelector('.btn-remove').onclick = () => { wrap.remove(); res({mode:'remove'}); };
+      btnMove.onclick = () => { const targetId = parseInt(sel.value); wrap.remove(); res({mode:'move', targetId}); };
+      wrap.querySelector('.btn-remove').focus();
     });
   }
 
@@ -104,18 +98,19 @@
   }
 
   async function handleDelete(e){
-    const row = e.target.closest('.group-row');
+    const btn = e.target;
+    const row = btn.closest('.group-row');
     const id = parseInt(row.dataset.id);
     const name = row.querySelector('.group-name').textContent;
-    const ok = await confirmDialog(`Eliminar grupo "${name}"?`);
-    if(!ok) return;
+    const choice = await confirmDelete(name, id);
+    if(!choice) return;
+    btn.disabled = true;
+    btn.classList.add('loading');
     try {
-      await deleteGroup(id);
-      await loadLists();
-      renderList(overlay.querySelector('#mgSearch').value.toLowerCase());
+      await deleteGroup(id, choice);
+      close();
       toast.success(`Grupo "${name}" eliminado`);
-      document.dispatchEvent(new CustomEvent('groups-updated'));
-    } catch(err){ console.error(err); toast.error('Error al eliminar grupo'); }
+    } catch(err){ console.error(err); toast.error(`Error al eliminar grupo: ${err.message}`); btn.disabled = false; btn.classList.remove('loading'); }
   }
 
   function open(){

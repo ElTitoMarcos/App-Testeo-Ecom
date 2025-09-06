@@ -39,12 +39,13 @@
     search.addEventListener('input', e => buildList(e.target.value.toLowerCase()));
     const create = pop.querySelector('#grpCreate');
     create.addEventListener('click', async () => {
-      const name = prompt('Nombre del grupo');
+      const name = await promptDialog('Crear grupo', 'Nombre del grupo');
       if(!name) return;
       try{
         await fetchJson('/create_list', {method:'POST', body: JSON.stringify({name})});
         await loadLists();
         buildList('');
+        toast.success(`Grupo "${name}" creado`);
       }catch(err){ console.error(err); toast.error('Error al crear grupo'); }
     });
     search.focus();
