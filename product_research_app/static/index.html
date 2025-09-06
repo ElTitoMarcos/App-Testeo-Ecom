@@ -166,17 +166,14 @@ body.dark .weight-slider {
   <tbody></tbody>
 </table>
 <div id="bottomBar" class="bottombar hidden">
-  <div style="display:flex; align-items:center; gap:8px;">
-    <button id="legendBtn" class="legend-btn" title="Mostrar leyenda" aria-label="Mostrar leyenda">ℹ️</button>
-    <span id="selCount"></span>
-  </div>
-  <div style="display:flex; gap:8px; align-items:center;">
-    <select id="groupSelect" aria-label="Filtrar por grupo"></select>
-    <button id="btnAddToGroup" disabled title="Añadir seleccionados al grupo" aria-label="Añadir seleccionados al grupo">Añadir a grupo</button>
-    <button id="btnDelete" disabled title="Eliminar seleccionados" aria-label="Eliminar seleccionados">Eliminar</button>
-    <button id="btnExport" disabled title="Exportar seleccionados" aria-label="Exportar seleccionados">Exportar</button>
-    <button id="btnColumns" title="Gestionar columnas" aria-label="Gestionar columnas">Columnas</button>
-  </div>
+  <button id="legendBtn" class="legend-btn" title="Mostrar leyenda" aria-label="Mostrar leyenda">ℹ️</button>
+  <span id="selCount"></span>
+  <select id="groupSelect" aria-label="Filtrar por grupo"></select>
+  <button id="btnAddToGroup" class="bar-btn" disabled title="Añadir seleccionados al grupo" aria-label="Añadir seleccionados al grupo">Añadir a grupo</button>
+  <button id="btnManageGroups" class="bar-btn" title="Gestionar grupos" aria-label="Gestionar grupos">Gestionar grupos</button>
+  <button id="btnDelete" class="bar-btn" disabled title="Eliminar seleccionados" aria-label="Eliminar seleccionados">Eliminar</button>
+  <button id="btnExport" class="bar-btn" disabled title="Exportar seleccionados" aria-label="Exportar seleccionados">Exportar</button>
+  <button id="btnColumns" class="bar-btn" title="Gestionar columnas" aria-label="Gestionar columnas">Columnas</button>
 </div>
 <div id="legendPop" class="popover hidden">
   <div>• Fila roja: duplicado</div>
@@ -950,21 +947,37 @@ async function loadLists() {
 
 window.loadLists = loadLists;
 
-async function deleteList(id, mode='remove', target=null){
+const deleteInFlight = {};
+async function deleteGroup(id, opts={}){
+  if(deleteInFlight[id]) return;
+  deleteInFlight[id] = true;
+  const {mode='remove', target=null} = opts;
   try{
-    const body = {id:id, mode:mode};
+    const body = {id, mode};
     if(mode === 'move' && target !== null){ body.targetGroupId = target; }
-    const data = await fetchJson('/delete_list', {method:'POST', body: JSON.stringify(body)});
-    await loadLists();
+    const res = await fetch('/delete_list', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    if(![200,204,404].includes(res.status)) throw new Error('bad status '+res.status);
+    // purge local caches
+    window.listCache = (window.listCache || []).filter(g => g.id !== id);
+    try{
+      const cache = JSON.parse(localStorage.getItem('groupsCache') || '[]');
+      localStorage.setItem('groupsCache', JSON.stringify(cache.filter(g => g.id !== id)));
+    }catch(e){/* ignore */}
     if(currentGroupFilter === id){
-      currentGroupFilter = -1;
-      fetchProducts();
-      toast.info('Grupo eliminado. Vista cambiada a "Todos"');
-    } else {
-      toast.success('Grupo eliminado');
+      const next = (mode === 'move' && target !== null) ? target : -1;
+      currentGroupFilter = next;
+      if(next === -1){ await fetchProducts(); }
+      else { await applyGroupFilter(next); }
     }
-    return data;
-  }catch(err){ console.error(err); toast.error('Error al eliminar grupo'); }
+    await loadLists();
+    document.dispatchEvent(new CustomEvent('groups-updated'));
+  }catch(err){
+    console.error(err);
+    toast.error('Error al eliminar grupo');
+    delete deleteInFlight[id];
+    throw err;
+  }
+  delete deleteInFlight[id];
 }
 
 async function applyGroupFilter(id){

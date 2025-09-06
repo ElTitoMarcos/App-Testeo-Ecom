@@ -10,6 +10,10 @@ body {
 :root {
   --dup-bg: #ffe5e5;
   --dup-accent: #ff3b30;
+  --bar-btn-bg: #e0f0ff;
+  --bar-btn-border: #0077cc;
+  --bar-btn-color: #0077cc;
+  --bar-btn-focus: #0077cc;
 }
 
 body.dark {
@@ -17,6 +21,10 @@ body.dark {
   color: #eaeaea;
   --dup-bg: #2A0000;
   --dup-accent: #FF3B30;
+  --bar-btn-bg: #1F2A44;
+  --bar-btn-border: #34456B;
+  --bar-btn-color: #E5EAF5;
+  --bar-btn-focus: #3A6FD8;
 }
 
 table {
@@ -92,6 +100,35 @@ body.dark .drawer.right {
 body.dark .legend-btn {
     background: #1F2A44;
     border: 1px solid #34456B;
+}
+
+.bar-btn {
+  background: var(--bar-btn-bg);
+  border: 1px solid var(--bar-btn-border);
+  border-radius: 8px;
+  padding: 4px 8px;
+  color: var(--bar-btn-color);
+  cursor: pointer;
+  opacity: 0.92;
+  transition: box-shadow .15s ease, opacity .15s ease, transform .1s ease;
+}
+.bar-btn:hover:not(:disabled) {
+  box-shadow: 0 2px 4px rgba(0,0,0,0.4);
+  opacity: 1;
+}
+.bar-btn:active:not(:disabled) {
+  transform: scale(0.98);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+  transition-duration: .08s;
+}
+.bar-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--bar-btn-focus);
+}
+.bar-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  box-shadow: none;
 }
 
 .popover {
@@ -234,8 +271,8 @@ body.dark .table tbody tr:nth-child(odd) { background: #11192B; }
   background: #f8fbff;
   border-top: 1px solid #ccc;
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  gap: 8px;
   padding: 8px 12px;
   z-index: 25;
   color: #222;

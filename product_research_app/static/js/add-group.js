@@ -19,7 +19,6 @@
     lists.forEach(l => { html += `<div class="grp-item" data-id="${l.id}" style="padding:4px 8px; cursor:pointer;">${l.name}</div>`; });
     html += '</div>';
     html += '<div id="grpCreate" style="padding:4px 8px; margin-top:8px; cursor:pointer; border-top:1px solid #ccc;">Crear grupo...</div>';
-    html += '<div id="grpManage" style="padding:4px 8px; cursor:pointer; border-top:1px solid #ccc;">Gestionar grupos</div>';
     pop.innerHTML = html;
 
     pop.querySelectorAll('.grp-item').forEach(el => {
@@ -48,8 +47,6 @@
         buildList('');
       }catch(err){ console.error(err); toast.error('Error al crear grupo'); }
     });
-    const manage = pop.querySelector('#grpManage');
-    manage.addEventListener('click', () => { hide(); openManageGroups(); });
     search.focus();
   }
 
@@ -85,4 +82,7 @@
     if(e.key === 'Escape') hide();
   });
   pop.addEventListener('wheel', e => e.stopPropagation());
+  document.addEventListener('groups-updated', () => {
+    if(!pop.classList.contains('hidden')) buildList(pop.querySelector('#grpSearch')?.value.toLowerCase()||'');
+  });
 })();
