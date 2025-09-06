@@ -13,19 +13,72 @@ body.dark {
 }
 
 :root {
-  --appbar-h: 60px;
-  --controlbar-h: 52px;
+  --topbar-h: 56px;
+  --toolbar-h: 44px;
 }
 
-.sticky-thead {
+/* Sticky top bars */
+.app-topbar, .table-toolbar {
+  display:flex;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:8px;
+  padding:8px 12px;
+  background:#f8fbff;
+  border-bottom:1px solid #ccc;
+  box-shadow:0 2px 4px rgba(0,0,0,0.05);
+}
+.app-topbar {
   position: sticky;
-  top: calc(var(--appbar-h) + var(--controlbar-h));
+  top: 0;
+  z-index: 1000;
+  min-height: var(--topbar-h);
+}
+.table-toolbar {
+  position: sticky;
+  top: var(--topbar-h, 56px);
+  z-index: 999;
+  min-height: var(--toolbar-h);
+}
+body.dark .app-topbar, body.dark .table-toolbar {
+  background:#0F1424;
+  border-bottom:1px solid #243150;
+  color:#E5EAF5;
+}
+.app-topbar .left, .app-topbar .right, .table-toolbar .left, .table-toolbar .right {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  flex-wrap:wrap;
+}
+.app-topbar .right, .table-toolbar .right { margin-left:auto; }
+/* Compact search input */
+.app-topbar #searchInput {
+  flex:1 1 clamp(240px, 28vw, 420px);
+}
+/* Consistent control heights */
+.app-topbar input,
+.app-topbar select,
+.app-topbar button,
+.table-toolbar input,
+.table-toolbar select,
+.table-toolbar button {
+  height:40px;
+  padding:0 12px;
+  box-sizing:border-box;
+}
+/* Sticky table header below the top bars */
+table thead th {
+  position: sticky;
+  top: calc(var(--topbar-h, 56px) + var(--toolbar-h, 44px));
   background: #f8fbff;
-  z-index: 10;
+  z-index: 998;
 }
-body.dark .sticky-thead {
-  background: #131A2E;
+body.dark table thead th {
+  background: #0F1424;
 }
+
+
 
 .drawer.right {
   position: fixed;
@@ -63,7 +116,7 @@ body.dark .legend-btn {
 .popover {
   position: fixed;
   right: 16px;
-  top: calc(var(--appbar-h) + var(--controlbar-h) + 56px);
+  top: calc(var(--topbar-h, 56px) + var(--toolbar-h, 44px) + 56px);
   background: #fff;
   border: 1px solid #ccc;
   padding: 10px 12px;
@@ -142,24 +195,7 @@ body.dark .chip button { color: #A9B4D0; }
 
 #topBar button:hover { background: #6e4ccf; }
 
-/* Control bar sticks beneath the app bar */
-#controlBar {
-  position: sticky;
-  top: var(--appbar-h);
-  z-index: 30;
-  background: #432874;
-  color: #fff;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 8px 12px;
-  gap: 8px;
-  flex-wrap: wrap;
-  width: 100%;
-  box-sizing: border-box;
-  min-height: var(--controlbar-h);
-}
-
+/* Table styling */
 .table tr { height: 52px; }
 .table td, .table th { padding: 8px 12px; }
 body.dark .table tbody tr:nth-child(odd) { background: #11192B; }
@@ -169,77 +205,9 @@ body.dark .table tbody tr:nth-child(odd) { background: #11192B; }
 .score-amber { background: #3A3119; color: #F1B44C; }
 .score-red { background: #3A1E1E; color: #F16969; }
 
-#controlBar button,
-#controlBar select {
-  background: #5a3da6;
-  color: #fff;
-  border: none;
-  border-radius: 4px;
-  padding: 6px 10px;
-  cursor: pointer;
-}
-
-#controlBar button:hover,
-#controlBar select:hover {
-  background: #6e4ccf;
-}
-
-#controlBar input[type="text"] {
-  padding: 8px 12px;
-  border-radius: 20px;
-  border: none;
-  background: #fff;
-  color: #000;
-}
-
-body.dark #controlBar {
-  background: #432874;
-  color: #fff;
-}
-
-body.dark #controlBar input[type="text"] {
-  background: #2e245c;
-  color: #fff;
-  border: 1px solid #5a3da6;
-}
-#controlBar .left,
-#controlBar .right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-#controlBar .left {
-  flex: 1 1 auto;
-  min-width: 0;
-  flex-wrap: wrap;
-  width: 100%;
-  box-sizing: border-box;
-}
-
-#controlBar .right {
-  flex: 0 0 auto;
-  justify-content: flex-end;
-}
-
-#searchInput {
-  flex: 0 1 auto;
-  width: clamp(280px, 32vw, 420px);
-  padding: 8px;
-  border-radius: 20px;
-  border: none;
-  font-size: 14px;
-}
-
 #activeFilterChips {
   display: flex;
   flex-wrap: wrap;
-}
-
-#controlBar input[type="text"],
-#controlBar button,
-#controlBar select {
-  height: 36px;
 }
 
 #productTable {
