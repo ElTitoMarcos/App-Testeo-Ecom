@@ -1290,7 +1290,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             weights_map = config.get_scoring_v2_weights()
             for pid in inserted_ids:
                 # Recupera el registro del producto
-                p_rec = database.get_product(conn_eval, pid)
+                p_rec = database.get_product(conn, pid)
                 # Ejecuta GPT para obtener puntuaciones v2
                 resp = gpt.evaluate_winner_score(
                     api_key, model,
@@ -1317,7 +1317,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "sources": {f: "gpt" for f in WINNER_V2_FIELDS},
                 }
                 database.insert_score(
-                    conn_eval,
+                    conn,
                     product_id=pid,
                     model=model or "",
                     total_score=0,
