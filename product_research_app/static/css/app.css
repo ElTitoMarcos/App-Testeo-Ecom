@@ -15,12 +15,11 @@ body.dark {
 :root {
   --appbar-h: 60px;
   --controlbar-h: 52px;
-  --table-offset: calc(var(--appbar-h) + var(--controlbar-h));
 }
 
 .sticky-thead {
   position: sticky;
-  top: var(--table-offset);
+  top: calc(var(--appbar-h) + var(--controlbar-h));
   background: #f8fbff;
   z-index: 10;
 }
@@ -64,7 +63,7 @@ body.dark .legend-btn {
 .popover {
   position: fixed;
   right: 16px;
-  top: calc(var(--table-offset) + 56px);
+  top: calc(var(--appbar-h) + var(--controlbar-h) + 56px);
   background: #fff;
   border: 1px solid #ccc;
   padding: 10px 12px;
@@ -122,7 +121,7 @@ body.dark .chip button { color: #A9B4D0; }
   position: sticky;
   top: var(--appbar-h);
   z-index: 30;
-  min-height: var(--controlbar-h);
+  height: var(--controlbar-h);
 }
 
 .table tr { height: 52px; }
@@ -156,6 +155,10 @@ body.dark #controlBar {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+#productTable {
+  margin-top: 0;
 }
 
 #productTable th:first-child,

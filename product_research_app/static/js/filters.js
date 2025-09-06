@@ -181,7 +181,6 @@ function updateStickyOffsets() {
   document.documentElement.style.setProperty('--appbar-h', `${a}px`);
   document.documentElement.style.setProperty('--controlbar-h', `${c}px`);
   tableOffset = a + c;
-  document.documentElement.style.setProperty('--table-offset', `${tableOffset}px`);
 }
 window.getTableOffset = () => tableOffset;
 window.addEventListener('load', updateStickyOffsets);
