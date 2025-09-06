@@ -676,7 +676,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.handle_upload()
             return
         if path == "/evaluate_all":
-            self.handle_evaluate_all()https://github.com/ElTitoMarcos/App-Testeo-Ecom/pull/64/conflict?name=product_research_app%252Fgpt.py&ancestor_oid=ca0e6e2a97fcb34b92632edc343e703ea04f9c64&base_oid=4d22af53d7d3a304a322450a65e1d167ac459b4f&head_oid=169b05c53655070eb97a8800d7f7c2f3952fa58b
+            self.handle_evaluate_all()
             return
         if path == "/setconfig":
             self.handle_setconfig()
@@ -695,6 +695,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/scoring/v2/gpt-evaluate":
             self.handle_scoring_v2_gpt_evaluate()
+            return
+        if path == "/scoring/v2/gpt-summary":
+            self.handle_scoring_v2_gpt_summary()
             return
         if path == "/delete":
             self.handle_delete()
@@ -1740,6 +1743,52 @@ class RequestHandler(BaseHTTPRequestHandler):
         out = {**scores, "justificacion": justifs, "source": sources}
         self._set_json()
         self.wfile.write(json.dumps(out).encode("utf-8"))
+
+    def handle_scoring_v2_gpt_summary(self):
+        """Generate an executive summary of top products using GPT."""
+
+        if not config.is_scoring_v2_enabled():
+            self._set_json(400)
+            self.wfile.write(
+                json.dumps({"error": "scoring v2 disabled"}).encode("utf-8")
+            )
+            return
+
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length).decode("utf-8") if length else ""
+        try:
+            data = json.loads(body) if body else {}
+        except Exception:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode("utf-8"))
+            return
+
+        products = data.get("products") or []
+        if not isinstance(products, list) or not products:
+            self._set_json(400)
+            self.wfile.write(
+                json.dumps({"error": "No products provided"}).encode("utf-8")
+            )
+            return
+
+        api_key = config.get_api_key() or os.environ.get("OPENAI_API_KEY")
+        model = config.get_model()
+        if not api_key or not model:
+            self._set_json(400)
+            self.wfile.write(
+                json.dumps({"error": "No API key configured"}).encode("utf-8")
+            )
+            return
+
+        try:
+            summary = gpt.summarize_top_products(api_key, model, products)
+        except Exception as exc:
+            self._set_json(500)
+            self.wfile.write(json.dumps({"error": str(exc)}).encode("utf-8"))
+            return
+
+        self._set_json()
+        self.wfile.write(json.dumps({"summary": summary}).encode("utf-8"))
 
     def handle_create_list(self):
         """Create a new user defined list (group) of products."""
