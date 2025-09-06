@@ -90,9 +90,25 @@ body.dark #pageBar, body.dark #tableToolbar {
   </header>
 </div>
 <div id="controlBar" role="toolbar" aria-label="Barra de controles" tabindex="0">
-  <div class="left"></div>
-  <div class="right"></div>
+  <div class="left">
+    <input type="text" id="searchInput" placeholder="Buscar producto o palabra clave..." style="flex:1; min-width:200px; padding:8px; border-radius:20px; border:1px solid #ccc; font-size:14px;" />
+    <button id="searchBtn">Buscar</button>
+    <button id="btnFilters">Filtros</button>
+    <div id="activeFilterChips" style="display:flex; flex-wrap:wrap;"></div>
+    <div id="listMeta">0 resultados</div>
+  </div>
+  <div class="right">
+    <button id="legendBtn" class="legend-btn">ℹ️</button>
+    <span id="selCount"></span>
+    <select id="groupSelect"></select>
+    <button id="btnAddToGroup" disabled>Añadir a grupo</button>
+    <button id="sendPrompt" type="button" aria-haspopup="dialog" aria-controls="promptDrawer">Consulta a GPT</button>
+    <button id="btnColumns">Columnas</button>
+    <button id="btnExport" disabled>Exportar</button>
+    <button id="btnDelete" disabled>Eliminar</button>
+  </div>
 </div>
+<input type="checkbox" id="selectAll" aria-label="Seleccionar todo" style="display:none;">
 <div id="config" style="display:none;">
   <label>API Key: <input type="password" id="apiKey" /></label>
   <button id="toggleApiKey" style="display:none;">Cambiar API Key</button>
@@ -177,26 +193,6 @@ body.dark #pageBar, body.dark #tableToolbar {
   </div>
 </div>
 
-<div id="bottomBar" class="bottombar">
-  <div class="controls">
-    <button id="legendBtn" class="legend-btn">ℹ️</button>
-    <input type="checkbox" id="selectAll" aria-label="Seleccionar todo">
-    <input type="text" id="searchInput" placeholder="Buscar producto o palabra clave..." style="flex:1; min-width:200px; padding:8px; border-radius:20px; border:1px solid #ccc; font-size:14px;" />
-    <button id="searchBtn">Buscar</button>
-    <button id="btnFilters">Filtros</button>
-    <div id="activeFilterChips" style="display:flex; flex-wrap:wrap;"></div>
-    <select id="groupSelect"></select>
-    <span id="selCount"></span>
-    <div id="listMeta">0 resultados</div>
-  </div>
-  <div class="actions">
-    <button id="btnAddToGroup" disabled>Añadir a grupo</button>
-    <button id="sendPrompt" type="button" aria-haspopup="dialog" aria-controls="promptDrawer">Consulta a GPT</button>
-    <button id="btnColumns">Columnas</button>
-    <button id="btnExport" disabled>Exportar</button>
-    <button id="btnDelete" disabled>Eliminar</button>
-  </div>
-</div>
 <table id="productTable">
   <thead class="sticky-thead">
     <tr id="headerRow"></tr>
