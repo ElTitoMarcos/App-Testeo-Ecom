@@ -295,9 +295,17 @@ def create_list(conn: sqlite3.Connection, name: str) -> int:
 
 
 def get_lists(conn: sqlite3.Connection) -> List[sqlite3.Row]:
-    """Return all lists."""
+    """Return all lists with product counts."""
     cur = conn.cursor()
-    cur.execute("SELECT * FROM lists ORDER BY name")
+    cur.execute(
+        """
+        SELECT l.id, l.name, COUNT(li.product_id) AS count
+        FROM lists l
+        LEFT JOIN list_items li ON li.list_id = l.id
+        GROUP BY l.id
+        ORDER BY l.name
+        """
+    )
     return cur.fetchall()
 
 
@@ -310,11 +318,68 @@ def add_product_to_list(conn: sqlite3.Connection, list_id: int, product_id: int)
     )
     conn.commit()
 
-def delete_list(conn: sqlite3.Connection, list_id: int) -> None:
-    """Delete a list by its ID, along with its associations."""
+def delete_list(
+    conn: sqlite3.Connection,
+    list_id: int,
+    mode: str = "remove",
+    target_list_id: int | None = None,
+) -> dict:
+    """Delete a list with options to detach or move products.
+
+    Args:
+        list_id: ID of the list to delete.
+        mode: 'remove' to detach products or 'move' to reassign them.
+        target_list_id: destination list ID when mode is 'move'.
+
+    Returns:
+        Dict summarising the action performed.
+    """
     cur = conn.cursor()
-    cur.execute("DELETE FROM lists WHERE id = ?", (list_id,))
-    conn.commit()
+    # Ensure list exists and fetch its name
+    cur.execute("SELECT id, name FROM lists WHERE id = ?", (list_id,))
+    row = cur.fetchone()
+    if not row:
+        raise ValueError("List not found")
+
+    # Protected lists (by name)
+    if row["name"].lower() in {"todos", "all"}:
+        raise ValueError("Protected list")
+
+    if mode == "move":
+        if target_list_id is None:
+            raise ValueError("target_list_id required for move")
+        if target_list_id == list_id:
+            raise ValueError("target_list_id must be different")
+        # Ensure target exists
+        cur.execute("SELECT id FROM lists WHERE id = ?", (target_list_id,))
+        if not cur.fetchone():
+            raise ValueError("Target list not found")
+        # Get product ids in source
+        cur.execute(
+            "SELECT product_id FROM list_items WHERE list_id = ?", (list_id,)
+        )
+        products = [r[0] for r in cur.fetchall()]
+        moved = 0
+        for pid in products:
+            cur.execute(
+                "INSERT OR IGNORE INTO list_items (list_id, product_id) VALUES (?, ?)",
+                (target_list_id, pid),
+            )
+            moved += cur.rowcount
+        # Remove old associations and list
+        cur.execute("DELETE FROM list_items WHERE list_id = ?", (list_id,))
+        cur.execute("DELETE FROM lists WHERE id = ?", (list_id,))
+        conn.commit()
+        return {"deletedGroup": row["name"], "movedCount": moved}
+    else:
+        # Remove list; ON DELETE CASCADE cleans associations
+        cur.execute(
+            "SELECT COUNT(*) FROM list_items WHERE list_id = ?", (list_id,)
+        )
+        count = cur.fetchone()[0]
+        cur.execute("DELETE FROM lists WHERE id = ?", (list_id,))
+        conn.commit()
+        return {"deletedGroup": row["name"], "detachedCount": count}
 
 
 def get_products_in_list(conn: sqlite3.Connection, list_id: int) -> List[sqlite3.Row]:

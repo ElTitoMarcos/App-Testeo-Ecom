@@ -345,12 +345,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({key: score[key] for key in score.keys()}).encode("utf-8"))
             return
         if path == "/lists":
-            # return all saved groups/lists
+            # return all saved groups/lists with product counts
             conn = ensure_db()
             lsts = database.get_lists(conn)
             data = []
             for l in lsts:
-                data.append({"id": l["id"], "name": l["name"]})
+                data.append({"id": l["id"], "name": l["name"], "count": l["count"]})
             self._set_json()
             self.wfile.write(json.dumps(data).encode("utf-8"))
             return
@@ -1839,7 +1839,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps({"id": list_id, "name": name}).encode('utf-8'))
 
     def handle_delete_list(self):
-        """Delete an existing list by ID."""
+        """Delete an existing list by ID with options to move or remove products."""
         length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(length).decode('utf-8') if length else ''
         try:
@@ -1850,14 +1850,22 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         try:
             lid = int(data.get('id'))
+            mode = data.get('mode', 'remove')
+            tgt = data.get('targetGroupId')
+            if tgt is not None:
+                tgt = int(tgt)
         except Exception:
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "ID inválido"}).encode('utf-8'))
+            self.wfile.write(json.dumps({"error": "Datos inválidos"}).encode('utf-8'))
             return
         conn = ensure_db()
-        database.delete_list(conn, lid)
-        self._set_json()
-        self.wfile.write(json.dumps({"status": "deleted"}).encode('utf-8'))
+        try:
+            result = database.delete_list(conn, lid, mode=mode, target_list_id=tgt)
+            self._set_json()
+            self.wfile.write(json.dumps(result).encode('utf-8'))
+        except Exception as exc:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": str(exc)}).encode('utf-8'))
 
     def handle_add_to_list(self):
         """Add one or more products to a list."""
