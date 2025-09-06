@@ -117,15 +117,38 @@ body.dark .chip {
 }
 body.dark .chip button { color: #A9B4D0; }
 
-#topBar { position: sticky; top: 0; z-index: 40; }
+#topBar {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  background: #432874;
+  color: #fff;
+  width: 100%;
+}
+
+#topBar header {
+  background: inherit;
+  color: inherit;
+}
+
+#topBar button {
+  background: #5a3da6;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+
+#topBar button:hover { background: #6e4ccf; }
 
 /* Control bar sticks beneath the app bar */
 #controlBar {
   position: sticky;
   top: var(--appbar-h);
   z-index: 30;
-  background: #f8fbff;
-  border-bottom: 1px solid #ccc;
+  background: #432874;
+  color: #fff;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -146,10 +169,38 @@ body.dark .table tbody tr:nth-child(odd) { background: #11192B; }
 .score-amber { background: #3A3119; color: #F1B44C; }
 .score-red { background: #3A1E1E; color: #F16969; }
 
+#controlBar button,
+#controlBar select {
+  background: #5a3da6;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+#controlBar button:hover,
+#controlBar select:hover {
+  background: #6e4ccf;
+}
+
+#controlBar input[type="text"] {
+  padding: 8px 12px;
+  border-radius: 20px;
+  border: none;
+  background: #fff;
+  color: #000;
+}
+
 body.dark #controlBar {
-  background: #0F1424;
-  border-bottom: 1px solid #243150;
-  color: #E5EAF5;
+  background: #432874;
+  color: #fff;
+}
+
+body.dark #controlBar input[type="text"] {
+  background: #2e245c;
+  color: #fff;
+  border: 1px solid #5a3da6;
 }
 #controlBar .left,
 #controlBar .right {
@@ -176,7 +227,7 @@ body.dark #controlBar {
   width: clamp(280px, 32vw, 420px);
   padding: 8px;
   border-radius: 20px;
-  border: 1px solid #ccc;
+  border: none;
   font-size: 14px;
 }
 
