@@ -151,18 +151,19 @@ body.dark #controlBar {
   border-bottom: 1px solid #243150;
   color: #E5EAF5;
 }
-#controlBar .left, #controlBar .right {
+#controlBar .left,
+#controlBar .right {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
-  width: 100%;
-  box-sizing: border-box;
 }
 
 #controlBar .left {
   flex: 1 1 auto;
   min-width: 0;
+  flex-wrap: wrap;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 #controlBar .right {
@@ -171,7 +172,7 @@ body.dark #controlBar {
 }
 
 #searchInput {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   width: clamp(280px, 32vw, 420px);
   padding: 8px;
   border-radius: 20px;

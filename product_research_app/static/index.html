@@ -14,8 +14,6 @@ body.dark header { background: linear-gradient(90deg, #2e2e78, #6547a6); }
 .container { max-width: 1200px; margin: 0 auto; padding: 10px; }
 .card { background:#fff; border-radius:8px; box-shadow:0 0 10px rgba(0,0,0,0.1); padding:15px; margin-bottom:15px; }
 body.dark .card { background:#262a51; box-shadow:0 0 10px rgba(0,0,0,0.4); }
-/* Controls */
-#controls { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
 button { padding:8px 14px; border:none; border-radius:4px; cursor:pointer; background: linear-gradient(90deg,#0062ff,#00c8ff); color:#fff; font-weight:600; box-shadow:0 3px 5px rgba(0,0,0,0.2); transition:opacity 0.2s; }
 button:hover { opacity:0.85; }
 body.dark button { background: linear-gradient(90deg,#3a3cad,#7a53d6); color:#fff; }
@@ -24,7 +22,7 @@ body.dark button { background: linear-gradient(90deg,#3a3cad,#7a53d6); color:#ff
 body.dark #btnFilters { background:#2a2d5c; border-color:#7a53d6; color:#a9a9ff; }
 select, input[type="text"], input[type="password"] { padding:6px; border-radius:4px; border:1px solid #ccc; }
 body.dark select, body.dark input[type="text"], body.dark input[type="password"] { background:#1f2344; color:#eaeaea; border-color:#444; }
-table { width:100%; border-collapse:collapse; margin-top:10px; }
+table { width:100%; border-collapse:collapse; }
 th, td { padding:8px; border:1px solid #ccc; }
 body.dark th, body.dark td { border-color:#444; }
 tbody tr:nth-child(even) { background:#f2f6ff; }
@@ -90,7 +88,7 @@ body.dark #pageBar, body.dark #tableToolbar {
   </header>
 </div>
 <!-- Unified control bar replacing page and table toolbars -->
-<div id="controlBar" role="toolbar" aria-label="Barra de controles" tabindex="0">
+<div id="controlBar" role="toolbar" aria-label="Barra de controles">
   <div class="left">
     <input type="text" id="searchInput" placeholder="Buscar producto o palabra clave..." />
     <button id="searchBtn">Buscar</button>
