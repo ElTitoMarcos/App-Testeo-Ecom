@@ -72,14 +72,12 @@ body.dark .weight-slider {
     <button id="searchBtn">Buscar</button>
     <button id="btnFilters">Filtros</button>
     <div id="activeFilterChips"></div>
-    <select id="groupSelect" aria-label="Seleccionar grupo"></select>
     <input type="text" id="newListName" placeholder="Nombre del grupo" style="padding:4px; min-width:120px;">
     <button id="createListBtn">Crear</button>
     <textarea id="gptPrompt" rows="1" maxlength="2000" placeholder="Escribe consulta para GPT..." aria-label="Escribe consulta para GPT..."></textarea>
     <button id="sendPrompt">Enviar consulta a GPT</button>
     <div id="searchRowRight">
-      <div id="listMeta">0 resultados • Vista: Tabla</div>
-      <select id="viewGroup" aria-label="Filtrar por grupo"></select>
+      <div id="listMeta">0 resultados</div>
     </div>
   </div>
 </div>
@@ -175,6 +173,7 @@ body.dark .weight-slider {
   <div style="display:flex; gap:8px; align-items:center;">
     <button id="btnDelete" disabled title="Eliminar seleccionados" aria-label="Eliminar seleccionados">Eliminar</button>
     <button id="btnExport" disabled title="Exportar seleccionados" aria-label="Exportar seleccionados">Exportar</button>
+    <select id="groupSelect" aria-label="Filtrar por grupo"></select>
     <button id="btnAddToGroup" disabled title="Añadir seleccionados al grupo" aria-label="Añadir seleccionados al grupo">Añadir a grupo</button>
     <button id="btnColumns" title="Gestionar columnas" aria-label="Gestionar columnas">Columnas</button>
   </div>
@@ -246,13 +245,11 @@ let allProducts = [];
 let products = [];
 let sortField = null;
 let sortDir = 1;
-let currentViewLabel = 'Tabla';
-
 function updateResultsBadge(total) {
   const meta = document.getElementById('listMeta');
   if (!meta) return;
   const count = typeof total === 'number' ? total : (Array.isArray(products) ? products.length : 0);
-  meta.textContent = `${count} resultados • Vista: ${currentViewLabel}`;
+  meta.textContent = `${count} resultados`;
 }
 
 window.updateResultsBadge = updateResultsBadge;
@@ -878,40 +875,25 @@ let currentListId = -1; // -1 indicates all products
 
 async function loadLists() {
   try {
-    const assignSelect = document.getElementById('groupSelect');
-    const filterSelect = document.getElementById('viewGroup');
-    if (!assignSelect || !filterSelect) return;
+    const select = document.getElementById('groupSelect');
+    if (!select) return;
     const lists = await fetchJson('/lists');
-    assignSelect.innerHTML = '';
-    filterSelect.innerHTML = '';
+    select.innerHTML = '';
 
-    // option for no list in assign select
-    const placeholder = document.createElement('option');
-    placeholder.value = '';
-    placeholder.textContent = 'Selecciona grupo';
-    assignSelect.appendChild(placeholder);
-
-    // option for viewing all products
     const allOpt = document.createElement('option');
     allOpt.value = -1;
     allOpt.textContent = 'Todos';
-    filterSelect.appendChild(allOpt);
+    select.appendChild(allOpt);
 
-    // Add each list to both selects
     (lists || []).forEach(lst => {
-      const optAssign = document.createElement('option');
-      optAssign.value = lst.id;
-      optAssign.textContent = lst.name;
-      assignSelect.appendChild(optAssign);
-
-      const optFilter = document.createElement('option');
-      optFilter.value = lst.id;
-      optFilter.textContent = lst.name;
-      filterSelect.appendChild(optFilter);
+      const opt = document.createElement('option');
+      opt.value = lst.id;
+      opt.textContent = lst.name;
+      select.appendChild(opt);
     });
 
-    filterSelect.value = currentListId.toString();
-    filterSelect.onchange = (e) => {
+    select.value = currentListId.toString();
+    select.onchange = (e) => {
       const id = parseInt(e.target.value);
       loadList(id);
     };
@@ -970,7 +952,7 @@ document.getElementById('createListBtn').onclick = async () => {
 document.getElementById('btnAddToGroup').onclick = async () => {
   const listSelect = document.getElementById('groupSelect');
   const lid = parseInt(listSelect.value);
-  if(!lid){ toast.info('Selecciona un grupo'); return; }
+  if(!lid || lid < 0){ toast.info('Selecciona un grupo'); return; }
   const ids = Array.from(selection, Number);
   if(!ids.length){ toast.info('Selecciona productos para añadir'); return; }
   try{

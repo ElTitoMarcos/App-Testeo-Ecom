@@ -49,7 +49,10 @@ body.dark .table-toolbar {
   z-index: 15;
 }
 body.dark .sticky-thead {
-  background: #131A2E;
+  background: #1a1b2e;
+}
+.sticky-thead th {
+  border-top: 0;
 }
 
 .drawer.right {
@@ -144,13 +147,14 @@ body.dark .chip {
 }
 body.dark .chip button { color: #A9B4D0; }
 
-#topBar { position: sticky; top: 0; z-index: 50; }
+#topBar { position: sticky; top: 0; z-index: 50; background: #f8fbff; }
+body.dark #topBar { background: #1a1b2e; }
 #searchRow {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  padding: 8px 15px;
+  padding: 8px 15px 0 15px;
   background: #f8fbff;
 }
 body.dark #searchRow { background: #1a1b2e; }
@@ -192,7 +196,7 @@ body.dark #gptPrompt {
 
 #listMeta { white-space: nowrap; }
 
-#viewGroup { min-width: 120px; }
+#groupSelect { min-width: 120px; }
 
 #activeFilterChips {
   display: flex;
