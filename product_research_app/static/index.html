@@ -49,6 +49,27 @@ body.dark pre { background:#2e315f; }
 body.dark .weight-slider {
   accent-color:#7a53d6;
 }
+#pageBar, #tableToolbar {
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:8px;
+  background:#f8fbff;
+  border-bottom:1px solid #ccc;
+  padding:8px 12px;
+}
+body.dark #pageBar, body.dark #tableToolbar {
+  background:#0F1424;
+  border-bottom:1px solid #243150;
+  color:#E5EAF5;
+}
+#pageBar .left, #pageBar .right, #tableToolbar .left, #tableToolbar .right {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  flex-wrap:wrap;
+}
 </style>
 </head>
 <body class="dark">
