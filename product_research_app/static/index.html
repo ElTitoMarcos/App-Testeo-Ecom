@@ -226,6 +226,7 @@ body.dark .weight-slider {
 <script src="/static/js/table.js"></script>
 <script src="/static/js/columns.js"></script>
 <script src="/static/js/add-group.js"></script>
+<script src="/static/js/manage-groups.js"></script>
 <script type="module">
 import { fetchJson } from "/static/js/net.js";
 window.fetchJson = fetchJson;
@@ -908,14 +909,20 @@ async function loadLists() {
 
 window.loadLists = loadLists;
 
-async function deleteList(id){
+async function deleteList(id, mode='remove', target=null){
   try{
-    const data = await fetchJson('/delete_list', {method:'POST', body: JSON.stringify({id:id})});
-    loadLists();
+    const body = {id:id, mode:mode};
+    if(mode === 'move' && target !== null){ body.targetGroupId = target; }
+    const data = await fetchJson('/delete_list', {method:'POST', body: JSON.stringify(body)});
+    await loadLists();
     if(currentGroupFilter === id){
       currentGroupFilter = -1;
       fetchProducts();
+      toast.info('Grupo eliminado. Vista cambiada a "Todos"');
+    } else {
+      toast.success('Grupo eliminado');
     }
+    return data;
   }catch(err){ console.error(err); toast.error('Error al eliminar grupo'); }
 }
 
