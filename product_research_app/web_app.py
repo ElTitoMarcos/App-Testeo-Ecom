@@ -1283,57 +1283,55 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._set_json(500)
             self.wfile.write(json.dumps({"error": str(exc)}).encode('utf-8'))
             return
-        # Automatically evaluate newly inserted products with offline heuristic if any
-        if inserted_ids:
-            conn_eval = ensure_db()
-            weights_map = config.get_weights()
-            sum_weights = sum(weights_map.values()) or 1.0
+        # Al final de handle_upload, después de inserted_ids y de la evaluación heurística
+        if inserted_ids and config.is_scoring_v2_enabled():
+            api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
+            model = config.get_model()
+            weights_map = config.get_scoring_v2_weights()
             for pid in inserted_ids:
-                # skip if already has a score
-                if database.get_scores_for_product(conn_eval, pid):
-                    continue
+                # Recupera el registro del producto
                 p_rec = database.get_product(conn_eval, pid)
-                if not p_rec:
-                    continue
-                offline = offline_evaluate(dict(p_rec))
-                metrics = {
-                    'momentum': offline['momentum'],
-                    'saturation': offline['saturation'],
-                    'differentiation': offline['differentiation'],
-                    'social_proof': offline['social_proof'],
-                    'margin': offline['margin'],
-                    'logistics': offline['logistics'],
+                # Ejecuta GPT para obtener puntuaciones v2
+                resp = gpt.evaluate_winner_score(
+                    api_key, model,
+                    {
+                        "title": p_rec["name"],
+                        "description": p_rec["description"],
+                        "category": p_rec["category"],
+                        "metrics": json.loads(p_rec.get("extra") or "{}"),
+                    },
+                )
+                scores = resp.get("scores", {})    # magnitud_deseo, nivel_consciencia, etc.
+                justifs = resp.get("justifications", {})
+                # Rellena los campos faltantes con valores neutros (ej. 3.0)
+                for f in WINNER_V2_FIELDS:
+                    scores[f] = scores.get(f, 3.0)
+                # Calcula puntuación total (raw_score y pct)
+                weighted = sum(scores[f] * weights_map.get(f, 0.0) for f in WINNER_V2_FIELDS)
+                raw_score = weighted * 8.0
+                pct = ((raw_score - 8.0) / 32.0) * 100.0
+                breakdown = {
+                    "scores": scores,
+                    "justifications": justifs,
+                    "weights": weights_map,
+                    "sources": {f: "gpt" for f in WINNER_V2_FIELDS},
                 }
-                weighted_total = (
-                    metrics['momentum'] * weights_map.get('momentum', 1.0)
-                    + metrics['saturation'] * weights_map.get('saturation', 1.0)
-                    + metrics['differentiation'] * weights_map.get('differentiation', 1.0)
-                    + metrics['social_proof'] * weights_map.get('social_proof', 1.0)
-                    + metrics['margin'] * weights_map.get('margin', 1.0)
-                    + metrics['logistics'] * weights_map.get('logistics', 1.0)
-                ) / sum_weights
-                # convert to score out of 100
-                try:
-                    score_int = int(round(((weighted_total - 1.0) / 8.0) * 100))
-                    if score_int < 0:
-                        score_int = 0
-                    if score_int > 100:
-                        score_int = 100
-                except Exception:
-                    score_int = int(round(weighted_total * 10))
                 database.insert_score(
                     conn_eval,
                     product_id=pid,
-                    model='heuristic',
-                    total_score=score_int,
-                    momentum=metrics['momentum'],
-                    saturation=metrics['saturation'],
-                    differentiation=metrics['differentiation'],
-                    social_proof=metrics['social_proof'],
-                    margin=metrics['margin'],
-                    logistics=metrics['logistics'],
-                    summary=offline['summary'],
-                    explanations=offline['explanations'],
+                    model=model or "",
+                    total_score=0,
+                    momentum=0,
+                    saturation=0,
+                    differentiation=0,
+                    social_proof=0,
+                    margin=0,
+                    logistics=0,
+                    summary="",
+                    explanations={},
+                    winner_score_v2_raw=raw_score,
+                    winner_score_v2_pct=pct,
+                    winner_score_v2_breakdown=breakdown,
                 )
         self._set_json()
         self.wfile.write(json.dumps({"inserted": inserted}).encode('utf-8'))

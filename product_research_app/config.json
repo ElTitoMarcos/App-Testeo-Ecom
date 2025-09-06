@@ -1,0 +1,12 @@
+{
+  "scoring_v2_weights": {
+    "magnitud_deseo": 0.125,
+    "nivel_consciencia": 0.125,
+    "saturacion_mercado": 0.125,
+    "facilidad_anuncio": 0.125,
+    "facilidad_logistica": 0.125,
+    "escalabilidad": 0.125,
+    "engagement_shareability": 0.125,
+    "durabilidad_recurrencia": 0.125
+  }
+}

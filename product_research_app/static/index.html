@@ -597,11 +597,19 @@ document.getElementById('autoWeightsGpt').onclick = async () => {
   }
 };
 document.getElementById('autoWeightsStat').onclick = async () => {
-  const res = await fetchJson('/scoring/v2/auto-weights-stat',{method:'POST'});
-  if(res.error){ toast.error(res.error); return; }
-  renderWeights(res.weights);
-  await saveWeightsConfig(res.weights);
-  toast.success('Pesos guardados');
+  const res = await fetchJson('/scoring/v2/auto-weights-stat', {method:'POST'});
+  if (res.error) {
+    toast.error(res.error);
+    return;
+  }
+  const msg = 'Pesos sugeridos por correlación:\n' +
+              JSON.stringify(res.weights, null, 2) +
+              '\n¿Aplicarlos?';
+  if (confirm(msg)) {
+    renderWeights(res.weights);
+    await saveWeightsConfig(res.weights);
+    toast.success('Pesos guardados (estadístico)');
+  }
 };
 // Handle file upload: clicking the upload button opens file chooser
 const fileInputEl = document.getElementById('fileInput');
