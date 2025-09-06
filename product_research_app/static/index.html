@@ -69,12 +69,12 @@ body.dark .weight-slider {
   </header>
   <!-- Search bar row with controls -->
   <div id="searchRow">
-    <input type="text" id="searchInput" placeholder="Buscar producto o palabra clave..." />
+    <input type="text" id="searchInput" placeholder="Buscar producto o palabra clave..." aria-label="Buscar productos" />
     <button id="searchBtn">Buscar</button>
     <button id="btnFilters">Filtros</button>
     <div id="activeFilterChips"></div>
     <div style="display:flex; gap:6px; align-items:center;">
-      <select id="groupSelect"></select>
+      <select id="groupSelect" aria-label="Seleccionar grupo"></select>
       <button id="btnAddToGroup">Añadir</button>
     </div>
     <input type="text" id="newListName" placeholder="Nombre del grupo" style="padding:4px; min-width:120px;">
@@ -83,13 +83,11 @@ body.dark .weight-slider {
     <button id="btnColumns">Columnas</button>
     <button id="btnDelete" disabled>Eliminar</button>
     <button id="btnExport" disabled>Exportar</button>
+    <div id="searchRowRight">
+      <div id="listMeta">0 resultados • Vista: Tabla</div>
+      <select id="viewGroup" aria-label="Filtrar por grupo"></select>
+    </div>
   </div>
-  <div id="listMeta">0 resultados • Vista: Tabla ▾ (Tarjetas)</div>
-</div>
-<!-- Groups/Lists management -->
-<div id="listsSection" class="card" style="margin-top:5px; padding:10px; max-width:420px;">
-  <strong>Grupos:</strong>
-  <div id="listsContainer" style="margin:6px 0; display:flex; flex-wrap:wrap; gap:6px;"></div>
 </div>
 <div id="config" style="display:none;">
   <label>API Key: <input type="password" id="apiKey" /></label>
@@ -243,6 +241,16 @@ let allProducts = [];
 let products = [];
 let sortField = null;
 let sortDir = 1;
+let currentViewLabel = 'Tabla';
+
+function updateResultsBadge(total) {
+  const meta = document.getElementById('listMeta');
+  if (!meta) return;
+  const count = typeof total === 'number' ? total : (Array.isArray(products) ? products.length : 0);
+  meta.textContent = `${count} resultados • Vista: ${currentViewLabel}`;
+}
+
+window.updateResultsBadge = updateResultsBadge;
 window.allProducts = allProducts;
 window.products = products;
 const columns = [
@@ -513,7 +521,7 @@ function renderTable() {
     tbody.appendChild(tr);
   });
   currentPageIds = products.map(p => String(p.id));
-  document.getElementById('listMeta').textContent = `${currentPageIds.length} resultados • Vista: Tabla ▾ (Tarjetas)`; // TODO: implementar vista Tarjetas
+  updateResultsBadge(currentPageIds.length);
   if (window.refreshColumns) window.refreshColumns();
   if (window.applyColumnVisibility) window.applyColumnVisibility();
   updateMasterState();
@@ -676,15 +684,19 @@ document.getElementById('saveConfig').onclick = async () => {
 document.getElementById('searchBtn').onclick = () => {
   const term = document.getElementById('searchInput').value.trim().toLowerCase();
   const tbody = document.querySelector('#productTable tbody');
+  let visible = 0;
   Array.from(tbody.rows).forEach(row => {
     if (!term) {
       row.style.display = '';
+      visible++;
       return;
     }
     const cells = Array.from(row.cells).map(td => td.textContent.toLowerCase());
     const match = cells.some(text => text.includes(term));
     row.style.display = match ? '' : 'none';
+    if (match) visible++;
   });
+  updateResultsBadge(visible);
 };
 document.getElementById('sendPrompt').onclick = async () => {
   const prompt = document.getElementById('customPrompt').value.trim();
@@ -820,68 +832,43 @@ let currentListId = -1; // -1 indicates all products
 
 async function loadLists() {
   try {
+    const assignSelect = document.getElementById('groupSelect');
+    const filterSelect = document.getElementById('viewGroup');
+    if (!assignSelect || !filterSelect) return;
     const lists = await fetchJson('/lists');
-    const container = document.getElementById('listsContainer');
-    const select = document.getElementById('groupSelect');
-    container.innerHTML = '';
-    select.innerHTML = '';
+    assignSelect.innerHTML = '';
+    filterSelect.innerHTML = '';
+
     // option for no list in assign select
     const placeholder = document.createElement('option');
     placeholder.value = '';
     placeholder.textContent = 'Selecciona grupo';
-    select.appendChild(placeholder);
-    // Add a button to view all products
-    const allBtn = document.createElement('button');
-    allBtn.textContent = 'Todos';
-    allBtn.style.padding = '4px 8px';
-    allBtn.style.borderRadius = '4px';
-    allBtn.style.border = '1px solid #34456B';
-    allBtn.style.background = '#1F2A44';
-    allBtn.style.color = '#E5EAF5';
-    allBtn.style.cursor = 'pointer';
-    allBtn.onclick = () => {
-      currentListId = -1;
-      loadList(-1);
-    };
-    const allWrapper = document.createElement('span');
-    allWrapper.appendChild(allBtn);
-    container.appendChild(allWrapper);
+    assignSelect.appendChild(placeholder);
 
-    // Add each list
-    lists.forEach(lst => {
-      // entry in container
-      const btn = document.createElement('button');
-      btn.textContent = lst.name;
-      btn.style.padding = '4px 8px';
-      btn.style.borderRadius = '4px';
-      btn.style.border = '1px solid #34456B';
-      btn.style.background = currentListId === lst.id ? '#33467B' : '#1F2A44';
-      btn.style.color = currentListId === lst.id ? '#FFFFFF' : '#E5EAF5';
-      btn.style.cursor = 'pointer';
-      btn.onclick = () => {
-        currentListId = lst.id;
-        loadList(lst.id);
-      };
-      // delete icon
-      const del = document.createElement('span');
-      del.textContent = ' ✖';
-      del.style.marginLeft = '4px';
-      del.style.color = 'red';
-      del.style.cursor = 'pointer';
-      del.onclick = (ev) => {
-        ev.stopPropagation();
-        toast.info('¿Eliminar grupo?', {actionText:'Eliminar', onAction: () => deleteList(lst.id)});
-      };
-      const wrapper = document.createElement('span');
-      wrapper.appendChild(btn);
-      wrapper.appendChild(del);
-      container.appendChild(wrapper);
-      // option in select
-      const opt = document.createElement('option');
-      opt.value = lst.id;
-      opt.textContent = lst.name;
-      select.appendChild(opt);
+    // option for viewing all products
+    const allOpt = document.createElement('option');
+    allOpt.value = -1;
+    allOpt.textContent = 'Todos';
+    filterSelect.appendChild(allOpt);
+
+    // Add each list to both selects
+    (lists || []).forEach(lst => {
+      const optAssign = document.createElement('option');
+      optAssign.value = lst.id;
+      optAssign.textContent = lst.name;
+      assignSelect.appendChild(optAssign);
+
+      const optFilter = document.createElement('option');
+      optFilter.value = lst.id;
+      optFilter.textContent = lst.name;
+      filterSelect.appendChild(optFilter);
     });
+
+    filterSelect.value = currentListId.toString();
+    filterSelect.onchange = (e) => {
+      const id = parseInt(e.target.value);
+      loadList(id);
+    };
   } catch(err) {
     console.error(err);
   }
@@ -908,6 +895,7 @@ async function loadList(id){
     return;
   }
   try{
+    currentListId = id;
     const data = await fetchJson('/list/' + id);
     allProducts = data;
     products = [...allProducts];
