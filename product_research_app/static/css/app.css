@@ -20,7 +20,6 @@ body.dark {
 /* Sticky top bars */
 .app-topbar, .table-toolbar {
   display:flex;
-  justify-content:space-between;
   align-items:center;
   flex-wrap:wrap;
   gap:8px;
@@ -52,8 +51,22 @@ body.dark .app-topbar, body.dark .table-toolbar {
   gap:8px;
   flex-wrap:wrap;
 }
-/* Smaller search input */
-.app-topbar #searchInput { width: 200px; max-width: 220px; }
+.app-topbar .right, .table-toolbar .right { margin-left:auto; }
+/* Compact search input */
+.app-topbar #searchInput {
+  flex:1 1 clamp(240px, 28vw, 420px);
+}
+/* Consistent control heights */
+.app-topbar input,
+.app-topbar select,
+.app-topbar button,
+.table-toolbar input,
+.table-toolbar select,
+.table-toolbar button {
+  height:40px;
+  padding:0 12px;
+  box-sizing:border-box;
+}
 /* Sticky table header below the top bars */
 table thead th {
   position: sticky;
@@ -182,11 +195,7 @@ body.dark .chip button { color: #A9B4D0; }
 
 #topBar button:hover { background: #6e4ccf; }
 
-/* Control bar sticks beneath the app bar */
-#controlBar {
-  /* deprecated */
-}
-
+/* Table styling */
 .table tr { height: 52px; }
 .table td, .table th { padding: 8px 12px; }
 body.dark .table tbody tr:nth-child(odd) { background: #11192B; }
@@ -196,77 +205,9 @@ body.dark .table tbody tr:nth-child(odd) { background: #11192B; }
 .score-amber { background: #3A3119; color: #F1B44C; }
 .score-red { background: #3A1E1E; color: #F16969; }
 
-#controlBar button,
-#controlBar select {
-  background: #5a3da6;
-  color: #fff;
-  border: none;
-  border-radius: 4px;
-  padding: 6px 10px;
-  cursor: pointer;
-}
-
-#controlBar button:hover,
-#controlBar select:hover {
-  background: #6e4ccf;
-}
-
-#controlBar input[type="text"] {
-  padding: 8px 12px;
-  border-radius: 20px;
-  border: none;
-  background: #fff;
-  color: #000;
-}
-
-body.dark #controlBar {
-  background: #432874;
-  color: #fff;
-}
-
-body.dark #controlBar input[type="text"] {
-  background: #2e245c;
-  color: #fff;
-  border: 1px solid #5a3da6;
-}
-#controlBar .left,
-#controlBar .right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-#controlBar .left {
-  flex: 1 1 auto;
-  min-width: 0;
-  flex-wrap: wrap;
-  width: 100%;
-  box-sizing: border-box;
-}
-
-#controlBar .right {
-  flex: 0 0 auto;
-  justify-content: flex-end;
-}
-
-#searchInput {
-  flex: 0 1 auto;
-  width: clamp(280px, 32vw, 420px);
-  padding: 8px;
-  border-radius: 20px;
-  border: none;
-  font-size: 14px;
-}
-
 #activeFilterChips {
   display: flex;
   flex-wrap: wrap;
-}
-
-#controlBar input[type="text"],
-#controlBar button,
-#controlBar select {
-  height: 36px;
 }
 
 #productTable {
