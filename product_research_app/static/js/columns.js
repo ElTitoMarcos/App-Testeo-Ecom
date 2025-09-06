@@ -64,8 +64,9 @@
       const rect = btn.getBoundingClientRect();
       panel.classList.remove('hidden');
       panel.style.visibility = 'hidden';
+      panel.scrollTop = 0;
       // initial position anchored to button
-      let top = rect.bottom;
+      let top = rect.bottom + 4;
       let left = rect.left;
       // measure and clamp within viewport
       const w = panel.offsetWidth;

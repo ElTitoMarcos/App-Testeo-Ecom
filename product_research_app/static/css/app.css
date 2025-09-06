@@ -89,8 +89,6 @@ body.dark .legend-btn {
 
 .popover {
   position: fixed;
-  right: 16px;
-  top: calc(var(--header-h, 60px) + 56px);
   background: #fff;
   border: 1px solid #ccc;
   padding: 10px 12px;
@@ -105,22 +103,17 @@ body.dark .popover {
 #legendPop {
   left: 16px;
   bottom: 56px;
-  right: auto;
-  top: auto;
 }
-
 #columnsPanel {
-  position: fixed;
-  left: 0;
-  top: 0;
-  right: auto;
-  bottom: auto;
-  max-height: 60vh;
+  min-width: 200px;
+  max-height: 70vh;
   overflow: auto;
-  z-index: 1500;
 }
 
 .selected .fires { filter: grayscale(1); opacity: .6; }
+
+.table tbody tr.selected { background: #cde8ff; }
+body.dark .table tbody tr.selected { background: #243150; }
 
 .chip {
   display: inline-flex;
@@ -230,4 +223,8 @@ body.dark .bottombar {
   background: #0F1424;
   border-top: 1px solid #243150;
   color: #E5EAF5;
+}
+
+#productTable {
+  margin-bottom: 80px;
 }
