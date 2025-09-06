@@ -346,7 +346,6 @@ WINNER_SCORE_V2_FIELDS = [
 
 def build_winner_score_prompt(product: Dict[str, Any]) -> str:
     """Construct the Winner Score v2 prompt for a product.
-
     The prompt asks the model to rate eight qualitative variables between 1 and
     5 and provide a brief justification for each.  Optional metrics can be
     supplied to give the model additional context.
@@ -356,7 +355,6 @@ def build_winner_score_prompt(product: Dict[str, Any]) -> str:
             ``category`` describing the product.  An optional ``metrics``
             mapping may contain additional numeric information (e.g. orders,
             revenue).
-
     Returns:
         A Spanish prompt string to send to the model.
     """
@@ -365,7 +363,6 @@ def build_winner_score_prompt(product: Dict[str, Any]) -> str:
     description = product.get("description") or ""
     category = product.get("category") or ""
     metrics = product.get("metrics") or {}
-
     metrics_lines = []
     if isinstance(metrics, dict) and metrics:
         metrics_lines.append("Métricas opcionales:")
@@ -429,12 +426,10 @@ def evaluate_winner_score(
 
     ``justifications`` – dictionary of short textual explanations for each
     variable (maximum 15 words, trimmed if necessary).
-
     Args:
         api_key: OpenAI API key.
         model: Identifier of the chat model to use.
         product: Mapping with product information.
-
     Raises:
         OpenAIError: If the API call fails or returns invalid content.
     """

@@ -676,7 +676,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.handle_upload()
             return
         if path == "/evaluate_all":
-            self.handle_evaluate_all()
+            self.handle_evaluate_all()https://github.com/ElTitoMarcos/App-Testeo-Ecom/pull/64/conflict?name=product_research_app%252Fgpt.py&ancestor_oid=ca0e6e2a97fcb34b92632edc343e703ea04f9c64&base_oid=4d22af53d7d3a304a322450a65e1d167ac459b4f&head_oid=169b05c53655070eb97a8800d7f7c2f3952fa58b
             return
         if path == "/setconfig":
             self.handle_setconfig()
