@@ -142,6 +142,10 @@ function updateHeaderHeight() {
   if (topBar) {
     document.documentElement.style.setProperty('--header-h', `${topBar.offsetHeight}px`);
   }
+  const toolbar = document.getElementById('bottomBar');
+  if (toolbar) {
+    document.documentElement.style.setProperty('--toolbar-h', `${toolbar.offsetHeight}px`);
+  }
 }
 window.addEventListener('load', updateHeaderHeight);
 window.addEventListener('resize', updateHeaderHeight);
