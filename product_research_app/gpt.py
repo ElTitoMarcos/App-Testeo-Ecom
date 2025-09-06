@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -342,6 +342,55 @@ WINNER_SCORE_V2_FIELDS = [
     "engagement_shareability",
     "durabilidad_recurrencia",
 ]
+
+NUMERIC_FIELD_MAP = {
+    "orders": ("magnitud_deseo", False),
+    "sellers": ("saturacion_mercado", True),
+    "weight": ("facilidad_logistica", True),
+}
+
+
+def compute_numeric_scores(
+    metrics: Dict[str, Any],
+    ranges: Dict[str, Tuple[float, float]],
+) -> Tuple[Dict[str, int], Dict[str, str], Dict[str, str]]:
+    """Derive Winner Score sub-scores from numeric metrics.
+
+    Args:
+        metrics: Mapping of raw metric values for a product.
+        ranges: Precomputed ``min``/``max`` pairs for each metric.
+
+    Returns:
+        Three dictionaries: ``scores`` with integer values 1-5, ``justifications``
+        with short explanations, and ``sources`` marking variables as
+        "data".
+    """
+
+    out_scores: Dict[str, int] = {}
+    out_justifs: Dict[str, str] = {}
+    out_sources: Dict[str, str] = {}
+
+    for metric, (field, reverse) in NUMERIC_FIELD_MAP.items():
+        raw_val = metrics.get(metric)
+        if raw_val is None or raw_val == "":
+            continue
+        try:
+            val = float(str(raw_val).replace(",", "."))
+        except Exception:
+            continue
+        min_val, max_val = ranges.get(metric, (val, val))
+        if max_val == min_val:
+            score = 3.0
+        else:
+            ratio = (val - min_val) / (max_val - min_val)
+            if reverse:
+                ratio = 1.0 - ratio
+            score = 1.0 + ratio * 4.0
+        out_scores[field] = int(round(score))
+        out_justifs[field] = f"Basado en {metric}: {raw_val}"[:120]
+        out_sources[field] = "data"
+
+    return out_scores, out_justifs, out_sources
 
 
 def build_winner_score_prompt(product: Dict[str, Any]) -> str:

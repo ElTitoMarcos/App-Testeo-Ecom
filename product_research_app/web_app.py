@@ -1105,6 +1105,22 @@ class RequestHandler(BaseHTTPRequestHandler):
                             name_map = gpt.simplify_product_names(api_key, model, names_list)
                         except Exception:
                             name_map = {}
+                    metric_vals = {k: [] for k in gpt.NUMERIC_FIELD_MAP}
+                    for item, _ in items_list:
+                        for m in gpt.NUMERIC_FIELD_MAP:
+                            v = item.get(m)
+                            if v is None or v == "":
+                                continue
+                            try:
+                                f = float(str(v).replace(',', '.'))
+                            except Exception:
+                                continue
+                            metric_vals[m].append(f)
+                    metric_ranges = {
+                        m: (min(vals), max(vals))
+                        for m, vals in metric_vals.items()
+                        if vals
+                    }
                     for item, name_key in items_list:
                         original_name = str(item.get(name_key)).strip()
                         simplified = name_map.get(original_name) or original_name
@@ -1141,24 +1157,30 @@ class RequestHandler(BaseHTTPRequestHandler):
                             source=filename,
                             extra=extra,
                         )
-                        if (
-                            config.is_scoring_v2_enabled()
-                            and api_key
-                            and model
-                        ):
-                            try:
-                                resp = gpt.evaluate_winner_score(
-                                    api_key,
-                                    model,
-                                    {
-                                        "title": simplified,
-                                        "description": description,
-                                        "category": category,
-                                        "metrics": extra,
-                                    },
-                                )
-                                scores = resp.get("scores", {})
-                                justifs = resp.get("justifications", {})
+                        if config.is_scoring_v2_enabled() and weights_map:
+                            scores, justifs, sources = gpt.compute_numeric_scores(extra, metric_ranges)
+                            need = [f for f in WINNER_V2_FIELDS if f not in scores]
+                            if need and api_key and model:
+                                try:
+                                    resp = gpt.evaluate_winner_score(
+                                        api_key,
+                                        model,
+                                        {
+                                            "title": simplified,
+                                            "description": description,
+                                            "category": category,
+                                            "metrics": extra,
+                                        },
+                                    )
+                                    rs = resp.get("scores", {})
+                                    js = resp.get("justifications", {})
+                                    for f in need:
+                                        scores[f] = rs.get(f, 3)
+                                        justifs[f] = js.get(f, "")
+                                        sources[f] = "gpt"
+                                except Exception:
+                                    pass
+                            if scores:
                                 weighted = sum(
                                     scores.get(f, 3) * weights_map.get(f, 0.0)
                                     for f in WINNER_V2_FIELDS
@@ -1169,11 +1191,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                                     "scores": scores,
                                     "justifications": justifs,
                                     "weights": weights_map,
+                                    "sources": sources,
                                 }
                                 database.insert_score(
                                     conn,
                                     product_id=pid,
-                                    model=model,
+                                    model=model or "",
                                     total_score=0,
                                     momentum=0,
                                     saturation=0,
@@ -1187,8 +1210,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                                     winner_score_v2_pct=pct,
                                     winner_score_v2_breakdown=breakdown,
                                 )
-                            except Exception:
-                                pass
                         inserted += 1
                         inserted_ids.append(pid)
                 except Exception as exc:
@@ -1688,28 +1709,35 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         api_key = config.get_api_key() or os.environ.get("OPENAI_API_KEY")
         model = config.get_model()
-        if not api_key or not model:
-            self._set_json(400)
-            self.wfile.write(json.dumps({"error": "No API key configured"}).encode("utf-8"))
-            return
-
-        try:
-            resp = gpt.evaluate_winner_score(
-                api_key,
-                model,
-                {
-                    "title": title,
-                    "description": description,
-                    "category": category,
-                    "metrics": metrics,
-                },
-            )
-        except Exception as exc:
-            self._set_json(500)
-            self.wfile.write(json.dumps({"error": str(exc)}).encode("utf-8"))
-            return
-
-        out = {**resp.get("scores", {}), "justificacion": resp.get("justifications", {})}
+        scores, justifs, sources = gpt.compute_numeric_scores(metrics, {})
+        need = [f for f in WINNER_V2_FIELDS if f not in scores]
+        if need:
+            if not api_key or not model:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"error": "No API key configured"}).encode("utf-8"))
+                return
+            try:
+                resp = gpt.evaluate_winner_score(
+                    api_key,
+                    model,
+                    {
+                        "title": title,
+                        "description": description,
+                        "category": category,
+                        "metrics": metrics,
+                    },
+                )
+            except Exception as exc:
+                self._set_json(500)
+                self.wfile.write(json.dumps({"error": str(exc)}).encode("utf-8"))
+                return
+            rs = resp.get("scores", {})
+            js = resp.get("justifications", {})
+            for f in need:
+                scores[f] = rs.get(f, 3)
+                justifs[f] = js.get(f, "")
+                sources[f] = "gpt"
+        out = {**scores, "justificacion": justifs, "source": sources}
         self._set_json()
         self.wfile.write(json.dumps(out).encode("utf-8"))
 
