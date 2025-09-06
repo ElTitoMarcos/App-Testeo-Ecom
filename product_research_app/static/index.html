@@ -162,30 +162,29 @@ body.dark .weight-slider {
   </div>
 </div>
 
-<div id="table-toolbar" class="table-toolbar">
-  <div style="display:flex; align-items:center; gap:8px;">
-    <input type="checkbox" id="selectAll">
-    <button id="btnFilters">Filtros</button>
-    <div id="activeFilterChips" style="display:flex; flex-wrap:wrap;"></div>
-    <div>
-      <select id="groupSelect"></select>
-      <button id="btnAddToGroup">Añadir</button>
-    </div>
-  </div>
-  <div id="listMeta">0 resultados • Vista: Tabla ▾ (Tarjetas)</div>
-  <div>
-    <button id="btnColumns">Columnas</button>
-    <button id="btnDelete" disabled>Eliminar</button>
-    <button id="btnExport" disabled>Exportar</button>
-  </div>
-</div>
-
 <table id="productTable">
   <thead class="sticky-thead">
     <tr id="headerRow"></tr>
   </thead>
   <tbody></tbody>
 </table>
+<div id="bottomBar" class="bottombar">
+  <div class="controls">
+    <button id="legendBtn" class="legend-btn">ℹ️</button>
+    <input type="checkbox" id="selectAll">
+    <button id="btnFilters">Filtros</button>
+    <div id="activeFilterChips" style="display:flex; flex-wrap:wrap;"></div>
+    <select id="groupSelect"></select>
+    <span id="selCount"></span>
+  </div>
+  <div id="listMeta">0 resultados • Vista: Tabla ▾ (Tarjetas)</div>
+  <div class="actions">
+    <button id="btnAddToGroup" disabled>Añadir a grupo</button>
+    <button id="btnColumns">Columnas</button>
+    <button id="btnDelete" disabled>Eliminar</button>
+    <button id="btnExport" disabled>Exportar</button>
+  </div>
+</div>
 <div id="legendPop" class="popover hidden">
   <div>• Fila roja: duplicado</div>
   <div>• 🔥 x1–x5: tendencia en el nombre</div>
