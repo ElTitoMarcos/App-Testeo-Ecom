@@ -84,7 +84,7 @@ body.dark .weight-slider {
     <button id="btnDelete" disabled>Eliminar</button>
     <button id="btnExport" disabled>Exportar</button>
     <div id="searchRowRight">
-      <div id="listMeta">0 resultados • Vista: Tabla ▾ (Tarjetas)</div>
+      <div id="listMeta">0 resultados • Vista: Tabla</div>
       <select id="viewGroup" aria-label="Filtrar por grupo"></select>
     </div>
   </div>
@@ -241,6 +241,16 @@ let allProducts = [];
 let products = [];
 let sortField = null;
 let sortDir = 1;
+let currentViewLabel = 'Tabla';
+
+function updateResultsBadge(total) {
+  const meta = document.getElementById('listMeta');
+  if (!meta) return;
+  const count = typeof total === 'number' ? total : (Array.isArray(products) ? products.length : 0);
+  meta.textContent = `${count} resultados • Vista: ${currentViewLabel}`;
+}
+
+window.updateResultsBadge = updateResultsBadge;
 window.allProducts = allProducts;
 window.products = products;
 const columns = [
@@ -511,7 +521,7 @@ function renderTable() {
     tbody.appendChild(tr);
   });
   currentPageIds = products.map(p => String(p.id));
-  document.getElementById('listMeta').textContent = `${currentPageIds.length} resultados • Vista: Tabla ▾ (Tarjetas)`; // TODO: implementar vista Tarjetas
+  updateResultsBadge(currentPageIds.length);
   if (window.refreshColumns) window.refreshColumns();
   if (window.applyColumnVisibility) window.applyColumnVisibility();
   updateMasterState();
@@ -674,15 +684,19 @@ document.getElementById('saveConfig').onclick = async () => {
 document.getElementById('searchBtn').onclick = () => {
   const term = document.getElementById('searchInput').value.trim().toLowerCase();
   const tbody = document.querySelector('#productTable tbody');
+  let visible = 0;
   Array.from(tbody.rows).forEach(row => {
     if (!term) {
       row.style.display = '';
+      visible++;
       return;
     }
     const cells = Array.from(row.cells).map(td => td.textContent.toLowerCase());
     const match = cells.some(text => text.includes(term));
     row.style.display = match ? '' : 'none';
+    if (match) visible++;
   });
+  updateResultsBadge(visible);
 };
 document.getElementById('sendPrompt').onclick = async () => {
   const prompt = document.getElementById('customPrompt').value.trim();
@@ -818,9 +832,10 @@ let currentListId = -1; // -1 indicates all products
 
 async function loadLists() {
   try {
-    const lists = await fetchJson('/lists');
     const assignSelect = document.getElementById('groupSelect');
     const filterSelect = document.getElementById('viewGroup');
+    if (!assignSelect || !filterSelect) return;
+    const lists = await fetchJson('/lists');
     assignSelect.innerHTML = '';
     filterSelect.innerHTML = '';
 
@@ -837,7 +852,7 @@ async function loadLists() {
     filterSelect.appendChild(allOpt);
 
     // Add each list to both selects
-    lists.forEach(lst => {
+    (lists || []).forEach(lst => {
       const optAssign = document.createElement('option');
       optAssign.value = lst.id;
       optAssign.textContent = lst.name;
@@ -880,6 +895,7 @@ async function loadList(id){
     return;
   }
   try{
+    currentListId = id;
     const data = await fetchJson('/list/' + id);
     allProducts = data;
     products = [...allProducts];
