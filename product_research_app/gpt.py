@@ -346,15 +346,15 @@ WINNER_SCORE_V2_FIELDS = [
 
 def build_winner_score_prompt(product: Dict[str, Any]) -> str:
     """Construct the Winner Score v2 prompt for a product.
-
-    The prompt requests the model to rate eight variables from 1 to 5 based on
-    the product's title, description and category. The model must answer with a
-    JSON object containing the integer scores for each variable.
+    The prompt asks the model to rate eight qualitative variables between 1 and
+    5 and provide a brief justification for each.  Optional metrics can be
+    supplied to give the model additional context.
 
     Args:
-        product: Mapping with optional keys ``title``/``name``, ``description``
-            and ``category`` describing the product.
-
+        product: Mapping with keys ``title``/``name``, ``description`` and
+            ``category`` describing the product.  An optional ``metrics``
+            mapping may contain additional numeric information (e.g. orders,
+            revenue).
     Returns:
         A Spanish prompt string to send to the model.
     """
@@ -362,34 +362,55 @@ def build_winner_score_prompt(product: Dict[str, Any]) -> str:
     title = product.get("title") or product.get("name") or ""
     description = product.get("description") or ""
     category = product.get("category") or ""
+    metrics = product.get("metrics") or {}
+    metrics_lines = []
+    if isinstance(metrics, dict) and metrics:
+        metrics_lines.append("Métricas opcionales:")
+        for k, v in metrics.items():
+            metrics_lines.append(f"- {k}: {v}")
+
+    metrics_block = "\n".join(metrics_lines)
     prompt = f"""
-Eres un analista de producto para e-commerce.
-Te doy un título, descripción y categoría.
-Evalúa del 1 al 5 (solo números enteros) cada una de estas variables:
+Eres un analista de producto experto en e-commerce y dropshipping.
+Te doy datos de un producto (título, descripción, categoría, métricas opcionales).
+Evalúa del 1 al 5 cada una de estas variables:
 - Magnitud del deseo
 - Nivel de consciencia del mercado
-- Saturación / sofisticación (estima según categoría y competencia implícita)
+- Saturación / sofisticación de mercado
 - Facilidad de explicar en un anuncio
-- Facilidad logística (peso/envío/fragilidad, estima por categoría)
-- Escalabilidad (aplica a mucha gente o a pocos)
-- Engagement / shareability (atractivo visual o viral)
-- Durabilidad / recurrencia de compra
+- Facilidad logística
+- Escalabilidad
+- Engagement / shareability
+- Durabilidad / recurrencia
 
 Título: {title}
 Descripción: {description}
 Categoría: {category}
+{metrics_block}
 
-Devuelve en formato JSON usando para cada variable un objeto con "score" (entero 1-5) y "justificacion" (frase breve de una línea):
+Devuelve solo en JSON con este formato:
 {{
-  "magnitud_deseo": {{"score": x, "justificacion": "..."}},
-  "nivel_consciencia": {{"score": x, "justificacion": "..."}},
-  "saturacion_mercado": {{"score": x, "justificacion": "..."}},
-  "facilidad_anuncio": {{"score": x, "justificacion": "..."}},
-  "facilidad_logistica": {{"score": x, "justificacion": "..."}},
-  "escalabilidad": {{"score": x, "justificacion": "..."}},
-  "engagement_shareability": {{"score": x, "justificacion": "..."}},
-  "durabilidad_recurrencia": {{"score": x, "justificacion": "..."}}
+  "magnitud_deseo": X,
+  "nivel_consciencia": X,
+  "saturacion_mercado": X,
+  "facilidad_anuncio": X,
+  "facilidad_logistica": X,
+  "escalabilidad": X,
+  "engagement_shareability": X,
+  "durabilidad_recurrencia": X,
+  "justificacion": {{
+    "magnitud_deseo": "...",
+    "nivel_consciencia": "...",
+    "saturacion_mercado": "...",
+    "facilidad_anuncio": "...",
+    "facilidad_logistica": "...",
+    "escalabilidad": "...",
+    "engagement_shareability": "...",
+    "durabilidad_recurrencia": "..."
+  }}
 }}
+
+Las justificaciones deben ser frases cortas (máx 15 palabras).
 """
     return prompt.strip()
 
@@ -399,15 +420,16 @@ def evaluate_winner_score(
 ) -> Dict[str, Any]:
     """Call OpenAI to obtain Winner Score v2 sub-scores for a product.
 
+    The function returns a mapping with two keys:
+
+    ``scores`` – dictionary of the eight variables with integer values 1–5.
+
+    ``justifications`` – dictionary of short textual explanations for each
+    variable (maximum 15 words, trimmed if necessary).
     Args:
         api_key: OpenAI API key.
         model: Identifier of the chat model to use.
         product: Mapping with product information.
-
-    Returns:
-        Parsed JSON dictionary with the eight variables. Missing or invalid
-        values are left as-is for the caller to handle.
-
     Raises:
         OpenAIError: If the API call fails or returns invalid content.
     """
@@ -423,10 +445,37 @@ def evaluate_winner_score(
     resp_json = call_openai_chat(api_key, model, messages)
     try:
         content = resp_json["choices"][0]["message"]["content"].strip()
-        result = json.loads(content)
+        raw = json.loads(content)
     except Exception as exc:
-        raise OpenAIError(f"La respuesta de la IA no está en formato JSON válido: {exc}") from exc
-    return result
+        raise OpenAIError(
+            f"La respuesta de la IA no está en formato JSON válido: {exc}"
+        ) from exc
+
+    scores: Dict[str, int] = {}
+    justifs_raw = raw.get("justificacion") or {}
+    justifs: Dict[str, str] = {}
+    for field in WINNER_SCORE_V2_FIELDS:
+        val = raw.get(field)
+        try:
+            ival = int(val)
+        except Exception:
+            ival = 3
+        if ival < 1:
+            ival = 1
+        if ival > 5:
+            ival = 5
+        scores[field] = ival
+
+        jtxt = ""
+        if isinstance(justifs_raw, dict):
+            jtxt = justifs_raw.get(field, "")
+        if isinstance(jtxt, str):
+            words = jtxt.strip().split()
+            if len(words) > 15:
+                jtxt = " ".join(words[:15])
+            justifs[field] = jtxt
+
+    return {"scores": scores, "justifications": justifs}
 
 def simplify_product_names(api_key: str, model: str, names: List[str], *, temperature: float = 0.2) -> Dict[str, str]:
     """

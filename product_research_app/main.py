@@ -311,25 +311,24 @@ def evaluate_product(conn: database.sqlite3.Connection) -> None:
     print(f"Evaluando producto '{product['name']}' con el modelo {model}...")
     try:
         if config.is_scoring_v2_enabled():
-            resp = gpt.evaluate_winner_score(api_key, model, dict(product))
+            try:
+                extra = json.loads(product.get("extra") or "{}")
+            except Exception:
+                extra = {}
+            resp = gpt.evaluate_winner_score(
+                api_key,
+                model,
+                {
+                    "title": product.get("name"),
+                    "description": product.get("description"),
+                    "category": product.get("category"),
+                    "metrics": extra,
+                },
+            )
             weights_map = config.get_scoring_v2_weights()
-            scores: Dict[str, int] = {}
-            justifs: Dict[str, str] = {}
-            for field in WINNER_V2_FIELDS:
-                item = resp.get(field) or {}
-                try:
-                    val = int(item.get("score", 3))
-                except Exception:
-                    val = 3
-                if val < 1:
-                    val = 1
-                if val > 5:
-                    val = 5
-                scores[field] = val
-                j = item.get("justificacion")
-                if isinstance(j, str):
-                    justifs[field] = j.strip()
-            weighted = sum(scores[f] * weights_map.get(f, 0.0) for f in WINNER_V2_FIELDS)
+            scores = resp.get("scores", {})
+            justifs = resp.get("justifications", {})
+            weighted = sum(scores.get(f, 3) * weights_map.get(f, 0.0) for f in WINNER_V2_FIELDS)
             raw_score = weighted * 8.0
             pct = ((raw_score - 8.0) / 32.0) * 100.0
             breakdown = {

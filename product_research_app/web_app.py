@@ -676,7 +676,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.handle_upload()
             return
         if path == "/evaluate_all":
-            self.handle_evaluate_all()
+            self.handle_evaluate_all()https://github.com/ElTitoMarcos/App-Testeo-Ecom/pull/64/conflict?name=product_research_app%252Fgpt.py&ancestor_oid=ca0e6e2a97fcb34b92632edc343e703ea04f9c64&base_oid=4d22af53d7d3a304a322450a65e1d167ac459b4f&head_oid=169b05c53655070eb97a8800d7f7c2f3952fa58b
             return
         if path == "/setconfig":
             self.handle_setconfig()
@@ -692,6 +692,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/auto_weights_v2_stat":
             self.handle_auto_weights_v2_stat()
+            return
+        if path == "/scoring/v2/gpt-evaluate":
+            self.handle_scoring_v2_gpt_evaluate()
             return
         if path == "/delete":
             self.handle_delete()
@@ -1151,26 +1154,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                                         "title": simplified,
                                         "description": description,
                                         "category": category,
+                                        "metrics": extra,
                                     },
                                 )
-                                scores: Dict[str, int] = {}
-                                justifs: Dict[str, str] = {}
-                                for field in WINNER_V2_FIELDS:
-                                    item = resp.get(field) or {}
-                                    try:
-                                        val = int(item.get("score", 3))
-                                    except Exception:
-                                        val = 3
-                                    if val < 1:
-                                        val = 1
-                                    if val > 5:
-                                        val = 5
-                                    scores[field] = val
-                                    j = item.get("justificacion")
-                                    if isinstance(j, str):
-                                        justifs[field] = j.strip()
+                                scores = resp.get("scores", {})
+                                justifs = resp.get("justifications", {})
                                 weighted = sum(
-                                    scores[f] * weights_map.get(f, 0.0)
+                                    scores.get(f, 3) * weights_map.get(f, 0.0)
                                     for f in WINNER_V2_FIELDS
                                 )
                                 raw_score = weighted * 8.0
@@ -1325,25 +1315,25 @@ class RequestHandler(BaseHTTPRequestHandler):
                 if not (api_key and model):
                     continue
                 try:
-                    resp = gpt.evaluate_winner_score(api_key, model, dict(p))
-                    scores: Dict[str, int] = {}
-                    justifs: Dict[str, str] = {}
-                    for field in WINNER_V2_FIELDS:
-                        item = resp.get(field) or {}
-                        try:
-                            val = int(item.get("score", 3))
-                        except Exception:
-                            val = 3
-                        if val < 1:
-                            val = 1
-                        if val > 5:
-                            val = 5
-                        scores[field] = val
-                        j = item.get("justificacion")
-                        if isinstance(j, str):
-                            justifs[field] = j.strip()
+                    try:
+                        extra = json.loads(p.get("extra") or "{}")
+                    except Exception:
+                        extra = {}
+                    resp = gpt.evaluate_winner_score(
+                        api_key,
+                        model,
+                        {
+                            "title": p.get("name"),
+                            "description": p.get("description"),
+                            "category": p.get("category"),
+                            "metrics": extra,
+                        },
+                    )
+                    scores = resp.get("scores", {})
+                    justifs = resp.get("justifications", {})
                     weighted = sum(
-                        scores[f] * weights_map.get(f, 0.0) for f in WINNER_V2_FIELDS
+                        scores.get(f, 3) * weights_map.get(f, 0.0)
+                        for f in WINNER_V2_FIELDS
                     )
                     raw_score = weighted * 8.0
                     pct = ((raw_score - 8.0) / 32.0) * 100.0
@@ -1675,6 +1665,55 @@ class RequestHandler(BaseHTTPRequestHandler):
         config.set_scoring_v2_weights(weights)
         self._set_json()
         self.wfile.write(json.dumps(weights).encode('utf-8'))
+
+    def handle_scoring_v2_gpt_evaluate(self):
+        """Endpoint that evaluates Winner Score v2 variables via GPT."""
+
+        if not config.is_scoring_v2_enabled():
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "scoring v2 disabled"}).encode("utf-8"))
+            return
+
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length).decode("utf-8") if length else ""
+        try:
+            data = json.loads(body) if body else {}
+        except Exception:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode("utf-8"))
+            return
+
+        title = data.get("title") or data.get("name") or ""
+        description = data.get("description") or ""
+        category = data.get("category") or ""
+        metrics = data.get("metrics") or {}
+
+        api_key = config.get_api_key() or os.environ.get("OPENAI_API_KEY")
+        model = config.get_model()
+        if not api_key or not model:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "No API key configured"}).encode("utf-8"))
+            return
+
+        try:
+            resp = gpt.evaluate_winner_score(
+                api_key,
+                model,
+                {
+                    "title": title,
+                    "description": description,
+                    "category": category,
+                    "metrics": metrics,
+                },
+            )
+        except Exception as exc:
+            self._set_json(500)
+            self.wfile.write(json.dumps({"error": str(exc)}).encode("utf-8"))
+            return
+
+        out = {**resp.get("scores", {}), "justificacion": resp.get("justifications", {})}
+        self._set_json()
+        self.wfile.write(json.dumps(out).encode("utf-8"))
 
     def handle_create_list(self):
         """Create a new user defined list (group) of products."""
