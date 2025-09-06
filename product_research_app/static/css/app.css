@@ -133,8 +133,32 @@ body.dark .chip {
 body.dark .chip button { color: #A9B4D0; }
 
 #topBar { position: sticky; top: 0; z-index: 40; }
-#searchRow { background: #f8fbff; }
+#searchRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 15px;
+  background: #f8fbff;
+}
 body.dark #searchRow { background: #1a1b2e; }
+
+#searchRow > * { flex: 0 0 auto; }
+
+#searchInput {
+  flex: 1 0 360px;
+  max-width: 420px;
+  padding: 8px;
+  border-radius: 20px;
+  border: 1px solid #ccc;
+  font-size: 14px;
+}
+body.dark #searchInput { border-color: #444; }
+
+#activeFilterChips {
+  display: flex;
+  flex-wrap: wrap;
+}
 
 .table tr { height: 52px; }
 .table td, .table th { padding: 8px 12px; }
