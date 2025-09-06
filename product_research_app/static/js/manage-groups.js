@@ -63,4 +63,12 @@
     dlg.style.top = `${(vh - h)/2}px`;
     dlg.style.visibility = '';
   }
+  const btn = document.getElementById('btnManageGroups');
+  if(btn) btn.addEventListener('click', openManageGroups);
+  document.addEventListener('keydown', e => {
+    if(e.altKey && e.key.toLowerCase() === 'g' && !['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName)){
+      e.preventDefault();
+      openManageGroups();
+    }
+  });
 })();

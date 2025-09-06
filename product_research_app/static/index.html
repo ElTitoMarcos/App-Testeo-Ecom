@@ -166,17 +166,14 @@ body.dark .weight-slider {
   <tbody></tbody>
 </table>
 <div id="bottomBar" class="bottombar hidden">
-  <div style="display:flex; align-items:center; gap:8px;">
-    <button id="legendBtn" class="legend-btn" title="Mostrar leyenda" aria-label="Mostrar leyenda">ℹ️</button>
-    <span id="selCount"></span>
-  </div>
-  <div style="display:flex; gap:8px; align-items:center;">
-    <select id="groupSelect" aria-label="Filtrar por grupo"></select>
-    <button id="btnAddToGroup" disabled title="Añadir seleccionados al grupo" aria-label="Añadir seleccionados al grupo">Añadir a grupo</button>
-    <button id="btnDelete" disabled title="Eliminar seleccionados" aria-label="Eliminar seleccionados">Eliminar</button>
-    <button id="btnExport" disabled title="Exportar seleccionados" aria-label="Exportar seleccionados">Exportar</button>
-    <button id="btnColumns" title="Gestionar columnas" aria-label="Gestionar columnas">Columnas</button>
-  </div>
+  <button id="legendBtn" class="legend-btn" title="Mostrar leyenda" aria-label="Mostrar leyenda">ℹ️</button>
+  <span id="selCount"></span>
+  <select id="groupSelect" aria-label="Filtrar por grupo"></select>
+  <button id="btnAddToGroup" class="bar-btn" disabled title="Añadir seleccionados al grupo" aria-label="Añadir seleccionados al grupo">Añadir a grupo</button>
+  <button id="btnManageGroups" class="bar-btn" title="Gestionar grupos" aria-label="Gestionar grupos">Gestionar grupos</button>
+  <button id="btnDelete" class="bar-btn" disabled title="Eliminar seleccionados" aria-label="Eliminar seleccionados">Eliminar</button>
+  <button id="btnExport" class="bar-btn" disabled title="Exportar seleccionados" aria-label="Exportar seleccionados">Exportar</button>
+  <button id="btnColumns" class="bar-btn" title="Gestionar columnas" aria-label="Gestionar columnas">Columnas</button>
 </div>
 <div id="legendPop" class="popover hidden">
   <div>• Fila roja: duplicado</div>
