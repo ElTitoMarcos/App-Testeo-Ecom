@@ -16,14 +16,13 @@ const idMap = {
   category: 'filterCategory'
 };
 
-// References to elements now housed inside the persistent control bar
-const controlBar = document.getElementById('controlBar');
-const searchInput = controlBar?.querySelector('#searchInput');
-const searchBtn = controlBar?.querySelector('#searchBtn');
-const btnFilters = controlBar?.querySelector('#btnFilters');
-const chipsContainer = controlBar?.querySelector('#activeFilterChips');
-const listMeta = controlBar?.querySelector('#listMeta');
-const groupSelect = controlBar?.querySelector('#groupSelect');
+// References to filter and search controls
+const searchInput = document.getElementById('searchInput');
+const searchBtn = document.getElementById('searchBtn');
+const btnFilters = document.getElementById('btnFilters');
+const chipsContainer = document.getElementById('activeFilterChips');
+const listMeta = document.getElementById('listMeta');
+const groupSelect = document.getElementById('groupSelect');
 
 searchInput?.setAttribute('aria-label', 'Buscar en tabla');
 searchBtn?.setAttribute('aria-label', 'Ejecutar búsqueda');
@@ -171,17 +170,3 @@ searchBtn?.addEventListener('click', () => {
   });
   if (listMeta) listMeta.textContent = `${visible} resultados`;
 });
-
-let tableOffset = 0;
-function updateStickyOffsets() {
-  const appBar = document.getElementById('topBar');
-  const control = document.getElementById('controlBar');
-  const a = appBar?.offsetHeight || 0;
-  const c = control?.offsetHeight || 0;
-  document.documentElement.style.setProperty('--appbar-h', `${a}px`);
-  document.documentElement.style.setProperty('--controlbar-h', `${c}px`);
-  tableOffset = a + c;
-}
-window.getTableOffset = () => tableOffset;
-window.addEventListener('load', updateStickyOffsets);
-window.addEventListener('resize', updateStickyOffsets);
