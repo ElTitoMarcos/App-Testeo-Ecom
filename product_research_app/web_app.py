@@ -1659,6 +1659,10 @@ class RequestHandler(BaseHTTPRequestHandler):
     def handle_scoring_v2_auto_weights_gpt(self):
         samples, metric_key = self._collect_samples_for_weights()
         if not samples or not metric_key:
+            weights = {k: 1.0 / len(WINNER_V2_FIELDS) for k in WINNER_V2_FIELDS}
+            self._set_json()
+            self.wfile.write(json.dumps({"weights": weights}).encode('utf-8'))
+            return
             self._set_json(400)
             self.wfile.write(json.dumps({"error": "Datos insuficientes"}).encode('utf-8'))
             return
@@ -1679,9 +1683,18 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def handle_scoring_v2_auto_weights_stat(self):
         samples, metric_key = self._collect_samples_for_weights()
+        # If not enough data is available to compute correlations (fewer than 2 samples)
+        # or a success metric could not be inferred, return uniform weights
+        # instead of emitting a 400 error.  This ensures the endpoint always
+        # provides usable output.
         if not samples or not metric_key or len(samples) < 2:
-            self._set_json(400)
-            self.wfile.write(json.dumps({"error": "Datos insuficientes"}).encode('utf-8'))
+            weights = {k: 1.0 / len(WINNER_V2_FIELDS) for k in WINNER_V2_FIELDS}
+            self._set_json()
+            self.wfile.write(json.dumps({"weights": weights}).encode('utf-8'))
+            return
+            weights = {k: 1.0 / len(WINNER_V2_FIELDS) for k in WINNER_V2_FIELDS}
+            self._set_json()
+            self.wfile.write(json.dumps({"weights": weights}).encode('utf-8'))
             return
         # compute Pearson correlation between each variable and success
         ys = [s[metric_key] for s in samples]
