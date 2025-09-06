@@ -383,7 +383,7 @@ function renderTable() {
   // Clear body
   tbody.innerHTML = '';
   // Render rows
-    products.forEach(item => {
+    products.forEach((item, idx) => {
     const tr = document.createElement('tr');
     // mark duplicate rows
     if (item.extras && item.extras['duplicate_of']) {

@@ -372,8 +372,13 @@ def delete_product(conn: sqlite3.Connection, product_id: int) -> None:
         product_id: ID of the product to delete
 
     This function relies on foreign key ON DELETE CASCADE to remove scores and list
-    associations automatically.
+    associations automatically. When the last product is removed the autoincrement
+    counter is reset so subsequent imports start again at 1.
     """
     cur = conn.cursor()
     cur.execute("DELETE FROM products WHERE id = ?", (product_id,))
     conn.commit()
+    cur.execute("SELECT COUNT(*) FROM products")
+    if cur.fetchone()[0] == 0:
+        cur.execute("DELETE FROM sqlite_sequence WHERE name='products'")
+        conn.commit()

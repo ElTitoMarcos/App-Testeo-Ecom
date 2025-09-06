@@ -26,7 +26,10 @@ import io
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
-import cgi
+try:
+    import cgi
+except ModuleNotFoundError:
+    cgi = None  # Python 3.12+: cgi module removed; uploads disabled if unavailable
 import threading
 import sqlite3
 import math
@@ -229,6 +232,11 @@ class RequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path == "/health":
+            # simple health check endpoint for development scripts
+            self._set_json()
+            self.wfile.write(json.dumps({"status": "ok"}).encode("utf-8"))
+            return
         if path == "/" or path == "/index.html":
             self._serve_static("index.html")
             return
@@ -763,6 +771,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self.send_error(400, 'Invalid JSON')
                 return
         elif ctype.startswith('multipart/form-data'):
+            if cgi is None:
+                self.send_error(500, 'Multipart uploads no soportados en esta versión de Python')
+                return
             form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={'REQUEST_METHOD': 'POST'})
             fileitem = form['file'] if 'file' in form else None
             if fileitem is None or not getattr(fileitem, 'filename', None):
@@ -857,6 +868,9 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def handle_upload(self):
         # handle multipart form data
+        if cgi is None:
+            self.send_error(500, "Multipart uploads no soportados en esta versión de Python")
+            return
         ctype, pdict = cgi.parse_header(self.headers.get('Content-Type'))
         if ctype != 'multipart/form-data':
             self.send_error(400, "Expected multipart/form-data")
@@ -1950,14 +1964,43 @@ class RequestHandler(BaseHTTPRequestHandler):
 
 
 def run(host: str = '127.0.0.1', port: int = 8000):
+    """Start the development server.
+
+    By default the server listens using plain HTTP on ``port``.  If the
+    environment variable ``DEV_HTTPS`` is ``true`` a second HTTPS server is
+    started on ``port + 1`` using self‑signed certificates located in
+    ``../certs/dev-cert.pem`` and ``../certs/dev-key.pem``.  This allows testing
+    TLS locally without affecting the normal HTTP workflow.
+    """
     ensure_db()
     httpd = HTTPServer((host, port), RequestHandler)
-    print(f"Servidor iniciado en http://{host}:{port}")
+    use_https = os.getenv("DEV_HTTPS", "").lower() == "true"
+    threads = []
+    if use_https:
+        cert_dir = Path(__file__).resolve().parent.parent / "certs"
+        cert_file = cert_dir / "dev-cert.pem"
+        key_file = cert_dir / "dev-key.pem"
+        if cert_file.exists() and key_file.exists():
+            import ssl
+            https_port = port + 1
+            httpsd = HTTPServer((host, https_port), RequestHandler)
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file))
+            httpsd.socket = context.wrap_socket(httpsd.socket, server_side=True)
+            t = threading.Thread(target=httpsd.serve_forever, daemon=True)
+            t.start()
+            threads.append((httpsd, t))
+            print(f"Servidor HTTPS en https://{host}:{https_port}")
+        else:
+            print("DEV_HTTPS=true pero certificados faltan; iniciando solo HTTP")
+    print(f"Servidor HTTP en http://{host}:{port}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         print("Apagando servidor...")
     httpd.server_close()
+    for srv, _ in threads:
+        srv.shutdown()
 
 
 if __name__ == '__main__':
