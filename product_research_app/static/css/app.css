@@ -12,11 +12,16 @@ body.dark {
   color: #eaeaea;
 }
 
+:root {
+  --appbar-h: 60px;
+  --controlbar-h: 52px;
+}
+
 .sticky-thead {
   position: sticky;
-  top: calc(var(--header-h, 60px) + var(--toolbar-h, 0px));
+  top: calc(var(--appbar-h) + var(--controlbar-h));
   background: #f8fbff;
-  z-index: 15;
+  z-index: 10;
 }
 body.dark .sticky-thead {
   background: #131A2E;
@@ -54,24 +59,11 @@ body.dark .legend-btn {
     border: 1px solid #34456B;
 }
 
-.bottombar .controls {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 1;
-  flex-wrap: wrap;
-}
-
-.bottombar .actions {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
 
 .popover {
   position: fixed;
   right: 16px;
-  top: calc(var(--header-h, 60px) + var(--toolbar-h, 0px) + 56px);
+  top: calc(var(--appbar-h) + var(--controlbar-h) + 56px);
   background: #fff;
   border: 1px solid #ccc;
   padding: 10px 12px;
@@ -94,6 +86,8 @@ body.dark .popover {
   position: absolute;
   left: auto;
   bottom: auto;
+  top: auto;
+  right: auto;
 }
 
 .selected .fires { filter: grayscale(1); opacity: .6; }
@@ -125,6 +119,24 @@ body.dark .chip button { color: #A9B4D0; }
 
 #topBar { position: sticky; top: 0; z-index: 40; }
 
+/* Control bar sticks beneath the app bar */
+#controlBar {
+  position: sticky;
+  top: var(--appbar-h);
+  z-index: 30;
+  height: var(--controlbar-h);
+  background: #f8fbff;
+  border-bottom: 1px solid #ccc;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  gap: 8px;
+  flex-wrap: wrap;
+  width: 100%;
+  box-sizing: border-box;
+}
+
 .table tr { height: 52px; }
 .table td, .table th { padding: 8px 12px; }
 body.dark .table tbody tr:nth-child(odd) { background: #11192B; }
@@ -134,23 +146,24 @@ body.dark .table tbody tr:nth-child(odd) { background: #11192B; }
 .score-amber { background: #3A3119; color: #F1B44C; }
 .score-red { background: #3A1E1E; color: #F16969; }
 
-.bottombar {
-  position: sticky;
-  top: var(--header-h, 60px);
-  left: 0;
-  right: 0;
-  background: #f8fbff;
-  border-bottom: 1px solid #ccc;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 8px 12px;
-  z-index: 25;
-  color: #222;
-  flex-wrap: wrap;
-}
-body.dark .bottombar {
+body.dark #controlBar {
   background: #0F1424;
   border-bottom: 1px solid #243150;
   color: #E5EAF5;
+}
+#controlBar .left, #controlBar .right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+#productTable {
+  margin-top: 0;
+}
+
+#productTable th:first-child,
+#productTable td:first-child {
+  width: 2.5rem;
+  text-align: center;
 }
