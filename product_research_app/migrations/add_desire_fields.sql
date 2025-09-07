@@ -1,13 +1,7 @@
--- Migration for desire/awareness/competition fields
--- Rename existing Spanish columns if present
-ALTER TABLE products RENAME COLUMN magnitud_deseo TO desire_magnitude;
-ALTER TABLE products RENAME COLUMN nivel_consciencia TO awareness_level;
-ALTER TABLE products RENAME COLUMN saturacion_mercado TO competition_level;
--- Add new desire column
-ALTER TABLE products ADD COLUMN desire TEXT;
--- Drop obsolete columns if they exist
-ALTER TABLE products DROP COLUMN facilidad_anuncio;
-ALTER TABLE products DROP COLUMN facilidad_logistica;
-ALTER TABLE products DROP COLUMN escalabilidad;
-ALTER TABLE products DROP COLUMN engagement_shareability;
-ALTER TABLE products DROP COLUMN durabilidad_recurrencia;
+-- Migration for new desire/awareness/competition fields
+-- The application performs this migration automatically, but the following
+-- statements can be executed manually on older databases. Run once.
+ALTER TABLE products ADD COLUMN desire_text TEXT;
+ALTER TABLE products ADD COLUMN desire_magnitude TEXT;
+ALTER TABLE products ADD COLUMN awareness_level TEXT;
+ALTER TABLE products ADD COLUMN competition_level TEXT;
