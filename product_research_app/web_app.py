@@ -214,6 +214,12 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.end_headers()
 
+    def _safe_write(self, data: bytes):
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
+
     def _serve_static(self, rel_path: str):
         file_path = STATIC_DIR / rel_path
         if not file_path.exists():
@@ -1460,7 +1466,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         inserted_ids.append(pid)
                 except Exception as exc:
                     self._set_json(500)
-                    self.wfile.write(json.dumps({"error": f"Error al procesar XLSX: {exc}"}).encode('utf-8'))
+                    self._safe_write(json.dumps({"error": f"Error al procesar XLSX: {exc}"}).encode('utf-8'))
                     return
             else:
                 # treat as image; save temporarily and attempt to extract products using GPT vision
@@ -1508,11 +1514,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                         inserted = 0
                 # respond with info about image and inserted count
                 self._set_json()
-                self.wfile.write(json.dumps({"uploaded_image": f"/uploads/{filename}", "inserted": inserted}).encode('utf-8'))
+                self._safe_write(json.dumps({"uploaded_image": f"/uploads/{filename}", "inserted": inserted}).encode('utf-8'))
                 return
         except Exception as exc:
             self._set_json(500)
-            self.wfile.write(json.dumps({"error": str(exc)}).encode('utf-8'))
+            self._safe_write(json.dumps({"error": str(exc)}).encode('utf-8'))
             return
         # Automatically evaluate newly inserted products with offline heuristic if any
         if inserted_ids:
@@ -1567,7 +1573,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     explanations=offline['explanations'],
                 )
         self._set_json()
-        self.wfile.write(json.dumps({"inserted": inserted}).encode('utf-8'))
+        self._safe_write(json.dumps({"inserted": inserted}).encode('utf-8'))
 
     def handle_evaluate_all(self):
         conn = ensure_db()
