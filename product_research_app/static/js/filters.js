@@ -59,6 +59,7 @@ function applyFiltersFromState() {
   selection.clear();
   updateMasterState();
   renderTable();
+  if (typeof updateResultsBadge === 'function') updateResultsBadge(products.length);
 }
 
 function buildActiveChips(state) {
