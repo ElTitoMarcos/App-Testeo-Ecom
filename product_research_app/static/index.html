@@ -34,6 +34,8 @@ tbody tr:hover {
   transform: translateY(-2px);
   transition: box-shadow 0.2s, transform 0.2s;
 }
+#importBanner { background:#fff8e1; color:#665c00; }
+body.dark #importBanner { background:#665c00; color:#fff; }
 /* History & Details */
 #history details { margin-bottom:8px; }
 details summary { cursor:pointer; font-weight:600; color:#0062ff; }
@@ -60,6 +62,7 @@ body.dark .weight-slider {
     <div style="flex:1; display:flex; justify-content:flex-end; gap:8px; align-items:center;">
       <input type="file" id="fileInput" style="display:none;" />
       <button id="uploadBtn" title="Subir archivo">📤</button>
+      <button id="importHistoryBtn">Ver últimos imports</button>
       <button id="refreshBtn" title="Actualizar lista">🔄</button>
       <button id="trendsBtn" title="Ver tendencias">📊</button>
       <button id="darkToggle" title="Modo oscuro">🌙</button>
@@ -81,6 +84,8 @@ body.dark .weight-slider {
     </div>
   </div>
 </div>
+<div id="importBanner" style="display:none; padding:8px; text-align:center;"></div>
+<div id="importHistory" class="card" style="display:none;"></div>
 <div id="config" style="display:none;">
   <label>API Key: <input type="password" id="apiKey" /></label>
   <button id="toggleApiKey" style="display:none;">Cambiar API Key</button>
@@ -228,6 +233,42 @@ import { fetchJson } from "/static/js/net.js";
 import * as groupsService from "/static/js/groups-service.js";
 window.fetchJson = fetchJson;
 window.groupsService = groupsService;
+const IMPORT_TASK_LS_KEY = 'last_import_task';
+let importPollTimer = null;
+
+function showImportBanner(msg = 'Importando… puedes cerrar esta ventana; seguiremos procesando.') {
+  const b = document.getElementById('importBanner');
+  if (!b) return;
+  b.textContent = msg;
+  b.style.display = 'block';
+}
+
+function hideImportBanner() {
+  const b = document.getElementById('importBanner');
+  if (b) b.style.display = 'none';
+}
+
+async function pollImportStatus(id) {
+  try {
+    const data = await fetchJson(`/_import_status?task_id=${id}`);
+    if (data.status === 'pending') {
+      showImportBanner();
+      importPollTimer = setTimeout(() => pollImportStatus(id), 2000);
+    } else {
+      hideImportBanner();
+      localStorage.removeItem(IMPORT_TASK_LS_KEY);
+      if (data.status === 'done') {
+        fetchProducts();
+        const n = data.rows_imported || 0;
+        toast.success(`Importación completada: ${n} filas nuevas`);
+      } else {
+        toast.error(data.error || 'Error en importación');
+      }
+    }
+  } catch (e) {
+    importPollTimer = setTimeout(() => pollImportStatus(id), 4000);
+  }
+}
 // Ensure the server shuts down cleanly when the tab or window is closed.
 // Using fetch with `keepalive` guarantees the request completes even during unload.
 window.addEventListener('beforeunload', () => {
@@ -686,7 +727,32 @@ function sortBy(field, type) {
 }
 
 document.getElementById('refreshBtn').onclick = fetchProducts;
-window.onload = () => { loadConfig(); fetchProducts(); };
+const historyBtn = document.getElementById('importHistoryBtn');
+if(historyBtn){
+  historyBtn.onclick = async () => {
+    const list = await fetchJson('/_import_history?limit=20');
+    const cont = document.getElementById('importHistory');
+    if(cont){
+      let html = '<h3>Últimos imports</h3><ul>';
+      list.forEach(it => {
+        const date = new Date(it.updated_at || it.created_at).toLocaleString();
+        html += `<li>${it.task_id}: ${it.status} - ${date}</li>`;
+      });
+      html += '</ul>';
+      cont.innerHTML = html;
+      cont.style.display = 'block';
+    }
+  };
+}
+window.onload = () => {
+  loadConfig();
+  fetchProducts();
+  const tid = localStorage.getItem(IMPORT_TASK_LS_KEY);
+  if(tid){
+    showImportBanner();
+    pollImportStatus(tid);
+  }
+};
 // Toggle config panel
 document.getElementById('configBtn').onclick = () => {
   const cfg = document.getElementById('config');
@@ -842,7 +908,8 @@ document.getElementById('uploadBtn').onclick = () => {
   fileInputEl.click();
 };
 // When a file is selected, automatically upload it
-fileInputEl.onchange = async () => {
+fileInputEl.onchange = async (ev) => {
+  ev.preventDefault();
   const file = fileInputEl.files[0];
   if(!file) return;
   const formData = new FormData();
@@ -854,22 +921,13 @@ fileInputEl.onchange = async () => {
   if (loading) loading.style.display = 'flex';
   try {
     const data = await fetchJson('/upload', {method:'POST', body: formData});
-    if(data.error){
+    if(data.task_id){
+      localStorage.setItem(IMPORT_TASK_LS_KEY, data.task_id);
+      showImportBanner();
+      pollImportStatus(data.task_id);
+      toast.success('Importación iniciada');
+    } else if(data.error){
       toast.error('Error: '+data.error);
-    } else {
-      let msg = '';
-      if(data.inserted !== undefined) {
-        msg += 'Productos importados: '+data.inserted+'\n';
-      }
-      if(data.uploaded_image){
-        if(data.inserted && data.inserted > 0) {
-          msg += 'Se procesó la imagen y se añadieron productos.';
-        } else {
-          msg += 'Imagen subida. No se añadieron productos automáticamente.';
-        }
-      }
-      toast.success(msg || 'Archivo procesado');
-      fetchProducts();
     }
   } catch(err){
     console.error(err);

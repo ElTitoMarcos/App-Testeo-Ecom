@@ -483,6 +483,20 @@ class RequestHandler(BaseHTTPRequestHandler):
             rows = [dict(r) for r in database.get_import_history(conn, limit)]
             self.safe_write(lambda: self.send_json(rows))
             return
+        if path == "/_import_status":
+            params = parse_qs(parsed.query)
+            try:
+                task_id = int(params.get("task_id", ["0"])[0])
+            except Exception:
+                self.safe_write(lambda: self.send_json({"error": "invalid task_id"}, status=400))
+                return
+            conn = ensure_db()
+            row = database.get_import_job(conn, task_id)
+            if row:
+                self.safe_write(lambda: self.send_json(dict(row)))
+            else:
+                self.safe_write(lambda: self.send_json({"error": "not found"}, status=404))
+            return
         if path == "/products":
             # Return a list of products including extra metadata for UI display
             conn = ensure_db()

@@ -635,6 +635,15 @@ def get_import_history(conn: sqlite3.Connection, limit: int = 20) -> List[sqlite
     return cur.fetchall()
 
 
+def get_import_job(conn: sqlite3.Connection, job_id: int) -> Optional[sqlite3.Row]:
+    """Return a single import job by ID."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id AS task_id, status, rows_imported, created_at, updated_at, error FROM import_jobs WHERE id=?",
+        (job_id,),
+    )
+    return cur.fetchone()
+
 def mark_stale_pending_imports(conn: sqlite3.Connection, minutes: int) -> None:
     """Mark pending imports older than X minutes as errored after restart."""
     cutoff = (datetime.utcnow() - timedelta(minutes=minutes)).isoformat()
