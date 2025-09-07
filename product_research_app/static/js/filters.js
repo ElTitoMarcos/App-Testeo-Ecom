@@ -5,6 +5,9 @@ let filtersState = {
   dateMax: '',
   ratingMin: null,
   category: '',
+  desireMagnitude: '',
+  awarenessLevel: '',
+  competitionLevel: '',
 };
 
 const idMap = {
@@ -49,6 +52,15 @@ function applyFiltersFromState() {
       const cat = (item.category || '').toString().toLowerCase();
       if (!cat.includes(filtersState.category)) return false;
     }
+    if (filtersState.desireMagnitude) {
+      if ((item.desire_magnitude || '') !== filtersState.desireMagnitude) return false;
+    }
+    if (filtersState.awarenessLevel) {
+      if ((item.awareness_level || '') !== filtersState.awarenessLevel) return false;
+    }
+    if (filtersState.competitionLevel) {
+      if ((item.competition_level || '') !== filtersState.competitionLevel) return false;
+    }
     return true;
   });
   // Mutate the global products array in place so renderTable sees the filtered list
@@ -72,6 +84,9 @@ function buildActiveChips(state) {
   if (state.dateMax) chips.push(['dateMax', `Hasta ${state.dateMax}`]);
   if (state.ratingMin !== null && !isNaN(state.ratingMin)) chips.push(['ratingMin', `Rating ≥ ${state.ratingMin}`]);
   if (state.category) chips.push(['category', `Cat: ${state.category}`]);
+  if (state.desireMagnitude) chips.push(['desireMagnitude', `DM: ${state.desireMagnitude}`]);
+  if (state.awarenessLevel) chips.push(['awarenessLevel', `Awareness: ${state.awarenessLevel}`]);
+  if (state.competitionLevel) chips.push(['competitionLevel', `Competition: ${state.competitionLevel}`]);
   chips.forEach(([key, label]) => {
     const chip = document.createElement('span');
     chip.className = 'chip';
@@ -84,7 +99,9 @@ function buildActiveChips(state) {
       } else {
         filtersState[key] = '';
       }
-      document.getElementById(idMap[key]).value = '';
+      const elId = idMap[key];
+      const el = elId ? document.getElementById(elId) : null;
+      if (el) el.value = '';
       applyFiltersFromState();
     };
     chip.appendChild(btn);
@@ -115,8 +132,9 @@ document.getElementById('clearFilters')?.addEventListener('click', () => {
   document.getElementById('filterDateMax').value = '';
   document.getElementById('filterRatingMin').value = '';
   document.getElementById('filterCategory').value = '';
-  filtersState = { priceMin: null, priceMax: null, dateMin: '', dateMax: '', ratingMin: null, category: '' };
+  filtersState = { priceMin: null, priceMax: null, dateMin: '', dateMax: '', ratingMin: null, category: '', desireMagnitude: '', awarenessLevel: '', competitionLevel: '' };
   applyFiltersFromState();
+  updateLevelChips();
 });
 
 document.addEventListener('keydown', (e) => {
@@ -145,3 +163,43 @@ function updateHeaderHeight() {
 }
 window.addEventListener('load', updateHeaderHeight);
 window.addEventListener('resize', updateHeaderHeight);
+
+const levelMap = {
+  desireMagnitude: ['Low','Medium','High'],
+  awarenessLevel: ['Unaware','Problem-Aware','Solution-Aware','Product-Aware','Most Aware'],
+  competitionLevel: ['Low','Medium','High']
+};
+
+function updateLevelChips(){
+  document.querySelectorAll('#levelFilterChips .chip').forEach(chip => {
+    const field = chip.dataset.field;
+    const val = chip.dataset.value;
+    chip.classList.toggle('selected', filtersState[field] === val);
+  });
+}
+
+function buildLevelFilterChips(){
+  const container = document.getElementById('levelFilterChips');
+  if(!container) return;
+  container.innerHTML = '';
+  Object.entries(levelMap).forEach(([field, values]) => {
+    const group = document.createElement('div');
+    values.forEach(val => {
+      const chip = document.createElement('span');
+      chip.className = 'chip';
+      chip.textContent = val;
+      chip.dataset.field = field;
+      chip.dataset.value = val;
+      chip.onclick = () => {
+        filtersState[field] = filtersState[field] === val ? '' : val;
+        applyFiltersFromState();
+        updateLevelChips();
+      };
+      group.appendChild(chip);
+    });
+    container.appendChild(group);
+  });
+  updateLevelChips();
+}
+
+buildLevelFilterChips();
