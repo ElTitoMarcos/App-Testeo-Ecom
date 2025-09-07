@@ -287,7 +287,15 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             price_col = find_key(headers, ["price", "precio", "cost", "unitprice"])
             curr_col = find_key(headers, ["currency", "moneda"])
             img_col = find_key(headers, ["image", "imagen", "img", "picture", "imgurl"])
-            conn.execute("BEGIN")
+            cur = conn.cursor()
+            cur.execute("BEGIN")
+            cur.execute("SELECT COUNT(*) FROM products")
+            count = cur.fetchone()[0]
+            cur.execute("SELECT COALESCE(MAX(id), -1) FROM products")
+            max_id = cur.fetchone()[0]
+            is_empty = count == 0
+            base_id = 0 if is_empty else (max_id + 1)
+            rows_validas = []
             for row in records:
                 name = (row.get(name_col) or '').strip() if name_col else None
                 if not name:
@@ -307,6 +315,11 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                     for k, v in row.items()
                     if k not in {name_col, desc_col, cat_col, price_col, curr_col, img_col}
                 }
+                rows_validas.append(
+                    (name, description, category, price, currency, image_url, extra_cols)
+                )
+            for idx, (name, description, category, price, currency, image_url, extra_cols) in enumerate(rows_validas):
+                row_id = base_id + idx
                 database.insert_product(
                     conn,
                     name=name,
@@ -318,6 +331,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                     source=filename,
                     extra=extra_cols,
                     commit=False,
+                    product_id=row_id,
                 )
                 rows_imported += 1
             conn.commit()

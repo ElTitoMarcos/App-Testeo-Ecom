@@ -197,6 +197,7 @@ def insert_product(
     competition_level: Optional[str] = None,
     extra: Optional[Dict[str, Any]] = None,
     commit: bool = True,
+    product_id: Optional[int] = None,
 ) -> int:
     """Insert a new product into the database.
 
@@ -214,9 +215,10 @@ def insert_product(
         awareness_level: One of 'Unaware','Problem-Aware','Solution-Aware','Product-Aware','Most Aware'
         competition_level: One of 'Low', 'Medium', 'High'
         extra: Optional dictionary of additional attributes (will be stored as JSON)
+        product_id: Explicit ID for the row. If ``None`` the database assigns one.
 
     Returns:
-        The auto‑generated product ID.
+        The product ID (auto‑generated or explicit).
     """
     cur = conn.cursor()
     import_date = datetime.utcnow().isoformat()
@@ -236,33 +238,60 @@ def insert_product(
     }
     if awareness_level not in allowed_awareness:
         awareness_level = None
-    cur.execute(
-        """
-        INSERT INTO products (
-            name, description, category, price, currency, image_url, source,
-            import_date, desire, desire_magnitude, awareness_level,
-            competition_level, extra)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
-        """,
-        (
-            name,
-            description,
-            category,
-            price,
-            currency,
-            image_url,
-            source,
-            import_date,
-            desire,
-            desire_magnitude,
-            awareness_level,
-            competition_level,
-            json_dump(extra) if extra is not None else "{}",
-        ),
-    )
+    if product_id is not None:
+        cur.execute(
+            """
+            INSERT INTO products (
+                id, name, description, category, price, currency, image_url, source,
+                import_date, desire, desire_magnitude, awareness_level,
+                competition_level, extra)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
+            """,
+            (
+                product_id,
+                name,
+                description,
+                category,
+                price,
+                currency,
+                image_url,
+                source,
+                import_date,
+                desire,
+                desire_magnitude,
+                awareness_level,
+                competition_level,
+                json_dump(extra) if extra is not None else "{}",
+            ),
+        )
+    else:
+        cur.execute(
+            """
+            INSERT INTO products (
+                name, description, category, price, currency, image_url, source,
+                import_date, desire, desire_magnitude, awareness_level,
+                competition_level, extra)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
+            """,
+            (
+                name,
+                description,
+                category,
+                price,
+                currency,
+                image_url,
+                source,
+                import_date,
+                desire,
+                desire_magnitude,
+                awareness_level,
+                competition_level,
+                json_dump(extra) if extra is not None else "{}",
+            ),
+        )
     if commit:
         conn.commit()
-    return cur.lastrowid
+    return product_id if product_id is not None else cur.lastrowid
 
 
 def list_products(conn: sqlite3.Connection) -> List[sqlite3.Row]:
