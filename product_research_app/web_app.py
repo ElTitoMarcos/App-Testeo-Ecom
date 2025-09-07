@@ -196,6 +196,28 @@ def ensure_db():
     return conn
 
 
+def build_product_dto(p: dict, extra: dict, score_value):
+    """Return a product dict limited to fields used by the frontend."""
+    return {
+        "id": p.get("id"),
+        "image": p.get("image_url"),
+        "name": p.get("name"),
+        "category": p.get("category"),
+        "price": p.get("price"),
+        "rating": extra.get("rating"),
+        "units_sold": extra.get("units_sold"),
+        "revenue": extra.get("revenue"),
+        "conversion_rate": extra.get("conversion_rate"),
+        "launch_date": extra.get("launch_date"),
+        "date_range": extra.get("date_range"),
+        "desire_text": p.get("desire_text"),
+        "desire_magnitude": p.get("desire_magnitude"),
+        "awareness_level": p.get("awareness_level"),
+        "competition_level": p.get("competition_level"),
+        "winner_score": score_value,
+    }
+
+
 def parse_xlsx(binary: bytes):
     """Parse a minimal XLSX file into a list of dictionaries."""
     import zipfile
@@ -542,25 +564,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         else "total_score"
                     )
                     score_value = score.get(key)
-                row = {
-                    "id": p["id"],
-                    "image": p["image_url"],
-                    "name": p["name"],
-                    "category": p["category"],
-                    "price": p["price"],
-                    "rating": extra_dict.get("rating"),
-                    "units_sold": extra_dict.get("units_sold"),
-                    "revenue": extra_dict.get("revenue"),
-                    "conversion_rate": extra_dict.get("conversion_rate"),
-                    "launch_date": extra_dict.get("launch_date"),
-                    "date_range": extra_dict.get("date_range"),
-                    "desire_text": p["desire_text"],
-                    "desire_magnitude": p["desire_magnitude"],
-                    "awareness_level": p["awareness_level"],
-                    "competition_level": p["competition_level"],
-                    "winner_score": score_value,
-                    "delete_id": p["id"],
-                }
+                row = build_product_dto(p, extra_dict, score_value)
                 rows.append(row)
             result = {"total": total, "items": rows}
             self._set_json()
@@ -638,35 +642,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                             if config.is_scoring_v2_enabled()
                             else "total_score"
                         )
-                        if key in score.keys():
-                            score_value = score[key]
-                        else:
-                            score_value = None
-                        breakdown_data = {}
-                        if config.is_scoring_v2_enabled():
-                            try:
-                                raw_breakdown = (
-                                    score["winner_score_v2_breakdown"]
-                                    if "winner_score_v2_breakdown" in score.keys()
-                                    else None
-                                )
-                                breakdown_data = json.loads(raw_breakdown or "{}")
-                            except Exception:
-                                breakdown_data = {}
-                    row = {
-                        "id": p["id"],
-                        "name": p["name"],
-                        "category": p["category"],
-                        "price": p["price"],
-                        "image_url": p["image_url"],
-                        "extras": extra_dict,
-                    }
-                    if config.is_scoring_v2_enabled():
-                        row["winner_score_v2_pct"] = score_value
-                        if score:
-                            row["winner_score_v2_breakdown"] = breakdown_data
-                    else:
-                        row["score"] = score_value
+                        score_value = score.get(key)
+                    row = build_product_dto(p, extra_dict, score_value)
                     rows.append(row)
                 self._set_json()
                 self.wfile.write(json.dumps(rows).encode("utf-8"))
@@ -1093,25 +1070,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             if score:
                 key = "winner_score_v2_pct" if config.is_scoring_v2_enabled() else "total_score"
                 winner = score.get(key)
-            row = {
-                "id": p["id"],
-                "image": p["image_url"],
-                "name": p["name"],
-                "category": p["category"],
-                "price": p["price"],
-                "rating": extra_dict.get("rating"),
-                "units_sold": extra_dict.get("units_sold"),
-                "revenue": extra_dict.get("revenue"),
-                "conversion_rate": extra_dict.get("conversion_rate"),
-                "launch_date": extra_dict.get("launch_date"),
-                "date_range": extra_dict.get("date_range"),
-                "desire_text": p["desire_text"],
-                "desire_magnitude": p["desire_magnitude"],
-                "awareness_level": p["awareness_level"],
-                "competition_level": p["competition_level"],
-                "winner_score": winner,
-                "delete_id": p["id"],
-            }
+            row = build_product_dto(p, extra_dict, winner)
             self.safe_write(lambda: self.send_json(row))
             return
         if path == "/products":
@@ -1138,8 +1097,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                 extra=data.get("extras"),
             )
             product = database.get_product(conn, pid)
+            extra = product["extra"] if "extra" in product.keys() else {}
+            try:
+                extra_dict = json.loads(extra) if isinstance(extra, str) else (extra or {})
+            except Exception:
+                extra_dict = {}
+            row = build_product_dto(product, extra_dict, None)
             self._set_json()
-            self.wfile.write(json.dumps(dict(product)).encode('utf-8'))
+            self.wfile.write(json.dumps(row).encode('utf-8'))
             return
         self.send_error(404)
 
@@ -1167,8 +1132,14 @@ class RequestHandler(BaseHTTPRequestHandler):
             database.update_product(conn, pid, **data)
             product = database.get_product(conn, pid)
             if product:
+                extra = product["extra"] if "extra" in product.keys() else {}
+                try:
+                    extra_dict = json.loads(extra) if isinstance(extra, str) else (extra or {})
+                except Exception:
+                    extra_dict = {}
+                row = build_product_dto(product, extra_dict, None)
                 self._set_json()
-                self.wfile.write(json.dumps(dict(product)).encode('utf-8'))
+                self.wfile.write(json.dumps(row).encode('utf-8'))
             else:
                 self.send_error(404)
             return
