@@ -512,10 +512,21 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self.safe_write(lambda: self.send_json({"error": "not found"}, status=404))
             return
         if path == "/products":
-            # Return a list of products including extra metadata for UI display
+            params = parse_qs(parsed.query)
+            try:
+                page = int(params.get("page", ["1"])[0])
+                per_page = int(params.get("page_size", ["50"])[0])
+            except Exception:
+                page, per_page = 1, 50
+            if page < 1:
+                page = 1
+            if per_page < 1:
+                per_page = 50
+            offset = (page - 1) * per_page
             conn = ensure_db()
+            total = database.count_products(conn)
             rows = []
-            for p in database.list_products(conn):
+            for p in database.list_products(conn, limit=per_page, offset=offset):
                 scores = database.get_scores_for_product(conn, p["id"])
                 score = scores[0] if scores else None
                 extra = p["extra"] if "extra" in p.keys() else {}
@@ -530,42 +541,30 @@ class RequestHandler(BaseHTTPRequestHandler):
                         if config.is_scoring_v2_enabled()
                         else "total_score"
                     )
-                    if key in score.keys():
-                        score_value = score[key]
-                    else:
-                        score_value = None
-                    breakdown_data = {}
-                    if config.is_scoring_v2_enabled():
-                        try:
-                            raw_breakdown = (
-                                score["winner_score_v2_breakdown"]
-                                if "winner_score_v2_breakdown" in score.keys()
-                                else None
-                            )
-                            breakdown_data = json.loads(raw_breakdown or "{}")
-                        except Exception:
-                            breakdown_data = {}
+                    score_value = score.get(key)
                 row = {
                     "id": p["id"],
+                    "image": p["image_url"],
                     "name": p["name"],
                     "category": p["category"],
                     "price": p["price"],
-                    "image_url": p["image_url"],
-                    "desire": p["desire"],
+                    "rating": extra_dict.get("rating"),
+                    "units_sold": extra_dict.get("units_sold"),
+                    "revenue": extra_dict.get("revenue"),
+                    "conversion_rate": extra_dict.get("conversion_rate"),
+                    "launch_date": extra_dict.get("launch_date"),
+                    "date_range": extra_dict.get("date_range"),
+                    "desire_text": p["desire_text"],
                     "desire_magnitude": p["desire_magnitude"],
                     "awareness_level": p["awareness_level"],
                     "competition_level": p["competition_level"],
-                    "extras": extra_dict,
+                    "winner_score": score_value,
+                    "delete_id": p["id"],
                 }
-                if config.is_scoring_v2_enabled():
-                    row["winner_score_v2_pct"] = score_value
-                    if score:
-                        row["winner_score_v2_breakdown"] = breakdown_data
-                else:
-                    row["score"] = score_value
                 rows.append(row)
+            result = {"total": total, "items": rows}
             self._set_json()
-            self.wfile.write(json.dumps(rows).encode("utf-8"))
+            self.wfile.write(json.dumps(result).encode("utf-8"))
             return
         if path == "/config":
             # return stored configuration (without exposing the API key)
@@ -1028,6 +1027,93 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/shutdown":
             self.handle_shutdown()
             return
+        if path == "/products/update-field":
+            length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(length).decode('utf-8')
+            try:
+                data = json.loads(body)
+                if not isinstance(data, dict):
+                    raise ValueError
+            except Exception:
+                self.safe_write(lambda: self.send_json({"error": "Invalid JSON"}, status=400))
+                return
+            pid = data.get("id")
+            field = data.get("field")
+            value = data.get("value")
+            allowed = {"desire_text", "desire_magnitude", "awareness_level", "competition_level"}
+            if not isinstance(pid, int) or field not in allowed:
+                self.safe_write(lambda: self.send_json({"error": "Invalid payload"}, status=400))
+                return
+            if field == "desire_text":
+                if value in (None, ""):
+                    value = None
+                elif not isinstance(value, str):
+                    self.safe_write(lambda: self.send_json({"error": "Invalid value"}, status=400))
+                    return
+            elif field in {"desire_magnitude", "competition_level"}:
+                if value in (None, ""):
+                    value = None
+                else:
+                    mapping = {"low": "Low", "medium": "Medium", "high": "High"}
+                    val = mapping.get(str(value).strip().lower())
+                    if not val:
+                        self.safe_write(lambda: self.send_json({"error": "Invalid value"}, status=400))
+                        return
+                    value = val
+            elif field == "awareness_level":
+                if value in (None, ""):
+                    value = None
+                else:
+                    mapping = {
+                        "unaware": "Unaware",
+                        "problem-aware": "Problem-Aware",
+                        "solution-aware": "Solution-Aware",
+                        "product-aware": "Product-Aware",
+                        "most aware": "Most Aware",
+                    }
+                    val = mapping.get(str(value).strip().lower())
+                    if not val:
+                        self.safe_write(lambda: self.send_json({"error": "Invalid value"}, status=400))
+                        return
+                    value = val
+            conn = ensure_db()
+            database.update_product(conn, pid, **{field: value})
+            p = database.get_product(conn, pid)
+            if not p:
+                self.safe_write(lambda: self.send_json({"error": "not found"}, status=404))
+                return
+            scores = database.get_scores_for_product(conn, pid)
+            score = scores[0] if scores else None
+            extra = p["extra"] if "extra" in p.keys() else {}
+            try:
+                extra_dict = json.loads(extra) if isinstance(extra, str) else (extra or {})
+            except Exception:
+                extra_dict = {}
+            winner = None
+            if score:
+                key = "winner_score_v2_pct" if config.is_scoring_v2_enabled() else "total_score"
+                winner = score.get(key)
+            row = {
+                "id": p["id"],
+                "image": p["image_url"],
+                "name": p["name"],
+                "category": p["category"],
+                "price": p["price"],
+                "rating": extra_dict.get("rating"),
+                "units_sold": extra_dict.get("units_sold"),
+                "revenue": extra_dict.get("revenue"),
+                "conversion_rate": extra_dict.get("conversion_rate"),
+                "launch_date": extra_dict.get("launch_date"),
+                "date_range": extra_dict.get("date_range"),
+                "desire_text": p["desire_text"],
+                "desire_magnitude": p["desire_magnitude"],
+                "awareness_level": p["awareness_level"],
+                "competition_level": p["competition_level"],
+                "winner_score": winner,
+                "delete_id": p["id"],
+            }
+            self.safe_write(lambda: self.send_json(row))
+            return
         if path == "/products":
             length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(length).decode('utf-8')
@@ -1049,10 +1135,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                 currency=data.get("currency"),
                 image_url=data.get("image_url"),
                 source=data.get("source"),
-                desire=data.get("desire"),
-                desire_magnitude=data.get("desire_magnitude"),
-                awareness_level=data.get("awareness_level"),
-                competition_level=data.get("competition_level"),
                 extra=data.get("extras"),
             )
             product = database.get_product(conn, pid)
