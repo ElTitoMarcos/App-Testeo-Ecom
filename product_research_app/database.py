@@ -65,7 +65,7 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             image_url TEXT,
             source TEXT,
             import_date TEXT NOT NULL,
-            desire TEXT,
+            desire_text TEXT,
             desire_magnitude TEXT,
             awareness_level TEXT,
             competition_level TEXT,
@@ -75,33 +75,95 @@ def initialize_database(conn: sqlite3.Connection) -> None:
     )
     cur.execute("PRAGMA table_info(products)")
     cols = [row[1] for row in cur.fetchall()]
-    if "desire" not in cols:
-        cur.execute("ALTER TABLE products ADD COLUMN desire TEXT")
-    if "desire_magnitude" not in cols and "magnitud_deseo" in cols:
-        cur.execute("ALTER TABLE products RENAME COLUMN magnitud_deseo TO desire_magnitude")
-    elif "desire_magnitude" not in cols:
+    if "desire_text" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN desire_text TEXT")
+    if "desire_magnitude" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN desire_magnitude TEXT")
-    if "awareness_level" not in cols and "nivel_consciencia" in cols:
-        cur.execute("ALTER TABLE products RENAME COLUMN nivel_consciencia TO awareness_level")
-    elif "awareness_level" not in cols:
+    if "awareness_level" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN awareness_level TEXT")
-    if "competition_level" not in cols and "saturacion_mercado" in cols:
-        cur.execute("ALTER TABLE products RENAME COLUMN saturacion_mercado TO competition_level")
-    elif "competition_level" not in cols:
+    if "competition_level" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN competition_level TEXT")
-    # drop obsolete columns if present
-    for obsolete in [
-        "facilidad_anuncio",
-        "facilidad_logistica",
-        "escalabilidad",
-        "engagement_shareability",
-        "durabilidad_recurrencia",
-    ]:
-        if obsolete in cols:
-            try:
-                cur.execute(f"ALTER TABLE products DROP COLUMN {obsolete}")
-            except Exception:
-                pass
+
+    # migrate legacy columns if present
+    cols = set(cols)
+    if "desire" in cols:
+        cur.execute(
+            "UPDATE products SET desire_text = desire WHERE desire_text IS NULL AND desire IS NOT NULL"
+        )
+    def _norm_tri(val: str) -> Optional[str]:
+        if val is None:
+            return None
+        mapping = {
+            "baja": "Low",
+            "low": "Low",
+            "medio": "Medium",
+            "media": "Medium",
+            "medium": "Medium",
+            "alta": "High",
+            "high": "High",
+        }
+        return mapping.get(val.strip().lower())
+    if "magnitud_deseo" in cols:
+        cur2 = conn.cursor()
+        cur2.execute(
+            "SELECT id, magnitud_deseo FROM products WHERE desire_magnitude IS NULL AND magnitud_deseo IS NOT NULL"
+        )
+        for row in cur2.fetchall():
+            mapped = _norm_tri(row[1])
+            cur2.execute(
+                "UPDATE products SET desire_magnitude = ? WHERE id = ?",
+                (mapped, row[0]),
+            )
+    def _norm_awareness(val: str) -> Optional[str]:
+        if val is None:
+            return None
+        mapping = {
+            "no consciente": "Unaware",
+            "unaware": "Unaware",
+            "consciente del problema": "Problem-Aware",
+            "problem-aware": "Problem-Aware",
+            "consciente de la solucion": "Solution-Aware",
+            "consciente de la solución": "Solution-Aware",
+            "solution-aware": "Solution-Aware",
+            "consciente del producto": "Product-Aware",
+            "product-aware": "Product-Aware",
+            "muy consciente": "Most Aware",
+            "most aware": "Most Aware",
+        }
+        return mapping.get(val.strip().lower())
+    if "nivel_consciencia" in cols:
+        cur2 = conn.cursor()
+        cur2.execute(
+            "SELECT id, nivel_consciencia FROM products WHERE awareness_level IS NULL AND nivel_consciencia IS NOT NULL"
+        )
+        for row in cur2.fetchall():
+            mapped = _norm_awareness(row[1])
+            cur2.execute(
+                "UPDATE products SET awareness_level = ? WHERE id = ?",
+                (mapped, row[0]),
+            )
+    if "saturacion_mercado" in cols:
+        cur2 = conn.cursor()
+        cur2.execute(
+            "SELECT id, saturacion_mercado FROM products WHERE competition_level IS NULL AND saturacion_mercado IS NOT NULL"
+        )
+        for row in cur2.fetchall():
+            mapped = _norm_tri(row[1])
+            cur2.execute(
+                "UPDATE products SET competition_level = ? WHERE id = ?",
+                (mapped, row[0]),
+            )
+
+    # optional indexes for new qualitative fields
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_products_desire_magnitude ON products(desire_magnitude)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_products_awareness_level ON products(awareness_level)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_products_competition_level ON products(competition_level)"
+    )
     # Scores table
     cur.execute(
         """
@@ -191,7 +253,7 @@ def insert_product(
     currency: Optional[str] = None,
     image_url: Optional[str] = None,
     source: Optional[str] = None,
-    desire: Optional[str] = None,
+    desire_text: Optional[str] = None,
     desire_magnitude: Optional[str] = None,
     awareness_level: Optional[str] = None,
     competition_level: Optional[str] = None,
@@ -210,7 +272,7 @@ def insert_product(
         currency: Optional currency code
         image_url: Optional URL or path to image
         source: Optional source string describing where the product was imported from
-        desire: Short text describing the desire (<=180 characters)
+        desire_text: Short text describing the desire (<=180 characters)
         desire_magnitude: One of 'Low', 'Medium', 'High'
         awareness_level: One of 'Unaware','Problem-Aware','Solution-Aware','Product-Aware','Most Aware'
         competition_level: One of 'Low', 'Medium', 'High'
@@ -222,8 +284,8 @@ def insert_product(
     """
     cur = conn.cursor()
     import_date = datetime.utcnow().isoformat()
-    if desire is not None and len(desire) > 180:
-        desire = desire[:180]
+    if desire_text is not None and len(desire_text) > 180:
+        desire_text = desire_text[:180]
     allowed_tri = {"Low", "Medium", "High"}
     if desire_magnitude not in allowed_tri:
         desire_magnitude = None
@@ -243,7 +305,7 @@ def insert_product(
             """
             INSERT INTO products (
                 id, name, description, category, price, currency, image_url, source,
-                import_date, desire, desire_magnitude, awareness_level,
+                import_date, desire_text, desire_magnitude, awareness_level,
                 competition_level, extra)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
             """,
@@ -257,7 +319,7 @@ def insert_product(
                 image_url,
                 source,
                 import_date,
-                desire,
+                desire_text,
                 desire_magnitude,
                 awareness_level,
                 competition_level,
@@ -269,7 +331,7 @@ def insert_product(
             """
             INSERT INTO products (
                 name, description, category, price, currency, image_url, source,
-                import_date, desire, desire_magnitude, awareness_level,
+                import_date, desire_text, desire_magnitude, awareness_level,
                 competition_level, extra)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
             """,
@@ -282,7 +344,7 @@ def insert_product(
                 image_url,
                 source,
                 import_date,
-                desire,
+                desire_text,
                 desire_magnitude,
                 awareness_level,
                 competition_level,
@@ -294,12 +356,22 @@ def insert_product(
     return product_id if product_id is not None else cur.lastrowid
 
 
-def list_products(conn: sqlite3.Connection) -> List[sqlite3.Row]:
-    """Return all products in the database ordered by import date descending."""
+def list_products(
+    conn: sqlite3.Connection, limit: Optional[int] = None, offset: int = 0
+) -> List[sqlite3.Row]:
+    """Return products ordered by import date descending.
+
+    When ``limit`` is provided the results are paginated using ``offset``.
+    """
+
     cur = conn.cursor()
-    cur.execute(
-        "SELECT * FROM products ORDER BY import_date DESC"
-    )
+    if limit is None:
+        cur.execute("SELECT * FROM products ORDER BY import_date DESC")
+    else:
+        cur.execute(
+            "SELECT * FROM products ORDER BY import_date DESC LIMIT ? OFFSET ?",
+            (int(limit), int(offset)),
+        )
     return cur.fetchall()
 
 
@@ -333,7 +405,7 @@ def update_product(
         "currency",
         "image_url",
         "source",
-        "desire",
+        "desire_text",
         "desire_magnitude",
         "awareness_level",
         "competition_level",
@@ -341,8 +413,8 @@ def update_product(
     data = {k: v for k, v in fields.items() if k in allowed_cols}
     if not data:
         return
-    if "desire" in data and data["desire"] and len(data["desire"]) > 180:
-        data["desire"] = data["desire"][:180]
+    if "desire_text" in data and data["desire_text"] and len(data["desire_text"]) > 180:
+        data["desire_text"] = data["desire_text"][:180]
     tri_vals = {"Low", "Medium", "High"}
     if "desire_magnitude" in data and data["desire_magnitude"] not in tri_vals:
         data["desire_magnitude"] = None
