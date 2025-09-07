@@ -96,6 +96,10 @@ def import_data(conn: database.sqlite3.Connection) -> None:
                 price_col = find_col(headers, ["price", "precio", "cost"])
                 currency_col = find_col(headers, ["currency", "moneda"])
                 image_col = find_col(headers, ["image", "imagen", "img", "picture"])
+                desire_col = find_col(headers, ["desire"])
+                desire_mag_col = find_col(headers, ["desire_magnitude", "desire magnitude", "magnitud_deseo"])
+                awareness_col = find_col(headers, ["awareness_level", "awareness level", "nivel_consciencia"])
+                competition_col = find_col(headers, ["competition_level", "competition level", "saturacion_mercado"])
                 # allow user override
                 override = prompt_user(
                     "¿Desea mapear columnas manualmente? (s/n): "
@@ -107,6 +111,19 @@ def import_data(conn: database.sqlite3.Connection) -> None:
                     price_col = prompt_user("Columna para el precio (enter para inferido): ") or price_col
                     currency_col = prompt_user("Columna para la moneda (enter para inferido): ") or currency_col
                     image_col = prompt_user("Columna para la imagen (enter para inferido): ") or image_col
+                    desire_col = prompt_user("Columna para Desire (enter para inferido): ") or desire_col
+                    desire_mag_col = (
+                        prompt_user("Columna para Desire Magnitude (enter para inferido): ")
+                        or desire_mag_col
+                    )
+                    awareness_col = (
+                        prompt_user("Columna para Awareness Level (enter para inferido): ")
+                        or awareness_col
+                    )
+                    competition_col = (
+                        prompt_user("Columna para Competition Level (enter para inferido): ")
+                        or competition_col
+                    )
                 for row in reader:
                     name = (row.get(name_col) or "").strip() if name_col else None
                     if not name:
@@ -122,7 +139,32 @@ def import_data(conn: database.sqlite3.Connection) -> None:
                             price = None
                     currency = (row.get(currency_col) or "").strip() if currency_col else None
                     image_url = (row.get(image_col) or "").strip() if image_col else None
-                    extra_cols = {k: v for k, v in row.items() if k not in {name_col, desc_col, cat_col, price_col, currency_col, image_col}}
+                    desire = (row.get(desire_col) or "").strip() if desire_col else None
+                    desire = desire or None
+                    desire_mag = (row.get(desire_mag_col) or "").strip() if desire_mag_col else None
+                    desire_mag = desire_mag or None
+                    awareness = (row.get(awareness_col) or "").strip() if awareness_col else None
+                    awareness = awareness or None
+                    competition = (row.get(competition_col) or "").strip() if competition_col else None
+                    competition = competition or None
+                    extra_cols = {
+                        k: v
+                        for k, v in row.items()
+                        if k
+                        not in {
+                            name_col,
+                            desc_col,
+                            cat_col,
+                            price_col,
+                            currency_col,
+                            image_col,
+                            desire_col,
+                            desire_mag_col,
+                            awareness_col,
+                            competition_col,
+                        }
+                        and k.lower() not in {"product name", "source", "decision"}
+                    }
                     _ = database.insert_product(
                         conn,
                         name=name,
@@ -132,6 +174,10 @@ def import_data(conn: database.sqlite3.Connection) -> None:
                         currency=currency,
                         image_url=image_url,
                         source=source,
+                        desire=desire,
+                        desire_magnitude=desire_mag,
+                        awareness_level=awareness,
+                        competition_level=competition,
                         extra=extra_cols,
                     )
                     inserted += 1
@@ -159,7 +205,43 @@ def import_data(conn: database.sqlite3.Connection) -> None:
                             continue
                 currency = item.get("currency") or item.get("moneda")
                 image_url = item.get("image") or item.get("imagen") or item.get("img")
-                extra = {k: v for k, v in item.items() if k not in {"name", "nombre", "product", "title", "description", "descripcion", "category", "categoria", "price", "precio", "cost", "currency", "moneda", "image", "imagen", "img"}}
+                desire = item.get("desire") or item.get("desire_text")
+                desire_mag = item.get("desire_magnitude") or item.get("magnitud_deseo")
+                awareness = item.get("awareness_level") or item.get("nivel_consciencia")
+                competition = item.get("competition_level") or item.get("saturacion_mercado")
+                extra = {
+                    k: v
+                    for k, v in item.items()
+                    if k
+                    not in {
+                        "name",
+                        "nombre",
+                        "product",
+                        "title",
+                        "description",
+                        "descripcion",
+                        "category",
+                        "categoria",
+                        "price",
+                        "precio",
+                        "cost",
+                        "currency",
+                        "moneda",
+                        "image",
+                        "imagen",
+                        "img",
+                        "desire",
+                        "desire_text",
+                        "desire_magnitude",
+                        "awareness_level",
+                        "competition_level",
+                        "magnitud_deseo",
+                        "nivel_consciencia",
+                        "saturacion_mercado",
+                        "source",
+                        "decision",
+                    }
+                }
                 _ = database.insert_product(
                     conn,
                     name=name,
@@ -168,6 +250,10 @@ def import_data(conn: database.sqlite3.Connection) -> None:
                     price=price,
                     currency=currency,
                     image_url=image_url,
+                    desire=desire,
+                    desire_magnitude=desire_mag,
+                    awareness_level=awareness,
+                    competition_level=competition,
                     source=source,
                     extra=extra,
                 )
@@ -418,7 +504,21 @@ def export_data(conn: database.sqlite3.Connection) -> None:
         if fmt == "csv":
             with open(out_file, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                writer.writerow(["id", "name", "description", "category", "price", "currency", "image_url", "source", "import_date"])
+                writer.writerow([
+                    "id",
+                    "name",
+                    "description",
+                    "category",
+                    "price",
+                    "currency",
+                    "image_url",
+                    "source",
+                    "import_date",
+                    "Desire",
+                    "Desire Magnitude",
+                    "Awareness Level",
+                    "Competition Level",
+                ])
                 for p in products:
                     writer.writerow([
                         p["id"],
@@ -430,22 +530,32 @@ def export_data(conn: database.sqlite3.Connection) -> None:
                         p["image_url"],
                         p["source"],
                         p["import_date"],
+                        p["desire"],
+                        p["desire_magnitude"],
+                        p["awareness_level"],
+                        p["competition_level"],
                     ])
             print(f"Datos exportados a {out_file}")
         elif fmt == "json":
             json_data = []
             for p in products:
-                json_data.append({
-                    "id": p["id"],
-                    "name": p["name"],
-                    "description": p["description"],
-                    "category": p["category"],
-                    "price": p["price"],
-                    "currency": p["currency"],
-                    "image_url": p["image_url"],
-                    "source": p["source"],
-                    "import_date": p["import_date"],
-                })
+                json_data.append(
+                    {
+                        "id": p["id"],
+                        "name": p["name"],
+                        "description": p["description"],
+                        "category": p["category"],
+                        "price": p["price"],
+                        "currency": p["currency"],
+                        "image_url": p["image_url"],
+                        "source": p["source"],
+                        "import_date": p["import_date"],
+                        "desire": p["desire"],
+                        "desire_magnitude": p["desire_magnitude"],
+                        "awareness_level": p["awareness_level"],
+                        "competition_level": p["competition_level"],
+                    }
+                )
             with open(out_file, "w", encoding="utf-8") as f:
                 json.dump(json_data, f, ensure_ascii=False, indent=2)
             print(f"Datos exportados a {out_file}")
