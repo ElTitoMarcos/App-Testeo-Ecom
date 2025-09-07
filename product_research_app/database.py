@@ -69,6 +69,7 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             desire_magnitude TEXT,
             awareness_level TEXT,
             competition_level TEXT,
+            desire_text TEXT DEFAULT NULL,
             extra JSON
         )
         """
@@ -77,6 +78,8 @@ def initialize_database(conn: sqlite3.Connection) -> None:
     cols = [row[1] for row in cur.fetchall()]
     if "desire" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN desire TEXT")
+    if "desire_text" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN desire_text TEXT")
     if "desire_magnitude" not in cols and "magnitud_deseo" in cols:
         cur.execute("ALTER TABLE products RENAME COLUMN magnitud_deseo TO desire_magnitude")
     elif "desire_magnitude" not in cols:
@@ -89,6 +92,23 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         cur.execute("ALTER TABLE products RENAME COLUMN saturacion_mercado TO competition_level")
     elif "competition_level" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN competition_level TEXT")
+    # Reset new qualitative fields to NULL for all existing rows
+    try:
+        cur.execute(
+            """
+            UPDATE products
+            SET desire_text = NULL,
+                desire_magnitude = NULL,
+                awareness_level = NULL,
+                competition_level = NULL
+            WHERE desire_text IS NOT NULL
+               OR desire_magnitude IS NOT NULL
+               OR awareness_level IS NOT NULL
+               OR competition_level IS NOT NULL
+            """
+        )
+    except Exception:
+        pass
     # drop obsolete columns if present
     for obsolete in [
         "facilidad_anuncio",
@@ -195,11 +215,15 @@ def insert_product(
     desire_magnitude: Optional[str] = None,
     awareness_level: Optional[str] = None,
     competition_level: Optional[str] = None,
+    desire_text: Optional[str] = None,
     extra: Optional[Dict[str, Any]] = None,
     commit: bool = True,
     product_id: Optional[int] = None,
 ) -> int:
     """Insert a new product into the database.
+
+    The ``desire`` parameter is kept for backward compatibility but its value
+    is ignored in favour of the new ``desire_text`` field.
 
     Args:
         conn: SQLite connection
@@ -210,10 +234,11 @@ def insert_product(
         currency: Optional currency code
         image_url: Optional URL or path to image
         source: Optional source string describing where the product was imported from
-        desire: Short text describing the desire (<=180 characters)
+        desire: Legacy textual desire field (deprecated)
         desire_magnitude: One of 'Low', 'Medium', 'High'
         awareness_level: One of 'Unaware','Problem-Aware','Solution-Aware','Product-Aware','Most Aware'
         competition_level: One of 'Low', 'Medium', 'High'
+        desire_text: New desire text field stored in ``desire_text`` column
         extra: Optional dictionary of additional attributes (will be stored as JSON)
         product_id: Explicit ID for the row. If ``None`` the database assigns one.
 
@@ -222,8 +247,8 @@ def insert_product(
     """
     cur = conn.cursor()
     import_date = datetime.utcnow().isoformat()
-    if desire is not None and len(desire) > 180:
-        desire = desire[:180]
+    if desire_text is not None and len(desire_text) > 180:
+        desire_text = desire_text[:180]
     allowed_tri = {"Low", "Medium", "High"}
     if desire_magnitude not in allowed_tri:
         desire_magnitude = None
@@ -244,8 +269,8 @@ def insert_product(
             INSERT INTO products (
                 id, name, description, category, price, currency, image_url, source,
                 import_date, desire, desire_magnitude, awareness_level,
-                competition_level, extra)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
+                competition_level, desire_text, extra)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
             """,
             (
                 product_id,
@@ -261,6 +286,7 @@ def insert_product(
                 desire_magnitude,
                 awareness_level,
                 competition_level,
+                desire_text,
                 json_dump(extra) if extra is not None else "{}",
             ),
         )
@@ -270,8 +296,8 @@ def insert_product(
             INSERT INTO products (
                 name, description, category, price, currency, image_url, source,
                 import_date, desire, desire_magnitude, awareness_level,
-                competition_level, extra)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
+                competition_level, desire_text, extra)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
             """,
             (
                 name,
@@ -286,6 +312,7 @@ def insert_product(
                 desire_magnitude,
                 awareness_level,
                 competition_level,
+                desire_text,
                 json_dump(extra) if extra is not None else "{}",
             ),
         )
@@ -294,13 +321,22 @@ def insert_product(
     return product_id if product_id is not None else cur.lastrowid
 
 
-def list_products(conn: sqlite3.Connection) -> List[sqlite3.Row]:
-    """Return all products in the database ordered by import date descending."""
+def list_products(conn: sqlite3.Connection, limit: Optional[int] = None, offset: int = 0) -> List[sqlite3.Row]:
+    """Return products ordered by import date descending with optional pagination."""
     cur = conn.cursor()
-    cur.execute(
-        "SELECT * FROM products ORDER BY import_date DESC"
-    )
+    if limit is None:
+        cur.execute("SELECT * FROM products ORDER BY import_date DESC")
+    else:
+        cur.execute("SELECT * FROM products ORDER BY import_date DESC LIMIT ? OFFSET ?", (limit, offset))
     return cur.fetchall()
+
+
+def count_products(conn: sqlite3.Connection) -> int:
+    """Return the total number of products."""
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM products")
+    row = cur.fetchone()
+    return row[0] if row else 0
 
 
 def get_product(conn: sqlite3.Connection, product_id: int) -> Optional[sqlite3.Row]:
@@ -337,12 +373,15 @@ def update_product(
         "desire_magnitude",
         "awareness_level",
         "competition_level",
+        "desire_text",
     }
     data = {k: v for k, v in fields.items() if k in allowed_cols}
     if not data:
         return
     if "desire" in data and data["desire"] and len(data["desire"]) > 180:
         data["desire"] = data["desire"][:180]
+    if "desire_text" in data and data["desire_text"] and len(data["desire_text"]) > 180:
+        data["desire_text"] = data["desire_text"][:180]
     tri_vals = {"Low", "Medium", "High"}
     if "desire_magnitude" in data and data["desire_magnitude"] not in tri_vals:
         data["desire_magnitude"] = None
