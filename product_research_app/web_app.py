@@ -195,8 +195,34 @@ def ensure_db():
     return conn
 
 
+class _SilentWriter:
+    """Wrapper around a socket writer that ignores connection errors."""
+
+    def __init__(self, raw):
+        self._raw = raw
+
+    def write(self, data):
+        try:
+            self._raw.write(data)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
+
+    def flush(self):
+        try:
+            self._raw.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
+
 class RequestHandler(BaseHTTPRequestHandler):
     server_version = "ProductResearchCopilot/1.0"
+
+    def setup(self):
+        super().setup()
+        self.wfile = _SilentWriter(self.wfile)
 
     def _set_json(self, status=200):
         self.send_response(status)
