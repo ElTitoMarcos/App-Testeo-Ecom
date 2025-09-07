@@ -76,6 +76,8 @@ body.dark .weight-slider {
     <button id="createListBtn">Crear</button>
     <textarea id="gptPrompt" rows="1" maxlength="2000" placeholder="Escribe consulta para GPT..." aria-label="Escribe consulta para GPT..."></textarea>
     <button id="sendPrompt">Enviar consulta a GPT</button>
+    <button id="btn-ai-generate">Generar con IA</button>
+    <span id="aiSpinner" style="display:none;">Generando...</span>
     <div id="searchRowRight">
       <div id="listMeta">0 resultados</div>
     </div>
@@ -1360,6 +1362,113 @@ function renderCategorySummary(){
   body+='</tbody>'; table.innerHTML=head+body;
   table.querySelectorAll('th').forEach(th=>{th.style.cursor='pointer';th.onclick=()=>{const key=th.dataset.key;if(catSort.key===key) catSort.asc=!catSort.asc; else {catSort.key=key;catSort.asc=true;} renderCategorySummary();};});
 }
+
+function getSelectedIds() {
+  const cbs = document.querySelectorAll('tbody input[type="checkbox"]:checked');
+  const ids = [];
+  cbs.forEach(cb => {
+    const tr = cb.closest('tr');
+    const idFromData = cb.dataset.id || tr?.dataset.id;
+    const idFromCell = tr?.querySelector('td:nth-child(1)')?.innerText?.trim();
+    const id = String(idFromData || idFromCell || "");
+    if (id) ids.push(id);
+  });
+  return ids;
+}
+
+function showSpinner(flag) {
+  const sp = document.getElementById('aiSpinner');
+  if (sp) sp.style.display = flag ? 'inline-block' : 'none';
+}
+
+function showToastMsg(msg) {
+  if (window.toast?.info) window.toast.info(msg);
+  else alert(msg);
+}
+
+function findRowById(id) {
+  const rows = document.querySelectorAll('#productTable tbody tr');
+  for (const tr of rows) {
+    const idFromData = tr.dataset.id || tr.querySelector('input[type="checkbox"]')?.dataset.id;
+    const idFromCell = tr.querySelector('td:nth-child(1)')?.innerText?.trim();
+    if (String(idFromData || idFromCell) === String(id)) return tr;
+  }
+  return null;
+}
+
+function getCell(tr, headerName) {
+  const ths = document.querySelectorAll('#productTable thead th');
+  let index = -1;
+  ths.forEach((th, i) => {
+    if (th.textContent.trim() === headerName) index = i;
+  });
+  if (index >= 0) return tr.children[index];
+  return null;
+}
+
+function setRowValue(tr, headerName, value) {
+  const cell = getCell(tr, headerName);
+  if (!cell) return;
+  const input = cell.querySelector('input, textarea');
+  if (input) input.value = value;
+  else cell.textContent = value;
+}
+
+function setRowSelect(tr, headerName, value) {
+  const cell = getCell(tr, headerName);
+  if (!cell) return;
+  const select = cell.querySelector('select');
+  if (select) {
+    const target = String(value || '').toLowerCase();
+    Array.from(select.options).forEach(opt => {
+      if (opt.value.toLowerCase() === target || opt.text.toLowerCase() === target) {
+        select.value = opt.value;
+      }
+    });
+  } else {
+    setRowValue(tr, headerName, value);
+  }
+}
+
+async function onGenerateWithAI() {
+  const btn = document.getElementById('btn-ai-generate');
+  const ids = getSelectedIds();
+  if (!ids.length) { showToastMsg('Selecciona al menos un producto'); return; }
+  try {
+    btn.disabled = true; showSpinner(true);
+    const res = await fetch('/api/desire', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ productIds: ids })
+    });
+    const data = await res.json();
+    if (!res.ok || !data?.ok) throw new Error('Error en /api/desire');
+    let updatedInPlace = false;
+    for (const r of data.results || []) {
+      if (r.ok && r.analysis) {
+        const tr = findRowById(r.id);
+        if (tr) {
+          setRowValue(tr, 'Desire', r.analysis.desire);
+          setRowSelect(tr, 'Desire Magnitude', r.analysis.desireMagnitude);
+          setRowSelect(tr, 'Awareness Level', r.analysis.awarenessLevel);
+          setRowSelect(tr, 'Competition Level', r.analysis.competitionLevel);
+          updatedInPlace = true;
+        }
+      } else if (r.error) {
+        showToastMsg(`ID ${r.id}: ${r.error}`);
+      }
+    }
+    if (!updatedInPlace) location.reload();
+    else showToastMsg('Generación completada ✅');
+  } catch (e) {
+    showToastMsg('Error llamando a /api/desire');
+    console.error(e);
+  } finally {
+    showSpinner(false); btn.disabled = false;
+  }
+}
+
+document.getElementById('btn-ai-generate')?.addEventListener('click', onGenerateWithAI);
 
 window.renderTable = renderTable;
 window.startProgress = startProgress;
