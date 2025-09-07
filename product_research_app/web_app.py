@@ -29,6 +29,7 @@ from pathlib import Path
 from email.parser import BytesParser
 from email.policy import default
 import threading
+import time
 import sqlite3
 import math
 from typing import Dict, Any
@@ -195,6 +196,162 @@ def ensure_db():
     return conn
 
 
+def parse_xlsx(binary: bytes):
+    """Parse a minimal XLSX file into a list of dictionaries."""
+    import zipfile
+    import xml.etree.ElementTree as ET
+    from io import BytesIO
+
+    with zipfile.ZipFile(BytesIO(binary)) as z:
+        shared = []
+        if 'xl/sharedStrings.xml' in z.namelist():
+            ss_root = ET.fromstring(z.read('xl/sharedStrings.xml'))
+            for si in ss_root.findall('.//{*}si'):
+                text = ''.join((t.text or '') for t in si.findall('.//{*}t'))
+                shared.append(text)
+        sheet_name = None
+        for name in z.namelist():
+            if name.startswith('xl/worksheets/sheet') and name.endswith('.xml'):
+                sheet_name = name
+                break
+        if not sheet_name:
+            return []
+        root = ET.fromstring(z.read(sheet_name))
+        rows = []
+        for row in root.findall('.//{*}row'):
+            values = []
+            last_col_idx = 0
+            for c in row.findall('{*}c'):
+                cell_ref = c.attrib.get('r', '')
+                letters = ''.join(ch for ch in cell_ref if ch.isalpha())
+                col_idx = 0
+                for ch in letters:
+                    col_idx = col_idx * 26 + (ord(ch.upper()) - ord('A') + 1)
+                while last_col_idx < col_idx - 1:
+                    values.append('')
+                    last_col_idx += 1
+                val = ''
+                cell_type = c.attrib.get('t')
+                if cell_type == 's':
+                    v = c.find('{*}v')
+                    if v is not None:
+                        try:
+                            idx = int(v.text)
+                            val = shared[idx] if idx < len(shared) else ''
+                        except Exception:
+                            val = ''
+                elif cell_type == 'inlineStr':
+                    tnode = c.find('{*}is/{*}t')
+                    val = tnode.text if tnode is not None else ''
+                else:
+                    v = c.find('{*}v')
+                    val = v.text if v is not None else ''
+                values.append(val)
+                last_col_idx = col_idx
+            rows.append(values)
+        while rows and all(not cell for cell in rows[0]):
+            rows.pop(0)
+        if not rows:
+            return []
+        headers = rows[0]
+        records = []
+        for r in rows[1:]:
+            rec = {}
+            for i, h in enumerate(headers):
+                rec[h] = r[i] if i < len(r) else ''
+            records.append(rec)
+        return records
+
+
+def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
+    """Background task to import XLSX data into the database."""
+    conn = ensure_db()
+    rows_imported = 0
+    try:
+        data = tmp_path.read_bytes()
+        records = parse_xlsx(data)
+
+        def find_key(keys, patterns):
+            for k in keys:
+                sanitized = ''.join(ch.lower() for ch in k if ch.isalnum())
+                for p in patterns:
+                    if p in sanitized:
+                        return k
+            return None
+
+        if records:
+            headers = list(records[0].keys())
+            name_col = find_key(headers, ["name", "nombre", "productname", "product", "title"])
+            desc_col = find_key(headers, ["description", "descripcion", "desc"])
+            cat_col = find_key(headers, ["category", "categoria", "cat"])
+            price_col = find_key(headers, ["price", "precio", "cost", "unitprice"])
+            curr_col = find_key(headers, ["currency", "moneda"])
+            img_col = find_key(headers, ["image", "imagen", "img", "picture", "imgurl"])
+            conn.execute("BEGIN")
+            for row in records:
+                name = (row.get(name_col) or '').strip() if name_col else None
+                if not name:
+                    continue
+                description = (row.get(desc_col) or '').strip() if desc_col else None
+                category = (row.get(cat_col) or '').strip() if cat_col else None
+                price = None
+                if price_col and row.get(price_col):
+                    try:
+                        price = float(str(row.get(price_col)).replace(',', '.'))
+                    except Exception:
+                        price = None
+                currency = (row.get(curr_col) or '').strip() if curr_col else None
+                image_url = (row.get(img_col) or '').strip() if img_col else None
+                extra_cols = {
+                    k: v
+                    for k, v in row.items()
+                    if k not in {name_col, desc_col, cat_col, price_col, curr_col, img_col}
+                }
+                database.insert_product(
+                    conn,
+                    name=name,
+                    description=description,
+                    category=category,
+                    price=price,
+                    currency=currency,
+                    image_url=image_url,
+                    source=filename,
+                    extra=extra_cols,
+                    commit=False,
+                )
+                rows_imported += 1
+            conn.commit()
+        database.complete_import_job(conn, job_id, rows_imported)
+    except Exception as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        database.fail_import_job(conn, job_id, str(exc))
+    finally:
+        try:
+            tmp_path.unlink()
+        except Exception:
+            pass
+
+
+def resume_incomplete_imports():
+    """Mark stale pending imports as failed and remove orphan temp files."""
+    conn = ensure_db()
+    database.mark_stale_pending_imports(conn, 5)
+    tmp_dir = APP_DIR / 'uploads'
+    if tmp_dir.exists():
+        cur = conn.cursor()
+        cur.execute("SELECT temp_path FROM import_jobs")
+        valid = {Path(row[0]) for row in cur.fetchall() if row[0]}
+        for f in tmp_dir.glob('import_*'):
+            if f not in valid:
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+
+
 class _SilentWriter:
     """Wrapper around a socket writer that ignores connection errors."""
 
@@ -240,11 +397,19 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.end_headers()
 
-    def _safe_write(self, data: bytes):
+    def safe_write(self, func):
         try:
-            self.wfile.write(data)
+            func()
+            return True
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-            pass
+            return False
+
+    def send_json(self, obj: Any, status: int = 200):
+        self._set_json(status)
+        self.wfile.write(json.dumps(obj).encode('utf-8'))
+
+    def _safe_write(self, data: bytes) -> bool:
+        return self.safe_write(lambda: self.wfile.write(data))
 
     def _serve_static(self, rel_path: str):
         file_path = STATIC_DIR / rel_path
@@ -307,6 +472,30 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path.startswith("/static/"):
             rel = path[len("/static/") :]
             self._serve_static(rel)
+            return
+        if path == "/_import_history":
+            params = parse_qs(parsed.query)
+            try:
+                limit = int(params.get("limit", ["20"])[0])
+            except Exception:
+                limit = 20
+            conn = ensure_db()
+            rows = [dict(r) for r in database.get_import_history(conn, limit)]
+            self.safe_write(lambda: self.send_json(rows))
+            return
+        if path == "/_import_status":
+            params = parse_qs(parsed.query)
+            try:
+                task_id = int(params.get("task_id", ["0"])[0])
+            except Exception:
+                self.safe_write(lambda: self.send_json({"error": "invalid task_id"}, status=400))
+                return
+            conn = ensure_db()
+            row = database.get_import_job(conn, task_id)
+            if row:
+                self.safe_write(lambda: self.send_json(dict(row)))
+            else:
+                self.safe_write(lambda: self.send_json({"error": "not found"}, status=404))
             return
         if path == "/products":
             # Return a list of products including extra metadata for UI display
@@ -1041,6 +1230,17 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         filename = Path(filename).name
         ext = Path(filename).suffix.lower()
+        if ext in (".xlsx", ".xls"):
+            tmp_dir = APP_DIR / "uploads"
+            tmp_dir.mkdir(exist_ok=True)
+            tmp_path = tmp_dir / f"import_{int(time.time()*1000)}{ext}"
+            with open(tmp_path, "wb") as f:
+                f.write(data)
+            conn = ensure_db()
+            job_id = database.create_import_job(conn, str(tmp_path))
+            threading.Thread(target=_process_import_job, args=(job_id, tmp_path, filename), daemon=True).start()
+            self.safe_write(lambda: self.send_json({"task_id": job_id}, status=202))
+            return
         conn = ensure_db()
         inserted = 0
         inserted_ids = []
@@ -1251,8 +1451,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                         )
                         inserted += 1
                         inserted_ids.append(pid)
-            elif ext in (".xlsx", ".xls"):
-                # parse basic xlsx into list of dicts (first sheet)
+            elif False and ext in (".xlsx", ".xls"):
+                # legacy xlsx processing (handled asynchronously earlier)
                 try:
                     import zipfile
                     import xml.etree.ElementTree as ET
@@ -2256,6 +2456,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 
 def run(host: str = '127.0.0.1', port: int = 8000):
     ensure_db()
+    resume_incomplete_imports()
     httpd = HTTPServer((host, port), RequestHandler)
     print(f"Servidor iniciado en http://{host}:{port}")
     try:

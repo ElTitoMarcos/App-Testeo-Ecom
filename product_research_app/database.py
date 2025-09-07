@@ -17,7 +17,7 @@ All date/time fields are stored as ISO 8601 strings for simplicity.
 """
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -36,7 +36,10 @@ def get_connection(db_path: Path) -> sqlite3.Connection:
     """
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
+    # Enable pragmas for reliability and performance
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 
@@ -162,6 +165,20 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    # Import jobs table to track asynchronous imports
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS import_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            rows_imported INTEGER DEFAULT 0,
+            error TEXT,
+            temp_path TEXT
+        )
+        """
+    )
     conn.commit()
 
 
@@ -179,6 +196,7 @@ def insert_product(
     awareness_level: Optional[str] = None,
     competition_level: Optional[str] = None,
     extra: Optional[Dict[str, Any]] = None,
+    commit: bool = True,
 ) -> int:
     """Insert a new product into the database.
 
@@ -242,7 +260,8 @@ def insert_product(
             json_dump(extra) if extra is not None else "{}",
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return cur.lastrowid
 
 
@@ -558,4 +577,91 @@ def delete_product(conn: sqlite3.Connection, product_id: int) -> None:
     """
     cur = conn.cursor()
     cur.execute("DELETE FROM products WHERE id = ?", (product_id,))
+    conn.commit()
+
+
+def create_import_job(conn: sqlite3.Connection, temp_path: str) -> int:
+    """Create a new pending import job and return its ID."""
+    now = datetime.utcnow().isoformat()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO import_jobs (status, created_at, updated_at, rows_imported, error, temp_path)
+        VALUES ('pending', ?, ?, 0, NULL, ?)
+        """,
+        (now, now, temp_path),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def complete_import_job(conn: sqlite3.Connection, job_id: int, rows: int) -> None:
+    """Mark an import job as completed."""
+    now = datetime.utcnow().isoformat()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE import_jobs
+        SET status='done', updated_at=?, rows_imported=?, error=NULL
+        WHERE id=?
+        """,
+        (now, rows, job_id),
+    )
+    conn.commit()
+
+
+def fail_import_job(conn: sqlite3.Connection, job_id: int, error: str) -> None:
+    """Mark an import job as failed."""
+    now = datetime.utcnow().isoformat()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE import_jobs
+        SET status='error', updated_at=?, error=?
+        WHERE id=?
+        """,
+        (now, error, job_id),
+    )
+    conn.commit()
+
+
+def get_import_history(conn: sqlite3.Connection, limit: int = 20) -> List[sqlite3.Row]:
+    """Return recent import jobs ordered by creation time."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id AS task_id, status, rows_imported, created_at, updated_at, error FROM import_jobs ORDER BY created_at DESC LIMIT ?",
+        (limit,),
+    )
+    return cur.fetchall()
+
+
+def get_import_job(conn: sqlite3.Connection, job_id: int) -> Optional[sqlite3.Row]:
+    """Return a single import job by ID."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id AS task_id, status, rows_imported, created_at, updated_at, error FROM import_jobs WHERE id=?",
+        (job_id,),
+    )
+    return cur.fetchone()
+
+
+def mark_stale_pending_imports(conn: sqlite3.Connection, minutes: int) -> None:
+    """Mark pending imports older than X minutes as errored after restart."""
+    cutoff = (datetime.utcnow() - timedelta(minutes=minutes)).isoformat()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, temp_path FROM import_jobs WHERE status='pending' AND created_at <= ?",
+        (cutoff,),
+    )
+    rows = cur.fetchall()
+    for row in rows:
+        cur.execute(
+            "UPDATE import_jobs SET status='error', updated_at=?, error='server restarted' WHERE id=?",
+            (datetime.utcnow().isoformat(), row["id"]),
+        )
+        if row["temp_path"]:
+            try:
+                Path(row["temp_path"]).unlink()
+            except Exception:
+                pass
     conn.commit()
