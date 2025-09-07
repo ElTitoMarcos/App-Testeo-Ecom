@@ -644,7 +644,6 @@ def get_import_job(conn: sqlite3.Connection, job_id: int) -> Optional[sqlite3.Ro
     )
     return cur.fetchone()
 
-
 def mark_stale_pending_imports(conn: sqlite3.Connection, minutes: int) -> None:
     """Mark pending imports older than X minutes as errored after restart."""
     cutoff = (datetime.utcnow() - timedelta(minutes=minutes)).isoformat()
