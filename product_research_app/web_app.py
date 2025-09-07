@@ -551,7 +551,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "category": p["category"],
                     "price": p["price"],
                     "image_url": p["image_url"],
-                    "desire": p["desire"],
+                    "desire_text": p["desire_text"],
                     "desire_magnitude": p["desire_magnitude"],
                     "awareness_level": p["awareness_level"],
                     "competition_level": p["competition_level"],
@@ -929,13 +929,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                     [
                         p['id'],
                         p['name'],
-                        p['desire'],
+                        p['desire_text'],
                         p['desire_magnitude'],
                         p['awareness_level'],
                         p['competition_level'],
                     ]
                 )
-            headers = ["id", "name", "Desire", "Desire Magnitude", "Awareness Level", "Competition Level"]
+            headers = ["id", "name", "Desire Text", "Desire Magnitude", "Awareness Level", "Competition Level"]
             if fmt == 'xlsx':
                 try:
                     from openpyxl import Workbook
@@ -1049,7 +1049,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 currency=data.get("currency"),
                 image_url=data.get("image_url"),
                 source=data.get("source"),
-                desire=data.get("desire"),
+                desire_text=data.get("desire_text") or data.get("desire"),
                 desire_magnitude=data.get("desire_magnitude"),
                 awareness_level=data.get("awareness_level"),
                 competition_level=data.get("competition_level"),
@@ -1279,7 +1279,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 price_col = find_key(headers, ["price", "precio", "cost", "unitprice"])
                 curr_col = find_key(headers, ["currency", "moneda"])
                 img_col = find_key(headers, ["image", "imagen", "img", "picture", "imgurl"])
-                desire_col = find_key(headers, ["desire", "deseo"])
+                desire_col = find_key(headers, ["desire_text", "desire", "deseo"])
                 desire_mag_col = find_key(headers, ["desiremagnitude", "desiremag", "magnituddeseo"])
                 awareness_col = find_key(headers, ["awarenesslevel", "awareness", "nivelconsciencia"])
                 competition_col = find_key(headers, ["competitionlevel", "competition", "saturacionmercado"])
@@ -1357,7 +1357,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         currency=currency,
                         image_url=image_url,
                         source=filename,
-                        desire=desire,
+                        desire_text=desire,
                         desire_magnitude=desire_mag,
                         awareness_level=awareness,
                         competition_level=competition,
@@ -1416,7 +1416,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                                 price = None
                         currency = item.get(currency_key) if currency_key else None
                         image_url = item.get(image_key) if image_key else None
-                        desire = item.get("desire") or item.get("desire_text")
+                        desire = item.get("desire_text") or item.get("desire")
                         desire_mag = item.get("desire_magnitude") or item.get("magnitud_deseo")
                         awareness = item.get("awareness_level") or item.get("nivel_consciencia")
                         competition = item.get("competition_level") or item.get("saturacion_mercado")
@@ -1457,7 +1457,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                             currency=str(currency).strip() if currency else None,
                             image_url=str(image_url).strip() if image_url else None,
                             source=filename,
-                            desire=desire,
+                            desire_text=desire,
                             desire_magnitude=desire_mag,
                             awareness_level=awareness,
                             competition_level=competition,
@@ -1602,7 +1602,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                                 price = None
                         currency = item.get(currency_key) if currency_key else None
                         image_url = item.get(image_key) if image_key else None
-                        desire = item.get("desire") or item.get("desire_text")
+                        desire = item.get("desire_text") or item.get("desire")
                         desire_mag = item.get("desire_magnitude") or item.get("magnitud_deseo")
                         awareness = item.get("awareness_level") or item.get("nivel_consciencia")
                         competition = item.get("competition_level") or item.get("saturacion_mercado")
@@ -1643,7 +1643,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                             currency=str(currency).strip() if currency else None,
                             image_url=str(image_url).strip() if image_url else None,
                             source=filename,
-                            desire=desire,
+                            desire_text=desire,
                             desire_magnitude=desire_mag,
                             awareness_level=awareness,
                             competition_level=competition,

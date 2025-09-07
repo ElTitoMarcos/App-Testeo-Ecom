@@ -96,7 +96,7 @@ def import_data(conn: database.sqlite3.Connection) -> None:
                 price_col = find_col(headers, ["price", "precio", "cost"])
                 currency_col = find_col(headers, ["currency", "moneda"])
                 image_col = find_col(headers, ["image", "imagen", "img", "picture"])
-                desire_col = find_col(headers, ["desire"])
+                desire_col = find_col(headers, ["desire_text", "desire"])
                 desire_mag_col = find_col(headers, ["desire_magnitude", "desire magnitude", "magnitud_deseo"])
                 awareness_col = find_col(headers, ["awareness_level", "awareness level", "nivel_consciencia"])
                 competition_col = find_col(headers, ["competition_level", "competition level", "saturacion_mercado"])
@@ -111,7 +111,7 @@ def import_data(conn: database.sqlite3.Connection) -> None:
                     price_col = prompt_user("Columna para el precio (enter para inferido): ") or price_col
                     currency_col = prompt_user("Columna para la moneda (enter para inferido): ") or currency_col
                     image_col = prompt_user("Columna para la imagen (enter para inferido): ") or image_col
-                    desire_col = prompt_user("Columna para Desire (enter para inferido): ") or desire_col
+                    desire_col = prompt_user("Columna para Desire Text (enter para inferido): ") or desire_col
                     desire_mag_col = (
                         prompt_user("Columna para Desire Magnitude (enter para inferido): ")
                         or desire_mag_col
@@ -174,7 +174,7 @@ def import_data(conn: database.sqlite3.Connection) -> None:
                         currency=currency,
                         image_url=image_url,
                         source=source,
-                        desire=desire,
+                        desire_text=desire,
                         desire_magnitude=desire_mag,
                         awareness_level=awareness,
                         competition_level=competition,
@@ -205,7 +205,7 @@ def import_data(conn: database.sqlite3.Connection) -> None:
                             continue
                 currency = item.get("currency") or item.get("moneda")
                 image_url = item.get("image") or item.get("imagen") or item.get("img")
-                desire = item.get("desire") or item.get("desire_text")
+                desire = item.get("desire_text") or item.get("desire")
                 desire_mag = item.get("desire_magnitude") or item.get("magnitud_deseo")
                 awareness = item.get("awareness_level") or item.get("nivel_consciencia")
                 competition = item.get("competition_level") or item.get("saturacion_mercado")
@@ -250,7 +250,7 @@ def import_data(conn: database.sqlite3.Connection) -> None:
                     price=price,
                     currency=currency,
                     image_url=image_url,
-                    desire=desire,
+                    desire_text=desire,
                     desire_magnitude=desire_mag,
                     awareness_level=awareness,
                     competition_level=competition,
@@ -514,7 +514,7 @@ def export_data(conn: database.sqlite3.Connection) -> None:
                     "image_url",
                     "source",
                     "import_date",
-                    "Desire",
+                    "Desire Text",
                     "Desire Magnitude",
                     "Awareness Level",
                     "Competition Level",
@@ -530,7 +530,7 @@ def export_data(conn: database.sqlite3.Connection) -> None:
                         p["image_url"],
                         p["source"],
                         p["import_date"],
-                        p["desire"],
+                        p["desire_text"],
                         p["desire_magnitude"],
                         p["awareness_level"],
                         p["competition_level"],
@@ -550,7 +550,7 @@ def export_data(conn: database.sqlite3.Connection) -> None:
                         "image_url": p["image_url"],
                         "source": p["source"],
                         "import_date": p["import_date"],
-                        "desire": p["desire"],
+                        "desire_text": p["desire_text"],
                         "desire_magnitude": p["desire_magnitude"],
                         "awareness_level": p["awareness_level"],
                         "competition_level": p["competition_level"],
