@@ -62,7 +62,6 @@ body.dark .weight-slider {
     <div style="flex:1; display:flex; justify-content:flex-end; gap:8px; align-items:center;">
       <input type="file" id="fileInput" style="display:none;" />
       <button id="uploadBtn" title="Subir archivo">📤</button>
-      <button id="importHistoryBtn">Ver últimos imports</button>
       <button id="refreshBtn" title="Actualizar lista">🔄</button>
       <button id="trendsBtn" title="Ver tendencias">📊</button>
       <button id="darkToggle" title="Modo oscuro">🌙</button>
@@ -85,7 +84,6 @@ body.dark .weight-slider {
   </div>
 </div>
 <div id="importBanner" style="display:none; padding:8px; text-align:center;"></div>
-<div id="importHistory" class="card" style="display:none;"></div>
 <div id="config" style="display:none;">
   <label>API Key: <input type="password" id="apiKey" /></label>
   <button id="toggleApiKey" style="display:none;">Cambiar API Key</button>
@@ -260,7 +258,7 @@ async function pollImportStatus(id) {
       if (data.status === 'done') {
         fetchProducts();
         const n = data.rows_imported || 0;
-        toast.success(`Importación completada: ${n} filas nuevas`);
+        toast.success(`Importación completada: ${n} filas nuevas. IDs desde 0 si era la primera importación.`);
       } else {
         toast.error(data.error || 'Error en importación');
       }
@@ -727,23 +725,6 @@ function sortBy(field, type) {
 }
 
 document.getElementById('refreshBtn').onclick = fetchProducts;
-const historyBtn = document.getElementById('importHistoryBtn');
-if(historyBtn){
-  historyBtn.onclick = async () => {
-    const list = await fetchJson('/_import_history?limit=20');
-    const cont = document.getElementById('importHistory');
-    if(cont){
-      let html = '<h3>Últimos imports</h3><ul>';
-      list.forEach(it => {
-        const date = new Date(it.updated_at || it.created_at).toLocaleString();
-        html += `<li>${it.task_id}: ${it.status} - ${date}</li>`;
-      });
-      html += '</ul>';
-      cont.innerHTML = html;
-      cont.style.display = 'block';
-    }
-  };
-}
 window.onload = () => {
   loadConfig();
   fetchProducts();
