@@ -50,6 +50,23 @@ body.dark pre { background:#2e315f; }
 body.dark .weight-slider {
   accent-color:#7a53d6;
 }
+:root { --sticky-offset: 72px; }
+.table-wrap { overflow-x: auto; }
+table.products { width:100%; table-layout:fixed; border-collapse:collapse; }
+table.products th, table.products td { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; vertical-align:middle; }
+table.products th { position:sticky; top:var(--sticky-offset,56px); z-index:2; background:#241b3a; }
+table.products td.num, table.products th.num { text-align:right; }
+table.products td.center, table.products th.center { text-align:center; }
+
+td .cell-input, td .cell-select {
+  width:100%; box-sizing:border-box; height:32px; padding:0 8px; border-radius:6px;
+  background:#1f2644; border:1px solid #3a3f63; color:#e9e9f2; outline:none;
+}
+td .cell-input::placeholder { color:#8e90a6; }
+td .cell-select { appearance:none; }
+td img.thumb { width:48px; height:48px; border-radius:6px; object-fit:cover; display:block; margin:0 auto; }
+
+thead th { white-space:nowrap; }
 </style>
 </head>
 <body class="dark">
@@ -161,12 +178,15 @@ body.dark .weight-slider {
   </div>
 </div>
 
-  <table id="productTable">
-  <thead class="sticky-thead">
-    <tr id="headerRow"></tr>
-  </thead>
-  <tbody></tbody>
-</table>
+<div class="table-wrap">
+  <table id="productTable" class="products">
+    <colgroup id="tableCols"></colgroup>
+    <thead>
+      <tr id="headerRow"></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</div>
 <div id="bottomBar" class="bottombar hidden">
   <button id="legendBtn" class="legend-btn" title="Mostrar leyenda" aria-label="Mostrar leyenda">ℹ️</button>
   <span id="selCount"></span>
@@ -319,30 +339,49 @@ function debounce(fn, delay){
 }
 
 async function saveField(id, field, value){
-  await fetchJson('/products/update-field', {
-    method: 'POST',
-    body: JSON.stringify({id, field, value})
-  });
-  toast.success('Guardado');
+  try{
+    await fetchJson('/products/update-field', {
+      method: 'POST',
+      body: JSON.stringify({id, field, value: value === '' ? null : value})
+    });
+    toast.success('Guardado');
+  } catch(e){
+    toast.error('Error al guardar');
+    throw e;
+  }
 }
-const columns = [
-  { key: 'id', label: 'ID', type: 'number' },
-  { key: 'image_url', label: 'Imagen', type: 'image' },
-  { key: 'name', label: 'Nombre', type: 'string' },
-  { key: 'category', label: 'Categoría', type: 'string' },
-  { key: 'price', label: 'Precio', type: 'number' },
-  { key: 'Product Rating', label: 'Rating', type: 'number' },
-  { key: 'Item Sold', label: 'Unidades Vendidas', type: 'number' },
-  { key: 'Revenue($)', label: 'Ingresos', type: 'number' },
-  { key: 'Creator Conversion Ratio', label: 'Tasa Conversión', type: 'string' },
-  { key: 'Launch Date', label: 'Fecha Lanzamiento', type: 'string' },
-  { key: 'Date Range', label: 'Rango Fechas', type: 'string' },
-  { key: 'desire_text', label: 'Desire', type: 'string' },
-  { key: 'desire_magnitude', label: 'Desire Magnitude', type: 'string' },
-  { key: 'awareness_level', label: 'Awareness Level', type: 'string' },
-  { key: 'competition_level', label: 'Competition Level', type: 'string' },
-  { key: 'winner_score', label: 'Winner Score', type: 'number' },
+
+// ESQUEMA VISIBLE Y ORDEN (claves = campos del JSON del backend)
+const COLUMNS = [
+  { key: "id",                label: "ID",               align: "center" },
+  { key: "image",             label: "Imagen",           align: "center" },
+  { key: "name",              label: "Nombre",           align: "left"   },
+  { key: "category",          label: "Categoría",        align: "left"   },
+  { key: "price",             label: "Precio",           align: "right"  },
+  { key: "rating",            label: "Rating",           align: "right"  },
+  { key: "units_sold",        label: "Unidades Vendidas",align: "right"  },
+  { key: "revenue",           label: "Ingresos",         align: "right"  },
+  { key: "conversion_rate",   label: "Tasa Conversión",  align: "right"  },
+  { key: "launch_date",       label: "Fecha Lanzamiento",align: "center" },
+  { key: "date_range",        label: "Rango Fechas",     align: "center" },
+  { key: "desire_text",       label: "Desire",           align: "left",   editor: "text" },
+  { key: "desire_magnitude",  label: "Desire Magnitude", align: "center", editor: "select", options: ["", "Low", "Medium", "High"] },
+  { key: "awareness_level",   label: "Awareness Level",  align: "center", editor: "select", options: ["", "Unaware", "Problem-Aware", "Solution-Aware", "Product-Aware", "Most Aware"] },
+  { key: "competition_level", label: "Competition Level",align: "center", editor: "select", options: ["", "Low", "Medium", "High"] },
+  { key: "winner_score",      label: "Winner Score",     align: "right"  },
+  { key: "_delete",           label: "",                 align: "center" }
 ];
+
+const COL_WIDTHS = {
+  id:56, image:64, name:420, category:340, price:96, rating:78,
+  units_sold:120, revenue:120, conversion_rate:120, launch_date:130,
+  date_range:180, desire_text:240, desire_magnitude:150,
+  awareness_level:220, competition_level:150, winner_score:130, _delete:52
+};
+
+const NUMERIC_KEYS = new Set(['price','rating','units_sold','revenue','conversion_rate','winner_score']);
+
+try { localStorage.removeItem('columnsVisibility'); } catch(e) {}
 
 let trendingWords = [];
 
@@ -366,7 +405,7 @@ function normalizeDupKey(item){
     .replace(/[^a-z0-9]+/g, ' ')
     .trim()
     .replace(/\s+/g, ' ');
-  return norm(item.name) + '|' + norm(item.image_url);
+  return norm(item.name) + '|' + norm(item.image);
 }
 
 function preprocessProducts(list){
@@ -549,257 +588,125 @@ async function fetchProducts() {
   products = [...allProducts];
   window.allProducts = allProducts;
   window.products = products;
-  selection.clear();
   renderTable();
   updateResultsBadge(totalCount);
 }
 
 function renderTable() {
+  const table = document.getElementById('productTable');
   const headerRow = document.getElementById('headerRow');
-  const tbody = document.querySelector('#productTable tbody');
-  // Build header if empty
+  const tbody = table.querySelector('tbody');
+  const colgroup = document.getElementById('tableCols');
+
+  if (colgroup && colgroup.childElementCount === 0) {
+    COLUMNS.forEach(col => {
+      const c = document.createElement('col');
+      const w = COL_WIDTHS[col.key];
+      if (w) c.style.width = w + 'px';
+      colgroup.appendChild(c);
+    });
+  }
+
   if (!headerRow.hasChildNodes()) {
-    // Add select column header (no label)
-    const thSel = document.createElement('th');
-    const selectAll = document.createElement('input');
-    selectAll.type = 'checkbox';
-    selectAll.id = 'selectAll';
-    thSel.appendChild(selectAll);
-    headerRow.appendChild(thSel);
-    // Add dynamic columns
-    columns.forEach(col => {
+    COLUMNS.forEach(col => {
       const th = document.createElement('th');
       th.textContent = col.label;
+      th.dataset.key = col.key;
+      if (col.align === 'right') th.classList.add('num');
+      else if (col.align === 'center') th.classList.add('center');
       th.style.cursor = 'pointer';
-      th.setAttribute('data-key', col.key);
-      th.onclick = () => sortBy(col.key, col.type);
+      th.onclick = () => sortBy(col.key);
       headerRow.appendChild(th);
     });
-    // Add delete column header
-    const thDel = document.createElement('th');
-    headerRow.appendChild(thDel);
   }
-  // Clear body
+
   tbody.innerHTML = '';
-  // Render rows
-    products.forEach(item => {
+  products.forEach(item => {
     const tr = document.createElement('tr');
-    if (item.isDuplicate) {
-      tr.classList.add('is-duplicate');
-    }
-    // Selection checkbox
-    const tdSel = document.createElement('td');
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.classList.add('rowCheck');
-    const rowId = String(item.id);
-    cb.dataset.id = rowId;
-    cb.checked = selection.has(rowId);
-    tr.classList.toggle('selected', cb.checked);
-    cb.addEventListener('change', () => {
-      const id = cb.dataset.id;
-      if (cb.checked) selection.add(id); else selection.delete(id);
-      tr.classList.toggle('selected', cb.checked);
-      updateMasterState();
-    });
-    tdSel.appendChild(cb);
-    tr.appendChild(tdSel);
-    columns.forEach(col => {
+    if (item.isDuplicate) tr.classList.add('is-duplicate');
+    COLUMNS.forEach(col => {
       const td = document.createElement('td');
-      const key = col.key;
-      td.setAttribute('data-key', key);
-      let value = '';
-      if (weightFields.includes(key)) {
-        value = item.winner_score_v2_breakdown && item.winner_score_v2_breakdown.scores ? item.winner_score_v2_breakdown.scores[key] : '';
-        if (item.winner_score_v2_breakdown && item.winner_score_v2_breakdown.justifications) {
-          const j = item.winner_score_v2_breakdown.justifications[key];
-          if (j) td.title = 'Justificación: ' + j;
+      td.dataset.key = col.key;
+      if (col.align === 'right') td.classList.add('num');
+      else if (col.align === 'center') td.classList.add('center');
+      const value = item[col.key];
+
+      if (col.key === 'image') {
+        if (value) {
+          const img = document.createElement('img');
+          img.src = value;
+          img.className = 'thumb';
+          img.onclick = () => showOverlay(value);
+          td.appendChild(img);
         }
-      } else if (['id','name','category','price','image_url','winner_score','desire_text','desire_magnitude','awareness_level','competition_level'].includes(key)) {
-        value = item[key];
-      } else {
-        value = item.extras ? item.extras[key] : '';
-      }
-      if (key === 'winner_score') {
-        const sc = parseFloat(value);
-        if (!isNaN(sc)) {
-          td.innerHTML = '<span class="' + winnerScoreClass(sc) + '">' + Math.round(sc) + '</span>';
-          if (item.winner_score_v2_breakdown && item.winner_score_v2_breakdown.justifications) {
-            const j = item.winner_score_v2_breakdown.justifications;
-            const tooltip = Object.entries(j).map(([k,v])=>`${k}: ${v}`).join('\n');
-            td.title = tooltip;
-          }
-        }
-      } else if (key === 'image_url' && value) {
-        const img = document.createElement('img');
-        img.src = value;
-        // Increase the preview size for better visibility
-        img.style.width = '100px';
-        img.style.height = '100px';
-        img.style.objectFit = 'cover';
-        // Show larger image on click
-        img.style.cursor = 'pointer';
-        img.onclick = () => {
-          showOverlay(value);
+      } else if (col.key === '_delete') {
+        const btn = document.createElement('button');
+        btn.textContent = '✖';
+        btn.title = 'Eliminar producto';
+        btn.style.background = 'transparent';
+        btn.style.border = 'none';
+        btn.style.cursor = 'pointer';
+        btn.style.color = 'red';
+        btn.onclick = () => {
+          toast.info('¿Eliminar producto?', {actionText:'Eliminar', onAction: () => deleteProduct(item.id)});
         };
-        td.appendChild(img);
-      } else if (key === 'name' && value) {
-        const fireCount = item.trending || 0;
-        const fireText = firesFor(fireCount);
-        const nameSpan = document.createElement('span');
-        nameSpan.textContent = value + (fireText ? ' ' : '');
-        td.appendChild(nameSpan);
-        if (fireCount > 0) {
-          const fireSpan = document.createElement('span');
-          fireSpan.className = 'fires';
-          fireSpan.textContent = fireText;
-          fireSpan.setAttribute('aria-label', `Tendencia: x${fireCount}`);
-          fireSpan.title = `Tendencia: x${fireCount}`;
-          td.appendChild(fireSpan);
-        }
-        // If Kalodata URL exists, add copy link button
-        const kal = item.extras && item.extras['KalodataUrl'];
-        if (kal) {
-          const btnCopy = document.createElement('button');
-          btnCopy.textContent = '📋';
-          btnCopy.title = 'Copiar link Kalodata';
-          btnCopy.style.marginLeft = '5px';
-          btnCopy.style.padding = '2px 6px';
-          btnCopy.style.fontSize = '12px';
-          btnCopy.onclick = () => {
-            navigator.clipboard.writeText(kal).then(() => {
-              toast.success('Link copiado al portapapeles');
-            });
-          };
-          td.appendChild(btnCopy);
-        }
-      } else if (key === 'desire_text') {
+        td.appendChild(btn);
+      } else if (col.editor === 'text') {
         const input = document.createElement('input');
         input.type = 'text';
+        input.className = 'cell-input';
         input.value = value || '';
-        input.style.width = '160px';
-        td.style.verticalAlign = 'middle';
         let prev = input.value;
-        const saver = debounce(async val => {
-          try {
-            await saveField(item.id, 'desire_text', val);
-            prev = val;
-          } catch (e) {
-            input.value = prev;
-          }
-        }, 300);
-        input.addEventListener('input', e => saver(e.target.value));
-        input.addEventListener('blur', () => saver.flush());
-        input.addEventListener('keydown', e => {
-          if (e.key === 'Enter') { e.preventDefault(); saver.flush(); input.blur(); }
-        });
+        const commit = async () => {
+          try { await saveField(item.id, col.key, input.value); prev = input.value; }
+          catch (e) { input.value = prev; }
+        };
+        input.addEventListener('blur', commit);
+        input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); commit(); input.blur(); }});
         td.appendChild(input);
-      } else if (key === 'desire_magnitude') {
+      } else if (col.editor === 'select') {
         const select = document.createElement('select');
-        ['', 'Low', 'Medium', 'High'].forEach(v => {
+        select.className = 'cell-select';
+        (col.options || []).forEach(opt => {
           const o = document.createElement('option');
-          o.value = v;
-          o.textContent = v;
+          o.value = opt;
+          o.textContent = opt;
           select.appendChild(o);
         });
         select.value = value || '';
-        select.style.width = '120px';
-        td.style.verticalAlign = 'middle';
         let prev = select.value;
         select.addEventListener('change', async () => {
-          const val = select.value;
-          try {
-            await saveField(item.id, 'desire_magnitude', val);
-            prev = val;
-          } catch (e) {
-            select.value = prev;
-          }
+          try { await saveField(item.id, col.key, select.value); prev = select.value; }
+          catch (e) { select.value = prev; }
         });
         td.appendChild(select);
-      } else if (key === 'awareness_level') {
-        const select = document.createElement('select');
-        ['', 'Unaware', 'Problem-Aware', 'Solution-Aware', 'Product-Aware', 'Most Aware'].forEach(v => {
-          const o = document.createElement('option');
-          o.value = v;
-          o.textContent = v;
-          select.appendChild(o);
-        });
-        select.value = value || '';
-        select.style.width = '160px';
-        td.style.verticalAlign = 'middle';
-        let prev = select.value;
-        select.addEventListener('change', async () => {
-          const val = select.value;
-          try {
-            await saveField(item.id, 'awareness_level', val);
-            prev = val;
-          } catch (e) {
-            select.value = prev;
-          }
-        });
-        td.appendChild(select);
-      } else if (key === 'competition_level') {
-        const select = document.createElement('select');
-        ['', 'Low', 'Medium', 'High'].forEach(v => {
-          const o = document.createElement('option');
-          o.value = v;
-          o.textContent = v;
-          select.appendChild(o);
-        });
-        select.value = value || '';
-        select.style.width = '120px';
-        td.style.verticalAlign = 'middle';
-        let prev = select.value;
-        select.addEventListener('change', async () => {
-          const val = select.value;
-          try {
-            await saveField(item.id, 'competition_level', val);
-            prev = val;
-          } catch (e) {
-            select.value = prev;
-          }
-        });
-        td.appendChild(select);
-      } else if (col.type === 'number' && value !== null && value !== undefined && value !== '') {
-        let num = parseFloat(String(value).replace(/[^0-9.-]+/g, ''));
-        if (isNaN(num)) {
-          td.textContent = '';
-        } else {
-          if (key === 'Item Sold' || key === 'Revenue($)' || key === 'Creator Number') {
-            td.textContent = abbr(num);
-          } else {
-            td.textContent = num.toLocaleString();
-          }
-        }
       } else {
-        td.textContent = value || '';
+        let text = value;
+        if (NUMERIC_KEYS.has(col.key) && value !== null && value !== undefined && value !== '') {
+          const num = parseFloat(value);
+          text = isNaN(num) ? '' : num.toLocaleString();
+        }
+        if (col.key === 'winner_score' && text !== '') {
+          const sc = parseFloat(text);
+          if (!isNaN(sc)) {
+            td.innerHTML = '<span class="' + winnerScoreClass(sc) + '">' + Math.round(sc) + '</span>';
+          } else {
+            td.textContent = text;
+          }
+        } else {
+          td.textContent = text || '';
+        }
       }
       tr.appendChild(td);
     });
-    // Delete button
-    const tdDel = document.createElement('td');
-    const btn = document.createElement('button');
-    btn.textContent = '✖';
-    btn.title = 'Eliminar producto';
-    btn.style.background = 'transparent';
-    btn.style.border = 'none';
-    btn.style.cursor = 'pointer';
-    btn.style.color = 'red';
-    btn.dataset.id = item.id;
-    btn.onclick = () => {
-      toast.info('¿Eliminar producto?', {actionText:'Eliminar', onAction: () => deleteProduct(item.id)});
-    };
-    tdDel.appendChild(btn);
-    tr.appendChild(tdDel);
     tbody.appendChild(tr);
   });
-  currentPageIds = products.map(p => String(p.id));
+
   if (window.refreshColumns) window.refreshColumns();
   if (window.applyColumnVisibility) window.applyColumnVisibility();
-  updateMasterState();
 }
 
-function sortBy(field, type) {
+function sortBy(field) {
   if (sortField === field) {
     sortDir = -sortDir;
   } else {
@@ -807,27 +714,13 @@ function sortBy(field, type) {
     sortDir = 1;
   }
   products.sort((a, b) => {
-    let va;
-    let vb;
-    if (field === 'id' || field === 'name' || field === 'category' || field === 'price' || field === 'image_url' || field === 'winner_score' || field === 'desire_text' || field === 'desire_magnitude' || field === 'awareness_level' || field === 'competition_level') {
-      va = a[field];
-      vb = b[field];
-    } else if (weightFields.includes(field)) {
-      va = a.winner_score_v2_breakdown && a.winner_score_v2_breakdown.scores ? a.winner_score_v2_breakdown.scores[field] : undefined;
-      vb = b.winner_score_v2_breakdown && b.winner_score_v2_breakdown.scores ? b.winner_score_v2_breakdown.scores[field] : undefined;
-    } else {
-      va = a.extras ? a.extras[field] : undefined;
-      vb = b.extras ? b.extras[field] : undefined;
-    }
-    if (type === 'number') {
-      const na = parseFloat(String(va).replace(/[^0-9.-]+/g, ''));
-      const nb = parseFloat(String(vb).replace(/[^0-9.-]+/g, ''));
-      if (isNaN(na) && isNaN(nb)) return 0;
-      if (isNaN(na)) return sortDir * 1;
-      if (isNaN(nb)) return sortDir * -1;
+    const va = a[field];
+    const vb = b[field];
+    if (NUMERIC_KEYS.has(field)) {
+      const na = parseFloat(va) || 0;
+      const nb = parseFloat(vb) || 0;
       return (na - nb) * sortDir;
     }
-    // default string comparison
     const sa = (va || '').toString().toLowerCase();
     const sb = (vb || '').toString().toLowerCase();
     if (sa < sb) return -1 * sortDir;
@@ -1294,8 +1187,6 @@ async function applyGroupFilter(id){
     products = [...allProducts];
     window.allProducts = allProducts;
     window.products = products;
-    selection.clear();
-    updateMasterState();
     renderTable();
     // refresh lists to highlight active group
     loadLists();
