@@ -65,7 +65,7 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             image_url TEXT,
             source TEXT,
             import_date TEXT NOT NULL,
-            desire TEXT,
+            desire_text TEXT,
             desire_magnitude TEXT,
             awareness_level TEXT,
             competition_level TEXT,
@@ -75,33 +75,28 @@ def initialize_database(conn: sqlite3.Connection) -> None:
     )
     cur.execute("PRAGMA table_info(products)")
     cols = [row[1] for row in cur.fetchall()]
-    if "desire" not in cols:
-        cur.execute("ALTER TABLE products ADD COLUMN desire TEXT")
-    if "desire_magnitude" not in cols and "magnitud_deseo" in cols:
-        cur.execute("ALTER TABLE products RENAME COLUMN magnitud_deseo TO desire_magnitude")
-    elif "desire_magnitude" not in cols:
+    if "desire_text" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN desire_text TEXT")
+    if "desire_magnitude" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN desire_magnitude TEXT")
-    if "awareness_level" not in cols and "nivel_consciencia" in cols:
-        cur.execute("ALTER TABLE products RENAME COLUMN nivel_consciencia TO awareness_level")
-    elif "awareness_level" not in cols:
+    if "awareness_level" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN awareness_level TEXT")
-    if "competition_level" not in cols and "saturacion_mercado" in cols:
-        cur.execute("ALTER TABLE products RENAME COLUMN saturacion_mercado TO competition_level")
-    elif "competition_level" not in cols:
+    if "competition_level" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN competition_level TEXT")
-    # drop obsolete columns if present
-    for obsolete in [
-        "facilidad_anuncio",
-        "facilidad_logistica",
-        "escalabilidad",
-        "engagement_shareability",
-        "durabilidad_recurrencia",
-    ]:
-        if obsolete in cols:
-            try:
-                cur.execute(f"ALTER TABLE products DROP COLUMN {obsolete}")
-            except Exception:
-                pass
+    # reset new qualitative fields to NULL if they contain legacy values
+    cur.execute(
+        """
+        UPDATE products
+        SET desire_text = NULL,
+            desire_magnitude = NULL,
+            awareness_level = NULL,
+            competition_level = NULL
+        WHERE desire_text IS NOT NULL
+           OR desire_magnitude IS NOT NULL
+           OR awareness_level IS NOT NULL
+           OR competition_level IS NOT NULL
+        """
+    )
     # Scores table
     cur.execute(
         """
@@ -191,13 +186,14 @@ def insert_product(
     currency: Optional[str] = None,
     image_url: Optional[str] = None,
     source: Optional[str] = None,
-    desire: Optional[str] = None,
+    desire_text: Optional[str] = None,
     desire_magnitude: Optional[str] = None,
     awareness_level: Optional[str] = None,
     competition_level: Optional[str] = None,
     extra: Optional[Dict[str, Any]] = None,
     commit: bool = True,
     product_id: Optional[int] = None,
+    **legacy,
 ) -> int:
     """Insert a new product into the database.
 
@@ -210,7 +206,7 @@ def insert_product(
         currency: Optional currency code
         image_url: Optional URL or path to image
         source: Optional source string describing where the product was imported from
-        desire: Short text describing the desire (<=180 characters)
+        desire_text: Short text describing the desire (<=180 characters)
         desire_magnitude: One of 'Low', 'Medium', 'High'
         awareness_level: One of 'Unaware','Problem-Aware','Solution-Aware','Product-Aware','Most Aware'
         competition_level: One of 'Low', 'Medium', 'High'
@@ -222,8 +218,10 @@ def insert_product(
     """
     cur = conn.cursor()
     import_date = datetime.utcnow().isoformat()
-    if desire is not None and len(desire) > 180:
-        desire = desire[:180]
+    if desire_text is None:
+        desire_text = legacy.get("desire")
+    if desire_text is not None and len(desire_text) > 180:
+        desire_text = desire_text[:180]
     allowed_tri = {"Low", "Medium", "High"}
     if desire_magnitude not in allowed_tri:
         desire_magnitude = None
@@ -243,7 +241,7 @@ def insert_product(
             """
             INSERT INTO products (
                 id, name, description, category, price, currency, image_url, source,
-                import_date, desire, desire_magnitude, awareness_level,
+                import_date, desire_text, desire_magnitude, awareness_level,
                 competition_level, extra)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
             """,
@@ -257,7 +255,7 @@ def insert_product(
                 image_url,
                 source,
                 import_date,
-                desire,
+                desire_text,
                 desire_magnitude,
                 awareness_level,
                 competition_level,
@@ -269,7 +267,7 @@ def insert_product(
             """
             INSERT INTO products (
                 name, description, category, price, currency, image_url, source,
-                import_date, desire, desire_magnitude, awareness_level,
+                import_date, desire_text, desire_magnitude, awareness_level,
                 competition_level, extra)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
             """,
@@ -282,7 +280,7 @@ def insert_product(
                 image_url,
                 source,
                 import_date,
-                desire,
+                desire_text,
                 desire_magnitude,
                 awareness_level,
                 competition_level,
@@ -299,6 +297,16 @@ def list_products(conn: sqlite3.Connection) -> List[sqlite3.Row]:
     cur = conn.cursor()
     cur.execute(
         "SELECT * FROM products ORDER BY import_date DESC"
+    )
+    return cur.fetchall()
+
+
+def list_products_paginated(conn: sqlite3.Connection, limit: int, offset: int) -> List[sqlite3.Row]:
+    """Return products in pages ordered by import date descending."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM products ORDER BY import_date DESC LIMIT ? OFFSET ?",
+        (limit, offset),
     )
     return cur.fetchall()
 
@@ -333,16 +341,18 @@ def update_product(
         "currency",
         "image_url",
         "source",
-        "desire",
+        "desire_text",
         "desire_magnitude",
         "awareness_level",
         "competition_level",
     }
+    if "desire" in fields and "desire_text" not in fields:
+        fields["desire_text"] = fields.pop("desire")
     data = {k: v for k, v in fields.items() if k in allowed_cols}
     if not data:
         return
-    if "desire" in data and data["desire"] and len(data["desire"]) > 180:
-        data["desire"] = data["desire"][:180]
+    if "desire_text" in data and data["desire_text"] and len(data["desire_text"]) > 180:
+        data["desire_text"] = data["desire_text"][:180]
     tri_vals = {"Low", "Medium", "High"}
     if "desire_magnitude" in data and data["desire_magnitude"] not in tri_vals:
         data["desire_magnitude"] = None
