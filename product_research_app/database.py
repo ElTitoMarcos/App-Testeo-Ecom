@@ -62,10 +62,43 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             image_url TEXT,
             source TEXT,
             import_date TEXT NOT NULL,
+            desire TEXT,
+            desire_magnitude TEXT,
+            awareness_level TEXT,
+            competition_level TEXT,
             extra JSON
         )
         """
     )
+    cur.execute("PRAGMA table_info(products)")
+    cols = [row[1] for row in cur.fetchall()]
+    if "desire" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN desire TEXT")
+    if "desire_magnitude" not in cols and "magnitud_deseo" in cols:
+        cur.execute("ALTER TABLE products RENAME COLUMN magnitud_deseo TO desire_magnitude")
+    elif "desire_magnitude" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN desire_magnitude TEXT")
+    if "awareness_level" not in cols and "nivel_consciencia" in cols:
+        cur.execute("ALTER TABLE products RENAME COLUMN nivel_consciencia TO awareness_level")
+    elif "awareness_level" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN awareness_level TEXT")
+    if "competition_level" not in cols and "saturacion_mercado" in cols:
+        cur.execute("ALTER TABLE products RENAME COLUMN saturacion_mercado TO competition_level")
+    elif "competition_level" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN competition_level TEXT")
+    # drop obsolete columns if present
+    for obsolete in [
+        "facilidad_anuncio",
+        "facilidad_logistica",
+        "escalabilidad",
+        "engagement_shareability",
+        "durabilidad_recurrencia",
+    ]:
+        if obsolete in cols:
+            try:
+                cur.execute(f"ALTER TABLE products DROP COLUMN {obsolete}")
+            except Exception:
+                pass
     # Scores table
     cur.execute(
         """
@@ -141,6 +174,10 @@ def insert_product(
     currency: Optional[str] = None,
     image_url: Optional[str] = None,
     source: Optional[str] = None,
+    desire: Optional[str] = None,
+    desire_magnitude: Optional[str] = None,
+    awareness_level: Optional[str] = None,
+    competition_level: Optional[str] = None,
     extra: Optional[Dict[str, Any]] = None,
 ) -> int:
     """Insert a new product into the database.
@@ -154,6 +191,10 @@ def insert_product(
         currency: Optional currency code
         image_url: Optional URL or path to image
         source: Optional source string describing where the product was imported from
+        desire: Short text describing the desire (<=180 characters)
+        desire_magnitude: One of 'Low', 'Medium', 'High'
+        awareness_level: One of 'Unaware','Problem-Aware','Solution-Aware','Product-Aware','Most Aware'
+        competition_level: One of 'Low', 'Medium', 'High'
         extra: Optional dictionary of additional attributes (will be stored as JSON)
 
     Returns:
@@ -161,10 +202,29 @@ def insert_product(
     """
     cur = conn.cursor()
     import_date = datetime.utcnow().isoformat()
+    if desire is not None and len(desire) > 180:
+        desire = desire[:180]
+    allowed_tri = {"Low", "Medium", "High"}
+    if desire_magnitude not in allowed_tri:
+        desire_magnitude = None
+    if competition_level not in allowed_tri:
+        competition_level = None
+    allowed_awareness = {
+        "Unaware",
+        "Problem-Aware",
+        "Solution-Aware",
+        "Product-Aware",
+        "Most Aware",
+    }
+    if awareness_level not in allowed_awareness:
+        awareness_level = None
     cur.execute(
         """
-        INSERT INTO products (name, description, category, price, currency, image_url, source, import_date, extra)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, json(?))
+        INSERT INTO products (
+            name, description, category, price, currency, image_url, source,
+            import_date, desire, desire_magnitude, awareness_level,
+            competition_level, extra)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
         """,
         (
             name,
@@ -175,6 +235,10 @@ def insert_product(
             image_url,
             source,
             import_date,
+            desire,
+            desire_magnitude,
+            awareness_level,
+            competition_level,
             json_dump(extra) if extra is not None else "{}",
         ),
     )
@@ -199,6 +263,59 @@ def get_product(conn: sqlite3.Connection, product_id: int) -> Optional[sqlite3.R
         (product_id,),
     )
     return cur.fetchone()
+
+
+def update_product(
+    conn: sqlite3.Connection,
+    product_id: int,
+    **fields: Any,
+) -> None:
+    """Update an existing product with provided fields.
+
+    Only updates known columns defined in the products table. Unknown keys
+    are ignored silently. Validation rules for the four new qualitative
+    fields mirror those used in ``insert_product``.
+    """
+
+    allowed_cols = {
+        "name",
+        "description",
+        "category",
+        "price",
+        "currency",
+        "image_url",
+        "source",
+        "desire",
+        "desire_magnitude",
+        "awareness_level",
+        "competition_level",
+    }
+    data = {k: v for k, v in fields.items() if k in allowed_cols}
+    if not data:
+        return
+    if "desire" in data and data["desire"] and len(data["desire"]) > 180:
+        data["desire"] = data["desire"][:180]
+    tri_vals = {"Low", "Medium", "High"}
+    if "desire_magnitude" in data and data["desire_magnitude"] not in tri_vals:
+        data["desire_magnitude"] = None
+    if "competition_level" in data and data["competition_level"] not in tri_vals:
+        data["competition_level"] = None
+    aware_vals = {
+        "Unaware",
+        "Problem-Aware",
+        "Solution-Aware",
+        "Product-Aware",
+        "Most Aware",
+    }
+    if "awareness_level" in data and data["awareness_level"] not in aware_vals:
+        data["awareness_level"] = None
+    sets = ",".join([f"{k} = ?" for k in data.keys()])
+    cur = conn.cursor()
+    cur.execute(
+        f"UPDATE products SET {sets} WHERE id = ?",
+        (*data.values(), product_id),
+    )
+    conn.commit()
 
 
 def insert_score(

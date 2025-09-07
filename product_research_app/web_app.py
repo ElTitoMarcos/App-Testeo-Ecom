@@ -316,6 +316,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "category": p["category"],
                     "price": p["price"],
                     "image_url": p["image_url"],
+                    "desire": p["desire"],
+                    "desire_magnitude": p["desire_magnitude"],
+                    "awareness_level": p["awareness_level"],
+                    "competition_level": p["competition_level"],
                     "extras": extra_dict,
                 }
                 if config.is_scoring_v2_enabled():
@@ -668,8 +672,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
 # export selected or all products
         if path == "/export":
-            # Export selected products as CSV; ids provided via query params (?ids=1,2,3)
             qs = parse_qs(parsed.query)
+            fmt = qs.get('format', ['csv'])[0]
             id_str = qs.get('ids', [None])[0]
             conn = ensure_db()
             items: list[sqlite3.Row] = []
@@ -684,41 +688,55 @@ class RequestHandler(BaseHTTPRequestHandler):
                         items.append(p)
             else:
                 items = database.list_products(conn)
-            # gather all extra keys
-            fieldnames = ['id','name','category','price']
-            extra_keys = set()
+            rows = []
             for p in items:
+                rows.append(
+                    [
+                        p['id'],
+                        p['name'],
+                        p['desire'],
+                        p['desire_magnitude'],
+                        p['awareness_level'],
+                        p['competition_level'],
+                    ]
+                )
+            headers = ["id", "name", "Desire", "Desire Magnitude", "Awareness Level", "Competition Level"]
+            if fmt == 'xlsx':
                 try:
-                    extra_dict = json.loads(p['extra']) if p['extra'] else {}
+                    from openpyxl import Workbook
                 except Exception:
-                    extra_dict = {}
-                extra_keys.update(extra_dict.keys())
-            fieldnames.extend(sorted(extra_keys))
-            import csv
-            from io import StringIO
-            output = StringIO()
-            writer = csv.writer(output)
-            writer.writerow(fieldnames)
-            for p in items:
-                row = []
-                row.append(p['id'])
-                row.append(p['name'])
-                row.append(p['category'])
-                row.append(p['price'])
-                try:
-                    extra_dict = json.loads(p['extra']) if p['extra'] else {}
-                except Exception:
-                    extra_dict = {}
-                for key in sorted(extra_keys):
-                    row.append(extra_dict.get(key, ''))
-                writer.writerow(row)
-            csv_data = output.getvalue().encode('utf-8')
-            self.send_response(200)
-            self.send_header("Content-Type", "text/csv; charset=utf-8")
-            self.send_header("Content-Disposition", "attachment; filename=export.csv")
-            self.end_headers()
-            self.wfile.write(csv_data)
-            return
+                    self._set_json(500)
+                    self.wfile.write(json.dumps({"error": "openpyxl not installed"}).encode('utf-8'))
+                    return
+                wb = Workbook()
+                ws = wb.active
+                ws.append(headers)
+                for r in rows:
+                    ws.append(r)
+                from io import BytesIO
+                bio = BytesIO()
+                wb.save(bio)
+                data = bio.getvalue()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                self.send_header("Content-Disposition", "attachment; filename=export.xlsx")
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            else:
+                import csv
+                from io import StringIO
+                output = StringIO()
+                writer = csv.writer(output)
+                writer.writerow(headers)
+                writer.writerows(rows)
+                csv_data = output.getvalue().encode('utf-8')
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header("Content-Disposition", "attachment; filename=export.csv")
+                self.end_headers()
+                self.wfile.write(csv_data)
+                return
         # unknown
         self.send_error(404)
         # unknown
@@ -775,11 +793,68 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/shutdown":
             self.handle_shutdown()
             return
+        if path == "/products":
+            length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(length).decode('utf-8')
+            try:
+                data = json.loads(body)
+                if not isinstance(data, dict):
+                    raise ValueError
+            except Exception:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+                return
+            conn = ensure_db()
+            pid = database.insert_product(
+                conn,
+                name=data.get("name", ""),
+                description=data.get("description"),
+                category=data.get("category"),
+                price=data.get("price"),
+                currency=data.get("currency"),
+                image_url=data.get("image_url"),
+                source=data.get("source"),
+                desire=data.get("desire"),
+                desire_magnitude=data.get("desire_magnitude"),
+                awareness_level=data.get("awareness_level"),
+                competition_level=data.get("competition_level"),
+                extra=data.get("extras"),
+            )
+            product = database.get_product(conn, pid)
+            self._set_json()
+            self.wfile.write(json.dumps(dict(product)).encode('utf-8'))
+            return
         self.send_error(404)
 
     def do_PUT(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path.startswith("/products/"):
+            try:
+                pid = int(path.split("/")[-1])
+            except Exception:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"error": "Invalid ID"}).encode('utf-8'))
+                return
+            length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(length).decode('utf-8')
+            try:
+                data = json.loads(body)
+                if not isinstance(data, dict):
+                    raise ValueError
+            except Exception:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+                return
+            conn = ensure_db()
+            database.update_product(conn, pid, **data)
+            product = database.get_product(conn, pid)
+            if product:
+                self._set_json()
+                self.wfile.write(json.dumps(dict(product)).encode('utf-8'))
+            else:
+                self.send_error(404)
+            return
         if path == "/settings/winner-score":
             length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(length).decode('utf-8')
@@ -958,6 +1033,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                 price_col = find_key(headers, ["price", "precio", "cost", "unitprice"])
                 curr_col = find_key(headers, ["currency", "moneda"])
                 img_col = find_key(headers, ["image", "imagen", "img", "picture", "imgurl"])
+                desire_col = find_key(headers, ["desire", "deseo"])
+                desire_mag_col = find_key(headers, ["desiremagnitude", "desiremag", "magnituddeseo"])
+                awareness_col = find_key(headers, ["awarenesslevel", "awareness", "nivelconsciencia"])
+                competition_col = find_key(headers, ["competitionlevel", "competition", "saturacionmercado"])
                 # collect names for potential simplification
                 rows_data = []
                 names_list = []
@@ -991,7 +1070,32 @@ class RequestHandler(BaseHTTPRequestHandler):
                             price = None
                     currency = (row.get(curr_col) or '').strip() if curr_col else None
                     image_url = (row.get(img_col) or '').strip() if img_col else None
-                    extra_cols = {k: v for k, v in row.items() if k not in {name_col, desc_col, cat_col, price_col, curr_col, img_col}}
+                    desire = (row.get(desire_col) or '').strip() if desire_col else None
+                    desire = desire or None
+                    desire_mag = (row.get(desire_mag_col) or '').strip() if desire_mag_col else None
+                    desire_mag = desire_mag or None
+                    awareness = (row.get(awareness_col) or '').strip() if awareness_col else None
+                    awareness = awareness or None
+                    competition = (row.get(competition_col) or '').strip() if competition_col else None
+                    competition = competition or None
+                    extra_cols = {
+                        k: v
+                        for k, v in row.items()
+                        if k
+                        not in {
+                            name_col,
+                            desc_col,
+                            cat_col,
+                            price_col,
+                            curr_col,
+                            img_col,
+                            desire_col,
+                            desire_mag_col,
+                            awareness_col,
+                            competition_col,
+                        }
+                        and k.lower() not in {"product name", "source", "decision"}
+                    }
                     # mark if duplicate
                     dupe = database.find_product_by_name(conn, simplified)
                     if simplified != original_name:
@@ -1007,6 +1111,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                         currency=currency,
                         image_url=image_url,
                         source=filename,
+                        desire=desire,
+                        desire_magnitude=desire_mag,
+                        awareness_level=awareness,
+                        competition_level=competition,
                         extra=extra_cols,
                     )
                     inserted += 1
@@ -1062,7 +1170,33 @@ class RequestHandler(BaseHTTPRequestHandler):
                                 price = None
                         currency = item.get(currency_key) if currency_key else None
                         image_url = item.get(image_key) if image_key else None
-                        extra = {k: v for k, v in item.items() if k not in {name_key, desc_key, category_key, price_key, currency_key, image_key}}
+                        desire = item.get("desire") or item.get("desire_text")
+                        desire_mag = item.get("desire_magnitude") or item.get("magnitud_deseo")
+                        awareness = item.get("awareness_level") or item.get("nivel_consciencia")
+                        competition = item.get("competition_level") or item.get("saturacion_mercado")
+                        extra = {
+                            k: v
+                            for k, v in item.items()
+                            if k
+                            not in {
+                                name_key,
+                                desc_key,
+                                category_key,
+                                price_key,
+                                currency_key,
+                                image_key,
+                                "desire",
+                                "desire_text",
+                                "desire_magnitude",
+                                "awareness_level",
+                                "competition_level",
+                                "magnitud_deseo",
+                                "nivel_consciencia",
+                                "saturacion_mercado",
+                                "source",
+                                "decision",
+                            }
+                        }
                         if simplified != original_name:
                             extra['original_name'] = original_name
                         dupe = database.find_product_by_name(conn, simplified)
@@ -1077,6 +1211,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                             currency=str(currency).strip() if currency else None,
                             image_url=str(image_url).strip() if image_url else None,
                             source=filename,
+                            desire=desire,
+                            desire_magnitude=desire_mag,
+                            awareness_level=awareness,
+                            competition_level=competition,
                             extra=extra,
                         )
                         inserted += 1
@@ -1218,7 +1356,33 @@ class RequestHandler(BaseHTTPRequestHandler):
                                 price = None
                         currency = item.get(currency_key) if currency_key else None
                         image_url = item.get(image_key) if image_key else None
-                        extra = {k: v for k, v in item.items() if k not in {name_key, desc_key, category_key, price_key, currency_key, image_key}}
+                        desire = item.get("desire") or item.get("desire_text")
+                        desire_mag = item.get("desire_magnitude") or item.get("magnitud_deseo")
+                        awareness = item.get("awareness_level") or item.get("nivel_consciencia")
+                        competition = item.get("competition_level") or item.get("saturacion_mercado")
+                        extra = {
+                            k: v
+                            for k, v in item.items()
+                            if k
+                            not in {
+                                name_key,
+                                desc_key,
+                                category_key,
+                                price_key,
+                                currency_key,
+                                image_key,
+                                "desire",
+                                "desire_text",
+                                "desire_magnitude",
+                                "awareness_level",
+                                "competition_level",
+                                "magnitud_deseo",
+                                "nivel_consciencia",
+                                "saturacion_mercado",
+                                "source",
+                                "decision",
+                            }
+                        }
                         if simplified != original_name:
                             extra['original_name'] = original_name
                         dupe = database.find_product_by_name(conn, simplified)
@@ -1233,6 +1397,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                             currency=str(currency).strip() if currency else None,
                             image_url=str(image_url).strip() if image_url else None,
                             source=filename,
+                            desire=desire,
+                            desire_magnitude=desire_mag,
+                            awareness_level=awareness,
+                            competition_level=competition,
                             extra=extra,
                         )
                         if config.is_scoring_v2_enabled() and weights_map:
