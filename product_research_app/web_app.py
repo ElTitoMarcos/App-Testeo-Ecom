@@ -196,6 +196,60 @@ def ensure_db():
     return conn
 
 
+def serialize_product_row(conn, p):
+    """Convert a product row into API-friendly dict."""
+    try:
+        extra_dict = json.loads(p["extra"] or "{}") if "extra" in p.keys() else {}
+    except Exception:
+        extra_dict = {}
+
+    def pick(keys):
+        for k in keys:
+            val = extra_dict.get(k)
+            if val not in (None, ""):
+                return val
+        return None
+
+    rating = pick(["Product Rating", "rating"])
+    units_sold = pick(["Units Sold", "units_sold", "units", "orders", "sales"])
+    revenue = pick(["revenue", "Revenue", "gmv", "sales"])
+    conversion_rate = pick([
+        "conversion_rate",
+        "Conversion Rate",
+        "Creator Conversion Ratio",
+    ])
+    launch_date = pick(["launch_date", "Launch Date"])
+    date_range = pick(["date_range", "Date Range"])
+
+    scores = database.get_scores_for_product(conn, p["id"])
+    score = scores[0] if scores else None
+    winner = None
+    if score:
+        key = (
+            "winner_score_v2_pct" if config.is_scoring_v2_enabled() else "total_score"
+        )
+        winner = score.get(key)
+
+    return {
+        "id": p["id"],
+        "image": p["image_url"],
+        "name": p["name"],
+        "category": p["category"],
+        "price": p["price"],
+        "rating": rating,
+        "units_sold": units_sold,
+        "revenue": revenue,
+        "conversion_rate": conversion_rate,
+        "launch_date": launch_date,
+        "date_range": date_range,
+        "desire_text": p["desire_text"],
+        "desire_magnitude": p["desire_magnitude"],
+        "awareness_level": p["awareness_level"],
+        "competition_level": p["competition_level"],
+        "winner_score": winner,
+    }
+
+
 def parse_xlsx(binary: bytes):
     """Parse a minimal XLSX file into a list of dictionaries."""
     import zipfile
@@ -512,60 +566,24 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self.safe_write(lambda: self.send_json({"error": "not found"}, status=404))
             return
         if path == "/products":
-            # Return a list of products including extra metadata for UI display
+            params = parse_qs(parsed.query)
+            try:
+                page = int(params.get("page", ["1"])[0])
+            except Exception:
+                page = 1
+            try:
+                page_size = int(params.get("page_size", ["50"])[0])
+            except Exception:
+                page_size = 50
+            if page < 1:
+                page = 1
+            if page_size < 1:
+                page_size = 50
+            offset = (page - 1) * page_size
             conn = ensure_db()
-            rows = []
-            for p in database.list_products(conn):
-                scores = database.get_scores_for_product(conn, p["id"])
-                score = scores[0] if scores else None
-                extra = p["extra"] if "extra" in p.keys() else {}
-                try:
-                    extra_dict = json.loads(extra) if isinstance(extra, str) else (extra or {})
-                except Exception:
-                    extra_dict = {}
-                score_value = None
-                if score:
-                    key = (
-                        "winner_score_v2_pct"
-                        if config.is_scoring_v2_enabled()
-                        else "total_score"
-                    )
-                    if key in score.keys():
-                        score_value = score[key]
-                    else:
-                        score_value = None
-                    breakdown_data = {}
-                    if config.is_scoring_v2_enabled():
-                        try:
-                            raw_breakdown = (
-                                score["winner_score_v2_breakdown"]
-                                if "winner_score_v2_breakdown" in score.keys()
-                                else None
-                            )
-                            breakdown_data = json.loads(raw_breakdown or "{}")
-                        except Exception:
-                            breakdown_data = {}
-                row = {
-                    "id": p["id"],
-                    "name": p["name"],
-                    "category": p["category"],
-                    "price": p["price"],
-                    "image_url": p["image_url"],
-                    "desire": p["desire"],
-                    "desire_magnitude": p["desire_magnitude"],
-                    "awareness_level": p["awareness_level"],
-                    "competition_level": p["competition_level"],
-                    "extras": extra_dict,
-                }
-                if config.is_scoring_v2_enabled():
-                    row["winner_score_v2_pct"] = score_value
-                    if score:
-                        row["winner_score_v2_breakdown"] = breakdown_data
-                else:
-                    row["score"] = score_value
-                rows.append(row)
-            self._set_json()
-            self.wfile.write(json.dumps(rows).encode("utf-8"))
+            products = database.list_products_paginated(conn, page_size, offset)
+            rows = [serialize_product_row(conn, p) for p in products]
+            self.safe_write(lambda: self.send_json(rows))
             return
         if path == "/config":
             # return stored configuration (without exposing the API key)
@@ -929,13 +947,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                     [
                         p['id'],
                         p['name'],
-                        p['desire'],
+                        p['desire_text'],
                         p['desire_magnitude'],
                         p['awareness_level'],
                         p['competition_level'],
                     ]
                 )
-            headers = ["id", "name", "Desire", "Desire Magnitude", "Awareness Level", "Competition Level"]
+            headers = ["id", "name", "Desire Text", "Desire Magnitude", "Awareness Level", "Competition Level"]
             if fmt == 'xlsx':
                 try:
                     from openpyxl import Workbook
@@ -1028,6 +1046,59 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/shutdown":
             self.handle_shutdown()
             return
+        if path == "/products/update-field":
+            length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(length).decode('utf-8')
+            try:
+                data = json.loads(body)
+                pid = int(data.get("id"))
+                field = data.get("field")
+            except Exception:
+                self.safe_write(lambda: self.send_json({"error": "Invalid JSON"}, status=400))
+                return
+            allowed_fields = {
+                "desire_text",
+                "desire_magnitude",
+                "awareness_level",
+                "competition_level",
+            }
+            if field not in allowed_fields:
+                self.safe_write(lambda: self.send_json({"error": "Invalid field"}, status=400))
+                return
+            value = data.get("value")
+            if value in ("", None):
+                value = None
+            else:
+                if field in {"desire_magnitude", "competition_level"}:
+                    allowed = {"Low", "Medium", "High"}
+                    val = str(value).strip().lower().capitalize()
+                    if val not in allowed:
+                        self.safe_write(lambda: self.send_json({"error": "Invalid value"}, status=400))
+                        return
+                    value = val
+                elif field == "awareness_level":
+                    allowed = {
+                        "Unaware",
+                        "Problem-Aware",
+                        "Solution-Aware",
+                        "Product-Aware",
+                        "Most Aware",
+                    }
+                    val = "-".join(w.capitalize() for w in str(value).strip().lower().split("-"))
+                    if val not in allowed:
+                        self.safe_write(lambda: self.send_json({"error": "Invalid value"}, status=400))
+                        return
+                    value = val
+                else:
+                    value = str(value)
+            conn = ensure_db()
+            database.update_product(conn, pid, **{field: value})
+            product = database.get_product(conn, pid)
+            if product:
+                self.safe_write(lambda: self.send_json(serialize_product_row(conn, product)))
+            else:
+                self.safe_write(lambda: self.send_json({"error": "not found"}, status=404))
+            return
         if path == "/products":
             length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(length).decode('utf-8')
@@ -1049,15 +1120,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                 currency=data.get("currency"),
                 image_url=data.get("image_url"),
                 source=data.get("source"),
-                desire=data.get("desire"),
+                desire_text=data.get("desire_text"),
                 desire_magnitude=data.get("desire_magnitude"),
                 awareness_level=data.get("awareness_level"),
                 competition_level=data.get("competition_level"),
                 extra=data.get("extras"),
             )
             product = database.get_product(conn, pid)
-            self._set_json()
-            self.wfile.write(json.dumps(dict(product)).encode('utf-8'))
+            self.safe_write(lambda: self.send_json(serialize_product_row(conn, product)))
             return
         self.send_error(404)
 
@@ -1085,8 +1155,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             database.update_product(conn, pid, **data)
             product = database.get_product(conn, pid)
             if product:
-                self._set_json()
-                self.wfile.write(json.dumps(dict(product)).encode('utf-8'))
+                self.safe_write(lambda: self.send_json(serialize_product_row(conn, product)))
             else:
                 self.send_error(404)
             return
@@ -1357,10 +1426,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                         currency=currency,
                         image_url=image_url,
                         source=filename,
-                        desire=desire,
-                        desire_magnitude=desire_mag,
-                        awareness_level=awareness,
-                        competition_level=competition,
                         extra=extra_cols,
                     )
                     inserted += 1
@@ -1457,10 +1522,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                             currency=str(currency).strip() if currency else None,
                             image_url=str(image_url).strip() if image_url else None,
                             source=filename,
-                            desire=desire,
-                            desire_magnitude=desire_mag,
-                            awareness_level=awareness,
-                            competition_level=competition,
                             extra=extra,
                         )
                         inserted += 1
@@ -1643,10 +1704,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                             currency=str(currency).strip() if currency else None,
                             image_url=str(image_url).strip() if image_url else None,
                             source=filename,
-                            desire=desire,
-                            desire_magnitude=desire_mag,
-                            awareness_level=awareness,
-                            competition_level=competition,
                             extra=extra,
                         )
                         if config.is_scoring_v2_enabled() and weights_map:
