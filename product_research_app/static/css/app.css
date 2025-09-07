@@ -290,6 +290,94 @@ body.dark .bottombar {
 
 #productTable {
   margin-bottom: 0;
+  table-layout: fixed;
+  width: 100%;
+}
+
+/* Desire-related columns */
+th.col-desire,
+td.col-desire,
+th.col-desire-magnitude,
+td.col-desire-magnitude,
+th.col-awareness-level,
+td.col-awareness-level,
+th.col-competition-level,
+td.col-competition-level {
+  padding: 6px 8px;
+  vertical-align: middle;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+th.col-desire,
+td.col-desire {
+  width: 220px;
+  min-width: 220px;
+  text-align: left;
+}
+
+th.col-desire-magnitude,
+td.col-desire-magnitude {
+  width: 140px;
+  min-width: 140px;
+  text-align: center;
+}
+
+th.col-awareness-level,
+td.col-awareness-level {
+  width: 180px;
+  min-width: 180px;
+  text-align: center;
+}
+
+th.col-competition-level,
+td.col-competition-level {
+  width: 140px;
+  min-width: 140px;
+  text-align: center;
+}
+
+.col-desire input,
+.col-desire-magnitude select,
+.col-awareness-level select,
+.col-competition-level select {
+  width: 100%;
+  box-sizing: border-box;
+  height: 32px;
+  font-size: 13px;
+  padding: 4px 8px;
+  margin: 0;
+}
+
+.col-desire-magnitude select,
+.col-awareness-level select,
+.col-competition-level select {
+  text-align: center;
+  text-align-last: center;
+}
+
+/* Responsive widths */
+@media (max-width: 1366px) {
+  th.col-desire,
+  td.col-desire { width: 200px; min-width: 200px; }
+  th.col-desire-magnitude,
+  td.col-desire-magnitude { width: 130px; min-width: 130px; }
+  th.col-awareness-level,
+  td.col-awareness-level { width: 160px; min-width: 160px; }
+  th.col-competition-level,
+  td.col-competition-level { width: 130px; min-width: 130px; }
+}
+
+@media (max-width: 1200px) {
+  th.col-desire,
+  td.col-desire { width: 180px; min-width: 180px; }
+  th.col-desire-magnitude,
+  td.col-desire-magnitude { width: 120px; min-width: 120px; }
+  th.col-awareness-level,
+  td.col-awareness-level { width: 150px; min-width: 150px; }
+  th.col-competition-level,
+  td.col-competition-level { width: 120px; min-width: 120px; }
 }
 
 /* Modal base styles */

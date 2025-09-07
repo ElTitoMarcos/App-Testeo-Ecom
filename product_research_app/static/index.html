@@ -308,14 +308,10 @@ const columns = [
   { key: 'Creator Conversion Ratio', label: 'Tasa Conversión', type: 'string' },
   { key: 'Launch Date', label: 'Fecha Lanzamiento', type: 'string' },
   { key: 'Date Range', label: 'Rango Fechas', type: 'string' },
-  { key: 'magnitud_deseo', label: 'Magnitud deseo', type: 'number' },
-  { key: 'nivel_consciencia', label: 'Nivel consciencia', type: 'number' },
-  { key: 'saturacion_mercado', label: 'Saturación mercado', type: 'number' },
-  { key: 'facilidad_anuncio', label: 'Facilidad anuncio', type: 'number' },
-  { key: 'facilidad_logistica', label: 'Facilidad logística', type: 'number' },
-  { key: 'escalabilidad', label: 'Escalabilidad', type: 'number' },
-  { key: 'engagement_shareability', label: 'Engagement/shareability', type: 'number' },
-  { key: 'durabilidad_recurrencia', label: 'Durabilidad/recurrencia', type: 'number' },
+  { key: 'desire', label: 'Desire', type: 'string', className: 'col-desire', width: 220 },
+  { key: 'desire_magnitude', label: 'Desire magnetitude', type: 'string', className: 'col-desire-magnitude', width: 140 },
+  { key: 'awareness_level', label: 'Awerness Level', type: 'string', className: 'col-awareness-level', width: 180 },
+  { key: 'competition_level', label: 'Competition level', type: 'string', className: 'col-competition-level', width: 140 },
   { key: 'winner_score_v2_pct', label: 'Winner Score', type: 'number' },
 ];
 
@@ -360,16 +356,7 @@ function preprocessProducts(list){
   dupMap.forEach(arr => { if (arr.length > 1) arr.forEach(it => it.isDuplicate = true); });
 }
 
-const weightFields = [
-  'magnitud_deseo',
-  'nivel_consciencia',
-  'saturacion_mercado',
-  'facilidad_anuncio',
-  'facilidad_logistica',
-  'escalabilidad',
-  'engagement_shareability',
-  'durabilidad_recurrencia'
-];
+const weightFields = [];
 const WEIGHTS_LS_KEY = 'winnerScoreWeights:v1';
 let weightStore = {};
 let persistTimer;
@@ -377,12 +364,14 @@ let backendWeightsEnabled = true;
 
 function defaultWeights(){
   const w = {};
+  if(weightFields.length === 0) return w;
   const v = 1 / weightFields.length;
   weightFields.forEach(k => w[k] = v);
   return w;
 }
 
 function normalizeWeights(obj){
+  if(weightFields.length === 0) return {};
   let total = 0;
   weightFields.forEach(k => { total += parseFloat(obj[k]) || 0; });
   if(total <= 0) return defaultWeights();
@@ -395,6 +384,7 @@ function renderWeights(weights){
   const container = document.getElementById('weightsContainer');
   if (!container) return;
   container.innerHTML = '';
+  if(weightFields.length === 0) return;
   weightFields.forEach(key => {
     const row = document.createElement('div');
     row.style.display = 'flex';
@@ -527,6 +517,17 @@ async function fetchProducts() {
   renderTable();
 }
 
+function patchProductField(id, data){
+  const t1 = allProducts.find(p => p.id === id);
+  if(t1) Object.assign(t1, data);
+  const t2 = products.find(p => p.id === id);
+  if(t2) Object.assign(t2, data);
+  fetchJson(`/products/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(data)
+  }).catch(()=>{});
+}
+
 function renderTable() {
   const headerRow = document.getElementById('headerRow');
   const tbody = document.querySelector('#productTable tbody');
@@ -545,6 +546,7 @@ function renderTable() {
       th.textContent = col.label;
       th.style.cursor = 'pointer';
       th.setAttribute('data-key', col.key);
+      if (col.className) th.classList.add(col.className);
       th.onclick = () => sortBy(col.key, col.type);
       headerRow.appendChild(th);
     });
@@ -581,14 +583,9 @@ function renderTable() {
       const td = document.createElement('td');
       const key = col.key;
       td.setAttribute('data-key', key);
+      if (col.className) td.classList.add(col.className);
       let value = '';
-      if (weightFields.includes(key)) {
-        value = item.winner_score_v2_breakdown && item.winner_score_v2_breakdown.scores ? item.winner_score_v2_breakdown.scores[key] : '';
-        if (item.winner_score_v2_breakdown && item.winner_score_v2_breakdown.justifications) {
-          const j = item.winner_score_v2_breakdown.justifications[key];
-          if (j) td.title = 'Justificación: ' + j;
-        }
-      } else if (['id','name','category','price','image_url','winner_score_v2_pct'].includes(key)) {
+      if (['id','name','category','price','image_url','winner_score_v2_pct','desire','desire_magnitude','awareness_level','competition_level'].includes(key)) {
         value = item[key];
       } else {
         value = item.extras ? item.extras[key] : '';
@@ -646,6 +643,53 @@ function renderTable() {
           };
           td.appendChild(btnCopy);
         }
+      } else if (key === 'desire') {
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = value || '';
+        input.addEventListener('change', () => {
+          patchProductField(item.id, { desire: input.value || null });
+        });
+        td.appendChild(input);
+      } else if (key === 'desire_magnitude') {
+        const select = document.createElement('select');
+        ['', 'Low', 'Medium', 'High'].forEach(opt => {
+          const o = document.createElement('option');
+          o.value = opt;
+          o.textContent = opt;
+          select.appendChild(o);
+        });
+        select.value = value || '';
+        select.addEventListener('change', () => {
+          patchProductField(item.id, { desire_magnitude: select.value || null });
+        });
+        td.appendChild(select);
+      } else if (key === 'awareness_level') {
+        const select = document.createElement('select');
+        ['', 'Unaware', 'Problem-Aware', 'Solution-Aware', 'Product-Aware', 'Most Aware'].forEach(opt => {
+          const o = document.createElement('option');
+          o.value = opt;
+          o.textContent = opt;
+          select.appendChild(o);
+        });
+        select.value = value || '';
+        select.addEventListener('change', () => {
+          patchProductField(item.id, { awareness_level: select.value || null });
+        });
+        td.appendChild(select);
+      } else if (key === 'competition_level') {
+        const select = document.createElement('select');
+        ['', 'Low', 'Medium', 'High'].forEach(opt => {
+          const o = document.createElement('option');
+          o.value = opt;
+          o.textContent = opt;
+          select.appendChild(o);
+        });
+        select.value = value || '';
+        select.addEventListener('change', () => {
+          patchProductField(item.id, { competition_level: select.value || null });
+        });
+        td.appendChild(select);
       } else if (col.type === 'number' && value !== null && value !== undefined && value !== '') {
         let num = parseFloat(String(value).replace(/[^0-9.-]+/g, ''));
         if (isNaN(num)) {
@@ -696,7 +740,7 @@ function sortBy(field, type) {
   products.sort((a, b) => {
     let va;
     let vb;
-    if (field === 'id' || field === 'name' || field === 'category' || field === 'price' || field === 'image_url' || field === 'winner_score_v2_pct') {
+    if (field === 'id' || field === 'name' || field === 'category' || field === 'price' || field === 'image_url' || field === 'winner_score_v2_pct' || field === 'desire' || field === 'desire_magnitude' || field === 'awareness_level' || field === 'competition_level') {
       va = a[field];
       vb = b[field];
     } else if (weightFields.includes(field)) {
