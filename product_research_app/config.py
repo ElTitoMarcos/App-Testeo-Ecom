@@ -11,6 +11,24 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 
+DEFAULT_CONFIG: Dict[str, Any] = {
+    "autoFillIAOnImport": True,
+    "aiBatch": {
+        "BATCH_SIZE": 10,
+        "MAX_CONCURRENCY": 2,
+        "MAX_RETRIES": 3,
+        "TIME_LIMIT_SECONDS": 300,
+    },
+    "aiCost": {
+        "model": "gpt-4.1-mini",
+        "useBatchWhenCountGte": 300,
+        "costCapUSD": 0.25,
+        "estTokensPerItemIn": 300,
+        "estTokensPerItemOut": 80,
+    },
+}
+
+
 CONFIG_FILE = Path(__file__).resolve().parent / "config.json"
 
 
@@ -21,16 +39,20 @@ def load_config() -> Dict[str, Any]:
     If the file does not exist, an empty configuration is returned.
     """
 
+    data: Dict[str, Any] = {}
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if not isinstance(data, dict):
-                return {}
-            return data
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                data = raw
         except Exception:
-            return {}
-    return {}
+            data = {}
+
+    changed = _merge_defaults(data, DEFAULT_CONFIG)
+    if changed:
+        save_config(data)
+    return data
 
 
 def save_config(config: Dict[str, Any]) -> None:
@@ -40,6 +62,18 @@ def save_config(config: Dict[str, Any]) -> None:
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
     tmp_path.replace(CONFIG_FILE)
+
+
+def _merge_defaults(dst: Dict[str, Any], src: Dict[str, Any]) -> bool:
+    changed = False
+    for k, v in src.items():
+        if k not in dst:
+            dst[k] = v
+            changed = True
+        elif isinstance(v, dict) and isinstance(dst.get(k), dict):
+            if _merge_defaults(dst[k], v):
+                changed = True
+    return changed
 
 
 def get_api_key() -> Optional[str]:
@@ -57,6 +91,27 @@ def get_model() -> str:
     if not model:
         return "gpt-4o"
     return model
+
+
+def get_ai_batch_config() -> Dict[str, Any]:
+    cfg = load_config()
+    base = DEFAULT_CONFIG["aiBatch"].copy()
+    base.update(cfg.get("aiBatch", {}))
+    return base
+
+
+def get_ai_cost_config() -> Dict[str, Any]:
+    cfg = load_config()
+    base = DEFAULT_CONFIG["aiCost"].copy()
+    user = cfg.get("aiCost", {})
+    for k, v in user.items():
+        if isinstance(v, dict) and k in base:
+            tmp = base.get(k, {}).copy()
+            tmp.update(v)
+            base[k] = tmp
+        else:
+            base[k] = v
+    return base
 
 
 def is_auto_fill_ia_on_import_enabled() -> bool:

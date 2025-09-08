@@ -431,9 +431,16 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             conn.commit()
         if inserted_ids and config.is_auto_fill_ia_on_import_enabled():
             database.start_import_job_ai(conn, job_id, len(inserted_ids))
-            def _progress(done, total):
-                database.update_import_job_ai_progress(conn, job_id, done)
-            res = ai_columns.fill_ai_columns(inserted_ids, progress_cb=_progress)
+            cfg_cost = config.get_ai_cost_config()
+            res = ai_columns.fill_ai_columns(
+                inserted_ids,
+                model=cfg_cost.get("model"),
+                batch_mode=len(inserted_ids) >= cfg_cost.get("useBatchWhenCountGte", 300),
+                cost_cap_usd=cfg_cost.get("costCapUSD"),
+            )
+            counts = res.get("counts", {})
+            database.update_import_job_ai_progress(conn, job_id, counts.get("n_procesados", 0))
+            database.set_import_job_ai_counts(conn, job_id, counts, res.get("pending_ids", []))
             if res.get("error"):
                 database.set_import_job_ai_error(conn, job_id, "No se pudieron completar las columnas con IA: revisa la API o inténtalo desde 'Completar columnas (IA)'.")
         database.complete_import_job(conn, job_id, rows_imported)
@@ -608,7 +615,21 @@ class RequestHandler(BaseHTTPRequestHandler):
             conn = ensure_db()
             row = database.get_import_job(conn, task_id)
             if row:
-                self.safe_write(lambda: self.send_json(dict(row)))
+                data = dict(row)
+                try:
+                    if data.get("ai_counts"):
+                        data["ai_counts"] = json.loads(data["ai_counts"])
+                except Exception:
+                    data["ai_counts"] = {}
+                try:
+                    if data.get("ai_pending"):
+                        data["pending_ids"] = json.loads(data["ai_pending"])
+                    else:
+                        data["pending_ids"] = []
+                except Exception:
+                    data["pending_ids"] = []
+                data.pop("ai_pending", None)
+                self.safe_write(lambda: self.send_json(data))
             else:
                 self.safe_write(lambda: self.send_json({"error": "not found"}, status=404))
             return
@@ -1936,14 +1957,28 @@ class RequestHandler(BaseHTTPRequestHandler):
                     explanations=offline['explanations'],
                 )
         ai_err = None
+        ai_counts = None
+        pending = []
         if inserted_ids and config.is_auto_fill_ia_on_import_enabled():
-            res_ai = ai_columns.fill_ai_columns(inserted_ids)
+            cfg_cost = config.get_ai_cost_config()
+            res_ai = ai_columns.fill_ai_columns(
+                inserted_ids,
+                model=cfg_cost.get("model"),
+                batch_mode=len(inserted_ids) >= cfg_cost.get("useBatchWhenCountGte", 300),
+                cost_cap_usd=cfg_cost.get("costCapUSD"),
+            )
+            ai_counts = res_ai.get("counts")
+            pending = res_ai.get("pending_ids", [])
             if res_ai.get("error"):
-                ai_err = "No se pudieron completar las columnas con IA: revisa la API o inténtalo desde 'Completar columnas (IA)'."
+                ai_err = "No se pudieron completar las columnas con IA: revisa la API o ejecútalo desde 'Completar columnas (IA)'."
         self._set_json()
         payload = {"inserted": inserted}
         if ai_err:
             payload["ai_error"] = ai_err
+        if ai_counts:
+            payload["ai_counts"] = ai_counts
+        if pending:
+            payload["pending_ids"] = pending
         self._safe_write(json.dumps(payload).encode('utf-8'))
 
     def handle_evaluate_all(self):

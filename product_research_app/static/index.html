@@ -239,12 +239,12 @@ window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
 let importPollTimer = null;
 
-function showImportBanner(msg = 'Importando productos, espera…') {
-  const b = document.getElementById('importBanner');
-  if (!b) return;
-  b.textContent = msg;
-  b.style.display = 'block';
-}
+  function showImportBanner(msg = 'Importando productos, espera…', sub) {
+    const b = document.getElementById('importBanner');
+    if (!b) return;
+    b.innerHTML = sub ? `<div>${msg}</div><div style="font-size:12px;">${sub}</div>` : msg;
+    b.style.display = 'block';
+  }
 
 function hideImportBanner() {
   const b = document.getElementById('importBanner');
@@ -258,20 +258,50 @@ async function pollImportStatus(id) {
       showImportBanner();
       importPollTimer = setTimeout(() => pollImportStatus(id), 2000);
     } else if (data.status === 'ai') {
-      const total = data.ai_total || 0;
-      const done = data.ai_done || 0;
-      const pct = total ? Math.round((done / total) * 100) : 0;
-      showImportBanner(`Rellenando columnas con IA (auto)… ${pct}%`);
+      const counts = data.ai_counts || {};
+      const total = counts.n_para_ia ?? data.ai_total ?? 0;
+      const done = data.ai_done ?? counts.n_procesados ?? 0;
+      const retries = counts.n_reintentados || 0;
+      const skipped = counts.n_omitidos_por_valor_existente || 0;
+      const label = counts.truncated ? `Aplicado límite de coste: procesados ${done} de ${total}.` : null;
+      showImportBanner(`Rellenando columnas con IA (auto)… Procesados ${done}/${total} · Reintentos ${retries} · Omitidos ${skipped}.`, label);
       importPollTimer = setTimeout(() => pollImportStatus(id), 2000);
     } else {
-      hideImportBanner();
       localStorage.removeItem(IMPORT_TASK_LS_KEY);
       if (data.status === 'done') {
         fetchProducts();
         const n = data.rows_imported || 0;
         toast.success(`Importación completada: ${n} filas nuevas. IDs desde 0 si era la primera importación.`);
+        const counts = data.ai_counts || {};
+        const done = counts.n_procesados || 0;
+        const total = counts.n_para_ia || 0;
+        const skipped = counts.n_omitidos_por_valor_existente || 0;
+        if (total) {
+          toast.success(`IA aplicada a ${done}/${total}. ${skipped} omitidos (ya tenían valor).`);
+        }
         if (data.ai_error) {
-          toast.info('No se pudieron completar las columnas con IA: revisa la API o inténtalo desde “Completar columnas (IA)”.');
+          toast.info('No se pudieron completar las columnas con IA: revisa la API o ejecútalo desde ‘Completar columnas (IA)’.');
+        }
+        const errDef = counts.n_error_definitivo || 0;
+        const cost = counts.cost_estimated_usd;
+        let html = `n_para_ia ${total} · n_procesados ${done} · n_omitidos_por_valor_existente ${skipped} · n_error_definitivo ${errDef}`;
+        if (cost !== undefined) html += ` · cost_estimated_usd ${cost}`;
+        if (counts.truncated) html += `<div style="font-size:12px;">Aplicado límite de coste: procesados ${done} de ${total}.` + `</div>`;
+        if (data.pending_ids && data.pending_ids.length) html += `<div><button id="retryIaNow">Reintentar IA ahora</button></div>`;
+        showImportBanner(html);
+        if (data.pending_ids && data.pending_ids.length) {
+          const btn = document.getElementById('retryIaNow');
+          if (btn) {
+            btn.onclick = async () => {
+              btn.disabled = true;
+              try {
+                await window.handleCompletarIA({ ids: data.pending_ids });
+                fetchProducts();
+              } finally {
+                btn.disabled = false;
+              }
+            };
+          }
         }
       } else {
         toast.error(data.error || 'Error en importación');
@@ -906,6 +936,7 @@ window.onload = () => {
   const tid = localStorage.getItem(IMPORT_TASK_LS_KEY);
   if(tid){
     showImportBanner();
+    toast.info('Reanudando IA post-import desde el último punto guardado…');
     pollImportStatus(tid);
   }
 };

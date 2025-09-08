@@ -16,6 +16,7 @@ Tables:
 All date/time fields are stored as ISO 8601 strings for simplicity.
 """
 
+import json
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -92,6 +93,8 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         cur.execute("ALTER TABLE products ADD COLUMN competition_level TEXT")
     if "date_range" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN date_range TEXT")
+    if "ai_columns_completed_at" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN ai_columns_completed_at TEXT")
     # drop obsolete columns if present
     for obsolete in [
         "facilidad_anuncio",
@@ -181,7 +184,9 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             temp_path TEXT,
             ai_total INTEGER DEFAULT 0,
             ai_done INTEGER DEFAULT 0,
-            ai_error TEXT
+            ai_error TEXT,
+            ai_counts TEXT,
+            ai_pending TEXT
         )
         """
     )
@@ -195,6 +200,14 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         pass
     try:
         cur.execute("ALTER TABLE import_jobs ADD COLUMN ai_error TEXT")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE import_jobs ADD COLUMN ai_counts TEXT")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE import_jobs ADD COLUMN ai_pending TEXT")
     except Exception:
         pass
     conn.commit()
@@ -359,6 +372,7 @@ def update_product(
         "awareness_level",
         "competition_level",
         "date_range",
+        "ai_columns_completed_at",
     }
     data = {k: v for k, v in fields.items() if k in allowed_cols}
     if not data:
@@ -710,11 +724,23 @@ def set_import_job_ai_error(conn: sqlite3.Connection, job_id: int, error: str) -
     conn.commit()
 
 
+def set_import_job_ai_counts(
+    conn: sqlite3.Connection, job_id: int, counts: Dict[str, Any], pending_ids: List[int]
+) -> None:
+    now = datetime.utcnow().isoformat()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE import_jobs SET ai_counts=?, ai_pending=?, updated_at=? WHERE id=?",
+        (json.dumps(counts), json.dumps(pending_ids), now, job_id),
+    )
+    conn.commit()
+
+
 def get_import_history(conn: sqlite3.Connection, limit: int = 20) -> List[sqlite3.Row]:
     """Return recent import jobs ordered by creation time."""
     cur = conn.cursor()
     cur.execute(
-        "SELECT id AS task_id, status, rows_imported, created_at, updated_at, error, ai_total, ai_done, ai_error FROM import_jobs ORDER BY created_at DESC LIMIT ?",
+        "SELECT id AS task_id, status, rows_imported, created_at, updated_at, error, ai_total, ai_done, ai_error, ai_counts, ai_pending FROM import_jobs ORDER BY created_at DESC LIMIT ?",
         (limit,),
     )
     return cur.fetchall()
@@ -724,7 +750,7 @@ def get_import_job(conn: sqlite3.Connection, job_id: int) -> Optional[sqlite3.Ro
     """Return a single import job by ID."""
     cur = conn.cursor()
     cur.execute(
-        "SELECT id AS task_id, status, rows_imported, created_at, updated_at, error, ai_total, ai_done, ai_error FROM import_jobs WHERE id=?",
+        "SELECT id AS task_id, status, rows_imported, created_at, updated_at, error, ai_total, ai_done, ai_error, ai_counts, ai_pending FROM import_jobs WHERE id=?",
         (job_id,),
     )
     return cur.fetchone()
