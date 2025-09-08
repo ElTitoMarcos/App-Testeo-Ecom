@@ -603,3 +603,39 @@ th.ec-col-competition,   td.ec-col-competition   { width: var(--ec-w-competition
 }
 @keyframes ecspin { to { transform: rotate(360deg); } }
 .ec-btn-loading{ pointer-events:none; }
+
+/* === Responsive tabla productos (alineación segura) === */
+:root{
+  --col-id:  clamp(52px, 4vw, 64px);
+  --col-img-min: 120px;    /* Imagen un poco más grande */
+  --col-img-max: 188px;
+}
+
+.products-table{
+  width: 100%;
+  table-layout: fixed;      /* garantiza que los anchos se respeten */
+  border-collapse: collapse;
+}
+
+.products-table th,
+.products-table td{
+  box-sizing: border-box;
+  vertical-align: middle;
+}
+
+.truncate{
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+td.cell-img img{
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 96px;
+  object-fit: contain;
+}
+
+/* El header sticky que ya tengas seguirá funcionando;
+   no añadimos wrappers que lo rompan. */
