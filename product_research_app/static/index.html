@@ -308,14 +308,10 @@ const columns = [
   { key: 'Creator Conversion Ratio', label: 'Tasa Conversión', type: 'string' },
   { key: 'Launch Date', label: 'Fecha Lanzamiento', type: 'string' },
   { key: 'Date Range', label: 'Rango Fechas', type: 'string' },
-  { key: 'magnitud_deseo', label: 'Magnitud deseo', type: 'number' },
-  { key: 'nivel_consciencia', label: 'Nivel consciencia', type: 'number' },
-  { key: 'saturacion_mercado', label: 'Saturación mercado', type: 'number' },
-  { key: 'facilidad_anuncio', label: 'Facilidad anuncio', type: 'number' },
-  { key: 'facilidad_logistica', label: 'Facilidad logística', type: 'number' },
-  { key: 'escalabilidad', label: 'Escalabilidad', type: 'number' },
-  { key: 'engagement_shareability', label: 'Engagement/shareability', type: 'number' },
-  { key: 'durabilidad_recurrencia', label: 'Durabilidad/recurrencia', type: 'number' },
+  { key: 'desire', label: 'Desire', type: 'string', width: 200, minWidth: 200, headerClass: 'ec-col ec-col-desire', cellClass: 'ec-col ec-col-desire', dataEcCol: 'desire' },
+  { key: 'desire_magnitude', label: 'Desire magnetitude', type: 'string', width: 130, minWidth: 120, headerClass: 'ec-col ec-col-desire-mag', cellClass: 'ec-col ec-col-desire-mag', dataEcCol: 'desire_magnitude' },
+  { key: 'awareness_level', label: 'Awerness Level', type: 'string', width: 160, minWidth: 150, headerClass: 'ec-col ec-col-awareness', cellClass: 'ec-col ec-col-awareness', dataEcCol: 'awareness_level' },
+  { key: 'competition_level', label: 'Competition level', type: 'string', width: 130, minWidth: 120, headerClass: 'ec-col ec-col-competition', cellClass: 'ec-col ec-col-competition', dataEcCol: 'competition_level' },
   { key: 'winner_score_v2_pct', label: 'Winner Score', type: 'number' },
 ];
 
@@ -545,6 +541,11 @@ function renderTable() {
       th.textContent = col.label;
       th.style.cursor = 'pointer';
       th.setAttribute('data-key', col.key);
+      if (col.headerClass) th.className = col.headerClass;
+      if (col.dataEcCol) th.setAttribute('data-ec-col', col.dataEcCol);
+      if (col.width) th.style.width = col.width + 'px';
+      if (col.minWidth) th.style.minWidth = col.minWidth + 'px';
+      if (col.maxWidth) th.style.maxWidth = col.maxWidth + 'px';
       th.onclick = () => sortBy(col.key, col.type);
       headerRow.appendChild(th);
     });
@@ -581,6 +582,11 @@ function renderTable() {
       const td = document.createElement('td');
       const key = col.key;
       td.setAttribute('data-key', key);
+      if (col.cellClass) td.className = col.cellClass;
+      if (col.dataEcCol) td.setAttribute('data-ec-col', col.dataEcCol);
+      if (col.width) td.style.width = col.width + 'px';
+      if (col.minWidth) td.style.minWidth = col.minWidth + 'px';
+      if (col.maxWidth) td.style.maxWidth = col.maxWidth + 'px';
       let value = '';
       if (weightFields.includes(key)) {
         value = item.winner_score_v2_breakdown && item.winner_score_v2_breakdown.scores ? item.winner_score_v2_breakdown.scores[key] : '';

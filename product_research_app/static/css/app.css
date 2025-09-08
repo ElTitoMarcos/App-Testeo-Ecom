@@ -505,3 +505,58 @@ button.loading::after {
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+/* Columna común (solo nuevas columnas) */
+.ec-col { vertical-align: middle; }
+
+/* Anchos y alineación por columna (desktop ≥1366px) */
+.ec-col-desire        { width: 200px; min-width: 200px; max-width: 260px; text-align: left;  }
+.ec-col-desire-mag    { width: 130px; min-width: 120px; max-width: 160px; text-align: center; }
+.ec-col-awareness     { width: 160px; min-width: 150px; max-width: 190px; text-align: center; }
+.ec-col-competition   { width: 130px; min-width: 120px; max-width: 160px; text-align: center; }
+
+/* Inputs/selects SOLO dentro de estas columnas */
+.ec-col-desire input,
+.ec-col-desire-mag select,
+.ec-col-awareness select,
+.ec-col-competition select {
+  width: 100%;
+  height: 30px;
+  box-sizing: border-box;
+  font-size: 13px;
+  padding: 4px 8px;
+  margin: 0; /* que no empuje nada */
+}
+
+/* Centrado visual de selects sin afectar otros */
+.ec-col-desire-mag select,
+.ec-col-awareness select,
+.ec-col-competition select {
+  text-align: center;
+  text-align-last: center;
+}
+
+/* Evitar desbordes SOLO aquí */
+.ec-col-desire > *,
+.ec-col-desire-mag > *,
+.ec-col-awareness > *,
+.ec-col-competition > * {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Breakpoints SOLO para estas columnas */
+@media (max-width: 1366px) {
+  .ec-col-desire      { width: 180px; min-width: 180px; }
+  .ec-col-desire-mag  { width: 120px; min-width: 110px; }
+  .ec-col-awareness   { width: 150px; min-width: 140px; }
+  .ec-col-competition { width: 120px; min-width: 110px; }
+}
+
+@media (max-width: 1200px) {
+  .ec-col-desire      { width: 170px; min-width: 170px; }
+  .ec-col-desire-mag  { width: 110px; min-width: 100px; }
+  .ec-col-awareness   { width: 140px; min-width: 130px; }
+  .ec-col-competition { width: 110px; min-width: 100px; }
+}
