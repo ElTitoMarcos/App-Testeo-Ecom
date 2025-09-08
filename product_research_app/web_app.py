@@ -34,10 +34,11 @@ import threading
 import time
 import sqlite3
 import math
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 from . import database
 from . import config
+from .services import ai_columns
 from . import gpt
 from . import title_analyzer
 
@@ -270,6 +271,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
     """Background task to import XLSX data into the database."""
     conn = ensure_db()
     rows_imported = 0
+    inserted_ids: List[int] = []
     try:
         data = tmp_path.read_bytes()
         records = parse_xlsx(data)
@@ -425,7 +427,15 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                     product_id=row_id,
                 )
                 rows_imported += 1
+                inserted_ids.append(row_id)
             conn.commit()
+        if inserted_ids and config.is_auto_fill_ia_on_import_enabled():
+            database.start_import_job_ai(conn, job_id, len(inserted_ids))
+            def _progress(done, total):
+                database.update_import_job_ai_progress(conn, job_id, done)
+            res = ai_columns.fill_ai_columns(inserted_ids, progress_cb=_progress)
+            if res.get("error"):
+                database.set_import_job_ai_error(conn, job_id, "No se pudieron completar las columnas con IA: revisa la API o inténtalo desde 'Completar columnas (IA)'.")
         database.complete_import_job(conn, job_id, rows_imported)
     except Exception as exc:
         try:
@@ -1925,8 +1935,16 @@ class RequestHandler(BaseHTTPRequestHandler):
                     summary=offline['summary'],
                     explanations=offline['explanations'],
                 )
+        ai_err = None
+        if inserted_ids and config.is_auto_fill_ia_on_import_enabled():
+            res_ai = ai_columns.fill_ai_columns(inserted_ids)
+            if res_ai.get("error"):
+                ai_err = "No se pudieron completar las columnas con IA: revisa la API o inténtalo desde 'Completar columnas (IA)'."
         self._set_json()
-        self._safe_write(json.dumps({"inserted": inserted}).encode('utf-8'))
+        payload = {"inserted": inserted}
+        if ai_err:
+            payload["ai_error"] = ai_err
+        self._safe_write(json.dumps(payload).encode('utf-8'))
 
     def handle_evaluate_all(self):
         conn = ensure_db()
@@ -2098,6 +2116,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 except Exception:
                     continue
             cfg['scoring_v2_weights'] = weights_v2
+        if 'autoFillIAOnImport' in data:
+            cfg['autoFillIAOnImport'] = bool(data['autoFillIAOnImport'])
         config.save_config(cfg)
         self._set_json()
         self.wfile.write(json.dumps({"status": "ok"}).encode('utf-8'))
