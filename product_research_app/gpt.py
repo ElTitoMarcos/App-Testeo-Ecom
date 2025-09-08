@@ -22,6 +22,8 @@ from __future__ import annotations
 import json
 import logging
 import time
+import re
+import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -31,6 +33,11 @@ logger = logging.getLogger(__name__)
 
 class OpenAIError(Exception):
     """Custom exception for OpenAI API errors."""
+    pass
+
+
+class InvalidJSONError(OpenAIError):
+    """Raised when the model response is not valid JSON."""
     pass
 
 
@@ -171,7 +178,14 @@ def extract_products_from_image(
         return []
 
 
-def call_openai_chat(api_key: str, model: str, messages: List[Dict[str, str]], temperature: float = 0.2) -> Dict[str, Any]:
+def call_openai_chat(
+    api_key: str,
+    model: str,
+    messages: List[Dict[str, Any]],
+    *,
+    temperature: float = 0.2,
+    response_format: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Send a chat completion request to the OpenAI API.
 
     Args:
@@ -196,6 +210,8 @@ def call_openai_chat(api_key: str, model: str, messages: List[Dict[str, str]], t
         "messages": messages,
         "temperature": temperature,
     }
+    if response_format is not None:
+        payload["response_format"] = response_format
     try:
         response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
     except requests.RequestException as exc:
@@ -330,89 +346,121 @@ def evaluate_product(
     return result
 
 
+def _canonical(s: Optional[str]) -> str:
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFD", str(s))
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    return re.sub(r"[^a-z]", "", s.lower())
+
+
+def _norm_tri(val: Optional[str], default: str = "Medium") -> str:
+    mapping = {
+        "low": "Low",
+        "baja": "Low",
+        "medium": "Medium",
+        "medio": "Medium",
+        "med": "Medium",
+        "high": "High",
+        "alta": "High",
+    }
+    return mapping.get(_canonical(val), default)
+
+
+def _norm_awareness(val: Optional[str]) -> str:
+    mapping = {
+        "unaware": "Unaware",
+        "problemaware": "Problem-Aware",
+        "problemaaware": "Problem-Aware",
+        "problemaconsciente": "Problem-Aware",
+        "solutionaware": "Solution-Aware",
+        "solucionaware": "Solution-Aware",
+        "solucionconsciente": "Solution-Aware",
+        "productaware": "Product-Aware",
+        "productoaware": "Product-Aware",
+        "productoconciente": "Product-Aware",
+        "mostaware": "Most Aware",
+        "masaware": "Most Aware",
+        "masconsciente": "Most Aware",
+        "muyaware": "Most Aware",
+    }
+    return mapping.get(_canonical(val), "Problem-Aware")
+
+
 def generate_ba_insights(api_key: str, model: str, product: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any], float]:
-    """Call OpenAI to obtain Breakthrough Advertising insights for a product.
-
-    The model is instructed to return a JSON object matching the schema
-    described in the requirements.  The function returns the parsed JSON
-    along with token usage information and the request duration in seconds.
-
-    Args:
-        api_key: OpenAI API key.
-        model: Chat model to call (defaults should be handled by caller).
-        product: Mapping with product information.
-
-    Returns:
-        A tuple ``(data, usage, duration)`` where ``data`` is the parsed JSON
-        object returned by the model, ``usage`` contains token counts (if
-        provided by the API) and ``duration`` is the elapsed time in seconds.
-    """
-
-    def trunc(s: Optional[str], limit: int = 800) -> str:
-        if not s:
-            return ""
-        s = str(s)
-        return s if len(s) <= limit else s[:limit]
-
-    # Build prompt
     sys_msg = (
-        "Eres estratega de marketing especializado en Breakthrough Advertising (Eugene Schwartz). "
-        "Trabajas en español claro y práctico. Evitas citar texto del libro; aplicas sus marcos: "
-        "deseo de masas, estado de conciencia del prospecto, sofisticación de mercado, promesa, "
-        "mecanismo único, prueba, demostración y escalamiento publicitario. Entregas un JSON estricto "
-        "según el esquema pedido. Si faltan datos, infiérelos con cautela y marca supuestos."
+        "estratega de marketing aplicando Breakthrough Advertising; habla en español claro; "
+        "no cites el libro; devuelve únicamente JSON con el esquema abajo."
     )
 
-    p = {k: product.get(k) for k in [
-        "id", "name", "category", "price", "rating", "units_sold", "revenue",
-        "conversion_rate", "launch_date", "date_range", "image_url", "desire",
-        "desire_magnitude", "awareness_level", "competition_level"
-    ]}
-
-    user_msg = (
-        "Analiza este producto con los marcos de Breakthrough Advertising.\nDatos:\n\n"
-        f"ID: {trunc(p.get('id'))}\n\n"
-        f"Nombre: {trunc(p.get('name'))}\n\n"
-        f"Categoría: {trunc(p.get('category'))}\n\n"
-        f"Precio: {p.get('price')}\n\n"
-        f"Rating: {p.get('rating')}\n\n"
-        f"Unidades vendidas: {p.get('units_sold')}\n\n"
-        f"Ingresos: {p.get('revenue')}\n\n"
-        f"Tasa conversión: {p.get('conversion_rate')}\n\n"
-        f"Fecha lanzamiento: {p.get('launch_date')}\n\n"
-        f"Rango fechas: {trunc(p.get('date_range'))}\n\n"
-        f"URL imagen (opcional): {trunc(p.get('image_url'))}\n\n"
-        "Campos actuales (pueden venir vacíos):\n\n"
-        f"Desire: {trunc(p.get('desire'))}\n\n"
-        f"Desire magnetitude: {p.get('desire_magnitude')}\n\n"
-        f"Awerness Level: {p.get('awareness_level')}\n\n"
-        f"Competition level: {p.get('competition_level')}\n\n"
-        "Objetivo:\n\n"
-        "Recomienda valores para las 4 columnas del grid.\n\n"
-        "Devuelve insights accionables para anuncios y páginas de producto, alineados con el estado de conciencia y la sofisticación del mercado.\n\n"
-        "Responde solo con JSON.\n\nSALIDA ESPERADA (JSON):\n\n"
-        "{\n  \"grid_updates\": {\n    \"desire\": \"<frase concreta de deseo del comprador>\",\n    \"desire_magnitude\": \"<Low|Medium|High>\",\n    \"awareness_level\": \"<Unaware|Problem-Aware|Solution-Aware|Product-Aware|Most Aware>\",\n    \"competition_level\": \"<Low|Medium|High>\"\n  },\n  \"ba_insights\": {\n    \"market_sophistication\": \"<I|II|III|IV|V y breve explicación>\",\n    \"mass_desire\": \"<definición sintetizada>\",\n    \"unique_mechanism\": \"<mecanismo/verosimilitud>\",\n    \"core_promise\": \"<promesa principal medible>\",\n    \"primary_proof\": \"<tipo de prueba viable>\",\n    \"angles\": [\"<ángulo 1>\", \"<ángulo 2>\", \"<ángulo 3>\"],\n    \"headlines\": [\"<titular 1>\", \"<titular 2>\", \"<titular 3>\"],\n    \"hooks_ugc\": [\"<hook 6–8s #1>\", \"<hook 6–8s #2>\"],\n    \"objections_and_answers\": [\n      {\"objection\":\"...\", \"answer\":\"...\"},\n      {\"objection\":\"...\", \"answer\":\"...\"}\n    ],\n    \"cta_options\": [\"<CTA 1>\", \"<CTA 2>\"]\n  }\n}\n"
+    fields = [
+        "id",
+        "name",
+        "category",
+        "price",
+        "rating",
+        "units_sold",
+        "revenue",
+        "conversion_rate",
+        "launch_date",
+        "date_range",
+        "image_url",
+        "desire",
+        "desire_magnitude",
+        "awareness_level",
+        "competition_level",
+    ]
+    lines = [f"{k}: {product.get(k)}" for k in fields]
+    text = (
+        "Analiza este producto con Breakthrough Advertising.\n" +
+        "\n".join(lines) +
+        "\nDevuelve JSON con recomendaciones para las 4 columnas del grid."
     )
+
+    content = [{"type": "text", "text": text}]
+    if product.get("image_url"):
+        content.append({"type": "input_image", "image_url": {"url": product["image_url"]}})
 
     messages = [
         {"role": "system", "content": sys_msg},
-        {"role": "user", "content": user_msg},
+        {"role": "user", "content": content},
     ]
 
     start = time.time()
-    resp = call_openai_chat(api_key, model, messages)
+    resp = call_openai_chat(
+        api_key,
+        model,
+        messages,
+        temperature=0.2,
+        response_format={"type": "json_object"},
+    )
     duration = time.time() - start
     usage = resp.get("usage", {})
 
     try:
-        content = resp["choices"][0]["message"]["content"].strip()
-        data = json.loads(content)
+        raw = resp["choices"][0]["message"]["content"].strip()
+        if raw.startswith("```") and raw.endswith("```"):
+            raw = re.sub(r"^```[a-zA-Z]*\n?", "", raw)
+            raw = re.sub(r"\n?```$", "", raw)
+        data = json.loads(raw)
     except Exception as exc:
         logger.error("Respuesta BA no es JSON: %s", resp)
-        raise OpenAIError("La respuesta de la IA no está en formato JSON válido.") from exc
+        raise InvalidJSONError("Respuesta BA no es JSON") from exc
 
-    logger.info("BA insights tokens=%s duration=%.2fs", usage.get("total_tokens"), duration)
-    return data, usage, duration
+    grid = data.get("grid_updates", {})
+    norm = {
+        "desire": grid.get("desire"),
+        "desire_magnitude": _norm_tri(grid.get("desire_magnitude"), "Medium"),
+        "awareness_level": _norm_awareness(grid.get("awareness_level")),
+        "competition_level": _norm_tri(grid.get("competition_level"), "Medium"),
+    }
+
+    logger.info(
+        "BA insights tokens=%s duration=%.2fs",
+        usage.get("total_tokens"),
+        duration,
+    )
+    return norm, usage, duration
 
 
 # ---------------- Winner Score v2 evaluation -----------------
