@@ -332,7 +332,7 @@ body.dark .bottombar {
   color: #E5EAF5;
 }
 
-#productTable {
+#productsTable {
   margin-bottom: 0;
 }
 
@@ -603,3 +603,60 @@ th.ec-col-competition,   td.ec-col-competition   { width: var(--ec-w-competition
 }
 @keyframes ecspin { to { transform: rotate(360deg); } }
 .ec-btn-loading{ pointer-events:none; }
+
+/* === Tabla responsive con cabecera alineada === */
+:root{
+  --col-id:  clamp(44px, 4vw, 64px);
+  --col-img: clamp(116px, 12vw, 188px); /* Imagen algo más grande */
+  --sbw: 0px; /* scrollbar width (fallback) */
+}
+
+.table-wrap{
+  position: relative;
+  overflow: auto;            /* scroll vertical en el contenedor */
+  overflow-x: hidden;        /* sin scroll horizontal */
+  scrollbar-gutter: stable;  /* reserva estable: evita descuadre thead/tbody */
+}
+
+.products-table{
+  width: 100%;
+  table-layout: fixed;       /* el colgroup gobierna los anchos */
+  border-collapse: collapse;
+}
+
+.products-table th,
+.products-table td{
+  box-sizing: border-box;
+  vertical-align: middle;
+}
+
+.products-table thead th{
+  position: sticky;
+  top: 0;
+  z-index: 2;                /* por encima de filas */
+  background: inherit;       /* mantiene el tema */
+}
+
+/* Wrapper interno para compensar el ancho de scrollbar en fallback */
+.products-table thead th .th-inner{
+  display: block;
+  padding-right: var(--sbw);
+}
+
+.truncate{
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Anchuras por variables */
+th.col-id,  td.col-id{  width: var(--col-id);  text-align: center; }
+th.col-img, td.col-img{ width: var(--col-img); }
+
+td.col-img img{
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 96px;
+  object-fit: contain;
+}
