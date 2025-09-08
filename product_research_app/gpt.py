@@ -24,11 +24,42 @@ import logging
 import time
 import re
 import unicodedata
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from . import database
+
 logger = logging.getLogger(__name__)
+
+APP_DIR = Path(__file__).resolve().parent
+DB_PATH = APP_DIR / "data.sqlite3"
+
+# Cache for baseline arrays recalculated every 10 minutes
+_BASELINE_CACHE: Dict[str, Any] = {"ts": 0, "data": None}
+
+STOPWORDS = {
+    "the",
+    "and",
+    "de",
+    "la",
+    "el",
+    "y",
+    "a",
+    "para",
+    "por",
+    "con",
+    "sin",
+    "en",
+    "un",
+    "una",
+    "los",
+    "las",
+    "lo",
+    "al",
+    "del",
+}
 
 
 class OpenAIError(Exception):
@@ -387,11 +418,140 @@ def _norm_awareness(val: Optional[str]) -> str:
     return mapping.get(_canonical(val), "Problem-Aware")
 
 
+def _to_float(val: Any) -> Optional[float]:
+    try:
+        return float(str(val).strip().replace(",", "."))
+    except Exception:
+        return None
+
+
+def _tokenize(name: str) -> List[str]:
+    return [
+        tok
+        for tok in re.findall(r"[a-zA-Z0-9]+", name.lower())
+        if tok not in STOPWORDS
+    ]
+
+
+def pct_rank(x: Optional[float], arr: List[Optional[float]]) -> Optional[float]:
+    if x is None or not arr:
+        return None
+    s = sorted(a for a in arr if a is not None)
+    if not s:
+        return None
+    import bisect
+
+    i = bisect.bisect_left(s, x)
+    return i / max(1, len(s) - 1)
+
+
+def nz(x: Optional[float], d: float = 0.0) -> float:
+    return d if x is None else x
+
+
+def _load_baseline_data() -> Dict[str, Any]:
+    now = time.time()
+    cached = _BASELINE_CACHE.get("data")
+    if cached and now - _BASELINE_CACHE.get("ts", 0) < 600:
+        return cached
+    conn = database.get_connection(DB_PATH)
+    rows = database.list_products(conn)
+    units: List[float] = []
+    conv: List[float] = []
+    rating_vals: List[float] = []
+    revenue: List[float] = []
+    cat_counts: Dict[str, int] = {}
+    token_index: Dict[str, set] = {}
+    for p in rows:
+        extra = p["extra"] if "extra" in p.keys() else {}
+        try:
+            extra = json.loads(extra) if isinstance(extra, str) else (extra or {})
+        except Exception:
+            extra = {}
+        u = _to_float(extra.get("units_sold"))
+        if u is not None:
+            units.append(u)
+        c = _to_float(extra.get("conversion_rate"))
+        if c is not None:
+            conv.append(c)
+        r = _to_float(extra.get("rating"))
+        if r is not None:
+            r_norm = max(0.0, min(1.0, (r - 3.0) / 2.0))
+            rating_vals.append(r_norm)
+        rev = _to_float(extra.get("revenue"))
+        if rev is not None:
+            revenue.append(rev)
+        cat = (p["category"] or "").split(">")[0].strip()
+        if cat:
+            cat_counts[cat] = cat_counts.get(cat, 0) + 1
+        for tok in _tokenize(p["name"] or ""):
+            token_index.setdefault(tok, set()).add(p["id"])
+    data = {
+        "units": units,
+        "conv": conv,
+        "rating": rating_vals,
+        "revenue": revenue,
+        "cat_counts": cat_counts,
+        "cat_count_list": list(cat_counts.values()),
+        "token_index": token_index,
+    }
+    _BASELINE_CACHE["ts"] = now
+    _BASELINE_CACHE["data"] = data
+    return data
+
+
+def _compute_baselines(product: Dict[str, Any]) -> Tuple[str, str]:
+    data = _load_baseline_data()
+    all_units = data["units"]
+    all_conv = data["conv"]
+    p_units = pct_rank(_to_float(product.get("units_sold")), all_units)
+    p_conv = pct_rank(_to_float(product.get("conversion_rate")), all_conv)
+    rating_val = _to_float(product.get("rating"))
+    if rating_val is not None:
+        p_rate = max(0.0, min(1.0, (rating_val - 3.0) / 2.0))
+    else:
+        p_rate = None
+    desire_signal = 0.45 * nz(p_units, 0) + 0.35 * nz(p_conv, 0) + 0.20 * nz(p_rate, 0)
+    if desire_signal > 0.66:
+        desire_baseline = "High"
+    elif desire_signal < 0.33:
+        desire_baseline = "Low"
+    else:
+        desire_baseline = "Medium"
+    if p_units is None or p_conv is None or p_rate is None:
+        if desire_baseline == "High":
+            desire_baseline = "Medium"
+    cat = (product.get("category") or "").split(">")[0].strip()
+    cat_counts = data["cat_counts"]
+    cat_count = cat_counts.get(cat)
+    cat_freq_pct = (
+        pct_rank(cat_count, data["cat_count_list"]) if cat_count is not None else None
+    )
+    tokens = _tokenize(product.get("name", ""))
+    candidate_counts: Dict[int, int] = {}
+    pid = product.get("id")
+    for tok in tokens:
+        for other in data["token_index"].get(tok, set()):
+            if other == pid:
+                continue
+            candidate_counts[other] = candidate_counts.get(other, 0) + 1
+    name_sim_count = sum(1 for v in candidate_counts.values() if v >= 2)
+    if (cat_freq_pct is not None and cat_freq_pct >= 0.70) or name_sim_count >= 8:
+        competition_baseline = "High"
+    elif (cat_freq_pct is not None and cat_freq_pct <= 0.30) and name_sim_count <= 2:
+        competition_baseline = "Low"
+    else:
+        competition_baseline = "Medium"
+    return desire_baseline, competition_baseline
+
+
 def generate_ba_insights(api_key: str, model: str, product: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any], float]:
     sys_msg = (
         "Eres estratega de marketing. Aplicas Breakthrough Advertising sin citar texto. "
         "Devuelve solo JSON con el esquema pedido. Español claro."
     )
+
+    desire_baseline, competition_baseline = _compute_baselines(product)
 
     fields = [
         "id",
@@ -410,16 +570,24 @@ def generate_ba_insights(api_key: str, model: str, product: Dict[str, Any]) -> T
         "competition_level",
     ]
     lines = [f"{k}: {product.get(k)}" for k in fields]
+    baseline_line = (
+        f"Baselines cuantitativos sugeridos: desire_magnitude={desire_baseline}, "
+        f"competition_level={competition_baseline}. Si discrepas, sé conservador."
+    )
     url = (product.get("image_url") or "").strip()
     if url and re.match(r"^https?://", url):
         text = (
             "Responde estrictamente con JSON siguiendo este esquema:\n"
             "{ \"grid_updates\": { \"desire\": \"...\", \"desire_magnitude\": \"Low|Medium|High\", "
             "\"awareness_level\": \"Unaware|Problem-Aware|Solution-Aware|Product-Aware|Most Aware\", "
-            "\"competition_level\": \"Low|Medium|High\" } }\n\n" +
+            "\"competition_level\": \"Low|Medium|High\" } }\n" +
+            baseline_line + "\n\n" +
             "Datos del producto:\n" + "\n".join(lines)
         )
-        content = [{"type": "text", "text": text}, {"type": "image_url", "image_url": {"url": url}}]
+        content = [
+            {"type": "text", "text": text},
+            {"type": "image_url", "image_url": {"url": url}},
+        ]
     else:
         if url:
             lines.append(f"Image URL: {url}")
@@ -427,7 +595,8 @@ def generate_ba_insights(api_key: str, model: str, product: Dict[str, Any]) -> T
             "Responde estrictamente con JSON siguiendo este esquema:\n"
             "{ \"grid_updates\": { \"desire\": \"...\", \"desire_magnitude\": \"Low|Medium|High\", "
             "\"awareness_level\": \"Unaware|Problem-Aware|Solution-Aware|Product-Aware|Most Aware\", "
-            "\"competition_level\": \"Low|Medium|High\" } }\n\n" +
+            "\"competition_level\": \"Low|Medium|High\" } }\n" +
+            baseline_line + "\n\n" +
             "Datos del producto:\n" + "\n".join(lines)
         )
         content = [{"type": "text", "text": text}]
@@ -459,12 +628,29 @@ def generate_ba_insights(api_key: str, model: str, product: Dict[str, Any]) -> T
         raise InvalidJSONError("Respuesta BA no es JSON") from exc
 
     grid = data.get("grid_updates", {})
+    gpt_desire = _norm_tri(grid.get("desire_magnitude"), "Medium")
+    gpt_comp = _norm_tri(grid.get("competition_level"), "Medium")
     norm = {
         "desire": grid.get("desire"),
-        "desire_magnitude": _norm_tri(grid.get("desire_magnitude"), "Medium"),
+        "desire_magnitude": gpt_desire,
         "awareness_level": _norm_awareness(grid.get("awareness_level")),
-        "competition_level": _norm_tri(grid.get("competition_level"), "Medium"),
+        "competition_level": gpt_comp,
     }
+
+    levels = ["Low", "Medium", "High"]
+
+    def _idx(v: str) -> int:
+        try:
+            return levels.index(v)
+        except ValueError:
+            return 1
+
+    norm["desire_magnitude"] = levels[
+        min(_idx(gpt_desire), _idx(desire_baseline))
+    ]
+    norm["competition_level"] = levels[
+        max(_idx(gpt_comp), _idx(competition_baseline))
+    ]
 
     logger.info(
         "BA insights tokens=%s duration=%.2fs",
