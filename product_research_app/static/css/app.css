@@ -14,6 +14,8 @@ body {
   --bar-btn-border: #0077cc;
   --bar-btn-color: #0077cc;
   --bar-btn-focus: #0077cc;
+  /* Imagen más grande, pero responsiva */
+  --img-size: clamp(72px, 7.2vh, 104px);
 }
 
 body.dark {
@@ -333,7 +335,55 @@ body.dark .bottombar {
 }
 
 #productTable {
+  width: 100vw;
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
   margin-bottom: 0;
+}
+
+#productTable th,
+#productTable td {
+  padding: 8px 10px;
+  vertical-align: middle;
+  text-align: center;
+  font-size: clamp(11px, 1.1vw, 14px);
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#productTable td.cell-name,
+#productTable td.cell-category {
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+#productTable td.cell-img {
+  width: var(--img-size);
+}
+#productTable td.cell-img img {
+  width: 100%;
+  height: var(--img-size);
+  object-fit: contain;
+  display: block;
+}
+
+#productTable td.cell-price,
+#productTable td.cell-rating,
+#productTable td.cell-sales,
+#productTable td.cell-revenue,
+#productTable td.cell-id {
+  white-space: nowrap;
+  text-align: center;
+}
+
+#productTable tbody tr {
+  height: max(var(--img-size), clamp(40px, 5.5vh, 64px));
 }
 
 /* Modal base styles */
