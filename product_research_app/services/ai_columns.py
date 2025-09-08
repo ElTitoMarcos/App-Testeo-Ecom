@@ -73,6 +73,119 @@ def _quantile(data: List[float], q: float) -> float:
     return s[lo] * (hi - pos) + s[hi] * (pos - lo)
 
 
+def _format_cost_message(cost: float) -> str:
+    if cost >= 0.1:
+        txt = f"{cost:.2f}"
+    else:
+        txt = f"{cost:.4f}"
+    if "." in txt:
+        txt = txt.rstrip("0").rstrip(".")
+    return f"importando productos, por favor espere... El coste será de {txt}$"
+
+
+def _classify_scores(
+    pairs: List[tuple[str, float]],
+    *,
+    winsorize_pct: float,
+    min_low_pct: float,
+    min_medium_pct: float,
+    min_high_pct: float,
+) -> tuple[Dict[str, str], Dict[str, int], Dict[str, Any]]:
+    labels: Dict[str, str] = {}
+    dist = {"Low": 0, "Medium": 0, "High": 0}
+    info: Dict[str, Any] = {"q33": None, "q67": None, "fallback": False, "moved_medium": 0, "moved_low": 0, "moved_high": 0}
+
+    if not pairs:
+        return labels, dist, info
+
+    values = [s for _, s in pairs]
+    n = len(values)
+    distinct = len(set(values))
+
+    if n >= 50 and winsorize_pct > 0:
+        low_lim = _quantile(values, winsorize_pct)
+        high_lim = _quantile(values, 1 - winsorize_pct)
+        values = [min(max(s, low_lim), high_lim) for s in values]
+        pairs = [(pid, min(max(score, low_lim), high_lim)) for pid, score in pairs]
+
+    q33 = _quantile(values, 1 / 3)
+    q67 = _quantile(values, 2 / 3)
+    info["q33"] = q33
+    info["q67"] = q67
+
+    if n >= 6 and distinct >= 3 and abs(q67 - q33) > 1e-6:
+        for pid, score in pairs:
+            if score <= q33:
+                lab = "Low"
+            elif score >= q67:
+                lab = "High"
+            else:
+                lab = "Medium"
+            labels[pid] = lab
+            dist[lab] += 1
+    else:
+        info["fallback"] = True
+        sorted_pairs = sorted(pairs, key=lambda x: x[1])
+        cut1 = round(n / 3)
+        cut2 = round(2 * n / 3)
+        for idx, (pid, _) in enumerate(sorted_pairs):
+            if idx < cut1:
+                lab = "Low"
+            elif idx < cut2:
+                lab = "Medium"
+            else:
+                lab = "High"
+            labels[pid] = lab
+            dist[lab] += 1
+
+    min_medium = math.ceil(min_medium_pct * n)
+    min_low = math.ceil(min_low_pct * n)
+    min_high = math.ceil(min_high_pct * n)
+
+    if dist["Medium"] < min_medium:
+        need = min_medium - dist["Medium"]
+        candidates = [(abs(score - 0.5), pid) for pid, score in pairs if labels[pid] != "Medium"]
+        candidates.sort()
+        for _, pid in candidates[:need]:
+            prev = labels[pid]
+            labels[pid] = "Medium"
+            dist["Medium"] += 1
+            dist[prev] -= 1
+            info["moved_medium"] += 1
+
+    available = max(0, dist["Medium"] - min_medium)
+    if dist["Low"] < min_low and available > 0:
+        need = min(min_low - dist["Low"], available)
+        candidates = [
+            (abs(score - q33), pid)
+            for pid, score in pairs
+            if labels[pid] == "Medium"
+        ]
+        candidates.sort()
+        for _, pid in candidates[:need]:
+            labels[pid] = "Low"
+            dist["Low"] += 1
+            dist["Medium"] -= 1
+            info["moved_low"] += 1
+        available = max(0, dist["Medium"] - min_medium)
+
+    if dist["High"] < min_high and available > 0:
+        need = min(min_high - dist["High"], available)
+        candidates = [
+            (abs(score - q67), pid)
+            for pid, score in pairs
+            if labels[pid] == "Medium"
+        ]
+        candidates.sort()
+        for _, pid in candidates[:need]:
+            labels[pid] = "High"
+            dist["High"] += 1
+            dist["Medium"] -= 1
+            info["moved_high"] += 1
+
+    return labels, dist, info
+
+
 async def _call_with_retries(api_key: str, model: str, items: List[Dict[str, Any]], max_retries: int) -> tuple[Dict[str, Any], Dict[str, str], int]:
     retry = 0
     base = 0.5
@@ -173,6 +286,8 @@ def fill_ai_columns(
         cost_estimated = (est_in / 1_000_000) * price_in + (est_out / 1_000_000) * price_out
         truncated = True
 
+    cost_msg = _format_cost_message(cost_estimated)
+
     if not api_key or not to_process:
         err_msg = "missing_api_key" if not api_key else None
         logger.info(
@@ -198,6 +313,8 @@ def fill_ai_columns(
                 "cost_estimated_usd": cost_estimated,
             },
             "pending_ids": selected_ids,
+            "cost_estimated_usd": cost_estimated,
+            "ui_cost_message": cost_msg,
         }
 
     batches = [to_process[i : i + cfg_batch.get("BATCH_SIZE", 10)] for i in range(0, len(to_process), cfg_batch.get("BATCH_SIZE", 10))]
@@ -238,8 +355,6 @@ def fill_ai_columns(
     cfg_calib = config.get_ai_calibration_config()
     dist_desire = {"Low": 0, "Medium": 0, "High": 0}
     dist_comp = {"Low": 0, "Medium": 0, "High": 0}
-    promoted_low = 0
-    promoted_high = 0
 
     desire_scores: List[tuple[str, float]] = []
     comp_scores: List[tuple[str, float]] = []
@@ -277,97 +392,35 @@ def fill_ai_columns(
                 apply["competition_level"] = updates.get("competition_level")
         updates_final[pid] = apply
 
-    q_low = cfg_calib.get("quantiles", {}).get("low", 0.20)
-    q_high = cfg_calib.get("quantiles", {}).get("high", 0.80)
     wins_p = cfg_calib.get("winsorize_pct", 0.05)
     min_low_pct = cfg_calib.get("min_low_pct", 0.05)
+    min_med_pct = cfg_calib.get("min_medium_pct", 0.05)
     min_high_pct = cfg_calib.get("min_high_pct", 0.05)
-    desire_q = {"Q20": None, "Q80": None}
-    comp_q = {"Q20": None, "Q80": None}
+
+    desire_info: Dict[str, Any] = {}
+    comp_info: Dict[str, Any] = {}
 
     if cfg_calib.get("enabled", True) and desire_scores:
-        scores = [s for _, s in desire_scores]
-        if len(scores) >= 50 and wins_p > 0:
-            low_lim = _quantile(scores, wins_p)
-            high_lim = _quantile(scores, 1 - wins_p)
-            scores = [min(max(s, low_lim), high_lim) for s in scores]
-        desire_q20 = _quantile(scores, q_low)
-        desire_q80 = _quantile(scores, q_high)
-        if len(scores) < 15 or abs(desire_q80 - desire_q20) < 0.05:
-            desire_q20, desire_q80 = 0.34, 0.66
-        desire_q["Q20"] = desire_q20
-        desire_q["Q80"] = desire_q80
-        for pid, score in desire_scores:
-            if score <= desire_q20:
-                label = "Low"
-            elif score >= desire_q80:
-                label = "High"
-            else:
-                label = "Medium"
-            updates_final[pid]["desire_magnitude"] = label
-            dist_desire[label] += 1
-        if dist_desire["Low"] == 0 and len(desire_scores) >= 3:
-            need = max(1, math.ceil(len(desire_scores) * min_low_pct))
-            for pid, _ in sorted(desire_scores, key=lambda x: x[1])[:need]:
-                if updates_final[pid].get("desire_magnitude") != "Low":
-                    updates_final[pid]["desire_magnitude"] = "Low"
-                    promoted_low += 1
-            dist_desire = {"Low": 0, "Medium": 0, "High": 0}
-            for pid, _ in desire_scores:
-                lab = updates_final[pid].get("desire_magnitude", "Medium")
-                dist_desire[lab] += 1
-        if dist_desire["High"] == 0 and len(desire_scores) >= 3:
-            need = max(1, math.ceil(len(desire_scores) * min_high_pct))
-            for pid, _ in sorted(desire_scores, key=lambda x: x[1], reverse=True)[:need]:
-                if updates_final[pid].get("desire_magnitude") != "High":
-                    updates_final[pid]["desire_magnitude"] = "High"
-                    promoted_high += 1
-            dist_desire = {"Low": 0, "Medium": 0, "High": 0}
-            for pid, _ in desire_scores:
-                lab = updates_final[pid].get("desire_magnitude", "Medium")
-                dist_desire[lab] += 1
+        labels, dist_desire, desire_info = _classify_scores(
+            desire_scores,
+            winsorize_pct=wins_p,
+            min_low_pct=min_low_pct,
+            min_medium_pct=min_med_pct,
+            min_high_pct=min_high_pct,
+        )
+        for pid, lab in labels.items():
+            updates_final[pid]["desire_magnitude"] = lab
 
     if cfg_calib.get("enabled", True) and comp_scores:
-        scores = [s for _, s in comp_scores]
-        if len(scores) >= 50 and wins_p > 0:
-            low_lim = _quantile(scores, wins_p)
-            high_lim = _quantile(scores, 1 - wins_p)
-            scores = [min(max(s, low_lim), high_lim) for s in scores]
-        comp_q20 = _quantile(scores, q_low)
-        comp_q80 = _quantile(scores, q_high)
-        if len(scores) < 15 or abs(comp_q80 - comp_q20) < 0.05:
-            comp_q20, comp_q80 = 0.34, 0.66
-        comp_q["Q20"] = comp_q20
-        comp_q["Q80"] = comp_q80
-        for pid, score in comp_scores:
-            if score <= comp_q20:
-                label = "Low"
-            elif score >= comp_q80:
-                label = "High"
-            else:
-                label = "Medium"
-            updates_final[pid]["competition_level"] = label
-            dist_comp[label] += 1
-        if dist_comp["Low"] == 0 and len(comp_scores) >= 3:
-            need = max(1, math.ceil(len(comp_scores) * min_low_pct))
-            for pid, _ in sorted(comp_scores, key=lambda x: x[1])[:need]:
-                if updates_final[pid].get("competition_level") != "Low":
-                    updates_final[pid]["competition_level"] = "Low"
-                    promoted_low += 1
-            dist_comp = {"Low": 0, "Medium": 0, "High": 0}
-            for pid, _ in comp_scores:
-                lab = updates_final[pid].get("competition_level", "Medium")
-                dist_comp[lab] += 1
-        if dist_comp["High"] == 0 and len(comp_scores) >= 3:
-            need = max(1, math.ceil(len(comp_scores) * min_high_pct))
-            for pid, _ in sorted(comp_scores, key=lambda x: x[1], reverse=True)[:need]:
-                if updates_final[pid].get("competition_level") != "High":
-                    updates_final[pid]["competition_level"] = "High"
-                    promoted_high += 1
-            dist_comp = {"Low": 0, "Medium": 0, "High": 0}
-            for pid, _ in comp_scores:
-                lab = updates_final[pid].get("competition_level", "Medium")
-                dist_comp[lab] += 1
+        labels, dist_comp, comp_info = _classify_scores(
+            comp_scores,
+            winsorize_pct=wins_p,
+            min_low_pct=min_low_pct,
+            min_medium_pct=min_med_pct,
+            min_high_pct=min_high_pct,
+        )
+        for pid, lab in labels.items():
+            updates_final[pid]["competition_level"] = lab
 
     applied_ok: Dict[str, Dict[str, Any]] = {}
     success = 0
@@ -396,12 +449,24 @@ def fill_ai_columns(
         cost_estimated,
     )
     logger.info(
-        "ai_calibration: dist_desire=%s dist_competition=%s applied_quantiles=%s auto_promoted_low=%s auto_promoted_high=%s",
+        "ai_calibration_desire: dist=%s q33=%.4f q67=%.4f fallback=%s moved_medium=%s moved_low=%s moved_high=%s",
         dist_desire,
+        desire_info.get("q33") or 0.0,
+        desire_info.get("q67") or 0.0,
+        desire_info.get("fallback"),
+        desire_info.get("moved_medium"),
+        desire_info.get("moved_low"),
+        desire_info.get("moved_high"),
+    )
+    logger.info(
+        "ai_calibration_competition: dist=%s q33=%.4f q67=%.4f fallback=%s moved_medium=%s moved_low=%s moved_high=%s",
         dist_comp,
-        {"desire": desire_q, "competition": comp_q},
-        promoted_low,
-        promoted_high,
+        comp_info.get("q33") or 0.0,
+        comp_info.get("q67") or 0.0,
+        comp_info.get("fallback"),
+        comp_info.get("moved_medium"),
+        comp_info.get("moved_low"),
+        comp_info.get("moved_high"),
     )
     processed_ids = {int(pid) for pid in applied_ok.keys()} | {int(pid) for pid in ko_all.keys()}
     pending_ids.extend([it["id"] for it in to_process if it["id"] not in processed_ids])
@@ -419,4 +484,6 @@ def fill_ai_columns(
             "cost_estimated_usd": cost_estimated,
         },
         "pending_ids": pending_ids,
+        "cost_estimated_usd": cost_estimated,
+        "ui_cost_message": cost_msg,
     }

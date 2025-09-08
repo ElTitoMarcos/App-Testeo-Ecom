@@ -28,10 +28,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "aiCalibration": {
         "enabled": True,
-        "quantiles": {"low": 0.20, "high": 0.80},
-        "min_low_pct": 0.05,
-        "min_high_pct": 0.05,
+        "mode": "terciles",
         "winsorize_pct": 0.05,
+        "min_low_pct": 0.05,
+        "min_medium_pct": 0.05,
+        "min_high_pct": 0.05,
     },
 }
 

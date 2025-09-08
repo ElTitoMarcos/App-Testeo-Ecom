@@ -1957,8 +1957,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                     explanations=offline['explanations'],
                 )
         ai_err = None
-        ai_counts = None
         pending = []
+        cost_msg = None
+        cost_est = None
         if inserted_ids and config.is_auto_fill_ia_on_import_enabled():
             cfg_cost = config.get_ai_cost_config()
             res_ai = ai_columns.fill_ai_columns(
@@ -1967,17 +1968,19 @@ class RequestHandler(BaseHTTPRequestHandler):
                 batch_mode=len(inserted_ids) >= cfg_cost.get("useBatchWhenCountGte", 300),
                 cost_cap_usd=cfg_cost.get("costCapUSD"),
             )
-            ai_counts = res_ai.get("counts")
             pending = res_ai.get("pending_ids", [])
-    
+            cost_msg = res_ai.get("ui_cost_message")
+            cost_est = res_ai.get("cost_estimated_usd")
             if res_ai.get("error"):
                 ai_err = "No se pudieron completar las columnas con IA: revisa la API."
         self._set_json()
         payload = {"inserted": inserted}
+        if cost_est is not None:
+            payload["cost_estimated_usd"] = cost_est
+        if cost_msg:
+            payload["ui_cost_message"] = cost_msg
         if ai_err:
             payload["ai_error"] = ai_err
-        if ai_counts:
-            payload["ai_counts"] = ai_counts
         if pending:
             payload["pending_ids"] = pending
         self._safe_write(json.dumps(payload).encode('utf-8'))
