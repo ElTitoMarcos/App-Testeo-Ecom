@@ -59,6 +59,14 @@ def get_model() -> str:
     return model
 
 
+def is_auto_fill_ia_on_import_enabled() -> bool:
+    cfg = load_config()
+    try:
+        return bool(cfg.get("autoFillIAOnImport", True))
+    except Exception:
+        return True
+
+
 def get_weights() -> Dict[str, float]:
     """Return weighting factors for each metric.
 
