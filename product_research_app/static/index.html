@@ -79,6 +79,7 @@ body.dark .weight-slider {
     <textarea id="gptPrompt" rows="1" maxlength="2000" placeholder="Escribe consulta para GPT..." aria-label="Escribe consulta para GPT..."></textarea>
     <button id="sendPrompt">Enviar consulta a GPT</button>
     <button id="btn-ba-gpt" disabled>BA (GPT)</button>
+    <button id="btn-ba-batch" class="secondary" disabled>BA (GPT) Lote</button>
     <div id="searchRowRight">
       <div id="listMeta">0 resultados</div>
     </div>
@@ -1480,6 +1481,7 @@ window.startProgress = startProgress;
 window.parseDate = parseDate;
 </script>
 <script type="module" src="/static/js/ba-gpt.js"></script>
+<script type="module" src="/static/js/ba-batch.js"></script>
 <div id="chartTooltip" style="position:absolute; background:#fff; border:1px solid #333; padding:4px; font-size:12px; border-radius:4px; pointer-events:none; display:none; z-index:2000;"></div>
 <script src="/static/js/filters.js"></script>
 </body>

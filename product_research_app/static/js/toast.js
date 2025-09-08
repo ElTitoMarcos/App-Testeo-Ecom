@@ -7,6 +7,10 @@
       const b = document.createElement('button'); b.className='action'; b.textContent=opt.actionText; b.onclick=()=>{ opt.onAction(); c.removeChild(el); };
       el.appendChild(b);
     }
+    if(opt.actionText2 && opt.onAction2){
+      const b2 = document.createElement('button'); b2.className='action'; b2.textContent=opt.actionText2; b2.onclick=()=>{ opt.onAction2(); c.removeChild(el); };
+      el.appendChild(b2);
+    }
     c.appendChild(el);
     setTimeout(()=>{ if(el.parentNode) c.removeChild(el); }, opt.duration||5000);
   }
