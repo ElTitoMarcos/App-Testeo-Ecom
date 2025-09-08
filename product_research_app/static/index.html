@@ -238,6 +238,12 @@ window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
 let importPollTimer = null;
 
+function formatPrice(n) {
+  const num = parseFloat(n);
+  if (isNaN(num)) return '';
+  return '$' + num.toFixed(2).replace(/\.00$/, '');
+}
+
   function showImportBanner(msg = 'Importando productos, espera…', sub) {
     const b = document.getElementById('importBanner');
     if (!b) return;
@@ -254,7 +260,7 @@ async function pollImportStatus(id) {
   try {
     const data = await fetchJson(`/_import_status?task_id=${id}`);
     if (data.status === 'pending') {
-      showImportBanner();
+      if (data.ui_cost_message) showImportBanner(data.ui_cost_message);
       importPollTimer = setTimeout(() => pollImportStatus(id), 2000);
     } else if (data.status === 'ai') {
       const counts = data.ai_counts || {};
@@ -281,26 +287,23 @@ async function pollImportStatus(id) {
         if (data.ai_error) {
           toast.info('No se pudieron completar las columnas con IA: revisa la API.');
         }
-        const errDef = counts.n_error_definitivo || 0;
-        const cost = counts.cost_estimated_usd;
-        let html = `n_para_ia ${total} · n_procesados ${done} · n_omitidos_por_valor_existente ${skipped} · n_error_definitivo ${errDef}`;
-        if (cost !== undefined) html += ` · cost_estimated_usd ${cost}`;
+        let html = '';
         if (counts.truncated) html += `<div style="font-size:12px;">Aplicado límite de coste: procesados ${done} de ${total}.` + `</div>`;
         if (data.pending_ids && data.pending_ids.length) html += `<div><button id="retryIaNow">Reintentar IA ahora</button></div>`;
-        showImportBanner(html);
+        if (html) showImportBanner(html); else hideImportBanner();
         if (data.pending_ids && data.pending_ids.length) {
-          const btn = document.getElementById('retryIaNow');
-          if (btn) {
-            btn.onclick = async () => {
-              btn.disabled = true;
-              try {
-                await window.handleCompletarIA({ ids: data.pending_ids });
-                fetchProducts();
-              } finally {
-                btn.disabled = false;
-              }
-            };
-          }
+            const btn = document.getElementById('retryIaNow');
+            if (btn) {
+              btn.onclick = async () => {
+                btn.disabled = true;
+                try {
+                  await window.handleCompletarIA({ ids: data.pending_ids });
+                  fetchProducts();
+                } finally {
+                  btn.disabled = false;
+                }
+              };
+            }
         }
       } else {
         toast.error(data.error || 'Error en importación');
@@ -788,6 +791,22 @@ function renderTable() {
           };
           td.appendChild(btnCopy);
         }
+      } else if (key === 'price') {
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = value != null ? formatPrice(value) : '';
+        input.addEventListener('focus', () => {
+          input.value = input.value.replace(/[^0-9.-]+/g, '');
+        });
+        input.addEventListener('blur', async () => {
+          let raw = input.value.trim().replace(/[^0-9.-]+/g, '');
+          const num = parseFloat(raw);
+          const val = isNaN(num) ? null : num;
+          try { await fetchJson(`/products/${item.id}`, {method:'PUT', body: JSON.stringify({price: val})}); } catch(e) {}
+          item.price = val;
+          input.value = val != null ? formatPrice(val) : '';
+        });
+        td.appendChild(input);
       } else if (key === 'desire') {
         const input = document.createElement('input');
         input.type = 'text';
@@ -1129,9 +1148,13 @@ fileInputEl.onchange = async (ev) => {
   if (loading) loading.style.display = 'flex';
   try {
     const data = await fetchJson('/upload', {method:'POST', body: formData});
+    if (data.ui_cost_message) {
+      showImportBanner(data.ui_cost_message);
+    } else {
+      showImportBanner();
+    }
     if(data.task_id){
       localStorage.setItem(IMPORT_TASK_LS_KEY, data.task_id);
-      showImportBanner();
       pollImportStatus(data.task_id);
       toast.success('Importación iniciada');
     } else if(data.error){
