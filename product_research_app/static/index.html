@@ -77,8 +77,8 @@ body.dark .weight-slider {
     <input type="text" id="newListName" placeholder="Nombre del grupo" style="padding:4px; min-width:120px;">
     <button id="createListBtn">Crear</button>
     <textarea id="gptPrompt" rows="1" maxlength="2000" placeholder="Escribe consulta para GPT..." aria-label="Escribe consulta para GPT..."></textarea>
-    <button id="sendPrompt">Enviar consulta a GPT</button>
-    <button id="btn-completar-ia">Completar columnas (IA)</button>
+    <button id="sendPrompt" data-requires-openai>Enviar consulta a GPT</button>
+    <button id="btn-completar-ia" data-requires-openai>Completar columnas (IA)</button>
     <div id="searchRowRight">
       <div id="listMeta">0 resultados</div>
     </div>
@@ -101,7 +101,7 @@ body.dark .weight-slider {
   <strong>Ponderaciones Winner Score</strong>
   <div id="weightsContainer" style="margin-top:8px; display:flex; flex-direction:column; gap:6px;"></div>
   <div style="margin-top:10px; display:flex; flex-wrap:wrap; gap:6px;">
-    <button id="autoWeightsGpt">Ajustar pesos con IA</button>
+    <button id="autoWeightsGpt" data-requires-openai>Ajustar pesos con IA</button>
     <button id="autoWeightsStat">Ajustar estadístico</button>
   </div>
 </div>
@@ -223,6 +223,7 @@ body.dark .weight-slider {
 </style>
 <script src="/static/js/overlay.js"></script>
 <script src="/static/js/toast.js"></script>
+<script src="/static/js/openai-guard.js"></script>
 <script src="/static/js/table.js"></script>
 <script src="/static/js/columns.js"></script>
 <script type="module" src="/static/js/add-group.js"></script>
@@ -998,6 +999,10 @@ function stratifiedSample(rows,n){
 }
 
 async function handleAutoWeights(endpoint, type){
+  if(type === 'gpt' && window.OPENAI_ENABLED === false){
+    toast.error('Falta API de OpenAI. Añádela en Configuración para usar IA.');
+    return;
+  }
   let res = buildWeightPayload(products);
   if(!res.ok){
     res = buildWeightPayload(allProducts);
@@ -1132,6 +1137,10 @@ if(gptField){
 }
 
 async function sendPromptHandler(){
+  if(window.OPENAI_ENABLED === false){
+    toast.error('Falta API de OpenAI. Añádela en Configuración para usar IA.');
+    return;
+  }
   const prompt = gptField.value.trim();
   if(!prompt){ toast.info('Escribe una consulta'); return; }
   sendPromptBtn.disabled = true;

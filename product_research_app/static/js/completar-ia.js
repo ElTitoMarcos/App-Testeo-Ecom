@@ -1,15 +1,22 @@
-const EC_BATCH_SIZE = 10;
-const EC_MODEL = "gpt-4o-mini-2024-07-18";
+const EC_MODEL = 'gpt-4o-mini-2024-07-18';
+const CTX_BUDGET = 48000;
+const ITEM_BASE = 420;
+const ITEM_IMG = 180;
 
-function getAllFilteredRows() {
+async function getAllFilteredRows() {
   if (typeof window.getAllFilteredRows === 'function') {
     try {
-      return window.getAllFilteredRows();
+      return await window.getAllFilteredRows();
     } catch {
       return [];
     }
   }
-  return Array.isArray(window.products) ? window.products.slice() : [];
+  if (Array.isArray(window.products)) return window.products.slice();
+  try {
+    const res = await fetch('/products');
+    if (res.ok) return await res.json();
+  } catch {}
+  return [];
 }
 
 function isEditing(pid, field) {
@@ -55,10 +62,22 @@ function applyUpdates(product, updates) {
   return applied;
 }
 
-function chunkArray(arr, size) {
-  const out = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
+function splitByBudget(items) {
+  let budget = 800;
+  let current = [];
+  const chunks = [];
+  items.forEach(p => {
+    const cost = ITEM_BASE + (p.image_url ? ITEM_IMG : 0);
+    if (budget + cost > CTX_BUDGET && current.length) {
+      chunks.push(current);
+      current = [];
+      budget = 800;
+    }
+    current.push(p);
+    budget += cost;
+  });
+  if (current.length) chunks.push(current);
+  return chunks;
 }
 
 async function processBatch(items) {
@@ -67,6 +86,15 @@ async function processBatch(items) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ model: EC_MODEL, items })
   });
+  if (res.status === 503) {
+    try {
+      const err = await res.json();
+      if (err.error === 'OPENAI_MISSING') throw new Error('OPENAI_MISSING');
+      throw new Error(err.error || res.statusText);
+    } catch {
+      throw new Error('OPENAI_MISSING');
+    }
+  }
   if (!res.ok) {
     let msg = res.statusText;
     try { const err = await res.json(); if (err.error) msg = err.error; } catch {}
@@ -91,13 +119,19 @@ async function processBatch(items) {
 }
 
 window.handleCompletarIA = async function() {
-  const all = getAllFilteredRows();
-  if (all.length === 0) {
-    toast.info('No hay productos');
+  if (window.OPENAI_ENABLED === false) {
+    if (window.toast && toast.error) toast.error('Falta API de OpenAI. Añádela en Configuración para usar IA.');
     return;
   }
+  const all = await getAllFilteredRows();
+  if (all.length === 0) {
+    toast.info('No hay productos en la lista actual.');
+    return;
+  }
+  const est = all.reduce((s, p) => s + ITEM_BASE + (p.image_url ? ITEM_IMG : 0), 800);
+  const chunks = est <= CTX_BUDGET ? [all] : splitByBudget(all);
   let okTotal = 0;
-  const chunks = chunkArray(all, EC_BATCH_SIZE);
+  let aborted = false;
   for (const ch of chunks) {
     const payload = ch.map(p => ({
       id: p.id,
@@ -117,11 +151,18 @@ window.handleCompletarIA = async function() {
       okTotal += ok;
       toast.info(`IA lote: +${ok} / ${payload.length} (fallos ${ko})`, { duration: 2000 });
     } catch (e) {
+      if (e.message === 'OPENAI_MISSING') {
+        if (window.toast && toast.error) toast.error('Falta API de OpenAI. Añádela en Configuración para usar IA.');
+        aborted = true;
+        break;
+      }
       toast.error(`IA lote: ${e.message}`, { duration: 2000 });
     }
   }
-  toast.info(`IA: ${okTotal}/${all.length} completados`);
-  updateMasterState();
+  if (!aborted) {
+    toast.info(`IA: ${okTotal}/${all.length} completados`);
+    updateMasterState();
+  }
 };
 
 window.EC_IA = window.EC_IA || {};
@@ -148,6 +189,10 @@ window.EC_IA = window.EC_IA || {};
   };
 
   ns.runCompletarIA = async function(){
+    if (window.OPENAI_ENABLED === false) {
+      if (window.toast && toast.error) toast.error('Falta API de OpenAI. Añádela en Configuración para usar IA.');
+      return;
+    }
     if (typeof window.handleCompletarIA === 'function'){
       return await window.handleCompletarIA({silent:true});
     }
