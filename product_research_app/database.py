@@ -92,6 +92,8 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         cur.execute("ALTER TABLE products ADD COLUMN competition_level TEXT")
     if "date_range" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN date_range TEXT")
+    if "ai_columns_completed_at" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN ai_columns_completed_at TEXT")
     # drop obsolete columns if present
     for obsolete in [
         "facilidad_anuncio",
@@ -359,6 +361,7 @@ def update_product(
         "awareness_level",
         "competition_level",
         "date_range",
+        "ai_columns_completed_at",
     }
     data = {k: v for k, v in fields.items() if k in allowed_cols}
     if not data:

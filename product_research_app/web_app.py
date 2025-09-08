@@ -431,9 +431,14 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             conn.commit()
         if inserted_ids and config.is_auto_fill_ia_on_import_enabled():
             database.start_import_job_ai(conn, job_id, len(inserted_ids))
-            def _progress(done, total):
-                database.update_import_job_ai_progress(conn, job_id, done)
-            res = ai_columns.fill_ai_columns(inserted_ids, progress_cb=_progress)
+            cfg_cost = config.get_ai_cost_config()
+            res = ai_columns.fill_ai_columns(
+                inserted_ids,
+                model=cfg_cost.get("model"),
+                batch_mode=len(inserted_ids) >= cfg_cost.get("useBatchWhenCountGte", 300),
+                cost_cap_usd=cfg_cost.get("costCapUSD"),
+            )
+            database.update_import_job_ai_progress(conn, job_id, res.get("counts", {}).get("n_procesados", 0))
             if res.get("error"):
                 database.set_import_job_ai_error(conn, job_id, "No se pudieron completar las columnas con IA: revisa la API o inténtalo desde 'Completar columnas (IA)'.")
         database.complete_import_job(conn, job_id, rows_imported)
@@ -1937,7 +1942,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                 )
         ai_err = None
         if inserted_ids and config.is_auto_fill_ia_on_import_enabled():
-            res_ai = ai_columns.fill_ai_columns(inserted_ids)
+            cfg_cost = config.get_ai_cost_config()
+            res_ai = ai_columns.fill_ai_columns(
+                inserted_ids,
+                model=cfg_cost.get("model"),
+                batch_mode=len(inserted_ids) >= cfg_cost.get("useBatchWhenCountGte", 300),
+                cost_cap_usd=cfg_cost.get("costCapUSD"),
+            )
             if res_ai.get("error"):
                 ai_err = "No se pudieron completar las columnas con IA: revisa la API o inténtalo desde 'Completar columnas (IA)'."
         self._set_json()
