@@ -69,6 +69,7 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             desire_magnitude TEXT,
             awareness_level TEXT,
             competition_level TEXT,
+            date_range TEXT,
             extra JSON
         )
         """
@@ -89,6 +90,10 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         cur.execute("ALTER TABLE products RENAME COLUMN saturacion_mercado TO competition_level")
     elif "competition_level" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN competition_level TEXT")
+    if "date_range" not in cols and "rango_fechas" in cols:
+        cur.execute("ALTER TABLE products RENAME COLUMN rango_fechas TO date_range")
+    elif "date_range" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN date_range TEXT")
     # drop obsolete columns if present
     for obsolete in [
         "facilidad_anuncio",
@@ -191,6 +196,7 @@ def insert_product(
     currency: Optional[str] = None,
     image_url: Optional[str] = None,
     source: Optional[str] = None,
+    date_range: Optional[str] = "",
     desire: Optional[str] = None,
     desire_magnitude: Optional[str] = None,
     awareness_level: Optional[str] = None,
@@ -210,6 +216,7 @@ def insert_product(
         currency: Optional currency code
         image_url: Optional URL or path to image
         source: Optional source string describing where the product was imported from
+        date_range: Optional date range text
         desire: Short text describing the desire (<=180 characters)
         desire_magnitude: One of 'Low', 'Medium', 'High'
         awareness_level: One of 'Unaware','Problem-Aware','Solution-Aware','Product-Aware','Most Aware'
@@ -238,14 +245,15 @@ def insert_product(
     }
     if awareness_level not in allowed_awareness:
         awareness_level = None
+    date_range = (date_range or "").strip()
     if product_id is not None:
         cur.execute(
             """
             INSERT INTO products (
                 id, name, description, category, price, currency, image_url, source,
                 import_date, desire, desire_magnitude, awareness_level,
-                competition_level, extra)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
+                competition_level, date_range, extra)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
             """,
             (
                 product_id,
@@ -261,6 +269,7 @@ def insert_product(
                 desire_magnitude,
                 awareness_level,
                 competition_level,
+                date_range,
                 json_dump(extra) if extra is not None else "{}",
             ),
         )
@@ -270,8 +279,8 @@ def insert_product(
             INSERT INTO products (
                 name, description, category, price, currency, image_url, source,
                 import_date, desire, desire_magnitude, awareness_level,
-                competition_level, extra)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
+                competition_level, date_range, extra)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
             """,
             (
                 name,
@@ -286,6 +295,7 @@ def insert_product(
                 desire_magnitude,
                 awareness_level,
                 competition_level,
+                date_range,
                 json_dump(extra) if extra is not None else "{}",
             ),
         )
@@ -337,6 +347,7 @@ def update_product(
         "desire_magnitude",
         "awareness_level",
         "competition_level",
+        "date_range",
     }
     data = {k: v for k, v in fields.items() if k in allowed_cols}
     if not data:
@@ -357,6 +368,8 @@ def update_product(
     }
     if "awareness_level" in data and data["awareness_level"] not in aware_vals:
         data["awareness_level"] = None
+    if "date_range" in data:
+        data["date_range"] = (data["date_range"] or "").strip()
     sets = ",".join([f"{k} = ?" for k in data.keys()])
     cur = conn.cursor()
     cur.execute(

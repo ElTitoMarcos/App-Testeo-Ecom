@@ -294,8 +294,8 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             units_col = find_key(headers, ["unitssold", "units", "ventas", "sold"])
             revenue_col = find_key(headers, ["revenue", "sales", "ingresos"])
             conv_col = find_key(headers, ["conversion", "cr", "tasaconversion"])
+            range_col = find_key(headers, ["daterange", "rangofechas", "rangodefechas", "period", "range"])
             launch_col = find_key(headers, ["launchdate", "fecha", "date", "firstseen"])
-            range_col = find_key(headers, ["daterange", "rangofechas", "period", "range"])
             price_col = find_key(headers, ["price", "precio", "cost", "unitprice"])
             img_col = find_key(headers, ["imageurl", "image", "imagelink", "mainimage", "mainimageurl", "img", "imagen", "picture", "primaryimage"])
             name_col = find_key(headers, ["name", "productname", "title", "product", "producto"])
@@ -379,7 +379,13 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
 
                 set_extra(conv_col, 'conversion_rate')
                 set_extra(launch_col, 'launch_date')
-                set_extra(range_col, 'date_range')
+                if range_col:
+                    val = row.get(range_col)
+                    date_range_val = str(val).strip() if val is not None else ""
+                else:
+                    date_range_val = ""
+                extras['date_range'] = date_range_val
+                extras['Date Range'] = date_range_val
 
                 recognized = {
                     name_col,
@@ -400,9 +406,9 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                         extras[k] = v
 
                 rows_validas.append(
-                    (name, description, category, price, currency, image_url, extras)
+                    (name, description, category, price, currency, image_url, date_range_val, extras)
                 )
-            for idx, (name, description, category, price, currency, image_url, extra_cols) in enumerate(rows_validas):
+            for idx, (name, description, category, price, currency, image_url, date_range_val, extra_cols) in enumerate(rows_validas):
                 row_id = base_id + idx
                 database.insert_product(
                     conn,
@@ -413,6 +419,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                     currency=currency,
                     image_url=image_url,
                     source=filename,
+                    date_range=date_range_val,
                     extra=extra_cols,
                     commit=False,
                     product_id=row_id,
@@ -613,6 +620,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                     extra_dict['Item Sold'] = extra_dict['units_sold']
                 if 'revenue' in extra_dict and 'Revenue($)' not in extra_dict:
                     extra_dict['Revenue($)'] = extra_dict['revenue']
+                dr_val = (p["date_range"] or "") if "date_range" in p.keys() else ""
+                if 'date_range' not in extra_dict:
+                    extra_dict['date_range'] = dr_val
+                if 'Date Range' not in extra_dict:
+                    extra_dict['Date Range'] = dr_val
                 score_value = None
                 if score:
                     key = (
@@ -650,7 +662,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "revenue": extra_dict.get("revenue"),
                     "conversion_rate": extra_dict.get("conversion_rate"),
                     "launch_date": extra_dict.get("launch_date"),
-                    "date_range": extra_dict.get("date_range"),
+                    "date_range": dr_val,
                     "extras": extra_dict,
                 }
                 if config.is_scoring_v2_enabled():
@@ -1029,9 +1041,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                         p['desire_magnitude'],
                         p['awareness_level'],
                         p['competition_level'],
+                        p['date_range'],
                     ]
                 )
-            headers = ["id", "name", "Desire", "Desire Magnitude", "Awareness Level", "Competition Level"]
+            headers = ["id", "name", "Desire", "Desire Magnitude", "Awareness Level", "Competition Level", "Date Range"]
             if fmt == 'xlsx':
                 try:
                     from openpyxl import Workbook
