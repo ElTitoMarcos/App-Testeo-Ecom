@@ -13,6 +13,17 @@ function getAllFilteredRows() {
   return Array.isArray(window.products) ? window.products.slice() : [];
 }
 
+function getAllFilteredRows() {
+  if (typeof window.getAllFilteredRows === 'function') {
+    try {
+      return window.getAllFilteredRows();
+    } catch {
+      return [];
+    }
+  }
+  return Array.isArray(window.products) ? window.products.slice() : [];
+}
+
 function isEditing(pid, field) {
   const active = document.activeElement;
   if (!active) return false;
