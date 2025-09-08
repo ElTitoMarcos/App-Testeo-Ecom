@@ -505,3 +505,43 @@ button.loading::after {
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+/* Solo nuevas columnas */
+.ec-col { vertical-align: middle; }
+
+/* Inputs/selects compactos solo aquí */
+.ec-col-desire input,
+.ec-col-desire-mag select,
+.ec-col-awareness select,
+.ec-col-competition select {
+  width: auto;               /* lo fijaremos por JS en px */
+  height: 30px;
+  box-sizing: content-box;
+  font-size: 13px;
+  padding: 2px 8px;
+  margin: 0;
+}
+
+/* Centrado visual en los select */
+.ec-col-desire-mag select,
+.ec-col-awareness select,
+.ec-col-competition select {
+  text-align: center;
+  text-align-last: center;
+}
+
+/* Evitar desbordes solo aquí */
+.ec-col-desire > *,
+.ec-col-desire-mag > *,
+.ec-col-awareness > *,
+.ec-col-competition > * {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Anchura de columna controlada por variables CSS (las pone JS) */
+th.ec-col-desire,        td.ec-col-desire        { width: var(--ec-w-desire, 160px); }
+th.ec-col-desire-mag,    td.ec-col-desire-mag    { width: var(--ec-w-desire-mag, 110px); }
+th.ec-col-awareness,     td.ec-col-awareness     { width: var(--ec-w-awareness, 160px); }
+th.ec-col-competition,   td.ec-col-competition   { width: var(--ec-w-competition, 110px); }
