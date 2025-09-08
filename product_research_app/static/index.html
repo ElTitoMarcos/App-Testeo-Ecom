@@ -24,7 +24,7 @@ body.dark button { background: linear-gradient(90deg,#3a3cad,#7a53d6); color:#ff
 body.dark #btnFilters { background:#2a2d5c; border-color:#7a53d6; color:#a9a9ff; }
 select, input[type="text"], input[type="password"] { padding:6px; border-radius:4px; border:1px solid #ccc; }
 body.dark select, body.dark input[type="text"], body.dark input[type="password"] { background:#1f2344; color:#eaeaea; border-color:#444; }
-#productTable { table-layout:auto; }
+#productsTable { table-layout:auto; }
 th, td { padding:8px; border:1px solid #ccc; text-align:center; vertical-align:middle; }
 body.dark th, body.dark td { border-color:#444; }
 .col-num { white-space:nowrap; min-width:80px; }
@@ -169,12 +169,15 @@ body.dark .weight-slider {
   </div>
 </div>
 
-  <table id="productTable">
-  <thead class="sticky-thead">
-    <tr id="headerRow"></tr>
-  </thead>
-  <tbody></tbody>
-</table>
+<div class="table-wrap">
+  <table id="productsTable" class="products-table">
+    <colgroup id="products-colgroup"></colgroup>
+    <thead class="sticky-thead">
+      <tr id="headerRow"></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</div>
 <div id="bottomBar" class="bottombar hidden">
   <button id="legendBtn" class="legend-btn" title="Mostrar leyenda" aria-label="Mostrar leyenda">ℹ️</button>
   <span id="selCount"></span>
@@ -304,7 +307,7 @@ function updateResultsBadge(total) {
 window.updateResultsBadge = updateResultsBadge;
 window.allProducts = allProducts;
 window.products = products;
-const gridRoot = document.getElementById('productTable');
+const gridRoot = document.getElementById('productsTable');
 
 function ecMakeMeasurer() {
   const el = document.createElement('span');
@@ -387,8 +390,8 @@ function ecAutoFitColumns(gridRoot) {
 const DEFAULT_LOCALE = 'es-ES';
 const DEFAULT_CURRENCY = 'EUR';
 const columns = [
-  { key: 'id', label: 'ID', type: 'number', headerClass: 'col-num', cellClass: 'col-num' },
-  { key: 'image_url', label: 'Imagen', type: 'image' },
+  { key: 'id', label: 'ID', type: 'number', headerClass: 'col-num col-id', cellClass: 'col-num col-id' },
+  { key: 'image_url', label: 'Imagen', type: 'image', headerClass: 'col-img', cellClass: 'col-img' },
   { key: 'name', label: 'Nombre', type: 'string', cellClass: 'col-text' },
   { key: 'category', label: 'Categoría', type: 'string', cellClass: 'col-text' },
   { key: 'price', label: 'Precio', type: 'number', headerClass: 'col-num', cellClass: 'col-num' },
@@ -628,7 +631,7 @@ async function fetchProducts(preserve=true) {
 
 function renderTable() {
   const headerRow = document.getElementById('headerRow');
-  const tbody = document.querySelector('#productTable tbody');
+  const tbody = document.querySelector('#productsTable tbody');
   // Build header if empty
   if (!headerRow.hasChildNodes()) {
     // Add select column header (no label)
@@ -1156,7 +1159,7 @@ document.getElementById('saveConfig').onclick = async () => {
 // search feature
 document.getElementById('searchBtn').onclick = () => {
   const term = document.getElementById('searchInput').value.trim().toLowerCase();
-  const tbody = document.querySelector('#productTable tbody');
+  const tbody = document.querySelector('#productsTable tbody');
   let visible = 0;
   Array.from(tbody.rows).forEach(row => {
     if (!term) {
@@ -1550,5 +1553,6 @@ window.parseDate = parseDate;
 <script type="module" src="/static/js/completar-ia.js"></script>
 <div id="chartTooltip" style="position:absolute; background:#fff; border:1px solid #333; padding:4px; font-size:12px; border-radius:4px; pointer-events:none; display:none; z-index:2000;"></div>
 <script src="/static/js/filters.js"></script>
+<script src="/static/js/auto_columns_v2.js"></script>
 </body>
 </html>
