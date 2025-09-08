@@ -199,71 +199,58 @@ def ensure_db():
     return conn
 
 
-def parse_xlsx(binary: bytes):
-    """Parse a minimal XLSX file into a list of dictionaries."""
-    import zipfile
-    import xml.etree.ElementTree as ET
-    from io import BytesIO
+def parse_xlsx(binary: bytes, sheet: str = "LIST_PRODUCT"):
+    """Parse an XLSX file into a list of dicts using openpyxl.
 
-    with zipfile.ZipFile(BytesIO(binary)) as z:
-        shared = []
-        if 'xl/sharedStrings.xml' in z.namelist():
-            ss_root = ET.fromstring(z.read('xl/sharedStrings.xml'))
-            for si in ss_root.findall('.//{*}si'):
-                text = ''.join((t.text or '') for t in si.findall('.//{*}t'))
-                shared.append(text)
-        sheet_name = None
-        for name in z.namelist():
-            if name.startswith('xl/worksheets/sheet') and name.endswith('.xml'):
-                sheet_name = name
-                break
-        if not sheet_name:
-            return []
-        root = ET.fromstring(z.read(sheet_name))
-        rows = []
-        for row in root.findall('.//{*}row'):
-            values = []
-            last_col_idx = 0
-            for c in row.findall('{*}c'):
-                cell_ref = c.attrib.get('r', '')
-                letters = ''.join(ch for ch in cell_ref if ch.isalpha())
-                col_idx = 0
-                for ch in letters:
-                    col_idx = col_idx * 26 + (ord(ch.upper()) - ord('A') + 1)
-                while last_col_idx < col_idx - 1:
-                    values.append('')
-                    last_col_idx += 1
-                val = ''
-                cell_type = c.attrib.get('t')
-                if cell_type == 's':
-                    v = c.find('{*}v')
-                    if v is not None:
-                        try:
-                            idx = int(v.text)
-                            val = shared[idx] if idx < len(shared) else ''
-                        except Exception:
-                            val = ''
-                elif cell_type == 'inlineStr':
-                    tnode = c.find('{*}is/{*}t')
-                    val = tnode.text if tnode is not None else ''
-                else:
-                    v = c.find('{*}v')
-                    val = v.text if v is not None else ''
-                values.append(val)
-                last_col_idx = col_idx
-            rows.append(values)
-        while rows and all(not cell for cell in rows[0]):
-            rows.pop(0)
-        if not rows:
-            return []
-        headers = rows[0]
-        records = []
-        for r in rows[1:]:
-            rec = {}
-            for i, h in enumerate(headers):
-                rec[h] = r[i] if i < len(r) else ''
-            records.append(rec)
-        return records
+    The sheet named ``LIST_PRODUCT`` is preferred; if it doesn't exist the
+    workbook's active sheet is used.  Empty trailing rows are skipped and all
+    values are returned as they appear in the file.
+    """
+    from io import BytesIO
+    import openpyxl
+
+    wb = openpyxl.load_workbook(BytesIO(binary), data_only=True, read_only=True)
+    ws = wb[sheet] if sheet in wb.sheetnames else wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return []
+    headers = [str(h).strip() if h is not None else "" for h in rows[0]]
+    records = []
+    for r in rows[1:]:
+        if r is None or all(c is None for c in r):
+            continue
+        rec = {}
+        for i, h in enumerate(headers):
+            rec[h] = r[i] if i < len(r) else None
+        records.append(rec)
+    return records
+
+
+def resolve_col(df, candidates):
+    """Return first matching column name from ``candidates``.
+
+    Matching is case-insensitive and ignores spaces, parentheses and other
+    non‑alphanumeric characters.  ``df`` may be a DataFrame-like object or a
+    list of dictionaries as produced by :func:`parse_xlsx`.
+    """
+    import re
+
+    if hasattr(df, "columns"):
+        cols = list(df.columns)
+    elif isinstance(df, list) and df and isinstance(df[0], dict):
+        cols = list(df[0].keys())
+    else:
+        cols = list(df)
+
+    def norm(s):
+        return re.sub(r"[^a-z0-9]", "", str(s).lower())
+
+    mapping = {norm(c): c for c in cols if c is not None}
+    for cand in candidates:
+        key = norm(cand)
+        if key in mapping:
+            return mapping[key]
+    return None
 
 
 def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
@@ -274,34 +261,22 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
         data = tmp_path.read_bytes()
         records = parse_xlsx(data)
 
-        used_cols: set[str] = set()
-
-        def find_key(keys, patterns):
-            for k in keys:
-                if k in used_cols:
-                    continue
-                sanitized = ''.join(ch.lower() for ch in k if ch.isalnum())
-                for p in patterns:
-                    if p in sanitized:
-                        used_cols.add(k)
-                        return k
-            return None
-
         if records:
-            headers = list(records[0].keys())
-            # identify columns with tolerant synonyms
-            rating_col = find_key(headers, ["rating", "stars", "valoracion", "puntuacion"])
-            units_col = find_key(headers, ["unitssold", "units", "ventas", "sold"])
-            revenue_col = find_key(headers, ["revenue", "sales", "ingresos"])
-            conv_col = find_key(headers, ["conversion", "cr", "tasaconversion"])
-            launch_col = find_key(headers, ["launchdate", "fecha", "date", "firstseen"])
-            range_col = find_key(headers, ["daterange", "rangofechas", "period", "range"])
-            price_col = find_key(headers, ["price", "precio", "cost", "unitprice"])
-            img_col = find_key(headers, ["imageurl", "image", "imagelink", "mainimage", "mainimageurl", "img", "imagen", "picture", "primaryimage"])
-            name_col = find_key(headers, ["name", "productname", "title", "product", "producto"])
-            desc_col = find_key(headers, ["description", "descripcion", "desc"])
-            cat_col = find_key(headers, ["category", "categoria", "niche", "segment"])
-            curr_col = find_key(headers, ["currency", "moneda"])
+            # identify columns using resolve_col helper
+            price_col = resolve_col(records, ["Price($)", "Price"])
+            rating_col = resolve_col(records, ["Product Rating", "Rating", "Stars"])
+            units_col = resolve_col(records, ["Item Sold", "Units Sold", "Units", "Sold"])
+            revenue_col = resolve_col(records, ["Revenue($)", "Revenue", "Sales"])
+            range_col = resolve_col(records, ["Date Range", "Range", "Period"])
+            launch_col = resolve_col(records, ["Launch Date", "LaunchDate", "First Seen", "Fecha"])
+            img_col = resolve_col(records, ["ImageURL", "Image", "ImageLink", "MainImage", "MainImageURL", "Img", "Imagen", "Picture", "PrimaryImage"])
+            name_col = resolve_col(records, ["Name", "Product Name", "Title", "Product", "Producto"])
+            desc_col = resolve_col(records, ["Description", "Descripcion", "Desc"])
+            cat_col = resolve_col(records, ["Category", "Categoria", "Niche", "Segment"])
+            curr_col = resolve_col(records, ["Currency", "Moneda"])
+            conv_col = resolve_col(records, ["Conversion", "CR", "TasaConversion"])
+
+            from datetime import datetime
 
             cur = conn.cursor()
             cur.execute("BEGIN")
@@ -309,8 +284,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             count = cur.fetchone()[0]
             cur.execute("SELECT COALESCE(MAX(id), -1) FROM products")
             max_id = cur.fetchone()[0]
-            is_empty = count == 0
-            base_id = 0 if is_empty else (max_id + 1)
+            base_id = 0 if count == 0 else (max_id + 1)
             rows_validas = []
             for row in records:
                 name = (row.get(name_col) or '').strip() if name_col else None
@@ -318,12 +292,12 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                     continue
                 description = (row.get(desc_col) or '').strip() if desc_col else None
                 category = (row.get(cat_col) or '').strip() if cat_col else None
-                price = None
-                if price_col and row.get(price_col):
+                precio_usd = None
+                if price_col and row.get(price_col) not in (None, ''):
                     try:
-                        price = float(str(row.get(price_col)).replace(',', '.'))
+                        precio_usd = float(str(row.get(price_col)).replace(',', '.'))
                     except Exception:
-                        price = None
+                        precio_usd = None
                 currency = (row.get(curr_col) or '').strip() if curr_col else None
                 image_url = (row.get(img_col) or '').strip() if img_col else None
 
@@ -344,18 +318,19 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                     extras['rating'] = rating_val
                     extras['Product Rating'] = rating_val
 
-                units_val = None
+                unidades_val = None
                 if units_col and row.get(units_col) not in (None, ''):
                     try:
                         s = re.sub(r'[^0-9]+', '', str(row.get(units_col)))
-                        units_val = int(s) if s else None
+                        unidades_val = int(s) if s else None
                     except Exception:
-                        units_val = None
-                if units_val is not None:
-                    extras['units_sold'] = units_val
-                    extras['Item Sold'] = units_val
+                        unidades_val = None
+                if unidades_val is not None:
+                    extras['unidades_vendidas'] = unidades_val
+                    extras['Item Sold'] = unidades_val
+                    extras['units_sold'] = unidades_val
 
-                revenue_val = None
+                ingresos_val = None
                 if revenue_col and row.get(revenue_col) not in (None, ''):
                     try:
                         s = str(row.get(revenue_col)).strip().replace(' ', '').replace(',', '.')
@@ -363,23 +338,46 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                         if s.count('.') > 1:
                             parts = s.split('.')
                             s = ''.join(parts[:-1]) + '.' + parts[-1]
-                        revenue_val = float(s) if s else None
+                        ingresos_val = float(s) if s else None
                     except Exception:
-                        revenue_val = None
-                if revenue_val is None and price is not None and units_val is not None:
-                    revenue_val = price * units_val
-                if revenue_val is not None:
-                    extras['revenue'] = revenue_val
-                    extras['Revenue($)'] = revenue_val
+                        ingresos_val = None
+                if ingresos_val is None and precio_usd is not None and unidades_val is not None:
+                    ingresos_val = precio_usd * unidades_val
+                if ingresos_val is not None:
+                    extras['ingresos_usd'] = ingresos_val
+                    extras['Revenue($)'] = ingresos_val
+                    extras['revenue'] = ingresos_val
 
-                def set_extra(col, key):
-                    val = row.get(col) if col else None
-                    if val is not None and str(val).strip():
-                        extras[key] = str(val).strip()
+                if precio_usd is not None:
+                    extras['precio_usd'] = precio_usd
+                    extras['Price($)'] = precio_usd
 
-                set_extra(conv_col, 'conversion_rate')
-                set_extra(launch_col, 'launch_date')
-                set_extra(range_col, 'date_range')
+                rango_raw = (row.get(range_col) or '').strip() if range_col else ''
+                if rango_raw:
+                    extras['rango_fechas_raw'] = rango_raw
+                rango_fechas = ''
+                rango_desde = None
+                rango_hasta = None
+                if rango_raw:
+                    parts = str(rango_raw).split('~')
+                    if len(parts) == 2:
+                        desde = parts[0].strip()
+                        hasta = parts[1].strip()
+                        try:
+                            datetime.strptime(desde, '%Y-%m-%d')
+                            datetime.strptime(hasta, '%Y-%m-%d')
+                            rango_desde = desde
+                            rango_hasta = hasta
+                            rango_fechas = f"{desde} – {hasta}"
+                        except Exception:
+                            pass
+
+                fecha_lanz = (row.get(launch_col) or '').strip() if launch_col else None
+                if fecha_lanz:
+                    extras['fecha_lanzamiento'] = fecha_lanz
+
+                if conv_col and row.get(conv_col) not in (None, ''):
+                    extras['conversion_rate'] = str(row.get(conv_col)).strip()
 
                 recognized = {
                     name_col,
@@ -391,29 +389,43 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                     rating_col,
                     units_col,
                     revenue_col,
-                    conv_col,
-                    launch_col,
                     range_col,
+                    launch_col,
+                    conv_col,
                 }
                 for k, v in row.items():
                     if k not in recognized:
                         extras[k] = v
 
                 rows_validas.append(
-                    (name, description, category, price, currency, image_url, extras)
+                    (name, description, category, precio_usd, currency, image_url, extras, rango_fechas, rango_desde, rango_hasta)
                 )
-            for idx, (name, description, category, price, currency, image_url, extra_cols) in enumerate(rows_validas):
+            for idx, (
+                name,
+                description,
+                category,
+                precio_usd,
+                currency,
+                image_url,
+                extra_cols,
+                rango_fechas,
+                rango_desde,
+                rango_hasta,
+            ) in enumerate(rows_validas):
                 row_id = base_id + idx
                 database.insert_product(
                     conn,
                     name=name,
                     description=description,
                     category=category,
-                    price=price,
+                    price=precio_usd,
                     currency=currency,
                     image_url=image_url,
                     source=filename,
                     extra=extra_cols,
+                    rango_fechas=rango_fechas,
+                    rango_fechas_desde=rango_desde,
+                    rango_fechas_hasta=rango_hasta,
                     commit=False,
                     product_id=row_id,
                 )
@@ -607,12 +619,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                     extra_dict = json.loads(extra) if isinstance(extra, str) else (extra or {})
                 except Exception:
                     extra_dict = {}
+                if 'precio_usd' in extra_dict and 'Price($)' not in extra_dict:
+                    extra_dict['Price($)'] = extra_dict['precio_usd']
+                if 'ingresos_usd' in extra_dict and 'Revenue($)' not in extra_dict:
+                    extra_dict['Revenue($)'] = extra_dict['ingresos_usd']
+                if 'unidades_vendidas' in extra_dict and 'Item Sold' not in extra_dict:
+                    extra_dict['Item Sold'] = extra_dict['unidades_vendidas']
                 if 'rating' in extra_dict and 'Product Rating' not in extra_dict:
                     extra_dict['Product Rating'] = extra_dict['rating']
-                if 'units_sold' in extra_dict and 'Item Sold' not in extra_dict:
-                    extra_dict['Item Sold'] = extra_dict['units_sold']
-                if 'revenue' in extra_dict and 'Revenue($)' not in extra_dict:
-                    extra_dict['Revenue($)'] = extra_dict['revenue']
                 score_value = None
                 if score:
                     key = (
@@ -645,12 +659,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "desire_magnitude": p["desire_magnitude"],
                     "awareness_level": p["awareness_level"],
                     "competition_level": p["competition_level"],
+                    "precio_usd": extra_dict.get("precio_usd"),
+                    "ingresos_usd": extra_dict.get("ingresos_usd"),
                     "rating": extra_dict.get("rating"),
-                    "units_sold": extra_dict.get("units_sold"),
-                    "revenue": extra_dict.get("revenue"),
+                    "unidades_vendidas": extra_dict.get("unidades_vendidas"),
                     "conversion_rate": extra_dict.get("conversion_rate"),
-                    "launch_date": extra_dict.get("launch_date"),
-                    "date_range": extra_dict.get("date_range"),
+                    "fecha_lanzamiento": extra_dict.get("fecha_lanzamiento"),
+                    "rango_fechas": p["rango_fechas"] if ("rango_fechas" in p.keys() and p["rango_fechas"]) else "",
                     "extras": extra_dict,
                 }
                 if config.is_scoring_v2_enabled():
@@ -1931,16 +1946,17 @@ class RequestHandler(BaseHTTPRequestHandler):
                     continue
                 try:
                     try:
-                        extra = json.loads(p.get("extra") or "{}")
+                        extra_raw = p["extra"] if "extra" in p.keys() else None
+                        extra = json.loads(extra_raw or "{}")
                     except Exception:
                         extra = {}
                     resp = gpt.evaluate_winner_score(
                         api_key,
                         model,
                         {
-                            "title": p.get("name"),
-                            "description": p.get("description"),
-                            "category": p.get("category"),
+                            "title": p["name"],
+                            "description": p["description"],
+                            "category": p["category"],
                             "metrics": extra,
                         },
                     )

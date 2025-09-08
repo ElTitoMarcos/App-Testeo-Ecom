@@ -381,18 +381,26 @@ function ecAutoFitColumns(gridRoot) {
   gridRoot.querySelectorAll('td.ec-col-awareness select').forEach(el => el.style.width = (aw - EC_LIMITS.awareness.pad) + 'px');
   gridRoot.querySelectorAll('td.ec-col-competition select').forEach(el => el.style.width = (co - EC_LIMITS.competition.pad) + 'px');
 }
+
+function formatUsdCompact(n){
+  if(n == null || isNaN(n)) return "—";
+  if(Math.abs(n) >= 1e9) return "$" + (n/1e9).toFixed(2) + " B";
+  if(Math.abs(n) >= 1e6) return "$" + (n/1e6).toFixed(2) + " M";
+  if(Math.abs(n) >= 1e3) return "$" + (n/1e3).toFixed(2) + " K";
+  return "$" + n.toFixed(2);
+}
 const columns = [
   { key: 'id', label: 'ID', type: 'number' },
   { key: 'image_url', label: 'Imagen', type: 'image' },
   { key: 'name', label: 'Nombre', type: 'string' },
   { key: 'category', label: 'Categoría', type: 'string' },
-  { key: 'price', label: 'Precio', type: 'number' },
+  { key: 'price', label: 'Precio', type: 'number', headerClass: 'text-center', cellClass: 'text-center', render: (v) => v == null ? "—" : "$" + Number(v).toLocaleString("en-US", {maximumFractionDigits: 2}) },
   { key: 'Product Rating', label: 'Rating', type: 'number' },
   { key: 'Item Sold', label: 'Unidades Vendidas', type: 'number' },
-  { key: 'Revenue($)', label: 'Ingresos', type: 'number' },
+  { key: 'Revenue($)', label: 'Ingresos', type: 'number', headerClass: 'text-center', cellClass: 'text-center', render: (v) => formatUsdCompact(Number(v)) },
   { key: 'Creator Conversion Ratio', label: 'Tasa Conversión', type: 'string' },
   { key: 'Launch Date', label: 'Fecha Lanzamiento', type: 'string' },
-  { key: 'Date Range', label: 'Rango Fechas', type: 'string' },
+  { key: 'rango_fechas', label: 'Rango Fechas', type: 'string', headerClass: 'text-center', cellClass: 'text-center' },
   { key: 'desire', label: 'Desire', type: 'string', headerClass: 'ec-col ec-col-desire', cellClass: 'ec-col ec-col-desire', dataEcCol: 'desire' },
   { key: 'desire_magnitude', label: 'Desire magnetitude', type: 'string', headerClass: 'ec-col ec-col-desire-mag', cellClass: 'ec-col ec-col-desire-mag', dataEcCol: 'desire_magnitude' },
   { key: 'awareness_level', label: 'Awerness Level', type: 'string', headerClass: 'ec-col ec-col-awareness', cellClass: 'ec-col ec-col-awareness', dataEcCol: 'awareness_level' },
@@ -692,12 +700,14 @@ function renderTable() {
           const j = item.winner_score_v2_breakdown.justifications[key];
           if (j) td.title = 'Justificación: ' + j;
         }
-      } else if (['id','name','category','price','image_url','winner_score_v2_pct','desire','desire_magnitude','awareness_level','competition_level'].includes(key)) {
+      } else if (['id','name','category','price','image_url','winner_score_v2_pct','desire','desire_magnitude','awareness_level','competition_level','rango_fechas'].includes(key)) {
         value = item[key];
       } else {
         value = item.extras ? item.extras[key] : '';
       }
-      if (key === 'winner_score_v2_pct') {
+      if (col.render) {
+        td.textContent = col.render(value);
+      } else if (key === 'winner_score_v2_pct') {
         const sc = parseFloat(value);
         if (!isNaN(sc)) {
           td.innerHTML = '<span class="' + winnerScoreClass(sc) + '">' + Math.round(sc) + '</span>';
@@ -862,7 +872,7 @@ function sortBy(field, type) {
   products.sort((a, b) => {
     let va;
     let vb;
-    if (field === 'id' || field === 'name' || field === 'category' || field === 'price' || field === 'image_url' || field === 'winner_score_v2_pct' || field === 'desire' || field === 'desire_magnitude' || field === 'awareness_level' || field === 'competition_level') {
+    if (field === 'id' || field === 'name' || field === 'category' || field === 'price' || field === 'image_url' || field === 'winner_score_v2_pct' || field === 'desire' || field === 'desire_magnitude' || field === 'awareness_level' || field === 'competition_level' || field === 'rango_fechas') {
       va = a[field];
       vb = b[field];
     } else if (weightFields.includes(field)) {
