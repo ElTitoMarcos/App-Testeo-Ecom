@@ -404,24 +404,33 @@ def generate_ba_insights(api_key: str, model: str, product: Dict[str, Any]) -> T
         "conversion_rate",
         "launch_date",
         "date_range",
-        "image_url",
         "desire",
         "desire_magnitude",
         "awareness_level",
         "competition_level",
     ]
     lines = [f"{k}: {product.get(k)}" for k in fields]
-    text = (
-        "Responde estrictamente con JSON siguiendo este esquema:\n"
-        "{ \"grid_updates\": { \"desire\": \"...\", \"desire_magnitude\": \"Low|Medium|High\", "
-        "\"awareness_level\": \"Unaware|Problem-Aware|Solution-Aware|Product-Aware|Most Aware\", "
-        "\"competition_level\": \"Low|Medium|High\" } }\n\n" +
-        "Datos del producto:\n" + "\n".join(lines)
-    )
-
-    content = [{"type": "text", "text": text}]
-    if product.get("image_url"):
-        content.append({"type": "input_image", "image_url": {"url": product["image_url"]}})
+    url = (product.get("image_url") or "").strip()
+    if url and re.match(r"^https?://", url):
+        text = (
+            "Responde estrictamente con JSON siguiendo este esquema:\n"
+            "{ \"grid_updates\": { \"desire\": \"...\", \"desire_magnitude\": \"Low|Medium|High\", "
+            "\"awareness_level\": \"Unaware|Problem-Aware|Solution-Aware|Product-Aware|Most Aware\", "
+            "\"competition_level\": \"Low|Medium|High\" } }\n\n" +
+            "Datos del producto:\n" + "\n".join(lines)
+        )
+        content = [{"type": "text", "text": text}, {"type": "image_url", "image_url": {"url": url}}]
+    else:
+        if url:
+            lines.append(f"Image URL: {url}")
+        text = (
+            "Responde estrictamente con JSON siguiendo este esquema:\n"
+            "{ \"grid_updates\": { \"desire\": \"...\", \"desire_magnitude\": \"Low|Medium|High\", "
+            "\"awareness_level\": \"Unaware|Problem-Aware|Solution-Aware|Product-Aware|Most Aware\", "
+            "\"competition_level\": \"Low|Medium|High\" } }\n\n" +
+            "Datos del producto:\n" + "\n".join(lines)
+        )
+        content = [{"type": "text", "text": text}]
 
     messages = [
         {"role": "system", "content": sys_msg},

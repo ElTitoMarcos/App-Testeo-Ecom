@@ -274,22 +274,35 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
         data = tmp_path.read_bytes()
         records = parse_xlsx(data)
 
+        used_cols: set[str] = set()
+
         def find_key(keys, patterns):
             for k in keys:
+                if k in used_cols:
+                    continue
                 sanitized = ''.join(ch.lower() for ch in k if ch.isalnum())
                 for p in patterns:
                     if p in sanitized:
+                        used_cols.add(k)
                         return k
             return None
 
         if records:
             headers = list(records[0].keys())
-            name_col = find_key(headers, ["name", "nombre", "productname", "product", "title"])
-            desc_col = find_key(headers, ["description", "descripcion", "desc"])
-            cat_col = find_key(headers, ["category", "categoria", "cat"])
+            # identify columns with tolerant synonyms
+            rating_col = find_key(headers, ["rating", "rate", "valoracion"])
+            units_col = find_key(headers, ["unitssold", "sold", "ventas", "orders"])
+            revenue_col = find_key(headers, ["revenue", "ingresos", "gmv", "sales"])
+            conv_col = find_key(headers, ["conversion", "cr", "tasaconversion"])
+            launch_col = find_key(headers, ["launchdate", "fecha", "date", "firstseen"])
+            range_col = find_key(headers, ["daterange", "rangofechas", "period", "range"])
             price_col = find_key(headers, ["price", "precio", "cost", "unitprice"])
+            img_col = find_key(headers, ["imageurl", "image", "imagelink", "mainimage", "mainimageurl", "img", "imagen", "picture", "primaryimage"])
+            name_col = find_key(headers, ["name", "productname", "title", "product", "producto"])
+            desc_col = find_key(headers, ["description", "descripcion", "desc"])
+            cat_col = find_key(headers, ["category", "categoria", "niche", "segment"])
             curr_col = find_key(headers, ["currency", "moneda"])
-            img_col = find_key(headers, ["image", "imagen", "img", "picture", "imgurl"])
+
             cur = conn.cursor()
             cur.execute("BEGIN")
             cur.execute("SELECT COUNT(*) FROM products")
@@ -313,13 +326,41 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                         price = None
                 currency = (row.get(curr_col) or '').strip() if curr_col else None
                 image_url = (row.get(img_col) or '').strip() if img_col else None
-                extra_cols = {
-                    k: v
-                    for k, v in row.items()
-                    if k not in {name_col, desc_col, cat_col, price_col, curr_col, img_col}
+
+                extras = {}
+
+                def set_extra(col, key):
+                    val = row.get(col) if col else None
+                    if val is not None and str(val).strip():
+                        extras[key] = str(val).strip()
+
+                set_extra(rating_col, 'rating')
+                set_extra(units_col, 'units_sold')
+                set_extra(revenue_col, 'revenue')
+                set_extra(conv_col, 'conversion_rate')
+                set_extra(launch_col, 'launch_date')
+                set_extra(range_col, 'date_range')
+
+                recognized = {
+                    name_col,
+                    desc_col,
+                    cat_col,
+                    price_col,
+                    curr_col,
+                    img_col,
+                    rating_col,
+                    units_col,
+                    revenue_col,
+                    conv_col,
+                    launch_col,
+                    range_col,
                 }
+                for k, v in row.items():
+                    if k not in recognized:
+                        extras[k] = v
+
                 rows_validas.append(
-                    (name, description, category, price, currency, image_url, extra_cols)
+                    (name, description, category, price, currency, image_url, extras)
                 )
             for idx, (name, description, category, price, currency, image_url, extra_cols) in enumerate(rows_validas):
                 row_id = base_id + idx
@@ -558,6 +599,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "desire_magnitude": p["desire_magnitude"],
                     "awareness_level": p["awareness_level"],
                     "competition_level": p["competition_level"],
+                    "rating": extra_dict.get("rating"),
+                    "units_sold": extra_dict.get("units_sold"),
+                    "revenue": extra_dict.get("revenue"),
+                    "conversion_rate": extra_dict.get("conversion_rate"),
+                    "launch_date": extra_dict.get("launch_date"),
+                    "date_range": extra_dict.get("date_range"),
                     "extras": extra_dict,
                 }
                 if config.is_scoring_v2_enabled():
@@ -2050,19 +2097,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"grid_updates": grid_updates}).encode('utf-8'))
         except gpt.InvalidJSONError:
             self._set_json(502)
-            self.wfile.write(json.dumps({"error": "Respuesta BA no es JSON"}).encode('utf-8'))
-        except gpt.OpenAIError as exc:
-            msg = str(exc)
-            m = re.search(r"status (\d+)", msg)
-            code = int(m.group(1)) if m else 503
-            if code == 429:
-                friendly = "Límite de OpenAI alcanzado. Inténtalo de nuevo pronto."
-            elif code == 503:
-                friendly = "OpenAI no disponible. Inténtalo más tarde."
-            else:
-                friendly = msg
-            self._set_json(code)
-            self.wfile.write(json.dumps({"error": friendly}).encode('utf-8'))
+            self.wfile.write(json.dumps({"error": "Respuesta IA no es JSON"}).encode('utf-8'))
+        except Exception:
+            self._set_json(503)
+            self.wfile.write(json.dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
 
     def handle_auto_weights(self):
         """
