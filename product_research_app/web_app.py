@@ -665,7 +665,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "unidades_vendidas": extra_dict.get("unidades_vendidas"),
                     "conversion_rate": extra_dict.get("conversion_rate"),
                     "fecha_lanzamiento": extra_dict.get("fecha_lanzamiento"),
-                    "rango_fechas": p.get("rango_fechas") or "",
+                    "rango_fechas": p["rango_fechas"] if ("rango_fechas" in p.keys() and p["rango_fechas"]) else "",
                     "extras": extra_dict,
                 }
                 if config.is_scoring_v2_enabled():
@@ -1946,16 +1946,17 @@ class RequestHandler(BaseHTTPRequestHandler):
                     continue
                 try:
                     try:
-                        extra = json.loads(p.get("extra") or "{}")
+                        extra_raw = p["extra"] if "extra" in p.keys() else None
+                        extra = json.loads(extra_raw or "{}")
                     except Exception:
                         extra = {}
                     resp = gpt.evaluate_winner_score(
                         api_key,
                         model,
                         {
-                            "title": p.get("name"),
-                            "description": p.get("description"),
-                            "category": p.get("category"),
+                            "title": p["name"],
+                            "description": p["description"],
+                            "category": p["category"],
                             "metrics": extra,
                         },
                     )
