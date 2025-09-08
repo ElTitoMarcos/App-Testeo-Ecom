@@ -161,7 +161,51 @@ body.dark .table tbody tr.selected { background: #243150; }
 
 /* Spacing for configuration panel */
 #config {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   padding-top: 16px;
+}
+
+#config .config-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+#config label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+#config button {
+  min-height: 36px;
+  padding: 8px 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#config .api-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+#config select,
+#config input {
+  min-height: 36px;
+  padding: 8px 12px;
+  margin-bottom: 0;
+}
+
+.card {
+  background: #0F1424;
+  border: 1px solid #34456B;
+  border-radius: 16px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+  padding: 16px;
 }
 
 .table tbody tr.is-duplicate {
@@ -304,7 +348,7 @@ body.dark .bottombar {
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.12s ease;
-  z-index: 1000;
+  z-index: 2000;
 }
 .modal-overlay.open {
   opacity: 1;
@@ -314,8 +358,8 @@ body.dark .bottombar {
   background: #0F1424;
   color: #E5EAF5;
   border: 1px solid #34456B;
-  border-radius: 20px;
-  box-shadow: 0 20px 40px rgba(0,0,0,0.4);
+  border-radius: 16px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.45);
   width: 90%;
   max-width: 420px;
   margin: 24px;

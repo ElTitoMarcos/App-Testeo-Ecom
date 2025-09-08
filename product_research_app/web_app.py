@@ -34,6 +34,7 @@ import threading
 import time
 import sqlite3
 import math
+from datetime import datetime, date
 from typing import Dict, Any
 
 from . import database
@@ -56,6 +57,8 @@ APP_DIR = Path(__file__).resolve().parent
 DB_PATH = APP_DIR / "data.sqlite3"
 STATIC_DIR = APP_DIR / "static"
 logger = logging.getLogger(__name__)
+DEFAULT_CURRENCY = "EUR"
+DEFAULT_LOCALE = "es-ES"
 
 # Heuristic scoring for offline evaluation.
 def offline_evaluate(product: dict) -> dict:
@@ -287,6 +290,42 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                         return k
             return None
 
+        def parse_date(val):
+            if val in (None, ''):
+                return None
+            if isinstance(val, (datetime, date)):
+                return val.strftime("%Y-%m-%d")
+            try:
+                s = str(val).strip()
+            except Exception:
+                return None
+            for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y"):
+                try:
+                    return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+                except Exception:
+                    continue
+            return None
+
+        def normalize_range(val):
+            if val in (None, ''):
+                return None
+            if isinstance(val, (datetime, date)):
+                return val.strftime("%Y-%m-%d")
+            s = str(val).strip()
+            parts = re.split(r"\s*[\u2013-]\s*|\s+to\s+", s)
+            if len(parts) >= 2:
+                start = parse_date(parts[0])
+                end = parse_date(parts[1])
+                if start and end:
+                    return f"{start} – {end}"
+                elif start or end:
+                    return start or end
+            else:
+                single = parse_date(parts[0])
+                if single:
+                    return single
+            return None
+
         if records:
             headers = list(records[0].keys())
             # identify columns with tolerant synonyms
@@ -294,14 +333,16 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             units_col = find_key(headers, ["unitssold", "units", "ventas", "sold"])
             revenue_col = find_key(headers, ["revenue", "sales", "ingresos"])
             conv_col = find_key(headers, ["conversion", "cr", "tasaconversion"])
-            launch_col = find_key(headers, ["launchdate", "fecha", "date", "firstseen"])
-            range_col = find_key(headers, ["daterange", "rangofechas", "period", "range"])
+            start_col = find_key(headers, ["fechainicio", "startdate", "desde", "firstseen"])
+            end_col = find_key(headers, ["fechafin", "enddate", "hasta", "lastseen"])
+            range_col = find_key(headers, ["daterange", "rangofechas", "period", "range", "rango"])
+            launch_col = find_key(headers, ["launchdate", "fechalanzamiento", "lanzamiento", "fecha", "date"])
             price_col = find_key(headers, ["price", "precio", "cost", "unitprice"])
             img_col = find_key(headers, ["imageurl", "image", "imagelink", "mainimage", "mainimageurl", "img", "imagen", "picture", "primaryimage"])
             name_col = find_key(headers, ["name", "productname", "title", "product", "producto"])
             desc_col = find_key(headers, ["description", "descripcion", "desc"])
             cat_col = find_key(headers, ["category", "categoria", "niche", "segment"])
-            curr_col = find_key(headers, ["currency", "moneda"])
+            curr_col = find_key(headers, ["currency", "moneda", "currencycode"])
 
             cur = conn.cursor()
             cur.execute("BEGIN")
@@ -325,6 +366,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                     except Exception:
                         price = None
                 currency = (row.get(curr_col) or '').strip() if curr_col else None
+                currency = currency or DEFAULT_CURRENCY
                 image_url = (row.get(img_col) or '').strip() if img_col else None
 
                 extras = {}
@@ -378,8 +420,25 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                         extras[key] = str(val).strip()
 
                 set_extra(conv_col, 'conversion_rate')
-                set_extra(launch_col, 'launch_date')
-                set_extra(range_col, 'date_range')
+
+                launch_val = parse_date(row.get(launch_col)) if launch_col else None
+                if launch_val:
+                    extras['launch_date'] = launch_val
+                    extras['Launch Date'] = launch_val
+
+                range_val = normalize_range(row.get(range_col)) if range_col else None
+                start_val = parse_date(row.get(start_col)) if start_col else None
+                end_val = parse_date(row.get(end_col)) if end_col else None
+                if not range_val:
+                    if start_val and end_val:
+                        range_val = f"{start_val} – {end_val}"
+                    elif start_val or end_val:
+                        range_val = start_val or end_val
+                if not range_val and launch_val:
+                    range_val = f"{launch_val} – {date.today().isoformat()}"
+                if range_val:
+                    extras['date_range'] = range_val
+                    extras['Date Range'] = range_val
 
                 recognized = {
                     name_col,
@@ -394,6 +453,8 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                     conv_col,
                     launch_col,
                     range_col,
+                    start_col,
+                    end_col,
                 }
                 for k, v in row.items():
                     if k not in recognized:
@@ -640,6 +701,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "name": p["name"],
                     "category": p["category"],
                     "price": p["price"],
+                    "currency": p["currency"] or DEFAULT_CURRENCY,
                     "image_url": p["image_url"],
                     "desire": p["desire"],
                     "desire_magnitude": p["desire_magnitude"],
@@ -1148,7 +1210,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 description=data.get("description"),
                 category=data.get("category"),
                 price=data.get("price"),
-                currency=data.get("currency"),
+                currency=data.get("currency") or DEFAULT_CURRENCY,
                 image_url=data.get("image_url"),
                 source=data.get("source"),
                 desire=data.get("desire"),
@@ -1379,7 +1441,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 desc_col = find_key(headers, ["description", "descripcion", "desc"])
                 cat_col = find_key(headers, ["category", "categoria", "cat"])
                 price_col = find_key(headers, ["price", "precio", "cost", "unitprice"])
-                curr_col = find_key(headers, ["currency", "moneda"])
+                curr_col = find_key(headers, ["currency", "moneda", "currencycode"])
                 img_col = find_key(headers, ["image", "imagen", "img", "picture", "imgurl"])
                 desire_col = find_key(headers, ["desire", "deseo"])
                 desire_mag_col = find_key(headers, ["desiremagnitude", "desiremag", "magnituddeseo"])
@@ -1417,6 +1479,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         except ValueError:
                             price = None
                     currency = (row.get(curr_col) or '').strip() if curr_col else None
+                    currency = currency or DEFAULT_CURRENCY
                     image_url = (row.get(img_col) or '').strip() if img_col else None
                     desire = (row.get(desire_col) or '').strip() if desire_col else None
                     desire = desire or None
@@ -1506,7 +1569,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         desc_key = find_key(keys, ["description", "descripcion", "desc"])
                         category_key = find_key(keys, ["category", "categoria", "cat"])
                         price_key = find_key(keys, ["price", "precio", "cost", "unitprice"])
-                        currency_key = find_key(keys, ["currency", "moneda"])
+                        currency_key = find_key(keys, ["currency", "moneda", "currencycode"])
                         image_key = find_key(keys, ["image", "imagen", "img", "picture", "imgurl"])
                         description = item.get(desc_key) if desc_key else None
                         category = item.get(category_key) if category_key else None
@@ -1517,6 +1580,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                             except Exception:
                                 price = None
                         currency = item.get(currency_key) if currency_key else None
+                        currency = str(currency).strip() if currency else None
+                        currency = currency or DEFAULT_CURRENCY
                         image_url = item.get(image_key) if image_key else None
                         desire = item.get("desire") or item.get("desire_text")
                         desire_mag = item.get("desire_magnitude") or item.get("magnitud_deseo")
@@ -1692,7 +1757,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         desc_key = find_key(keys, ["description", "descripcion", "desc"])
                         category_key = find_key(keys, ["category", "categoria", "cat"])
                         price_key = find_key(keys, ["price", "precio", "cost", "unitprice"])
-                        currency_key = find_key(keys, ["currency", "moneda"])
+                        currency_key = find_key(keys, ["currency", "moneda", "currencycode"])
                         image_key = find_key(keys, ["image", "imagen", "img", "picture", "imgurl"])
                         description = item.get(desc_key) if desc_key else None
                         category = item.get(category_key) if category_key else None
@@ -1703,6 +1768,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                             except Exception:
                                 price = None
                         currency = item.get(currency_key) if currency_key else None
+                        currency = str(currency).strip() if currency else None
+                        currency = currency or DEFAULT_CURRENCY
                         image_url = item.get(image_key) if image_key else None
                         desire = item.get("desire") or item.get("desire_text")
                         desire_mag = item.get("desire_magnitude") or item.get("magnitud_deseo")
@@ -1844,7 +1911,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                                 description=desc,
                                 category=cat,
                                 price=price_val,
-                                currency=None,
+                                currency=DEFAULT_CURRENCY,
                                 image_url=str(tmp_path),
                                 source=filename,
                                 extra={},

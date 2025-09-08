@@ -24,8 +24,11 @@ body.dark button { background: linear-gradient(90deg,#3a3cad,#7a53d6); color:#ff
 body.dark #btnFilters { background:#2a2d5c; border-color:#7a53d6; color:#a9a9ff; }
 select, input[type="text"], input[type="password"] { padding:6px; border-radius:4px; border:1px solid #ccc; }
 body.dark select, body.dark input[type="text"], body.dark input[type="password"] { background:#1f2344; color:#eaeaea; border-color:#444; }
-th, td { padding:8px; border:1px solid #ccc; }
+#productTable { table-layout:auto; }
+th, td { padding:8px; border:1px solid #ccc; text-align:center; vertical-align:middle; }
 body.dark th, body.dark td { border-color:#444; }
+.col-num { white-space:nowrap; min-width:80px; }
+.col-text { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 tbody tr:nth-child(even) { background:#f2f6ff; }
 body.dark tbody tr:nth-child(even) { background:#2a2d5c; }
 body.dark tbody tr:nth-child(odd) { background:#25285a; }
@@ -86,16 +89,20 @@ body.dark .weight-slider {
 </div>
 <div id="importBanner" style="display:none; padding:8px; text-align:center;"></div>
 <div id="config" style="display:none;">
-  <label>API Key: <input type="password" id="apiKey" /></label>
-  <button id="toggleApiKey" style="display:none;">Cambiar API Key</button>
-  <label>Modelo:
+  <div class="config-controls">
+    <label for="modelSelect">Modelo</label>
     <select id="modelSelect">
       <option value="gpt-4o">GPT-4o</option>
       <option value="gpt-4">GPT-4</option>
       <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
     </select>
-  </label>
-  <button id="saveConfig">Actualizar</button>
+    <button id="toggleApiKey" type="button" style="display:none;">Cambiar API Key</button>
+    <button id="saveConfig" type="button">Actualizar</button>
+  </div>
+  <div class="api-row">
+    <label for="apiKey">API Key</label>
+    <input type="password" id="apiKey" />
+  </div>
 </div>
 <div id="weightsCard" class="card" style="display:none; max-width:420px;">
   <strong>Ponderaciones Winner Score</strong>
@@ -377,23 +384,25 @@ function ecAutoFitColumns(gridRoot) {
   gridRoot.querySelectorAll('td.ec-col-awareness select').forEach(el => el.style.width = (aw - EC_LIMITS.awareness.pad) + 'px');
   gridRoot.querySelectorAll('td.ec-col-competition select').forEach(el => el.style.width = (co - EC_LIMITS.competition.pad) + 'px');
 }
+const DEFAULT_LOCALE = 'es-ES';
+const DEFAULT_CURRENCY = 'EUR';
 const columns = [
-  { key: 'id', label: 'ID', type: 'number' },
+  { key: 'id', label: 'ID', type: 'number', headerClass: 'col-num', cellClass: 'col-num' },
   { key: 'image_url', label: 'Imagen', type: 'image' },
-  { key: 'name', label: 'Nombre', type: 'string' },
-  { key: 'category', label: 'Categoría', type: 'string' },
-  { key: 'price', label: 'Precio', type: 'number' },
-  { key: 'Product Rating', label: 'Rating', type: 'number' },
-  { key: 'Item Sold', label: 'Unidades Vendidas', type: 'number' },
-  { key: 'Revenue($)', label: 'Ingresos', type: 'number' },
-  { key: 'Creator Conversion Ratio', label: 'Tasa Conversión', type: 'string' },
-  { key: 'Launch Date', label: 'Fecha Lanzamiento', type: 'string' },
-  { key: 'Date Range', label: 'Rango Fechas', type: 'string' },
-  { key: 'desire', label: 'Desire', type: 'string', headerClass: 'ec-col ec-col-desire', cellClass: 'ec-col ec-col-desire', dataEcCol: 'desire' },
+  { key: 'name', label: 'Nombre', type: 'string', cellClass: 'col-text' },
+  { key: 'category', label: 'Categoría', type: 'string', cellClass: 'col-text' },
+  { key: 'price', label: 'Precio', type: 'number', headerClass: 'col-num', cellClass: 'col-num' },
+  { key: 'Product Rating', label: 'Rating', type: 'number', headerClass: 'col-num', cellClass: 'col-num' },
+  { key: 'Item Sold', label: 'Unidades Vendidas', type: 'number', headerClass: 'col-num', cellClass: 'col-num' },
+  { key: 'Revenue($)', label: 'Ingresos', type: 'number', headerClass: 'col-num', cellClass: 'col-num' },
+  { key: 'Creator Conversion Ratio', label: 'Tasa Conversión', type: 'string', headerClass: 'col-num', cellClass: 'col-num' },
+  { key: 'Launch Date', label: 'Fecha Lanzamiento', type: 'string', cellClass: 'col-text' },
+  { key: 'Date Range', label: 'Rango Fechas', type: 'string', cellClass: 'col-text' },
+  { key: 'desire', label: 'Desire', type: 'string', headerClass: 'ec-col ec-col-desire col-text', cellClass: 'ec-col ec-col-desire col-text', dataEcCol: 'desire' },
   { key: 'desire_magnitude', label: 'Desire magnetitude', type: 'string', headerClass: 'ec-col ec-col-desire-mag', cellClass: 'ec-col ec-col-desire-mag', dataEcCol: 'desire_magnitude' },
-  { key: 'awareness_level', label: 'Awerness Level', type: 'string', headerClass: 'ec-col ec-col-awareness', cellClass: 'ec-col ec-col-awareness', dataEcCol: 'awareness_level' },
-  { key: 'competition_level', label: 'Competition level', type: 'string', headerClass: 'ec-col ec-col-competition', cellClass: 'ec-col ec-col-competition', dataEcCol: 'competition_level' },
-  { key: 'winner_score_v2_pct', label: 'Winner Score', type: 'number' },
+  { key: 'awareness_level', label: 'Awerness Level', type: 'string', headerClass: 'ec-col ec-col-awareness col-text', cellClass: 'ec-col ec-col-awareness col-text', dataEcCol: 'awareness_level' },
+  { key: 'competition_level', label: 'Competition level', type: 'string', headerClass: 'ec-col ec-col-competition col-text', cellClass: 'ec-col ec-col-competition col-text', dataEcCol: 'competition_level' },
+  { key: 'winner_score_v2_pct', label: 'Winner Score', type: 'number', headerClass: 'col-num', cellClass: 'col-num' },
 ];
 
 let trendingWords = [];
@@ -559,9 +568,9 @@ async function loadConfig() {
     document.getElementById('modelSelect').value = cfg.model;
   }
   if (cfg.has_api_key) {
-    const apiInput = document.getElementById('apiKey');
-    apiInput.style.display = 'none';
-    document.getElementById('toggleApiKey').style.display = 'inline-block';
+    const row = document.querySelector('#config .api-row');
+    if (row) row.style.display = 'none';
+    document.getElementById('toggleApiKey').style.display = 'inline-flex';
   }
   initWeights(cfg.scoring_v2_weights);
 }
@@ -722,6 +731,7 @@ function renderTable() {
         const nameSpan = document.createElement('span');
         nameSpan.textContent = value + (fireText ? ' ' : '');
         td.appendChild(nameSpan);
+        td.title = value;
         if (fireCount > 0) {
           const fireSpan = document.createElement('span');
           fireSpan.className = 'fires';
@@ -746,6 +756,9 @@ function renderTable() {
           };
           td.appendChild(btnCopy);
         }
+      } else if (key === 'category' && value) {
+        td.textContent = value;
+        td.title = value;
       } else if (key === 'desire') {
         const input = document.createElement('input');
         input.type = 'text';
@@ -808,14 +821,19 @@ function renderTable() {
         if (isNaN(num)) {
           td.textContent = '';
         } else {
-          if (key === 'Item Sold' || key === 'Revenue($)' || key === 'Creator Number') {
+          if (key === 'price' || key === 'Revenue($)') {
+            const curr = item.currency || DEFAULT_CURRENCY;
+            const formatted = new Intl.NumberFormat(DEFAULT_LOCALE, { style: 'currency', currency: curr }).format(num);
+            td.textContent = formatted;
+          } else if (key === 'Item Sold' || key === 'Creator Number') {
             td.textContent = abbr(num);
           } else {
-            td.textContent = num.toLocaleString();
+            td.textContent = num.toLocaleString(DEFAULT_LOCALE);
           }
         }
       } else {
         td.textContent = value || '';
+        if (value) td.title = value;
       }
       tr.appendChild(td);
     });
@@ -904,7 +922,10 @@ document.getElementById('configBtn').onclick = () => {
   const btn = document.getElementById('configBtn');
   const modal = document.createElement('div');
   modal.className = 'modal';
-  modal.innerHTML = '<header class="modal-header"><h3>Configuración</h3><button class="modal-close" aria-label="Cerrar">✕</button></header><div class="modal-body"></div>';
+  modal.setAttribute('role','dialog');
+  modal.setAttribute('aria-modal','true');
+  modal.innerHTML = '<header class="modal-header"><h3 id="configModalTitle">Configuración</h3><button type="button" class="modal-close" aria-label="Cerrar">✕</button></header><div class="modal-body"></div>';
+  modal.setAttribute('aria-labelledby','configModalTitle');
   const body = modal.querySelector('.modal-body');
   const cfgParent = cfg.parentElement;
   const wParent = wcard.parentElement;
@@ -1230,9 +1251,11 @@ function parseDate(value) {
 
 // toggle API key visibility
 document.getElementById('toggleApiKey').onclick = () => {
-  const apiInput = document.getElementById('apiKey');
-  apiInput.style.display = 'inline-block';
+  const row = document.querySelector('#config .api-row');
+  if (row) row.style.display = 'flex';
   document.getElementById('toggleApiKey').style.display = 'none';
+  const input = document.getElementById('apiKey');
+  if (input) input.focus();
 };
 
 // Show overlay with larger image
