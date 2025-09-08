@@ -2029,7 +2029,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         try:
             payload = json.loads(body)
             product = payload.get("product")
-            model = payload.get("model") or "gpt-4o-mini"
+            model = payload.get("model") or "gpt-4o-mini-2024-07-18"
         except Exception:
             self._set_json(400)
             self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
@@ -2044,10 +2044,13 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"error": "No API key configured"}).encode('utf-8'))
             return
         try:
-            data, usage, duration = gpt.generate_ba_insights(api_key, model, product)
+            grid_updates, usage, duration = gpt.generate_ba_insights(api_key, model, product)
             logger.info("/api/ba/insights tokens=%s duration=%.2fs", usage.get('total_tokens'), duration)
             self._set_json()
-            self.wfile.write(json.dumps(data).encode('utf-8'))
+            self.wfile.write(json.dumps({"grid_updates": grid_updates}).encode('utf-8'))
+        except gpt.InvalidJSONError:
+            self._set_json(502)
+            self.wfile.write(json.dumps({"error": "Respuesta BA no es JSON"}).encode('utf-8'))
         except gpt.OpenAIError as exc:
             msg = str(exc)
             m = re.search(r"status (\d+)", msg)

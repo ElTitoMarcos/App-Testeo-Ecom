@@ -39,7 +39,7 @@ function updateMasterState(){
   if(btnDel) btnDel.disabled = disable;
   if(btnExp) btnExp.disabled = disable;
   if(btnAdd) btnAdd.disabled = disable;
-  if(btnBa) btnBa.disabled = selection.size !== 1;
+  if(btnBa) btnBa.disabled = disable;
   if(btnBaBatch) btnBaBatch.disabled = disable;
   if(selection.size > EC_BA_MAX_BATCH){
     if(!batchWarned){ toast.info(`Máximo ${EC_BA_MAX_BATCH} productos por lote`); batchWarned=true; }
