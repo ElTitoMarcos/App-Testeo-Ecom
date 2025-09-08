@@ -603,3 +603,41 @@ th.ec-col-competition,   td.ec-col-competition   { width: var(--ec-w-competition
 }
 @keyframes ecspin { to { transform: rotate(360deg); } }
 .ec-btn-loading{ pointer-events:none; }
+
+/* === Responsive table columns === */
+:root{
+  --col-id: clamp(44px, 4vw, 64px);
+  --col-img: clamp(110px, 12vw, 180px); /* Imagen más grande */
+}
+
+.table-wrap{
+  overflow-y: auto;
+  overflow-x: hidden; /* sin desplazamiento horizontal */
+}
+
+.products-table{
+  width: 100%;
+  table-layout: fixed;     /* necesario para que los anchos funcionen */
+  border-collapse: collapse;
+}
+
+.products-table th,
+.products-table td{
+  vertical-align: middle;
+}
+
+.truncate{
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+th.col-id,    td.col-id{    width: var(--col-id);   text-align: center; }
+th.col-img,   td.col-img{   width: var(--col-img); }
+td.col-img img{
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 100px;
+  object-fit: contain;
+}
