@@ -277,7 +277,6 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             conv_col = resolve_col(records, ["Conversion", "CR", "TasaConversion"])
 
             from datetime import datetime, date
-
             cur = conn.cursor()
             cur.execute("BEGIN")
             cur.execute("SELECT COUNT(*) FROM products")
