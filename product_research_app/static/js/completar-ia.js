@@ -4,19 +4,11 @@ const ITEM_BASE = 420;
 const ITEM_IMG = 180;
 
 async function getAllFilteredRows() {
-  if (typeof window.getAllFilteredRows === 'function') {
-    try {
-      return await window.getAllFilteredRows();
-    } catch {
-      return [];
-    }
+  const all = window.allProducts || [];
+  if (typeof window.applyCurrentFilters === 'function') {
+    return window.applyCurrentFilters(all);
   }
-  if (Array.isArray(window.products)) return window.products.slice();
-  try {
-    const res = await fetch('/products');
-    if (res.ok) return await res.json();
-  } catch {}
-  return [];
+  return Array.isArray(window.products) ? window.products.slice() : [];
 }
 
 function isEditing(pid, field) {
@@ -123,13 +115,13 @@ window.handleCompletarIA = async function() {
     if (window.toast && toast.error) toast.error('Falta API de OpenAI. Añádela en Configuración para usar IA.');
     return;
   }
-  const all = await getAllFilteredRows();
-  if (all.length === 0) {
+  const items = await getAllFilteredRows();
+  if (!items || !items.length) {
     toast.info('No hay productos en la lista actual.');
     return;
   }
-  const est = all.reduce((s, p) => s + ITEM_BASE + (p.image_url ? ITEM_IMG : 0), 800);
-  const chunks = est <= CTX_BUDGET ? [all] : splitByBudget(all);
+  const est = items.reduce((s, p) => s + ITEM_BASE + (p.image_url ? ITEM_IMG : 0), 800);
+  const chunks = est <= CTX_BUDGET ? [items] : splitByBudget(items);
   let okTotal = 0;
   let aborted = false;
   for (const ch of chunks) {
@@ -160,7 +152,7 @@ window.handleCompletarIA = async function() {
     }
   }
   if (!aborted) {
-    toast.info(`IA: ${okTotal}/${all.length} completados`);
+    toast.info(`IA: ${okTotal}/${items.length} completados`);
     updateMasterState();
   }
 };

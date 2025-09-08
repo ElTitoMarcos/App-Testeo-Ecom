@@ -24,10 +24,10 @@ function closeDrawer() {
   document.getElementById('filtersDrawer').classList.add('hidden');
 }
 
-function applyFiltersFromState() {
+function applyCurrentFilters(list) {
   const dMin = filtersState.dateMin ? parseDate(filtersState.dateMin) : null;
   const dMax = filtersState.dateMax ? parseDate(filtersState.dateMax) : null;
-  const filtered = allProducts.filter(item => {
+  return list.filter(item => {
     if (filtersState.priceMin !== null && !isNaN(filtersState.priceMin)) {
       if (item.price === null || item.price === undefined || item.price < filtersState.priceMin) return false;
     }
@@ -51,6 +51,12 @@ function applyFiltersFromState() {
     }
     return true;
   });
+}
+
+window.applyCurrentFilters = list => applyCurrentFilters(list);
+
+function applyFiltersFromState() {
+  const filtered = applyCurrentFilters(allProducts);
   // Mutate the global products array in place so renderTable sees the filtered list
   products.splice(0, products.length, ...filtered);
   window.products = products;
