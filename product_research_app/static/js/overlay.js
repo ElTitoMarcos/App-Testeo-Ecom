@@ -46,7 +46,7 @@
   }
 
   function open(content, opts={}){
-    const {onClose, returnFocus} = opts;
+    const {onClose, returnFocus, closeOnBackdrop=true} = opts;
     const root = window.ensureOverlayRoot ? window.ensureOverlayRoot() : document.body;
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay hidden';
@@ -80,7 +80,9 @@
     function escHandler(e){ if(e.key === 'Escape') close(); }
     function backdropHandler(e){ if(e.target === overlay) close(); }
 
-    overlay.addEventListener('click', backdropHandler);
+    if(closeOnBackdrop){
+      overlay.addEventListener('click', backdropHandler);
+    }
     document.addEventListener('keydown', escHandler);
 
     document.body.style.overflow = 'hidden';

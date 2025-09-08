@@ -95,7 +95,7 @@ body.dark .weight-slider {
       <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
     </select>
   </label>
-  <button id="saveConfig">Guardar configuración</button>
+  <button id="saveConfig">Actualizar</button>
 </div>
 <div id="weightsCard" class="card" style="display:none; max-width:420px;">
   <strong>Ponderaciones Winner Score</strong>
@@ -900,10 +900,29 @@ window.onload = () => {
 document.getElementById('configBtn').onclick = () => {
   const cfg = document.getElementById('config');
   const wcard = document.getElementById('weightsCard');
-  if (!cfg || !wcard) return;
-  const show = (cfg.style.display === 'none' || cfg.style.display === '') ? 'block' : 'none';
-  cfg.style.display = show;
-  wcard.style.display = show;
+  if(!cfg || !wcard || !window.modalManager) return;
+  const btn = document.getElementById('configBtn');
+  const modal = document.createElement('div');
+  modal.className = 'modal';
+  modal.innerHTML = '<header class="modal-header"><h3>Configuración</h3><button class="modal-close" aria-label="Cerrar">✕</button></header><div class="modal-body"></div>';
+  const body = modal.querySelector('.modal-body');
+  const cfgParent = cfg.parentElement;
+  const wParent = wcard.parentElement;
+  const cfgNext = cfg.nextSibling;
+  const wNext = wcard.nextSibling;
+  body.appendChild(cfg);
+  body.appendChild(wcard);
+  cfg.style.display = 'block';
+  wcard.style.display = 'block';
+  const handle = modalManager.open(modal, {returnFocus: btn, closeOnBackdrop:false, onClose: () => {
+    cfg.style.display = 'none';
+    wcard.style.display = 'none';
+    cfgParent.insertBefore(cfg, cfgNext);
+    wParent.insertBefore(wcard, wNext);
+  }});
+  modal.querySelector('.modal-close').addEventListener('click', () => handle.close());
+  const first = modal.querySelector('input,select,textarea,button');
+  if(first) first.focus();
 };
 
 
@@ -1083,21 +1102,34 @@ fileInputEl.onchange = async (ev) => {
   }
 };
 document.getElementById('saveConfig').onclick = async () => {
-  const apiInput = document.getElementById('apiKey');
-  const key = apiInput.style.display === 'none' ? '' : apiInput.value.trim();
-  const model = document.getElementById('modelSelect').value;
-  const payload = {};
-  if(key) payload.api_key = key;
-  payload.model = model;
-  const data = await fetchJson('/setconfig', {method:'POST', body: JSON.stringify(payload)});
-  if(data.error){ toast.error('Error: '+data.error); } else {
-    toast.success('Configuración guardada');
-    // hide API key input if user entered one
-    if(key){
-      apiInput.value = '';
-      apiInput.style.display = 'none';
-      document.getElementById('toggleApiKey').style.display = 'inline-block';
+  const btn = document.getElementById('saveConfig');
+  const original = 'Actualizar';
+  btn.disabled = true;
+  btn.innerHTML = '<span class="ec-spinner" aria-hidden="true"></span><span>Actualizando…</span>';
+  try {
+    const apiInput = document.getElementById('apiKey');
+    const key = apiInput.style.display === 'none' ? '' : apiInput.value.trim();
+    const model = document.getElementById('modelSelect').value;
+    const payload = {};
+    if(key) payload.api_key = key;
+    payload.model = model;
+    const data = await fetchJson('/setconfig', {method:'POST', body: JSON.stringify(payload)});
+    if(data.error){
+      toast.error('Error al actualizar');
+    } else {
+      toast.success('Actualizado', {duration:3000});
+      if(key){
+        apiInput.value = '';
+        apiInput.style.display = 'none';
+        document.getElementById('toggleApiKey').style.display = 'inline-block';
+      }
     }
+  } catch(err){
+    console.error(err);
+    toast.error('Error al actualizar');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = original;
   }
 };
 // search feature
