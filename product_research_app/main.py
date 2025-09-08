@@ -96,6 +96,7 @@ def import_data(conn: database.sqlite3.Connection) -> None:
                 price_col = find_col(headers, ["price", "precio", "cost"])
                 currency_col = find_col(headers, ["currency", "moneda"])
                 image_col = find_col(headers, ["image", "imagen", "img", "picture"])
+                date_range_col = find_col(headers, ["date range", "daterange", "fecha rango", "rango fechas"])
                 desire_col = find_col(headers, ["desire"])
                 desire_mag_col = find_col(headers, ["desire_magnitude", "desire magnitude", "magnitud_deseo"])
                 awareness_col = find_col(headers, ["awareness_level", "awareness level", "nivel_consciencia"])
@@ -111,6 +112,7 @@ def import_data(conn: database.sqlite3.Connection) -> None:
                     price_col = prompt_user("Columna para el precio (enter para inferido): ") or price_col
                     currency_col = prompt_user("Columna para la moneda (enter para inferido): ") or currency_col
                     image_col = prompt_user("Columna para la imagen (enter para inferido): ") or image_col
+                    date_range_col = prompt_user("Columna para Date Range (enter para inferido): ") or date_range_col
                     desire_col = prompt_user("Columna para Desire (enter para inferido): ") or desire_col
                     desire_mag_col = (
                         prompt_user("Columna para Desire Magnitude (enter para inferido): ")
@@ -139,6 +141,7 @@ def import_data(conn: database.sqlite3.Connection) -> None:
                             price = None
                     currency = (row.get(currency_col) or "").strip() if currency_col else None
                     image_url = (row.get(image_col) or "").strip() if image_col else None
+                    date_range = (row.get(date_range_col) or "").strip() if date_range_col else ""
                     desire = (row.get(desire_col) or "").strip() if desire_col else None
                     desire = desire or None
                     desire_mag = (row.get(desire_mag_col) or "").strip() if desire_mag_col else None
@@ -162,6 +165,7 @@ def import_data(conn: database.sqlite3.Connection) -> None:
                             desire_mag_col,
                             awareness_col,
                             competition_col,
+                            date_range_col,
                         }
                         and k.lower() not in {"product name", "source", "decision"}
                     }
@@ -173,6 +177,7 @@ def import_data(conn: database.sqlite3.Connection) -> None:
                         price=price,
                         currency=currency,
                         image_url=image_url,
+                        date_range=date_range,
                         source=source,
                         desire=desire,
                         desire_magnitude=desire_mag,
@@ -205,6 +210,14 @@ def import_data(conn: database.sqlite3.Connection) -> None:
                             continue
                 currency = item.get("currency") or item.get("moneda")
                 image_url = item.get("image") or item.get("imagen") or item.get("img")
+                date_range = (
+                    item.get("date_range")
+                    or item.get("Date Range")
+                    or item.get("DateRange")
+                    or item.get("Fecha Rango")
+                    or item.get("Rango Fechas")
+                    or ""
+                )
                 desire = item.get("desire") or item.get("desire_text")
                 desire_mag = item.get("desire_magnitude") or item.get("magnitud_deseo")
                 awareness = item.get("awareness_level") or item.get("nivel_consciencia")
@@ -250,6 +263,7 @@ def import_data(conn: database.sqlite3.Connection) -> None:
                     price=price,
                     currency=currency,
                     image_url=image_url,
+                    date_range=date_range,
                     desire=desire,
                     desire_magnitude=desire_mag,
                     awareness_level=awareness,
