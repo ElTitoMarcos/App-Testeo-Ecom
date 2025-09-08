@@ -56,6 +56,8 @@ APP_DIR = Path(__file__).resolve().parent
 DB_PATH = APP_DIR / "data.sqlite3"
 STATIC_DIR = APP_DIR / "static"
 logger = logging.getLogger(__name__)
+DEFAULT_CURRENCY = "EUR"
+DEFAULT_LOCALE = "es-ES"
 
 # Heuristic scoring for offline evaluation.
 def offline_evaluate(product: dict) -> dict:
@@ -301,7 +303,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             name_col = find_key(headers, ["name", "productname", "title", "product", "producto"])
             desc_col = find_key(headers, ["description", "descripcion", "desc"])
             cat_col = find_key(headers, ["category", "categoria", "niche", "segment"])
-            curr_col = find_key(headers, ["currency", "moneda"])
+            curr_col = find_key(headers, ["currency", "moneda", "currencycode"])
 
             cur = conn.cursor()
             cur.execute("BEGIN")
@@ -325,6 +327,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                     except Exception:
                         price = None
                 currency = (row.get(curr_col) or '').strip() if curr_col else None
+                currency = currency or DEFAULT_CURRENCY
                 image_url = (row.get(img_col) or '').strip() if img_col else None
 
                 extras = {}
@@ -640,6 +643,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "name": p["name"],
                     "category": p["category"],
                     "price": p["price"],
+                    "currency": p["currency"] or DEFAULT_CURRENCY,
                     "image_url": p["image_url"],
                     "desire": p["desire"],
                     "desire_magnitude": p["desire_magnitude"],
@@ -1148,7 +1152,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 description=data.get("description"),
                 category=data.get("category"),
                 price=data.get("price"),
-                currency=data.get("currency"),
+                currency=data.get("currency") or DEFAULT_CURRENCY,
                 image_url=data.get("image_url"),
                 source=data.get("source"),
                 desire=data.get("desire"),
@@ -1379,7 +1383,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 desc_col = find_key(headers, ["description", "descripcion", "desc"])
                 cat_col = find_key(headers, ["category", "categoria", "cat"])
                 price_col = find_key(headers, ["price", "precio", "cost", "unitprice"])
-                curr_col = find_key(headers, ["currency", "moneda"])
+                curr_col = find_key(headers, ["currency", "moneda", "currencycode"])
                 img_col = find_key(headers, ["image", "imagen", "img", "picture", "imgurl"])
                 desire_col = find_key(headers, ["desire", "deseo"])
                 desire_mag_col = find_key(headers, ["desiremagnitude", "desiremag", "magnituddeseo"])
@@ -1417,6 +1421,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         except ValueError:
                             price = None
                     currency = (row.get(curr_col) or '').strip() if curr_col else None
+                    currency = currency or DEFAULT_CURRENCY
                     image_url = (row.get(img_col) or '').strip() if img_col else None
                     desire = (row.get(desire_col) or '').strip() if desire_col else None
                     desire = desire or None
@@ -1506,7 +1511,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         desc_key = find_key(keys, ["description", "descripcion", "desc"])
                         category_key = find_key(keys, ["category", "categoria", "cat"])
                         price_key = find_key(keys, ["price", "precio", "cost", "unitprice"])
-                        currency_key = find_key(keys, ["currency", "moneda"])
+                        currency_key = find_key(keys, ["currency", "moneda", "currencycode"])
                         image_key = find_key(keys, ["image", "imagen", "img", "picture", "imgurl"])
                         description = item.get(desc_key) if desc_key else None
                         category = item.get(category_key) if category_key else None
@@ -1517,6 +1522,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                             except Exception:
                                 price = None
                         currency = item.get(currency_key) if currency_key else None
+                        currency = str(currency).strip() if currency else None
+                        currency = currency or DEFAULT_CURRENCY
                         image_url = item.get(image_key) if image_key else None
                         desire = item.get("desire") or item.get("desire_text")
                         desire_mag = item.get("desire_magnitude") or item.get("magnitud_deseo")
@@ -1692,7 +1699,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         desc_key = find_key(keys, ["description", "descripcion", "desc"])
                         category_key = find_key(keys, ["category", "categoria", "cat"])
                         price_key = find_key(keys, ["price", "precio", "cost", "unitprice"])
-                        currency_key = find_key(keys, ["currency", "moneda"])
+                        currency_key = find_key(keys, ["currency", "moneda", "currencycode"])
                         image_key = find_key(keys, ["image", "imagen", "img", "picture", "imgurl"])
                         description = item.get(desc_key) if desc_key else None
                         category = item.get(category_key) if category_key else None
@@ -1703,6 +1710,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                             except Exception:
                                 price = None
                         currency = item.get(currency_key) if currency_key else None
+                        currency = str(currency).strip() if currency else None
+                        currency = currency or DEFAULT_CURRENCY
                         image_url = item.get(image_key) if image_key else None
                         desire = item.get("desire") or item.get("desire_text")
                         desire_mag = item.get("desire_magnitude") or item.get("magnitud_deseo")
@@ -1844,7 +1853,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                                 description=desc,
                                 category=cat,
                                 price=price_val,
-                                currency=None,
+                                currency=DEFAULT_CURRENCY,
                                 image_url=str(tmp_path),
                                 source=filename,
                                 extra={},
