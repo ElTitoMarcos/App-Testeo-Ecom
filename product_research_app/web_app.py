@@ -1048,6 +1048,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/api/ba/insights":
             self.handle_ba_insights()
             return
+        if path == "/api/ia/batch-columns":
+            self.handle_ia_batch_columns()
+            return
         if path == "/auto_weights":
             self.handle_auto_weights()
             return
@@ -2095,6 +2098,36 @@ class RequestHandler(BaseHTTPRequestHandler):
             logger.info("/api/ba/insights tokens=%s duration=%.2fs", usage.get('total_tokens'), duration)
             self._set_json()
             self.wfile.write(json.dumps({"grid_updates": grid_updates}).encode('utf-8'))
+        except gpt.InvalidJSONError:
+            self._set_json(502)
+            self.wfile.write(json.dumps({"error": "Respuesta IA no es JSON"}).encode('utf-8'))
+        except Exception:
+            self._set_json(503)
+            self.wfile.write(json.dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
+
+    def handle_ia_batch_columns(self):
+        length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(length).decode('utf-8')
+        try:
+            payload = json.loads(body)
+            items = payload.get("items")
+            model = payload.get("model") or "gpt-4o-mini-2024-07-18"
+            if not isinstance(items, list):
+                raise ValueError
+        except Exception:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+            return
+        api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
+        if not api_key:
+            self._set_json(503)
+            self.wfile.write(json.dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
+            return
+        try:
+            ok, ko, usage, duration = gpt.generate_batch_columns(api_key, model, items)
+            logger.info("/api/ia/batch-columns tokens=%s duration=%.2fs", usage.get('total_tokens'), duration)
+            self._set_json()
+            self.wfile.write(json.dumps({"ok": ok, "ko": ko}).encode('utf-8'))
         except gpt.InvalidJSONError:
             self._set_json(502)
             self.wfile.write(json.dumps({"error": "Respuesta IA no es JSON"}).encode('utf-8'))
