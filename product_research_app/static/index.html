@@ -34,8 +34,8 @@ tbody tr:hover {
   transform: translateY(-2px);
   transition: box-shadow 0.2s, transform 0.2s;
 }
-#importBanner { background:#fff8e1; color:#665c00; }
-body.dark #importBanner { background:#665c00; color:#fff; }
+#importBanner { background:rgba(122,83,214,0.2); color:#7a53d6; border:1px solid rgba(122,83,214,0.3); }
+body.dark #importBanner { background:rgba(122,83,214,0.2); color:#c9b9f3; border:1px solid rgba(122,83,214,0.4); }
 /* History & Details */
 #history details { margin-bottom:8px; }
 details summary { cursor:pointer; font-weight:600; color:#0062ff; }
@@ -95,7 +95,7 @@ body.dark .weight-slider {
       <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
     </select>
   </label>
-  <button id="saveConfig">Guardar configuración</button>
+  <button id="saveConfig">Actualizar</button>
 </div>
 <div id="weightsCard" class="card" style="display:none; max-width:420px;">
   <strong>Ponderaciones Winner Score</strong>
@@ -235,7 +235,7 @@ window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
 let importPollTimer = null;
 
-function showImportBanner(msg = 'Importando… puedes cerrar esta ventana; seguiremos procesando.') {
+function showImportBanner(msg = 'Importando productos, espera…') {
   const b = document.getElementById('importBanner');
   if (!b) return;
   b.textContent = msg;
@@ -592,15 +592,28 @@ function isTrending(name) {
   return words.some(w => trendingWords.includes(w));
 }
 
-async function fetchProducts() {
+async function fetchProducts(preserve=true) {
+  const prevSel = new Set(selection);
   const data = await fetchJson('/products');
-  // keep a copy of all products for filtering
   allProducts = data;
   preprocessProducts(allProducts);
+  allProducts.sort((a,b)=> (Number(a.id)||0) - (Number(b.id)||0));
+  sortField = 'id';
+  sortDir = 1;
   products = [...allProducts];
   window.allProducts = allProducts;
   window.products = products;
+  if (typeof filtersState !== 'undefined' && preserve) {
+    applyFiltersFromState();
+  } else {
+    renderTable();
+  }
+  const visibleIds = new Set(products.map(p => String(p.id)));
   selection.clear();
+  for (const id of prevSel) {
+    if (visibleIds.has(id)) selection.add(id);
+  }
+  updateMasterState();
   renderTable();
 }
 
@@ -887,10 +900,29 @@ window.onload = () => {
 document.getElementById('configBtn').onclick = () => {
   const cfg = document.getElementById('config');
   const wcard = document.getElementById('weightsCard');
-  if (!cfg || !wcard) return;
-  const show = (cfg.style.display === 'none' || cfg.style.display === '') ? 'block' : 'none';
-  cfg.style.display = show;
-  wcard.style.display = show;
+  if(!cfg || !wcard || !window.modalManager) return;
+  const btn = document.getElementById('configBtn');
+  const modal = document.createElement('div');
+  modal.className = 'modal';
+  modal.innerHTML = '<header class="modal-header"><h3>Configuración</h3><button class="modal-close" aria-label="Cerrar">✕</button></header><div class="modal-body"></div>';
+  const body = modal.querySelector('.modal-body');
+  const cfgParent = cfg.parentElement;
+  const wParent = wcard.parentElement;
+  const cfgNext = cfg.nextSibling;
+  const wNext = wcard.nextSibling;
+  body.appendChild(cfg);
+  body.appendChild(wcard);
+  cfg.style.display = 'block';
+  wcard.style.display = 'block';
+  const handle = modalManager.open(modal, {returnFocus: btn, closeOnBackdrop:false, onClose: () => {
+    cfg.style.display = 'none';
+    wcard.style.display = 'none';
+    cfgParent.insertBefore(cfg, cfgNext);
+    wParent.insertBefore(wcard, wNext);
+  }});
+  modal.querySelector('.modal-close').addEventListener('click', () => handle.close());
+  const first = modal.querySelector('input,select,textarea,button');
+  if(first) first.focus();
 };
 
 
@@ -1070,21 +1102,34 @@ fileInputEl.onchange = async (ev) => {
   }
 };
 document.getElementById('saveConfig').onclick = async () => {
-  const apiInput = document.getElementById('apiKey');
-  const key = apiInput.style.display === 'none' ? '' : apiInput.value.trim();
-  const model = document.getElementById('modelSelect').value;
-  const payload = {};
-  if(key) payload.api_key = key;
-  payload.model = model;
-  const data = await fetchJson('/setconfig', {method:'POST', body: JSON.stringify(payload)});
-  if(data.error){ toast.error('Error: '+data.error); } else {
-    toast.success('Configuración guardada');
-    // hide API key input if user entered one
-    if(key){
-      apiInput.value = '';
-      apiInput.style.display = 'none';
-      document.getElementById('toggleApiKey').style.display = 'inline-block';
+  const btn = document.getElementById('saveConfig');
+  const original = 'Actualizar';
+  btn.disabled = true;
+  btn.innerHTML = '<span class="ec-spinner" aria-hidden="true"></span><span>Actualizando…</span>';
+  try {
+    const apiInput = document.getElementById('apiKey');
+    const key = apiInput.style.display === 'none' ? '' : apiInput.value.trim();
+    const model = document.getElementById('modelSelect').value;
+    const payload = {};
+    if(key) payload.api_key = key;
+    payload.model = model;
+    const data = await fetchJson('/setconfig', {method:'POST', body: JSON.stringify(payload)});
+    if(data.error){
+      toast.error('Error al actualizar');
+    } else {
+      toast.success('Actualizado', {duration:3000});
+      if(key){
+        apiInput.value = '';
+        apiInput.style.display = 'none';
+        document.getElementById('toggleApiKey').style.display = 'inline-block';
+      }
     }
+  } catch(err){
+    console.error(err);
+    toast.error('Error al actualizar');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = original;
   }
 };
 // search feature
