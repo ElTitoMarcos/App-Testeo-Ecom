@@ -86,16 +86,20 @@ body.dark .weight-slider {
 </div>
 <div id="importBanner" style="display:none; padding:8px; text-align:center;"></div>
 <div id="config" style="display:none;">
-  <label>API Key: <input type="password" id="apiKey" /></label>
-  <button id="toggleApiKey" style="display:none;">Cambiar API Key</button>
-  <label>Modelo:
+  <div class="config-controls">
+    <label for="modelSelect">Modelo</label>
     <select id="modelSelect">
       <option value="gpt-4o">GPT-4o</option>
       <option value="gpt-4">GPT-4</option>
       <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
     </select>
-  </label>
-  <button id="saveConfig">Actualizar</button>
+    <button id="toggleApiKey" type="button" style="display:none;">Cambiar API Key</button>
+    <button id="saveConfig" type="button">Actualizar</button>
+  </div>
+  <div class="api-row">
+    <label for="apiKey">API Key</label>
+    <input type="password" id="apiKey" />
+  </div>
 </div>
 <div id="weightsCard" class="card" style="display:none; max-width:420px;">
   <strong>Ponderaciones Winner Score</strong>
@@ -559,9 +563,9 @@ async function loadConfig() {
     document.getElementById('modelSelect').value = cfg.model;
   }
   if (cfg.has_api_key) {
-    const apiInput = document.getElementById('apiKey');
-    apiInput.style.display = 'none';
-    document.getElementById('toggleApiKey').style.display = 'inline-block';
+    const row = document.querySelector('#config .api-row');
+    if (row) row.style.display = 'none';
+    document.getElementById('toggleApiKey').style.display = 'inline-flex';
   }
   initWeights(cfg.scoring_v2_weights);
 }
@@ -904,7 +908,10 @@ document.getElementById('configBtn').onclick = () => {
   const btn = document.getElementById('configBtn');
   const modal = document.createElement('div');
   modal.className = 'modal';
-  modal.innerHTML = '<header class="modal-header"><h3>Configuración</h3><button class="modal-close" aria-label="Cerrar">✕</button></header><div class="modal-body"></div>';
+  modal.setAttribute('role','dialog');
+  modal.setAttribute('aria-modal','true');
+  modal.innerHTML = '<header class="modal-header"><h3 id="configModalTitle">Configuración</h3><button type="button" class="modal-close" aria-label="Cerrar">✕</button></header><div class="modal-body"></div>';
+  modal.setAttribute('aria-labelledby','configModalTitle');
   const body = modal.querySelector('.modal-body');
   const cfgParent = cfg.parentElement;
   const wParent = wcard.parentElement;
@@ -1230,9 +1237,11 @@ function parseDate(value) {
 
 // toggle API key visibility
 document.getElementById('toggleApiKey').onclick = () => {
-  const apiInput = document.getElementById('apiKey');
-  apiInput.style.display = 'inline-block';
+  const row = document.querySelector('#config .api-row');
+  if (row) row.style.display = 'flex';
   document.getElementById('toggleApiKey').style.display = 'none';
+  const input = document.getElementById('apiKey');
+  if (input) input.focus();
 };
 
 // Show overlay with larger image

@@ -28,7 +28,7 @@
 // Simple modal manager with stacking
 (function(){
   const stack = [];
-  const BASE_Z = 1000;
+  const BASE_Z = 2000;
 
   function trapFocus(container){
     const focusable = container.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
