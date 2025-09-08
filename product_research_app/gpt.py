@@ -660,6 +660,94 @@ def generate_ba_insights(api_key: str, model: str, product: Dict[str, Any]) -> T
     return norm, usage, duration
 
 
+def generate_batch_columns(api_key: str, model: str, items: List[Dict[str, Any]]) -> Tuple[Dict[str, Any], Dict[str, str], Dict[str, Any], float]:
+    sys_msg = (
+        "Eres un analista de marketing. Aplica marcos de Breakthrough Advertising sin citar texto. "
+        "Devuelve exclusivamente un JSON cuyas claves son los IDs de producto, y cuyos valores incluyen: "
+        "desire (string), desire_magnitude (Low|Medium|High), awareness_level (Unaware|Problem-Aware|Solution-Aware|Product-Aware|Most Aware), "
+        "competition_level (Low|Medium|High). No devuelvas comentarios, ni Markdown, ni bloques de código."
+    )
+
+    intro_text = (
+        "Responde SOLO con un JSON.\n"
+        "Raíz: objeto cuyas claves son IDs de producto (string o número).\n"
+        "Por cada ID: { \"desire\": string,\n"
+        "               \"desire_magnitude\": \"Low|Medium|High\",\n"
+        "               \"awareness_level\": \"Unaware|Problem-Aware|Solution-Aware|Product-Aware|Most Aware\",\n"
+        "               \"competition_level\": \"Low|Medium|High\" }.\n"
+    )
+
+    content: List[Dict[str, Any]] = [{"type": "text", "text": intro_text}]
+    for it in items:
+        lines = [
+            "BEGIN_PRODUCT",
+            f"id: {it.get('id')}",
+            f"name: {it.get('name')}",
+            f"category: {it.get('category')}",
+            f"price: {it.get('price')}",
+            f"rating: {it.get('rating')}",
+            f"units_sold: {it.get('units_sold')}",
+            f"revenue: {it.get('revenue')}",
+            f"conversion_rate: {it.get('conversion_rate')}",
+            f"launch_date: {it.get('launch_date')}",
+            f"date_range: {it.get('date_range')}",
+        ]
+        url = (it.get("image_url") or "").strip()
+        if not re.match(r"^https?://", url):
+            if url:
+                lines.append(f"image_url: {url}")
+        lines.append("END_PRODUCT")
+        content.append({"type": "text", "text": "\n".join(lines)})
+        if url and re.match(r"^https?://", url):
+            content.append({"type": "image_url", "image_url": {"url": url}})
+
+    messages = [
+        {"role": "system", "content": sys_msg},
+        {"role": "user", "content": content},
+    ]
+
+    start = time.time()
+    resp = call_openai_chat(
+        api_key,
+        model,
+        messages,
+        temperature=0.2,
+        response_format={"type": "json_object"},
+    )
+    duration = time.time() - start
+    usage = resp.get("usage", {})
+
+    try:
+        raw = resp["choices"][0]["message"]["content"].strip()
+        if raw.startswith("```") and raw.endswith("```"):
+            raw = re.sub(r"^```[a-zA-Z]*\n?", "", raw)
+            raw = re.sub(r"\n?```$", "", raw)
+        data = json.loads(raw)
+    except Exception as exc:
+        logger.error("Respuesta IA no es JSON: %s", resp)
+        raise InvalidJSONError("Respuesta IA no es JSON") from exc
+
+    if not isinstance(data, dict):
+        raise InvalidJSONError("Respuesta IA no es JSON")
+
+    ok: Dict[str, Dict[str, Any]] = {}
+    ko: Dict[str, str] = {}
+    for it in items:
+        pid = str(it.get("id"))
+        entry = data.get(pid)
+        if not isinstance(entry, dict):
+            ko[pid] = "missing"
+            continue
+        ok[pid] = {
+            "desire": entry.get("desire"),
+            "desire_magnitude": _norm_tri(entry.get("desire_magnitude")),
+            "awareness_level": _norm_awareness(entry.get("awareness_level")),
+            "competition_level": _norm_tri(entry.get("competition_level")),
+        }
+
+    return ok, ko, usage, duration
+
+
 # ---------------- Winner Score v2 evaluation -----------------
 
 

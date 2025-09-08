@@ -1,5 +1,17 @@
-const EC_BA_CONCURRENCY = 3;
-const btn = document.getElementById('btn-completar-ia');
+const EC_BATCH_SIZE = 10;
+const EC_MODEL = "gpt-4o-mini-2024-07-18";
+let EC_IA_LOADING = false;
+
+function getAllFilteredRows() {
+  if (typeof window.getAllFilteredRows === 'function') {
+    try {
+      return window.getAllFilteredRows();
+    } catch {
+      return [];
+    }
+  }
+  return Array.isArray(window.products) ? window.products.slice() : [];
+}
 
 function isEditing(pid, field) {
   const active = document.activeElement;
@@ -44,73 +56,86 @@ function applyUpdates(product, updates) {
   return applied;
 }
 
-async function processProduct(product) {
-  const payload = {
-    id: product.id,
-    name: product.name,
-    category: product.category,
-    price: product.price,
-    rating: product.rating,
-    units_sold: product.units_sold,
-    revenue: product.revenue,
-    conversion_rate: product.conversion_rate,
-    launch_date: product.launch_date,
-    date_range: product.date_range,
-    image_url: product.image_url || null,
-    desire: product.desire,
-    desire_magnitude: product.desire_magnitude,
-    awareness_level: product.awareness_level,
-    competition_level: product.competition_level
-  };
-  try {
-    const res = await fetch('/api/ba/insights', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ product: payload, model: 'gpt-4o-mini-2024-07-18' })
-    });
-    if (!res.ok) {
-      let msg = res.statusText;
-      try { const err = await res.json(); if (err.error) msg = err.error; } catch {}
-      throw new Error(msg);
-    }
-    const data = await res.json();
-    applyUpdates(product, data.grid_updates || {});
-    toast.success(`Completado ID ${product.id}`, { duration: 2000 });
-    return true;
-  } catch (e) {
-    const msg = e && e.message ? e.message : 'Error';
-    toast.error(`Falló ID ${product.id}: ${msg}`, { duration: 2000 });
-    return false;
-  }
+function applyBatchGridUpdates(okMap) {
+  const ids = Object.keys(okMap || {});
+  ids.forEach(id => {
+    const product = (window.products || []).find(p => String(p.id) === String(id));
+    if (product) applyUpdates(product, okMap[id]);
+  });
+  return ids.length;
 }
 
-async function runQueue(products) {
-  let ok = 0;
-  const total = products.length;
-  const queue = products.slice();
-  async function worker() {
-    while (queue.length) {
-      const p = queue.shift();
-      if (await processProduct(p)) ok++;
-    }
+async function handleCompletarIA(){
+  if (EC_IA_LOADING) return;
+  EC_IA_LOADING = true;
+  const btn = document.getElementById('btn-completar-ia');
+  if (btn){
+    btn.disabled = true;
+    btn.setAttribute('aria-disabled','true');
+    btn.setAttribute('aria-busy','true');
+    btn.dataset.label = btn.dataset.label || btn.textContent.trim();
+    btn.innerHTML = '<span class="ec-spinner" aria-hidden="true"></span><span>Cargando…</span>';
   }
-  const workers = [];
-  for (let i = 0; i < EC_BA_CONCURRENCY; i++) workers.push(worker());
-  await Promise.all(workers);
-  toast.info(`IA: ${ok}/${total}`);
-}
-
-if (btn) {
-  btn.addEventListener('click', async () => {
-    if (selection.size === 0) {
-      toast.info('Selecciona al menos un producto');
+  try{
+    const items = await getAllFilteredRows();
+    if (!items || !items.length){
+      toast.info('No hay productos en la lista actual.');
       return;
     }
-    btn.disabled = true;
-    const ids = Array.from(selection);
-    const products = ids.map(id => (window.products || []).find(p => String(p.id) === id)).filter(Boolean);
-    await runQueue(products);
-    btn.disabled = false;
-    updateMasterState();
-  });
+    const CHUNK = window.EC_BATCH_SIZE || EC_BATCH_SIZE;
+    let okTotal = 0, koTotal = 0;
+    for (let i=0; i<items.length; i+=CHUNK){
+      const slice = items.slice(i, i+CHUNK);
+      const payload = slice.map(p => ({
+        id: p.id,
+        name: p.name,
+        category: p.category,
+        price: p.price,
+        rating: p.rating,
+        units_sold: p.units_sold,
+        revenue: p.revenue,
+        conversion_rate: p.conversion_rate,
+        launch_date: p.launch_date,
+        date_range: p.date_range,
+        image_url: (p.image_url && /^https?:/i.test(p.image_url)) ? p.image_url : null
+      }));
+      const res = await fetch('/api/ia/batch-columns', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ model: window.EC_MODEL || EC_MODEL, items: payload })
+      });
+      if (!res.ok){
+        koTotal += slice.length;
+        toast.error(`IA lote falló (${res.status})`);
+        continue;
+      }
+      let data;
+      try { data = await res.json(); } catch { data = null; }
+      if (!data){
+        koTotal += slice.length;
+        toast.error('IA lote: JSON inválido');
+        continue;
+      }
+      const oks = Object.keys(data.ok || {});
+      const kos = Object.keys(data.ko || {});
+      okTotal += applyBatchGridUpdates(data.ok);
+      koTotal += kos.length;
+      toast.info(`IA lote: +${oks.length} / ${slice.length} (fallos ${kos.length})`);
+    }
+    toast.success(`IA: ${okTotal}/${items.length} completados`);
+    if (typeof updateMasterState === 'function') updateMasterState();
+  } catch(err){
+    console.error(err);
+    toast.error('IA: error inesperado');
+  } finally {
+    if (btn){
+      btn.disabled = false;
+      btn.removeAttribute('aria-disabled');
+      btn.removeAttribute('aria-busy');
+      btn.innerHTML = btn.dataset.label || 'Completar columnas (IA)';
+    }
+    EC_IA_LOADING = false;
+  }
 }
+
+document.getElementById('btn-completar-ia')?.addEventListener('click', handleCompletarIA);
