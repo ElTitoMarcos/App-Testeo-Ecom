@@ -2040,8 +2040,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
         if not api_key:
-            self._set_json(401)
-            self.wfile.write(json.dumps({"error": "No API key configured"}).encode('utf-8'))
+            self._set_json(503)
+            self.wfile.write(json.dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
             return
         try:
             grid_updates, usage, duration = gpt.generate_ba_insights(api_key, model, product)
