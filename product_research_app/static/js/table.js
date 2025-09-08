@@ -1,6 +1,4 @@
 const selection = new Set();
-const EC_BA_MAX_BATCH = 100;
-let batchWarned = false;
 let currentPageIds = [];
 let master = null;
 const bottomBar = document.getElementById('bottomBar');
@@ -34,16 +32,11 @@ function updateMasterState(){
   const btnDel = document.getElementById('btnDelete');
   const btnExp = document.getElementById('btnExport');
   const btnAdd = document.getElementById('btnAddToGroup');
-  const btnBa = document.getElementById('btn-ba-gpt');
-  const btnBaBatch = document.getElementById('btn-ba-batch');
+  const btnIA = document.getElementById('btn-completar-ia');
   if(btnDel) btnDel.disabled = disable;
   if(btnExp) btnExp.disabled = disable;
   if(btnAdd) btnAdd.disabled = disable;
-  if(btnBa) btnBa.disabled = disable;
-  if(btnBaBatch) btnBaBatch.disabled = disable;
-  if(selection.size > EC_BA_MAX_BATCH){
-    if(!batchWarned){ toast.info(`Máximo ${EC_BA_MAX_BATCH} productos por lote`); batchWarned=true; }
-  } else { batchWarned=false; }
+  if(btnIA) btnIA.disabled = disable;
   if(bottomBar){
     const selEl = document.getElementById('selCount');
     if(selEl) selEl.textContent = `${selection.size} seleccionados`;
