@@ -78,7 +78,6 @@ body.dark .weight-slider {
     <button id="createListBtn">Crear</button>
     <textarea id="gptPrompt" rows="1" maxlength="2000" placeholder="Escribe consulta para GPT..." aria-label="Escribe consulta para GPT..."></textarea>
     <button id="sendPrompt">Enviar consulta a GPT</button>
-    <button id="btn-completar-ia">Completar columnas (IA)</button>
     <div id="searchRowRight">
       <div id="listMeta">0 resultados</div>
     </div>
@@ -280,7 +279,7 @@ async function pollImportStatus(id) {
           toast.success(`IA aplicada a ${done}/${total}. ${skipped} omitidos (ya tenían valor).`);
         }
         if (data.ai_error) {
-          toast.info('No se pudieron completar las columnas con IA: revisa la API o ejecútalo desde ‘Completar columnas (IA)’.');
+          toast.info('No se pudieron completar las columnas con IA: revisa la API.');
         }
         const errDef = counts.n_error_definitivo || 0;
         const cost = counts.cost_estimated_usd;
@@ -1139,7 +1138,7 @@ fileInputEl.onchange = async (ev) => {
       toast.error('Error: '+data.error);
     } else {
       if(data.ai_error){
-        toast.info('No se pudieron completar las columnas con IA: revisa la API o inténtalo desde “Completar columnas (IA)”.');
+        toast.info('No se pudieron completar las columnas con IA: revisa la API.');
       }
       if(data.inserted){
         fetchProducts();
