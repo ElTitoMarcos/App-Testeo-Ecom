@@ -1,5 +1,17 @@
-const EC_BA_CONCURRENCY = 3;
+const EC_BATCH_SIZE = 10;
+const EC_MODEL = "gpt-4o-mini-2024-07-18";
 const btn = document.getElementById('btn-completar-ia');
+
+function getAllFilteredRows() {
+  if (typeof window.getAllFilteredRows === 'function') {
+    try {
+      return window.getAllFilteredRows();
+    } catch {
+      return [];
+    }
+  }
+  return Array.isArray(window.products) ? window.products.slice() : [];
+}
 
 function isEditing(pid, field) {
   const active = document.activeElement;
@@ -44,73 +56,75 @@ function applyUpdates(product, updates) {
   return applied;
 }
 
-async function processProduct(product) {
-  const payload = {
-    id: product.id,
-    name: product.name,
-    category: product.category,
-    price: product.price,
-    rating: product.rating,
-    units_sold: product.units_sold,
-    revenue: product.revenue,
-    conversion_rate: product.conversion_rate,
-    launch_date: product.launch_date,
-    date_range: product.date_range,
-    image_url: product.image_url || null,
-    desire: product.desire,
-    desire_magnitude: product.desire_magnitude,
-    awareness_level: product.awareness_level,
-    competition_level: product.competition_level
-  };
-  try {
-    const res = await fetch('/api/ba/insights', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ product: payload, model: 'gpt-4o-mini-2024-07-18' })
-    });
-    if (!res.ok) {
-      let msg = res.statusText;
-      try { const err = await res.json(); if (err.error) msg = err.error; } catch {}
-      throw new Error(msg);
-    }
-    const data = await res.json();
-    applyUpdates(product, data.grid_updates || {});
-    toast.success(`Completado ID ${product.id}`, { duration: 2000 });
-    return true;
-  } catch (e) {
-    const msg = e && e.message ? e.message : 'Error';
-    toast.error(`Falló ID ${product.id}: ${msg}`, { duration: 2000 });
-    return false;
-  }
+function chunkArray(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
 }
 
-async function runQueue(products) {
-  let ok = 0;
-  const total = products.length;
-  const queue = products.slice();
-  async function worker() {
-    while (queue.length) {
-      const p = queue.shift();
-      if (await processProduct(p)) ok++;
-    }
+async function processBatch(items) {
+  const res = await fetch('/api/ia/batch-columns', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: EC_MODEL, items })
+  });
+  if (!res.ok) {
+    let msg = res.statusText;
+    try { const err = await res.json(); if (err.error) msg = err.error; } catch {}
+    throw new Error(msg);
   }
-  const workers = [];
-  for (let i = 0; i < EC_BA_CONCURRENCY; i++) workers.push(worker());
-  await Promise.all(workers);
-  toast.info(`IA: ${ok}/${total}`);
+  const data = await res.json();
+  let ok = 0;
+  let ko = 0;
+  const okMap = data.ok || {};
+  const koMap = data.ko || {};
+  Object.keys(okMap).forEach(id => {
+    const product = (window.products || []).find(p => String(p.id) === String(id));
+    if (product) {
+      applyUpdates(product, okMap[id]);
+      ok++;
+    } else {
+      ko++;
+    }
+  });
+  ko += Object.keys(koMap).length;
+  return { ok, ko };
 }
 
 if (btn) {
   btn.addEventListener('click', async () => {
-    if (selection.size === 0) {
-      toast.info('Selecciona al menos un producto');
+    const all = getAllFilteredRows();
+    if (all.length === 0) {
+      toast.info('No hay productos');
       return;
     }
     btn.disabled = true;
-    const ids = Array.from(selection);
-    const products = ids.map(id => (window.products || []).find(p => String(p.id) === id)).filter(Boolean);
-    await runQueue(products);
+    let okTotal = 0;
+    const chunks = chunkArray(all, EC_BATCH_SIZE);
+    for (const ch of chunks) {
+      const payload = ch.map(p => ({
+        id: p.id,
+        name: p.name,
+        category: p.category,
+        price: p.price,
+        rating: p.rating,
+        units_sold: p.units_sold,
+        revenue: p.revenue,
+        conversion_rate: p.conversion_rate,
+        launch_date: p.launch_date,
+        date_range: p.date_range,
+        image_url: p.image_url || null
+      }));
+      try {
+        const { ok, ko } = await processBatch(payload);
+        okTotal += ok;
+        toast.info(`IA lote: +${ok} / ${payload.length} (fallos ${ko})`, { duration: 2000 });
+      } catch (e) {
+        toast.error(`IA lote: ${e.message}`, { duration: 2000 });
+      }
+    }
     btn.disabled = false;
+    toast.info(`IA: ${okTotal}/${all.length} completados`);
     updateMasterState();
   });
 }
