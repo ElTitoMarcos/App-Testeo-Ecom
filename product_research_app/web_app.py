@@ -1969,6 +1969,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             )
             ai_counts = res_ai.get("counts")
             pending = res_ai.get("pending_ids", [])
+    
             if res_ai.get("error"):
                 ai_err = "No se pudieron completar las columnas con IA: revisa la API o ejecútalo desde 'Completar columnas (IA)'."
         self._set_json()

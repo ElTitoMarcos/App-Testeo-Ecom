@@ -109,6 +109,7 @@ def fill_ai_columns(
     cost_estimated = (est_in / 1_000_000) * price_in + (est_out / 1_000_000) * price_out
     truncated = False
     pending_ids: List[int] = []
+
     if cost_cap_usd is not None and cost_estimated > cost_cap_usd:
         per_item_cost = ((cfg_cost.get("estTokensPerItemIn", 0) / 1_000_000) * price_in + (cfg_cost.get("estTokensPerItemOut", 0) / 1_000_000) * price_out)
         max_items = int(cost_cap_usd // per_item_cost) if per_item_cost > 0 else 0
