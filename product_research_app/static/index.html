@@ -238,6 +238,12 @@ window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
 let importPollTimer = null;
 
+function formatPrice(n) {
+  const num = parseFloat(n);
+  if (isNaN(num)) return '';
+  return '$' + num.toFixed(2).replace(/\.00$/, '');
+}
+
   function showImportBanner(msg = 'Importando productos, espera…', sub) {
     const b = document.getElementById('importBanner');
     if (!b) return;
@@ -254,7 +260,7 @@ async function pollImportStatus(id) {
   try {
     const data = await fetchJson(`/_import_status?task_id=${id}`);
     if (data.status === 'pending') {
-      showImportBanner();
+      if (data.ui_cost_message) showImportBanner(data.ui_cost_message);
       importPollTimer = setTimeout(() => pollImportStatus(id), 2000);
     } else if (data.status === 'ai') {
       const counts = data.ai_counts || {};
@@ -785,6 +791,22 @@ function renderTable() {
           };
           td.appendChild(btnCopy);
         }
+      } else if (key === 'price') {
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = value != null ? formatPrice(value) : '';
+        input.addEventListener('focus', () => {
+          input.value = input.value.replace(/[^0-9.-]+/g, '');
+        });
+        input.addEventListener('blur', async () => {
+          let raw = input.value.trim().replace(/[^0-9.-]+/g, '');
+          const num = parseFloat(raw);
+          const val = isNaN(num) ? null : num;
+          try { await fetchJson(`/products/${item.id}`, {method:'PUT', body: JSON.stringify({price: val})}); } catch(e) {}
+          item.price = val;
+          input.value = val != null ? formatPrice(val) : '';
+        });
+        td.appendChild(input);
       } else if (key === 'desire') {
         const input = document.createElement('input');
         input.type = 'text';
