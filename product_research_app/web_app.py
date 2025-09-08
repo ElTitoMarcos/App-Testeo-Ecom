@@ -57,6 +57,23 @@ DB_PATH = APP_DIR / "data.sqlite3"
 STATIC_DIR = APP_DIR / "static"
 logger = logging.getLogger(__name__)
 
+LAST_OPENAI_MISSING_LOG_TS = 0
+
+
+def require_openai(handler) -> str | None:
+    """Return API key or send 503 with throttled log."""
+    global LAST_OPENAI_MISSING_LOG_TS
+    api_key = config.get_api_key() or os.environ.get("OPENAI_API_KEY")
+    if api_key:
+        return api_key
+    handler._set_json(503)
+    handler.wfile.write(json.dumps({"error": "OPENAI_MISSING"}).encode("utf-8"))
+    now = time.time()
+    if now - LAST_OPENAI_MISSING_LOG_TS > 60:
+        logger.error("OPENAI_MISSING")
+        LAST_OPENAI_MISSING_LOG_TS = now
+    return None
+
 # Heuristic scoring for offline evaluation.
 def offline_evaluate(product: dict) -> dict:
     """
@@ -530,6 +547,14 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path.startswith("/static/"):
             rel = path[len("/static/") :]
             self._serve_static(rel)
+            return
+        if path == "/api/openai/status":
+            api_key = config.get_api_key() or os.environ.get("OPENAI_API_KEY")
+            self._set_json()
+            if api_key:
+                self.wfile.write(json.dumps({"ok": True, "provider": "openai"}).encode("utf-8"))
+            else:
+                self.wfile.write(json.dumps({"ok": False, "reason": "missing_api_key"}).encode("utf-8"))
             return
         if path == "/_import_history":
             params = parse_qs(parsed.query)
@@ -2055,12 +2080,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._set_json(400)
             self.wfile.write(json.dumps({"error": "Invalid request"}).encode('utf-8'))
             return
-        api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
-        model = config.get_model()
+        api_key = require_openai(self)
         if not api_key:
-            self._set_json(400)
-            self.wfile.write(json.dumps({"error": "No API key configured"}).encode('utf-8'))
             return
+        model = config.get_model()
         try:
             resp = gpt.call_openai_chat(api_key, model, [
                 {"role": "system", "content": "Eres un asistente útil."},
@@ -2088,10 +2111,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._set_json(400)
             self.wfile.write(json.dumps({"error": "Missing product"}).encode('utf-8'))
             return
-        api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
+        api_key = require_openai(self)
         if not api_key:
-            self._set_json(503)
-            self.wfile.write(json.dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
             return
         try:
             grid_updates, usage, duration = gpt.generate_ba_insights(api_key, model, product)
@@ -2118,10 +2139,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._set_json(400)
             self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
             return
-        api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
+        api_key = require_openai(self)
         if not api_key:
-            self._set_json(503)
-            self.wfile.write(json.dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
             return
         try:
             ok, ko, usage, duration = gpt.generate_batch_columns(api_key, model, items)

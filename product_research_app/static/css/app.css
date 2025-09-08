@@ -545,3 +545,16 @@ th.ec-col-desire,        td.ec-col-desire        { width: var(--ec-w-desire, 160
 th.ec-col-desire-mag,    td.ec-col-desire-mag    { width: var(--ec-w-desire-mag, 110px); }
 th.ec-col-awareness,     td.ec-col-awareness     { width: var(--ec-w-awareness, 160px); }
 th.ec-col-competition,   td.ec-col-competition   { width: var(--ec-w-competition, 110px); }
+
+.ec-spinner{
+  display:inline-block;
+  width:14px; height:14px;
+  margin-right:8px;
+  border:2px solid currentColor;
+  border-right-color: transparent;
+  border-radius:50%;
+  animation: ecspin .6s linear infinite;
+  vertical-align:-2px;
+}
+@keyframes ecspin { to { transform: rotate(360deg); } }
+.ec-btn-loading{ pointer-events:none; }
