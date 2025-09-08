@@ -332,8 +332,14 @@ body.dark .bottombar {
   color: #E5EAF5;
 }
 
+.table-container {
+  width: 100%;
+  overflow-x: auto;
+}
 #productTable {
   margin-bottom: 0;
+  width: 100%;
+  table-layout: fixed;
 }
 
 /* Modal base styles */
