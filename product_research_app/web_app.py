@@ -290,9 +290,9 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
         if records:
             headers = list(records[0].keys())
             # identify columns with tolerant synonyms
-            rating_col = find_key(headers, ["rating", "rate", "valoracion"])
-            units_col = find_key(headers, ["unitssold", "sold", "ventas", "orders"])
-            revenue_col = find_key(headers, ["revenue", "ingresos", "gmv", "sales"])
+            rating_col = find_key(headers, ["rating", "stars", "valoracion", "puntuacion"])
+            units_col = find_key(headers, ["unitssold", "units", "ventas", "sold"])
+            revenue_col = find_key(headers, ["revenue", "sales", "ingresos"])
             conv_col = find_key(headers, ["conversion", "cr", "tasaconversion"])
             launch_col = find_key(headers, ["launchdate", "fecha", "date", "firstseen"])
             range_col = find_key(headers, ["daterange", "rangofechas", "period", "range"])
@@ -329,14 +329,54 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
 
                 extras = {}
 
+                rating_val = None
+                if rating_col and row.get(rating_col) not in (None, ''):
+                    try:
+                        s = str(row.get(rating_col)).strip().replace(' ', '').replace(',', '.')
+                        s = re.sub(r'[^0-9.]+', '', s)
+                        if s.count('.') > 1:
+                            parts = s.split('.')
+                            s = ''.join(parts[:-1]) + '.' + parts[-1]
+                        rating_val = float(s) if s else None
+                    except Exception:
+                        rating_val = None
+                if rating_val is not None:
+                    extras['rating'] = rating_val
+                    extras['Product Rating'] = rating_val
+
+                units_val = None
+                if units_col and row.get(units_col) not in (None, ''):
+                    try:
+                        s = re.sub(r'[^0-9]+', '', str(row.get(units_col)))
+                        units_val = int(s) if s else None
+                    except Exception:
+                        units_val = None
+                if units_val is not None:
+                    extras['units_sold'] = units_val
+                    extras['Item Sold'] = units_val
+
+                revenue_val = None
+                if revenue_col and row.get(revenue_col) not in (None, ''):
+                    try:
+                        s = str(row.get(revenue_col)).strip().replace(' ', '').replace(',', '.')
+                        s = re.sub(r'[^0-9.]+', '', s)
+                        if s.count('.') > 1:
+                            parts = s.split('.')
+                            s = ''.join(parts[:-1]) + '.' + parts[-1]
+                        revenue_val = float(s) if s else None
+                    except Exception:
+                        revenue_val = None
+                if revenue_val is None and price is not None and units_val is not None:
+                    revenue_val = price * units_val
+                if revenue_val is not None:
+                    extras['revenue'] = revenue_val
+                    extras['Revenue($)'] = revenue_val
+
                 def set_extra(col, key):
                     val = row.get(col) if col else None
                     if val is not None and str(val).strip():
                         extras[key] = str(val).strip()
 
-                set_extra(rating_col, 'rating')
-                set_extra(units_col, 'units_sold')
-                set_extra(revenue_col, 'revenue')
                 set_extra(conv_col, 'conversion_rate')
                 set_extra(launch_col, 'launch_date')
                 set_extra(range_col, 'date_range')
@@ -567,6 +607,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                     extra_dict = json.loads(extra) if isinstance(extra, str) else (extra or {})
                 except Exception:
                     extra_dict = {}
+                if 'rating' in extra_dict and 'Product Rating' not in extra_dict:
+                    extra_dict['Product Rating'] = extra_dict['rating']
+                if 'units_sold' in extra_dict and 'Item Sold' not in extra_dict:
+                    extra_dict['Item Sold'] = extra_dict['units_sold']
+                if 'revenue' in extra_dict and 'Revenue($)' not in extra_dict:
+                    extra_dict['Revenue($)'] = extra_dict['revenue']
                 score_value = None
                 if score:
                     key = (
