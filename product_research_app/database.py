@@ -69,6 +69,9 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             desire_magnitude TEXT,
             awareness_level TEXT,
             competition_level TEXT,
+            rango_fechas TEXT,
+            rango_fechas_desde TEXT,
+            rango_fechas_hasta TEXT,
             extra JSON
         )
         """
@@ -89,6 +92,12 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         cur.execute("ALTER TABLE products RENAME COLUMN saturacion_mercado TO competition_level")
     elif "competition_level" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN competition_level TEXT")
+    if "rango_fechas" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN rango_fechas TEXT")
+    if "rango_fechas_desde" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN rango_fechas_desde TEXT")
+    if "rango_fechas_hasta" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN rango_fechas_hasta TEXT")
     # drop obsolete columns if present
     for obsolete in [
         "facilidad_anuncio",
@@ -195,6 +204,9 @@ def insert_product(
     desire_magnitude: Optional[str] = None,
     awareness_level: Optional[str] = None,
     competition_level: Optional[str] = None,
+    rango_fechas: Optional[str] = None,
+    rango_fechas_desde: Optional[str] = None,
+    rango_fechas_hasta: Optional[str] = None,
     extra: Optional[Dict[str, Any]] = None,
     commit: bool = True,
     product_id: Optional[int] = None,
@@ -214,6 +226,9 @@ def insert_product(
         desire_magnitude: One of 'Low', 'Medium', 'High'
         awareness_level: One of 'Unaware','Problem-Aware','Solution-Aware','Product-Aware','Most Aware'
         competition_level: One of 'Low', 'Medium', 'High'
+        rango_fechas: Display date range ("YYYY-MM-DD – YYYY-MM-DD")
+        rango_fechas_desde: ISO start date of range
+        rango_fechas_hasta: ISO end date of range
         extra: Optional dictionary of additional attributes (will be stored as JSON)
         product_id: Explicit ID for the row. If ``None`` the database assigns one.
 
@@ -244,8 +259,8 @@ def insert_product(
             INSERT INTO products (
                 id, name, description, category, price, currency, image_url, source,
                 import_date, desire, desire_magnitude, awareness_level,
-                competition_level, extra)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
+                competition_level, rango_fechas, rango_fechas_desde, rango_fechas_hasta, extra)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
             """,
             (
                 product_id,
@@ -261,6 +276,9 @@ def insert_product(
                 desire_magnitude,
                 awareness_level,
                 competition_level,
+                rango_fechas,
+                rango_fechas_desde,
+                rango_fechas_hasta,
                 json_dump(extra) if extra is not None else "{}",
             ),
         )
@@ -270,8 +288,8 @@ def insert_product(
             INSERT INTO products (
                 name, description, category, price, currency, image_url, source,
                 import_date, desire, desire_magnitude, awareness_level,
-                competition_level, extra)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
+                competition_level, rango_fechas, rango_fechas_desde, rango_fechas_hasta, extra)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
             """,
             (
                 name,
@@ -286,6 +304,9 @@ def insert_product(
                 desire_magnitude,
                 awareness_level,
                 competition_level,
+                rango_fechas,
+                rango_fechas_desde,
+                rango_fechas_hasta,
                 json_dump(extra) if extra is not None else "{}",
             ),
         )
@@ -337,6 +358,9 @@ def update_product(
         "desire_magnitude",
         "awareness_level",
         "competition_level",
+        "rango_fechas",
+        "rango_fechas_desde",
+        "rango_fechas_hasta",
     }
     data = {k: v for k, v in fields.items() if k in allowed_cols}
     if not data:
