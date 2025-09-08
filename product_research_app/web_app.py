@@ -23,6 +23,8 @@ from __future__ import annotations
 import json
 import os
 import io
+import re
+import logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
@@ -53,6 +55,7 @@ WINNER_V2_FIELDS = [
 APP_DIR = Path(__file__).resolve().parent
 DB_PATH = APP_DIR / "data.sqlite3"
 STATIC_DIR = APP_DIR / "static"
+logger = logging.getLogger(__name__)
 
 # Heuristic scoring for offline evaluation.
 def offline_evaluate(product: dict) -> dict:
@@ -994,6 +997,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/custom_gpt":
             self.handle_custom_gpt()
+            return
+        if path == "/api/ba/insights":
+            self.handle_ba_insights()
             return
         if path == "/auto_weights":
             self.handle_auto_weights()
@@ -2016,6 +2022,44 @@ class RequestHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._set_json(500)
             self.wfile.write(json.dumps({"error": str(exc)}).encode('utf-8'))
+
+    def handle_ba_insights(self):
+        length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(length).decode('utf-8')
+        try:
+            payload = json.loads(body)
+            product = payload.get("product")
+            model = payload.get("model") or "gpt-4o-mini"
+        except Exception:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+            return
+        if not isinstance(product, dict) or not product.get("id"):
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "Missing product"}).encode('utf-8'))
+            return
+        api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
+        if not api_key:
+            self._set_json(401)
+            self.wfile.write(json.dumps({"error": "No API key configured"}).encode('utf-8'))
+            return
+        try:
+            data, usage, duration = gpt.generate_ba_insights(api_key, model, product)
+            logger.info("/api/ba/insights tokens=%s duration=%.2fs", usage.get('total_tokens'), duration)
+            self._set_json()
+            self.wfile.write(json.dumps(data).encode('utf-8'))
+        except gpt.OpenAIError as exc:
+            msg = str(exc)
+            m = re.search(r"status (\d+)", msg)
+            code = int(m.group(1)) if m else 503
+            if code == 429:
+                friendly = "Límite de OpenAI alcanzado. Inténtalo de nuevo pronto."
+            elif code == 503:
+                friendly = "OpenAI no disponible. Inténtalo más tarde."
+            else:
+                friendly = msg
+            self._set_json(code)
+            self.wfile.write(json.dumps({"error": friendly}).encode('utf-8'))
 
     def handle_auto_weights(self):
         """
