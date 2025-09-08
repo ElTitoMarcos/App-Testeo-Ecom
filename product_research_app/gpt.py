@@ -389,8 +389,8 @@ def _norm_awareness(val: Optional[str]) -> str:
 
 def generate_ba_insights(api_key: str, model: str, product: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any], float]:
     sys_msg = (
-        "estratega de marketing aplicando Breakthrough Advertising; habla en español claro; "
-        "no cites el libro; devuelve únicamente JSON con el esquema abajo."
+        "Eres estratega de marketing. Aplicas Breakthrough Advertising sin citar texto. "
+        "Devuelve solo JSON con el esquema pedido. Español claro."
     )
 
     fields = [
@@ -412,9 +412,11 @@ def generate_ba_insights(api_key: str, model: str, product: Dict[str, Any]) -> T
     ]
     lines = [f"{k}: {product.get(k)}" for k in fields]
     text = (
-        "Analiza este producto con Breakthrough Advertising.\n" +
-        "\n".join(lines) +
-        "\nDevuelve JSON con recomendaciones para las 4 columnas del grid."
+        "Responde estrictamente con JSON siguiendo este esquema:\n"
+        "{ \"grid_updates\": { \"desire\": \"...\", \"desire_magnitude\": \"Low|Medium|High\", "
+        "\"awareness_level\": \"Unaware|Problem-Aware|Solution-Aware|Product-Aware|Most Aware\", "
+        "\"competition_level\": \"Low|Medium|High\" } }\n\n" +
+        "Datos del producto:\n" + "\n".join(lines)
     )
 
     content = [{"type": "text", "text": text}]
