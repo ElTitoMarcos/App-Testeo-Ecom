@@ -506,29 +506,23 @@ button.loading::after {
   to { transform: rotate(360deg); }
 }
 
-/* Columna común (solo nuevas columnas) */
+/* Solo nuevas columnas */
 .ec-col { vertical-align: middle; }
 
-/* Anchos y alineación por columna (desktop ≥1366px) */
-.ec-col-desire        { width: 200px; min-width: 200px; max-width: 260px; text-align: left;  }
-.ec-col-desire-mag    { width: 130px; min-width: 120px; max-width: 160px; text-align: center; }
-.ec-col-awareness     { width: 160px; min-width: 150px; max-width: 190px; text-align: center; }
-.ec-col-competition   { width: 130px; min-width: 120px; max-width: 160px; text-align: center; }
-
-/* Inputs/selects SOLO dentro de estas columnas */
+/* Inputs/selects compactos solo aquí */
 .ec-col-desire input,
 .ec-col-desire-mag select,
 .ec-col-awareness select,
 .ec-col-competition select {
-  width: 100%;
+  width: auto;               /* lo fijaremos por JS en px */
   height: 30px;
-  box-sizing: border-box;
+  box-sizing: content-box;
   font-size: 13px;
-  padding: 4px 8px;
-  margin: 0; /* que no empuje nada */
+  padding: 2px 8px;
+  margin: 0;
 }
 
-/* Centrado visual de selects sin afectar otros */
+/* Centrado visual en los select */
 .ec-col-desire-mag select,
 .ec-col-awareness select,
 .ec-col-competition select {
@@ -536,7 +530,7 @@ button.loading::after {
   text-align-last: center;
 }
 
-/* Evitar desbordes SOLO aquí */
+/* Evitar desbordes solo aquí */
 .ec-col-desire > *,
 .ec-col-desire-mag > *,
 .ec-col-awareness > *,
@@ -546,17 +540,8 @@ button.loading::after {
   text-overflow: ellipsis;
 }
 
-/* Breakpoints SOLO para estas columnas */
-@media (max-width: 1366px) {
-  .ec-col-desire      { width: 180px; min-width: 180px; }
-  .ec-col-desire-mag  { width: 120px; min-width: 110px; }
-  .ec-col-awareness   { width: 150px; min-width: 140px; }
-  .ec-col-competition { width: 120px; min-width: 110px; }
-}
-
-@media (max-width: 1200px) {
-  .ec-col-desire      { width: 170px; min-width: 170px; }
-  .ec-col-desire-mag  { width: 110px; min-width: 100px; }
-  .ec-col-awareness   { width: 140px; min-width: 130px; }
-  .ec-col-competition { width: 110px; min-width: 100px; }
-}
+/* Anchura de columna controlada por variables CSS (las pone JS) */
+th.ec-col-desire,        td.ec-col-desire        { width: var(--ec-w-desire, 160px); }
+th.ec-col-desire-mag,    td.ec-col-desire-mag    { width: var(--ec-w-desire-mag, 110px); }
+th.ec-col-awareness,     td.ec-col-awareness     { width: var(--ec-w-awareness, 160px); }
+th.ec-col-competition,   td.ec-col-competition   { width: var(--ec-w-competition, 110px); }
