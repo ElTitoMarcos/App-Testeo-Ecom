@@ -90,10 +90,16 @@ async function processBatch(items) {
   return { ok, ko };
 }
 
-window.handleCompletarIA = async function() {
-  const all = getAllFilteredRows();
+window.handleCompletarIA = async function(opts = {}) {
+  const ids = opts.ids;
+  let all;
+  if (ids && Array.isArray(ids)) {
+    all = (Array.isArray(window.products) ? window.products : []).filter(p => ids.includes(p.id));
+  } else {
+    all = getAllFilteredRows();
+  }
   if (all.length === 0) {
-    toast.info('No hay productos');
+    if (!opts.silent) toast.info('No hay productos');
     return;
   }
   let okTotal = 0;
@@ -112,15 +118,15 @@ window.handleCompletarIA = async function() {
       date_range: p.date_range,
       image_url: p.image_url || null
     }));
-    try {
-      const { ok, ko } = await processBatch(payload);
-      okTotal += ok;
-      toast.info(`IA lote: +${ok} / ${payload.length} (fallos ${ko})`, { duration: 2000 });
-    } catch (e) {
-      toast.error(`IA lote: ${e.message}`, { duration: 2000 });
-    }
+      try {
+        const { ok, ko } = await processBatch(payload);
+        okTotal += ok;
+        if (!opts.silent) toast.info(`IA lote: +${ok} / ${payload.length} (fallos ${ko})`, { duration: 2000 });
+      } catch (e) {
+        if (!opts.silent) toast.error(`IA lote: ${e.message}`, { duration: 2000 });
+      }
   }
-  toast.info(`IA: ${okTotal}/${all.length} completados`);
+    if (!opts.silent) toast.info(`IA: ${okTotal}/${all.length} completados`);
   updateMasterState();
 };
 
@@ -147,16 +153,16 @@ window.EC_IA = window.EC_IA || {};
     }
   };
 
-  ns.runCompletarIA = async function(){
-    if (typeof window.handleCompletarIA === 'function'){
-      return await window.handleCompletarIA({silent:true});
-    }
-    if (typeof window.runCompletarIA === 'function'){
-      return await window.runCompletarIA();
-    }
-    if (window.toast && toast.error) toast.error('No se encontró el flujo de IA.');
-    else console.error('No se encontró el flujo de IA.');
-  };
+  ns.runCompletarIA = async function(opts){
+      if (typeof window.handleCompletarIA === 'function'){
+        return await window.handleCompletarIA(opts);
+      }
+      if (typeof window.runCompletarIA === 'function'){
+        return await window.runCompletarIA(opts);
+      }
+      if (window.toast && toast.error) toast.error('No se encontró el flujo de IA.');
+      else console.error('No se encontró el flujo de IA.');
+    };
 
   ns._bound = ns._bound || null;
   ns.bindButton = function(){

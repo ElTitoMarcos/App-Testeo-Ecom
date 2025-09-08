@@ -64,6 +64,7 @@ def fill_ai_columns(
     total_requested = len(product_ids)
     skipped_existing = 0
     to_process: List[Dict[str, Any]] = []
+    selected_ids: List[int] = []
     records: Dict[str, Any] = {}
     now_ts = datetime.utcnow().isoformat()
 
@@ -82,6 +83,7 @@ def fill_ai_columns(
             extra = json.loads(rec["extra"]) if rec["extra"] else {}
         except Exception:
             extra = {}
+        selected_ids.append(rec["id"])
         item = {
             "id": rec["id"],
             "name": rec["name"],
@@ -106,11 +108,14 @@ def fill_ai_columns(
     price_out = price_map.get("output", 0.6)
     cost_estimated = (est_in / 1_000_000) * price_in + (est_out / 1_000_000) * price_out
     truncated = False
+    pending_ids: List[int] = []
+
     if cost_cap_usd is not None and cost_estimated > cost_cap_usd:
         per_item_cost = ((cfg_cost.get("estTokensPerItemIn", 0) / 1_000_000) * price_in + (cfg_cost.get("estTokensPerItemOut", 0) / 1_000_000) * price_out)
         max_items = int(cost_cap_usd // per_item_cost) if per_item_cost > 0 else 0
         to_process = to_process[:max_items]
         records = {str(it["id"]): records[str(it["id"])] for it in to_process}
+        pending_ids.extend(selected_ids[max_items:])
         count = len(to_process)
         est_in = count * cfg_cost.get("estTokensPerItemIn", 0)
         est_out = count * cfg_cost.get("estTokensPerItemOut", 0)
@@ -141,6 +146,7 @@ def fill_ai_columns(
                 "truncated": truncated,
                 "cost_estimated_usd": cost_estimated,
             },
+            "pending_ids": selected_ids,
         }
 
     batches = [to_process[i : i + cfg_batch.get("BATCH_SIZE", 10)] for i in range(0, len(to_process), cfg_batch.get("BATCH_SIZE", 10))]
@@ -215,6 +221,8 @@ def fill_ai_columns(
         truncated,
         cost_estimated,
     )
+    processed_ids = {int(pid) for pid in ok_all.keys()} | {int(pid) for pid in ko_all.keys()}
+    pending_ids.extend([it["id"] for it in to_process if it["id"] not in processed_ids])
     return {
         "ok": ok_all,
         "ko": ko_all,
@@ -228,4 +236,5 @@ def fill_ai_columns(
             "truncated": truncated,
             "cost_estimated_usd": cost_estimated,
         },
+        "pending_ids": pending_ids,
     }
