@@ -1,5 +1,5 @@
 const EC_BA_CONCURRENCY = 3;
-const btn = document.getElementById('btn-ba-gpt');
+const btn = document.getElementById('btn-completar-ia');
 
 function isEditing(pid, field) {
   const active = document.activeElement;
@@ -11,6 +11,37 @@ function isEditing(pid, field) {
   const td = active.closest('td[data-key]');
   if (!td) return false;
   return td.dataset.key === field;
+}
+
+function applyUpdates(product, updates) {
+  const applied = {};
+  const row = document.querySelector(`input.rowCheck[data-id="${product.id}"]`)?.closest('tr');
+  const map = {
+    desire: 'td.ec-col-desire input',
+    desire_magnitude: 'td.ec-col-desire-mag select',
+    awareness_level: 'td.ec-col-awareness select',
+    competition_level: 'td.ec-col-competition select'
+  };
+  Object.keys(map).forEach(k => {
+    const nv = updates[k];
+    if (nv === undefined || isEditing(product.id, k)) return;
+    product[k] = nv;
+    const el = row ? row.querySelector(map[k]) : null;
+    if (el) {
+      if (el.tagName === 'INPUT') el.value = nv || '';
+      else el.value = nv || '';
+    }
+    applied[k] = nv;
+  });
+  if (Object.keys(applied).length) {
+    fetch(`/products/${product.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(applied)
+    }).catch(() => {});
+    if (window.ecAutoFitColumns && window.gridRoot) ecAutoFitColumns(gridRoot);
+  }
+  return applied;
 }
 
 async function processProduct(product) {
@@ -32,35 +63,23 @@ async function processProduct(product) {
     competition_level: product.competition_level
   };
   try {
-    const resp = await fetch('/api/ba/insights', {
+    const res = await fetch('/api/ba/insights', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ product: payload, model: 'gpt-4o-mini' })
+      body: JSON.stringify({ product: payload, model: 'gpt-4o-mini-2024-07-18' })
     });
-    if (!resp.ok) throw new Error();
-    const data = await resp.json();
-    const updates = data.grid_updates || {};
-    const applied = {};
-    ['desire', 'desire_magnitude', 'awareness_level', 'competition_level'].forEach(k => {
-      if (updates[k] !== undefined && !isEditing(product.id, k)) {
-        product[k] = updates[k];
-        applied[k] = updates[k];
-      }
-    });
-    if (Object.keys(applied).length) {
-      renderTable();
-      try {
-        await fetch(`/products/${product.id}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(applied)
-        });
-      } catch (e) {}
+    if (!res.ok) {
+      let msg = res.statusText;
+      try { const err = await res.json(); if (err.error) msg = err.error; } catch {}
+      throw new Error(msg);
     }
-    toast.success(`BA listo: ID ${product.id}`, { duration: 2000 });
+    const data = await res.json();
+    applyUpdates(product, data.grid_updates || {});
+    toast.success(`Completado ID ${product.id}`, { duration: 2000 });
     return true;
   } catch (e) {
-    toast.error(`BA falló: ID ${product.id}`, { duration: 2000 });
+    const msg = e && e.message ? e.message : 'Error';
+    toast.error(`Falló ID ${product.id}: ${msg}`, { duration: 2000 });
     return false;
   }
 }
@@ -78,7 +97,7 @@ async function runQueue(products) {
   const workers = [];
   for (let i = 0; i < EC_BA_CONCURRENCY; i++) workers.push(worker());
   await Promise.all(workers);
-  toast.info(`BA: ${ok}/${total}`);
+  toast.info(`IA: ${ok}/${total}`);
 }
 
 if (btn) {
