@@ -306,6 +306,7 @@ body.dark #gptPrompt {
 .table tr { height: 52px; }
 .table td, .table th { padding: 8px 12px; }
 body.dark .table tbody tr:nth-child(odd) { background: #11192B; }
+.text-center { text-align: center; }
 
 .badge { border-radius: 10px; padding: 2px 8px; font-weight: 600; }
 .score-green { background: #183B2D; color: #44C48C; }
