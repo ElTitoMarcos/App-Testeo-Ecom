@@ -26,6 +26,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "estTokensPerItemIn": 300,
         "estTokensPerItemOut": 80,
     },
+    "aiCalibration": {
+        "enabled": True,
+        "quantiles": {"low": 0.20, "high": 0.80},
+        "min_low_pct": 0.05,
+        "min_high_pct": 0.05,
+        "winsorize_pct": 0.05,
+    },
 }
 
 
@@ -104,6 +111,20 @@ def get_ai_cost_config() -> Dict[str, Any]:
     cfg = load_config()
     base = DEFAULT_CONFIG["aiCost"].copy()
     user = cfg.get("aiCost", {})
+    for k, v in user.items():
+        if isinstance(v, dict) and k in base:
+            tmp = base.get(k, {}).copy()
+            tmp.update(v)
+            base[k] = tmp
+        else:
+            base[k] = v
+    return base
+
+
+def get_ai_calibration_config() -> Dict[str, Any]:
+    cfg = load_config()
+    base = DEFAULT_CONFIG["aiCalibration"].copy()
+    user = cfg.get("aiCalibration", {})
     for k, v in user.items():
         if isinstance(v, dict) and k in base:
             tmp = base.get(k, {}).copy()

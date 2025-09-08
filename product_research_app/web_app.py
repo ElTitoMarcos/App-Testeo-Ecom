@@ -442,7 +442,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             database.update_import_job_ai_progress(conn, job_id, counts.get("n_procesados", 0))
             database.set_import_job_ai_counts(conn, job_id, counts, res.get("pending_ids", []))
             if res.get("error"):
-                database.set_import_job_ai_error(conn, job_id, "No se pudieron completar las columnas con IA: revisa la API o inténtalo desde 'Completar columnas (IA)'.")
+                database.set_import_job_ai_error(conn, job_id, "No se pudieron completar las columnas con IA: revisa la API.")
         database.complete_import_job(conn, job_id, rows_imported)
     except Exception as exc:
         try:
@@ -1971,7 +1971,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             pending = res_ai.get("pending_ids", [])
     
             if res_ai.get("error"):
-                ai_err = "No se pudieron completar las columnas con IA: revisa la API o ejecútalo desde 'Completar columnas (IA)'."
+                ai_err = "No se pudieron completar las columnas con IA: revisa la API."
         self._set_json()
         payload = {"inserted": inserted}
         if ai_err:
