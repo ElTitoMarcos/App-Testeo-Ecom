@@ -32,9 +32,11 @@ function updateMasterState(){
   const btnDel = document.getElementById('btnDelete');
   const btnExp = document.getElementById('btnExport');
   const btnAdd = document.getElementById('btnAddToGroup');
+  const btnBa = document.getElementById('btn-ba-gpt');
   if(btnDel) btnDel.disabled = disable;
   if(btnExp) btnExp.disabled = disable;
   if(btnAdd) btnAdd.disabled = disable;
+  if(btnBa) btnBa.disabled = selection.size !== 1;
   if(bottomBar){
     const selEl = document.getElementById('selCount');
     if(selEl) selEl.textContent = `${selection.size} seleccionados`;
