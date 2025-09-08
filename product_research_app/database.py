@@ -69,6 +69,7 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             desire_magnitude TEXT,
             awareness_level TEXT,
             competition_level TEXT,
+            date_range TEXT,
             extra JSON
         )
         """
@@ -89,6 +90,8 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         cur.execute("ALTER TABLE products RENAME COLUMN saturacion_mercado TO competition_level")
     elif "competition_level" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN competition_level TEXT")
+    if "date_range" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN date_range TEXT")
     # drop obsolete columns if present
     for obsolete in [
         "facilidad_anuncio",
@@ -195,6 +198,7 @@ def insert_product(
     desire_magnitude: Optional[str] = None,
     awareness_level: Optional[str] = None,
     competition_level: Optional[str] = None,
+    date_range: Optional[str] = None,
     extra: Optional[Dict[str, Any]] = None,
     commit: bool = True,
     product_id: Optional[int] = None,
@@ -244,8 +248,8 @@ def insert_product(
             INSERT INTO products (
                 id, name, description, category, price, currency, image_url, source,
                 import_date, desire, desire_magnitude, awareness_level,
-                competition_level, extra)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
+                competition_level, date_range, extra)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
             """,
             (
                 product_id,
@@ -261,6 +265,7 @@ def insert_product(
                 desire_magnitude,
                 awareness_level,
                 competition_level,
+                date_range,
                 json_dump(extra) if extra is not None else "{}",
             ),
         )
@@ -270,8 +275,8 @@ def insert_product(
             INSERT INTO products (
                 name, description, category, price, currency, image_url, source,
                 import_date, desire, desire_magnitude, awareness_level,
-                competition_level, extra)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
+                competition_level, date_range, extra)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
             """,
             (
                 name,
@@ -286,6 +291,7 @@ def insert_product(
                 desire_magnitude,
                 awareness_level,
                 competition_level,
+                date_range,
                 json_dump(extra) if extra is not None else "{}",
             ),
         )
@@ -337,6 +343,7 @@ def update_product(
         "desire_magnitude",
         "awareness_level",
         "competition_level",
+        "date_range",
     }
     data = {k: v for k, v in fields.items() if k in allowed_cols}
     if not data:

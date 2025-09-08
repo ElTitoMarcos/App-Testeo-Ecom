@@ -392,7 +392,7 @@ const columns = [
   { key: 'Revenue($)', label: 'Ingresos', type: 'number' },
   { key: 'Creator Conversion Ratio', label: 'Tasa Conversión', type: 'string' },
   { key: 'Launch Date', label: 'Fecha Lanzamiento', type: 'string' },
-  { key: 'Date Range', label: 'Rango Fechas', type: 'string' },
+  { key: 'date_range', label: 'Rango Fechas', type: 'string' },
   { key: 'desire', label: 'Desire', type: 'string', headerClass: 'ec-col ec-col-desire', cellClass: 'ec-col ec-col-desire', dataEcCol: 'desire' },
   { key: 'desire_magnitude', label: 'Desire magnetitude', type: 'string', headerClass: 'ec-col ec-col-desire-mag', cellClass: 'ec-col ec-col-desire-mag', dataEcCol: 'desire_magnitude' },
   { key: 'awareness_level', label: 'Awerness Level', type: 'string', headerClass: 'ec-col ec-col-awareness', cellClass: 'ec-col ec-col-awareness', dataEcCol: 'awareness_level' },
@@ -692,7 +692,7 @@ function renderTable() {
           const j = item.winner_score_v2_breakdown.justifications[key];
           if (j) td.title = 'Justificación: ' + j;
         }
-      } else if (['id','name','category','price','image_url','winner_score_v2_pct','desire','desire_magnitude','awareness_level','competition_level'].includes(key)) {
+      } else if (['id','name','category','price','image_url','winner_score_v2_pct','desire','desire_magnitude','awareness_level','competition_level','date_range'].includes(key)) {
         value = item[key];
       } else {
         value = item.extras ? item.extras[key] : '';
