@@ -1054,10 +1054,17 @@ class RequestHandler(BaseHTTPRequestHandler):
                 items = database.list_products(conn)
             rows = []
             for p in items:
+                scores = database.get_scores_for_product(conn, p['id'])
+                score_val = None
+                if scores:
+                    sc = scores[0]
+                    if 'winner_score_v2_pct' in sc.keys():
+                        score_val = sc['winner_score_v2_pct']
                 rows.append(
                     [
                         p['id'],
                         p['name'],
+                        score_val,
                         p['desire'],
                         p['desire_magnitude'],
                         p['awareness_level'],
@@ -1065,7 +1072,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         p['date_range'],
                     ]
                 )
-            headers = ["id", "name", "Desire", "Desire Magnitude", "Awareness Level", "Competition Level", "Date Range"]
+            headers = ["id", "name", "Winner Score v2", "Desire", "Desire Magnitude", "Awareness Level", "Competition Level", "Date Range"]
             if fmt == 'xlsx':
                 try:
                     from openpyxl import Workbook

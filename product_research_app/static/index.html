@@ -112,6 +112,7 @@ body.dark .metric-row .chip { background:#2a2d5c; color:#a9a9ff; }
     <button id="resetWeights">Reset</button>
     <button id="savePreset">Guardar preset</button>
     <button id="loadPreset">Cargar preset</button>
+    <button id="aiWeights">Ajustar pesos con IA</button>
   </div>
 </div>
 <div id="custom" style="display:none;">
@@ -325,6 +326,7 @@ let allProducts = [];
 let products = [];
 let sortField = null;
 let sortDir = 1;
+let sortType = 'string';
 function updateResultsBadge(total) {
   const meta = document.getElementById('listMeta');
   if (!meta) return;
@@ -484,7 +486,7 @@ const PRESET_O_KEY = 'winnerPresetOrderV2';
 let weightValues = {};
 let weightOrder = [];
 
-function defaultWeights(){ const w={}; metricDefs.forEach(m=>w[m.key]=50); return w; }
+function defaultWeights(){ return { ...window.winnerV2.getDefaultWeightsV2().lanzamiento }; }
 function defaultOrder(){ return metricDefs.map(m=>m.key); }
 
 function loadWeights(){ try{ weightValues = JSON.parse(localStorage.getItem(WEIGHT_KEY)||'{}'); } catch(e){ weightValues={}; } weightValues = { ...defaultWeights(), ...weightValues }; }
@@ -492,15 +494,89 @@ function loadOrder(){ try{ weightOrder = JSON.parse(localStorage.getItem(ORDER_K
 
 function renderWeights(){ const list=document.getElementById('weightsList'); if(!list) return; list.innerHTML=''; weightOrder.forEach(key=>{ const def=metricDefs.find(m=>m.key===key); const li=document.createElement('li'); li.className='metric-row'; li.draggable=true; li.dataset.key=key; li.innerHTML=`<span class="drag">☰</span><span title="${def.tip}" style="min-width:140px;">${def.label}</span><span class="chip">Mín. (0)</span><input type="range" min="0" max="100" value="${weightValues[key]||0}" class="weight-slider"><span class="chip">Máx. (100)</span><span class="value">${weightValues[key]||0}</span>`; const range=li.querySelector('input'); const val=li.querySelector('.value'); range.addEventListener('input',()=>{ weightValues[key]=Number(range.value); val.textContent=range.value; saveState(); }); li.addEventListener('dragstart',e=>{ e.dataTransfer.setData('text/plain',key); }); li.addEventListener('dragover',e=>{ e.preventDefault(); }); li.addEventListener('drop',e=>{ e.preventDefault(); const k=e.dataTransfer.getData('text/plain'); const idx=weightOrder.indexOf(k); const idx2=weightOrder.indexOf(key); weightOrder.splice(idx,1); weightOrder.splice(idx2,0,k); renderWeights(); saveState(); }); list.appendChild(li); }); }
 
-function saveState(){ localStorage.setItem(WEIGHT_KEY, JSON.stringify(weightValues)); localStorage.setItem(ORDER_KEY, JSON.stringify(weightOrder)); recalcWinnerScores(); toast.success('Winner Score actualizado'); }
+function saveState(showToast=true){ localStorage.setItem(WEIGHT_KEY, JSON.stringify(weightValues)); localStorage.setItem(ORDER_KEY, JSON.stringify(weightOrder)); recalcWinnerScores(); if(showToast) toast.success('Winner Score actualizado'); }
 
 function resetWeights(){ weightValues=defaultWeights(); weightOrder=defaultOrder(); saveState(); renderWeights(); }
 function savePreset(){ localStorage.setItem(PRESET_W_KEY, JSON.stringify(weightValues)); localStorage.setItem(PRESET_O_KEY, JSON.stringify(weightOrder)); toast.success('Preset guardado'); }
-function loadPreset(){ try{ weightValues = JSON.parse(localStorage.getItem(PRESET_W_KEY)||'{}'); weightOrder = JSON.parse(localStorage.getItem(PRESET_O_KEY)||'[]'); if(!Array.isArray(weightOrder) || weightOrder.length !== metricDefs.length){ weightOrder = defaultOrder(); } saveState(); renderWeights(); } catch(e){ toast.error('No hay preset'); } }
+function loadPreset(){ try{
+  const defaults = window.winnerV2.getDefaultWeightsV2();
+  let choice = prompt('Preset (lanzamiento, rentabilidad o local)', 'local');
+  if(!choice) return;
+  choice = choice.toLowerCase();
+  if(choice === 'local'){
+    weightValues = JSON.parse(localStorage.getItem(PRESET_W_KEY)||'{}');
+    weightOrder = JSON.parse(localStorage.getItem(PRESET_O_KEY)||'[]');
+    if(!Array.isArray(weightOrder) || weightOrder.length !== metricDefs.length){ weightOrder = defaultOrder(); }
+  } else if(defaults[choice]){
+    weightValues = { ...defaults[choice] };
+    weightOrder = defaultOrder();
+  } else {
+    toast.error('Preset no encontrado');
+    return;
+  }
+  saveState();
+  renderWeights();
+ } catch(e){ toast.error('No hay preset'); } }
 
-function initWeights(){ loadWeights(); loadOrder(); renderWeights(); document.getElementById('resetWeights').onclick=resetWeights; document.getElementById('savePreset').onclick=savePreset; document.getElementById('loadPreset').onclick=loadPreset; }
+function stratifiedSample(list, n){
+  const byCat = {};
+  list.forEach(p=>{ const c = p.category || 'N/A'; (byCat[c] = byCat[c] || []).push(p); });
+  const total = list.length;
+  const sample = [];
+  for(const c in byCat){
+    const arr = byCat[c].slice().sort((a,b)=>{
+      const ra = Number(a.revenue || (a.extras && a.extras['Revenue($)']) || 0);
+      const rb = Number(b.revenue || (b.extras && b.extras['Revenue($)']) || 0);
+      const ua = Number(a.units_sold || (a.extras && a.extras['Item Sold']) || 0);
+      const ub = Number(b.units_sold || (b.extras && b.extras['Item Sold']) || 0);
+      const sa = ra || ua;
+      const sb = rb || ub;
+      return sb - sa;
+    });
+    const k = Math.max(1, Math.round(n * arr.length / total));
+    sample.push(...arr.slice(0,k));
+  }
+  return sample.slice(0,n);
+}
 
-function recalcWinnerScores(){ if(!Array.isArray(allProducts)) return; const ranges = window.winnerV2.computeRanges(allProducts); allProducts.forEach(p=>{ const s = window.winnerV2.scoreProduct(p, weightValues, ranges); p.winner_score_v2_pct = s*100; }); renderTable(); }
+async function adjustWeightsAI(){
+  try{
+    let sample = stratifiedSample(allProducts || [], 30);
+    let payload = sample.map(p=>({name:p.name, category:p.category, price:p.price, units:p.units_sold||(p.extras&&p.extras['Item Sold'])||0, ingresos:p.revenue||(p.extras&&p.extras['Revenue($)'])||0, conversion:p.extras&&p.extras['Creator Conversion Ratio'], fecha:p.extras&&p.extras['date_range'], desire:p.desire_magnitude, awareness:p.awareness_level, competition:p.competition_level}));
+    let tokenEstimate = JSON.stringify(payload).length/4;
+    const maxTokens = 0.30/0.002*1000;
+    if(tokenEstimate>maxTokens){
+      const ratio = maxTokens/tokenEstimate;
+      const newN = Math.max(1, Math.floor(sample.length * ratio));
+      sample = stratifiedSample(allProducts||[], newN);
+      payload = sample.map(p=>({name:p.name, category:p.category, price:p.price, units:p.units_sold||(p.extras&&p.extras['Item Sold'])||0, ingresos:p.revenue||(p.extras&&p.extras['Revenue($)'])||0, conversion:p.extras&&p.extras['Creator Conversion Ratio'], fecha:p.extras&&p.extras['date_range'], desire:p.desire_magnitude, awareness:p.awareness_level, competition:p.competition_level}));
+      tokenEstimate = JSON.stringify(payload).length/4;
+    }
+    const cost = tokenEstimate/1000*0.002;
+    toast.info(`Coste estimado: $${cost.toFixed(3)}`);
+    const prompt = `Dado este listado de productos ${JSON.stringify(payload)}\nDevuelve un JSON con pesos 0-100 para las métricas: ${metricKeys.join(', ')}.`;
+    const res = await fetch('/custom_gpt', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({prompt})});
+    if(!res.ok){
+      if(res.status===401||res.status===403){ toast.error('Falta API key'); return; }
+      if(res.status===429||res.status===503){ toast.error('Servicio saturado, intenta luego'); return; }
+      toast.error('Error IA'); return;
+    }
+    const data = await res.json();
+    let weights;
+    try{ weights = JSON.parse(data.response||''); } catch(e){ toast.error('Respuesta IA inválida'); return; }
+    let changed=false;
+    metricKeys.forEach(k=>{ if(typeof weights[k]==='number'){ weightValues[k]=Math.max(0,Math.min(100,weights[k])); changed=true; }});
+    if(changed){ saveState(false); renderWeights(); toast.success('Pesos ajustados por IA'); }
+  }catch(err){
+    console.error(err);
+    if(err.message && err.message.toLowerCase().includes('api')) toast.error('Falta API key');
+    else toast.error('Error al ajustar pesos');
+  }
+}
+
+function initWeights(){ loadWeights(); loadOrder(); renderWeights(); document.getElementById('resetWeights').onclick=resetWeights; document.getElementById('savePreset').onclick=savePreset; document.getElementById('loadPreset').onclick=loadPreset; const aiBtn=document.getElementById('aiWeights'); if(aiBtn) aiBtn.onclick=adjustWeightsAI; }
+
+function recalcWinnerScores(){ if(!Array.isArray(allProducts)) return; const ranges = window.winnerV2.computeRanges(allProducts); allProducts.forEach(p=>{ const s = window.winnerV2.scoreProduct(p, weightValues, ranges); p.winner_score_v2_pct = s*100; }); sortProducts(); renderTable(); }
 
 async function loadConfig() {
   let cfg = {};
@@ -554,6 +630,7 @@ async function fetchProducts(preserve=true) {
   allProducts.sort((a,b)=> (Number(a.id)||0) - (Number(b.id)||0));
   sortField = 'id';
   sortDir = 1;
+  sortType = 'number';
   products = [...allProducts];
   window.allProducts = allProducts;
   window.products = products;
@@ -595,6 +672,7 @@ function renderTable() {
       if (col.width) th.style.width = col.width + 'px';
       if (col.minWidth) th.style.minWidth = col.minWidth + 'px';
       if (col.maxWidth) th.style.maxWidth = col.maxWidth + 'px';
+      if (col.key === 'winner_score_v2_pct') th.title = 'Suma ponderada de 10 métricas normalizadas (v2)';
       th.onclick = () => sortBy(col.key, col.type);
       headerRow.appendChild(th);
     });
@@ -805,16 +883,12 @@ gridRoot.addEventListener('input',  e => { if (e.target.closest('td.ec-col-desir
 gridRoot.addEventListener('change', e => { if (e.target.closest('td.ec-col-desire-mag, td.ec-col-awareness, td.ec-col-competition')) ecAutoFitColumns(gridRoot); });
 window.addEventListener('resize', (() => { let t; return () => { clearTimeout(t); t = setTimeout(() => ecAutoFitColumns(gridRoot), 150); }; })());
 
-function sortBy(field, type) {
-  if (sortField === field) {
-    sortDir = -sortDir;
-  } else {
-    sortField = field;
-    sortDir = 1;
-  }
-  products.sort((a, b) => {
-    let va;
-    let vb;
+function sortProducts(){
+  if(!sortField) return;
+  const field = sortField;
+  const type = sortType;
+  products.sort((a,b)=>{
+    let va; let vb;
     if (field === 'id' || field === 'name' || field === 'category' || field === 'price' || field === 'image_url' || field === 'winner_score_v2_pct' || field === 'desire' || field === 'desire_magnitude' || field === 'awareness_level' || field === 'competition_level') {
       va = a[field];
       vb = b[field];
@@ -833,13 +907,23 @@ function sortBy(field, type) {
       if (isNaN(nb)) return sortDir * -1;
       return (na - nb) * sortDir;
     }
-    // default string comparison
     const sa = (va || '').toString().toLowerCase();
     const sb = (vb || '').toString().toLowerCase();
     if (sa < sb) return -1 * sortDir;
     if (sa > sb) return 1 * sortDir;
     return 0;
   });
+}
+
+function sortBy(field, type) {
+  if (sortField === field) {
+    sortDir = -sortDir;
+  } else {
+    sortField = field;
+    sortDir = 1;
+    sortType = type;
+  }
+  sortProducts();
   renderTable();
 }
 
