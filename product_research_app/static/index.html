@@ -1335,8 +1335,8 @@ document.getElementById('btnGenWinner').onclick = async () => {
   const ids = Array.from(selection, Number);
   const pending = ids.filter(id => {
     const prod = (allProducts || []).find(p => p.id === id);
-    const val = prod ? Number(prod.winner_score_v2_pct) : 0;
-    return !val;
+    const val = prod ? Number(prod.winner_score_v2_pct) : NaN;
+    return !val || isNaN(val);
   });
   if(!pending.length){
     toast.info('No se actualizó ningún producto. Revisa que tengan métricas y que el campo Winner Score esté vacío o 0.');
