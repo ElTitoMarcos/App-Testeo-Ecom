@@ -502,6 +502,8 @@ function renderWeights(){
     const li=document.createElement('li');
     li.className='ws-row';
     li.dataset.key=key;
+    li.draggable=false;
+    li.style.pointerEvents='auto';
     li.innerHTML=`<span class="ws-handle">≡</span><span class="ws-name">${def.label}</span><input type="range" min="0" max="100" step="1" value="${state.winnerWeightsV2[key]||0}" class="ws-slider" data-metric="${key}"><span class="ws-value">${state.winnerWeightsV2[key]||0}</span>`;
     list.appendChild(li);
   });
@@ -520,9 +522,14 @@ function resetWeights(){
 
 function attachWeightSliderListeners(){
   document.querySelectorAll('.ws-slider').forEach(sl=>{
+    sl.removeAttribute('disabled');
+    sl.removeAttribute('readonly');
+    sl.style.pointerEvents = 'auto';
     sl.addEventListener('input', onWeightInput, {passive:true});
     sl.addEventListener('change', onWeightChange, {passive:true});
-    ['mousedown','touchstart'].forEach(ev=>{ sl.addEventListener(ev,e=>{ e.stopPropagation(); }); });
+    ['mousedown','touchstart'].forEach(ev=>{
+      sl.addEventListener(ev, e=>e.stopPropagation(), {passive:true});
+    });
   });
 }
 
@@ -539,6 +546,11 @@ function onWeightInput(e){
 
 function onWeightChange(e){
   onWeightInput(e);
+  const now = Date.now();
+  if(!window._wsToast || now - window._wsToast > 1200){
+    if(window.toast && toast.info){ toast.info('Weight actualizado', {duration:1500}); }
+    window._wsToast = now;
+  }
 }
 
 function stratifiedSample(list, n){
