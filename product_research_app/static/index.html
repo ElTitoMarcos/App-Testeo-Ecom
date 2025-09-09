@@ -979,36 +979,9 @@ window.onload = () => {
     pollImportStatus(tid);
   }
 };
-// Toggle config panel
+// Open settings page
 document.getElementById('configBtn').onclick = () => {
-  const cfg = document.getElementById('config');
-  const wcard = document.getElementById('weightsCard');
-  if(!cfg || !wcard || !window.modalManager) return;
-  const btn = document.getElementById('configBtn');
-  const modal = document.createElement('div');
-  modal.className = 'modal';
-  modal.setAttribute('role','dialog');
-  modal.setAttribute('aria-modal','true');
-  modal.innerHTML = '<header class="modal-header"><h3 id="configModalTitle">Configuración</h3><button type="button" class="modal-close" aria-label="Cerrar">✕</button></header><div class="modal-body"></div>';
-  modal.setAttribute('aria-labelledby','configModalTitle');
-  const body = modal.querySelector('.modal-body');
-  const cfgParent = cfg.parentElement;
-  const wParent = wcard.parentElement;
-  const cfgNext = cfg.nextSibling;
-  const wNext = wcard.nextSibling;
-  body.appendChild(cfg);
-  body.appendChild(wcard);
-  cfg.style.display = 'block';
-  wcard.style.display = 'block';
-  const handle = modalManager.open(modal, {returnFocus: btn, closeOnBackdrop:false, onClose: () => {
-    cfg.style.display = 'none';
-    wcard.style.display = 'none';
-    cfgParent.insertBefore(cfg, cfgNext);
-    wParent.insertBefore(wcard, wNext);
-  }});
-  modal.querySelector('.modal-close').addEventListener('click', () => handle.close());
-  const first = modal.querySelector('input,select,textarea,button');
-  if(first) first.focus();
+  window.location.href = '/settings';
 };
 
 
