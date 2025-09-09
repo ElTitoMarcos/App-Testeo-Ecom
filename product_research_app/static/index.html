@@ -92,7 +92,7 @@ body.dark pre { background:#2e315f; }
     <input type="password" id="apiKey" />
   </div>
 </div>
-<div id="weightsCard" class="card" style="display:none; max-width:420px;">
+<div id="weightsCard" class="card" style="display:none;">
   <strong>Ponderaciones Winner Score</strong>
   <ul id="weightsList" style="list-style:none; margin-top:8px; padding:0;"></ul>
   <div style="margin-top:10px; display:flex; flex-wrap:wrap; gap:6px;">
@@ -223,6 +223,7 @@ body.dark pre { background:#2e315f; }
 <script type="module" src="/static/js/add-group.js"></script>
 <script type="module" src="/static/js/manage-groups.js"></script>
 <script src="/static/js/winner_v2.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
 <script type="module">
 import { fetchJson } from "/static/js/net.js";
 import * as groupsService from "/static/js/groups-service.js";
@@ -484,18 +485,14 @@ function renderWeights(){
     const li=document.createElement('li');
     li.className='metric-row';
     li.dataset.key=key;
-    li.innerHTML=`<span class="ws-handle">≡</span><span class="ws-name">${def.label}</span><div class="ws-slider-wrap"><span class="ws-endcap-left">Menor importancia (0)</span><input type="range" min="0" max="100" step="1" value="${weightValues[key]||0}" class="ws-slider"><span class="ws-endcap-right">Mayor importancia (100)</span></div><span class="ws-value">${weightValues[key]||0}</span>`;
+    li.innerHTML=`<span class="ws-handle">≡</span><span class="ws-name">${def.label}</span><div class="ws-slider-wrap"><input type="range" min="0" max="100" step="1" value="${weightValues[key]||0}" class="ws-slider"></div><span class="ws-value">${weightValues[key]||0}</span>`;
     const range=li.querySelector('.ws-slider');
     const val=li.querySelector('.ws-value');
     range.addEventListener('input',()=>{ weightValues[key]=Number(range.value); val.textContent=range.value; saveState(); });
-    ['mousedown','touchstart'].forEach(ev=>{ range.addEventListener(ev,e=>{ e.stopPropagation(); e.stopImmediatePropagation(); }); });
-    const handle=li.querySelector('.ws-handle');
-    handle.draggable=true;
-    handle.addEventListener('dragstart',e=>{ e.dataTransfer.setData('text/plain',key); });
-    li.addEventListener('dragover',e=>{ e.preventDefault(); });
-    li.addEventListener('drop',e=>{ e.preventDefault(); const k=e.dataTransfer.getData('text/plain'); const idx=weightOrder.indexOf(k); const idx2=weightOrder.indexOf(key); weightOrder.splice(idx,1); weightOrder.splice(idx2,0,k); renderWeights(); saveState(); });
+    ['mousedown','touchstart'].forEach(ev=>{ range.addEventListener(ev,e=>{ e.stopPropagation(); }); });
     list.appendChild(li);
   });
+  Sortable.create(list,{ handle:'.ws-handle', animation:150, onEnd:()=>{ weightOrder=Array.from(list.children).map(li=>li.dataset.key); saveState(); }});
 }
 
 function saveState(){ localStorage.setItem(WEIGHT_KEY, JSON.stringify(weightValues)); localStorage.setItem(ORDER_KEY, JSON.stringify(weightOrder)); recalculateWinnerScoreV2(); }

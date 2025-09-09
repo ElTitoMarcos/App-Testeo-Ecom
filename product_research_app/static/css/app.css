@@ -366,15 +366,22 @@ body.dark .bottombar {
   border: 1px solid #34456B;
   border-radius: 16px;
   box-shadow: 0 8px 24px rgba(0,0,0,0.45);
-  width: 90%;
-  max-width: 420px;
+  width: 90vw;
+  max-width: min(900px, 96vw);
+  max-height: min(88vh, 980px);
   margin: 24px;
-  max-height: 80vh;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   transform: scale(0.9);
   opacity: 0;
   transition: opacity 0.16s ease, transform 0.16s ease;
+}
+
+@media (min-width:1200px){
+  .modal-overlay .modal {
+    max-width: min(1024px, 96vw);
+  }
 }
 .modal-overlay.open .modal {
   transform: scale(1);
@@ -386,6 +393,10 @@ body.dark .bottombar {
   justify-content: space-between;
   padding: 16px 20px 8px;
   margin-bottom: 12px;
+  position: sticky;
+  top: 0;
+  background: #0F1424;
+  z-index: 1;
 }
 .modal-header h2 {
   margin: 0;
@@ -407,6 +418,7 @@ body.dark .bottombar {
 .modal-body {
   padding: 0 20px 16px;
   overflow-y: auto;
+  overscroll-behavior: contain;
   flex: 1 1 auto;
 }
 .modal-body input {
@@ -612,11 +624,11 @@ th.ec-col-competition,   td.ec-col-competition   { width: var(--ec-w-competition
 
 /* Winner Score slider styles */
 .ws-handle{ cursor:grab; padding-inline:4px; }
-.metric-row{ display:flex; align-items:center; gap:8px; }
-.ws-name{ flex:0 0 120px; }
-.ws-slider-wrap{ display:flex; align-items:center; flex:1; gap:8px; }
-.ws-endcap-left, .ws-endcap-right{ font-size:11px; white-space:nowrap; }
-.ws-slider{ flex:1; width:100%; min-width:160px; padding-inline:8px; height:12px; cursor:pointer; accent-color:#0077cc; }
+#weightsCard{ overflow-x:hidden; }
+.metric-row{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.ws-name{ flex:0 0 140px; }
+.ws-slider-wrap{ display:flex; align-items:center; flex:1 1 200px; gap:8px; min-width:0; }
+.ws-slider{ flex:1; width:100%; padding:4px 8px; height:12px; cursor:pointer; accent-color:#0077cc; }
 body.dark .ws-slider{ accent-color:#7a53d6; }
 .ws-slider::-webkit-slider-thumb{ width:20px; height:20px; border-radius:50%; cursor:pointer; }
 .ws-slider::-moz-range-thumb{ width:20px; height:20px; border-radius:50%; cursor:pointer; }
