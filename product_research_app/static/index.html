@@ -262,7 +262,8 @@ async function pollImportStatus(id) {
     } else {
       localStorage.removeItem(IMPORT_TASK_LS_KEY);
       if (data.status === 'done') {
-        fetchProducts();
+        await fetchProducts();
+        toast.success('Winner Score actualizado tras importar');
         const n = data.rows_imported || 0;
         toast.success(`Importación completada: ${n} filas nuevas. IDs desde 0 si era la primera importación.`);
         const counts = data.ai_counts || {};
@@ -470,6 +471,11 @@ const ORDER_KEY = 'winnerOrderV2';
 let weightValues = {};
 let weightOrder = [];
 
+function debounce(fn, ms=150){
+  let t; return (...args)=>{ clearTimeout(t); t=setTimeout(()=>fn(...args), ms); };
+}
+const debouncedRecalc = debounce(() => recalculateWinnerScoreV2(), 150);
+
 function defaultWeights(){ return { ...window.winnerV2.getDefaultWeightsV2().lanzamiento }; }
 function defaultOrder(){ return metricDefs.map(m=>m.key); }
 
@@ -495,7 +501,11 @@ function renderWeights(){
   Sortable.create(list,{ handle:'.ws-handle', animation:150, onEnd:()=>{ weightOrder=Array.from(list.children).map(li=>li.dataset.key); saveState(); }});
 }
 
-function saveState(){ localStorage.setItem(WEIGHT_KEY, JSON.stringify(weightValues)); localStorage.setItem(ORDER_KEY, JSON.stringify(weightOrder)); recalculateWinnerScoreV2(); }
+function saveState(){
+  localStorage.setItem(WEIGHT_KEY, JSON.stringify(weightValues));
+  localStorage.setItem(ORDER_KEY, JSON.stringify(weightOrder));
+  debouncedRecalc();
+}
 
 function resetWeights(){ weightValues=defaultWeights(); weightOrder=defaultOrder(); saveState(); renderWeights(); }
 
@@ -523,47 +533,57 @@ function stratifiedSample(list, n){
 async function adjustWeightsAI(){
   try{
     let sample=stratifiedSample(allProducts||[],30);
-    let payload=sample.map(p=>({name:p.name, category:p.category, price:p.price, units:p.units_sold||(p.extras&&p.extras['Item Sold'])||0, ingresos:p.revenue||(p.extras&&p.extras['Revenue($)'])||0, conversion:p.extras&&p.extras['Creator Conversion Ratio'], fecha:p.extras&&p.extras['date_range'], desire:p.desire_magnitude, awareness:p.awareness_level, competition:p.competition_level}));
+    let payload=sample.map(p=>({name:p.name,category:p.category,price:p.price,units:p.units_sold||(p.extras&&p.extras['Item Sold'])||0,ingresos:p.revenue||(p.extras&&p.extras['Revenue($)'])||0,conversion:p.extras&&p.extras['Creator Conversion Ratio'],fecha:p.extras&&p.extras['date_range'],desire:p.desire_magnitude,awareness:p.awareness_level,competition:p.competition_level}));
     let tokenEstimate=JSON.stringify(payload).length/4;
     const maxTokens=0.30/0.002*1000;
     while(tokenEstimate>maxTokens && sample.length>1){
       const ratio=maxTokens/tokenEstimate;
       const newN=Math.max(1,Math.floor(sample.length*ratio));
       sample=stratifiedSample(allProducts||[],newN);
-      payload=sample.map(p=>({name:p.name, category:p.category, price:p.price, units:p.units_sold||(p.extras&&p.extras['Item Sold'])||0, ingresos:p.revenue||(p.extras&&p.extras['Revenue($)'])||0, conversion:p.extras&&p.extras['Creator Conversion Ratio'], fecha:p.extras&&p.extras['date_range'], desire:p.desire_magnitude, awareness:p.awareness_level, competition:p.competition_level}));
+      payload=sample.map(p=>({name:p.name,category:p.category,price:p.price,units:p.units_sold||(p.extras&&p.extras['Item Sold'])||0,ingresos:p.revenue||(p.extras&&p.extras['Revenue($)'])||0,conversion:p.extras&&p.extras['Creator Conversion Ratio'],fecha:p.extras&&p.extras['date_range'],desire:p.desire_magnitude,awareness:p.awareness_level,competition:p.competition_level}));
       tokenEstimate=JSON.stringify(payload).length/4;
     }
     const cost=tokenEstimate/1000*0.002;
-    toast.info(`Coste estimado: $${cost.toFixed(3)}`);
-    const prompt=`Dado este listado de productos ${JSON.stringify(payload)}\nDevuelve un JSON con pesos 0-100 para las métricas: ${metricKeys.join(', ')}.`;
-    let res=await fetch('/custom_gpt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt})});
+    toast.info(`Analizando ${sample.length} productos (~$${cost.toFixed(2)})`);
+    const instruction='Devuelve SOLO un JSON plano con pesos 0-100 para estas 10 claves exactas, sin texto adicional:\n["magnitud_deseo","nivel_consciencia_headroom","evidencia_demanda","tasa_conversion","ventas_por_dia","recencia_lanzamiento","competition_level_invertido","facilidad_anuncio","escalabilidad","durabilidad_recurrencia"]';
+    const prompt=`Basado en estos productos ${JSON.stringify(payload)}\n${instruction}`;
+    let res=await fetch('/custom_gpt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,response_format:{type:'json_object'}})});
     if(!res.ok){
-      if(res.status===401||res.status===403){ toast.error('Configura tu API key'); return; }
-      if(res.status===429||res.status===503){ toast.error('Límite de tasa; inténtalo luego'); return; }
-      toast.error('Error IA'); return;
+      toast.error('No se pudo ajustar por IA. Revisa tu API Key o inténtalo más tarde.');
+      return;
     }
-    let data=await res.json();
-    let weights;
-    try{ weights=JSON.parse(data.response||''); }
-    catch(e){
-      res=await fetch('/custom_gpt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,response_format:{type:'json_object'}})});
-      if(!res.ok){ toast.error('Error IA'); return; }
-      data=await res.json();
-      try{ weights=JSON.parse(data.response||''); } catch(e2){ toast.error('Respuesta IA inválida'); return; }
+    const data=await res.json();
+    let raw=data.response||'';
+    console.debug('IA raw:', raw);
+    let obj;
+    if(typeof raw==='string'){
+      try{ obj=JSON.parse(raw); }
+      catch(e){
+        const m=raw.match(/\{[\s\S]*\}/);
+        if(m){ try{ obj=JSON.parse(m[0]); } catch(e2){} }
+      }
+    }else if(typeof raw==='object'){
+      obj=raw;
     }
+    console.debug('IA parsed:', obj);
+    if(!obj || typeof obj!=='object'){
+      toast.error('No se pudo ajustar por IA. Revisa tu API Key o inténtalo más tarde.');
+      return;
+    }
+    const newWeights={};
     for(const k of metricKeys){
-      const v=Number(weights[k]);
-      if(isNaN(v)||v<0||v>100){ toast.error('Respuesta IA inválida'); return; }
-      weightValues[k]=v;
+      let v=Number(obj[k]);
+      if(isNaN(v)) v=Number(weightValues[k])||0;
+      if(v<0) v=0; if(v>100) v=100;
+      newWeights[k]=v;
     }
+    weightValues=newWeights;
     saveState();
     renderWeights();
     toast.success('Pesos ajustados por IA');
-    toast.success('Winner Score actualizado');
   }catch(err){
     console.error(err);
-    if(err.message && err.message.toLowerCase().includes('api')) toast.error('Configura tu API key');
-    else toast.error('Error al ajustar pesos');
+    toast.error('No se pudo ajustar por IA. Revisa tu API Key o inténtalo más tarde.');
   }
 }
 
@@ -571,12 +591,19 @@ function initWeights(){ loadWeights(); loadOrder(); renderWeights(); document.ge
 
 function recalculateWinnerScoreV2(){
   if(!Array.isArray(allProducts)) return;
-  const ranges = window.winnerV2.computeRanges(allProducts);
-  const weights={};
+  let stored={};
+  try{ stored=JSON.parse(localStorage.getItem(WEIGHT_KEY)||'{}'); }catch(e){ stored={}; }
+  stored={ ...defaultWeights(), ...stored };
   let sum=0;
-  metricKeys.forEach(k=>{ const w=Number(weightValues[k])||0; weights[k]=w; sum+=w; });
+  metricKeys.forEach(k=>{ sum+=Number(stored[k])||0; });
+  if(sum<=0){
+    stored=defaultWeights();
+    sum=0; metricKeys.forEach(k=>{ sum+=Number(stored[k])||0; });
+  }
   const normWeights={};
-  metricKeys.forEach(k=>{ normWeights[k]= sum>0 ? weights[k]/sum : 0; });
+  metricKeys.forEach(k=>{ normWeights[k]= sum>0 ? (Number(stored[k])||0)/sum : 0; });
+  weightValues=stored;
+  const ranges=window.winnerV2.computeRanges(allProducts);
   allProducts.forEach(p=>{
     let total=0; let score=0;
     metricKeys.forEach(k=>{
@@ -586,7 +613,9 @@ function recalculateWinnerScoreV2(){
     });
     p.winner_score_v2_pct = total>0 ? score/total : 0;
   });
-  products.sort((a,b)=>b.winner_score_v2_pct - a.winner_score_v2_pct);
+  if(sortField==='winner_score_v2_pct'){
+    sortProducts();
+  }
   renderTable();
 }
 
