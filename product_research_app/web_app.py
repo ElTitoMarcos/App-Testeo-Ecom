@@ -1183,6 +1183,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._set_json(400)
                 self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
                 return
+            if "price" in data and data.get("source") != "import":
+                logger.info(
+                    "price field is read-only; ignoring on create (source=%s)",
+                    data.get("source"),
+                )
+                data.pop("price", None)
             conn = ensure_db()
             pid = database.insert_product(
                 conn,
@@ -1225,6 +1231,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._set_json(400)
                 self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
                 return
+            if "price" in data and data.get("source") != "import":
+                logger.info(
+                    "price field is read-only; ignoring update for product %s (source=%s)",
+                    pid,
+                    data.get("source"),
+                )
+                data.pop("price", None)
             conn = ensure_db()
             database.update_product(conn, pid, **data)
             product = database.get_product(conn, pid)
@@ -1956,7 +1969,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                     summary=offline['summary'],
                     explanations=offline['explanations'],
                 )
-        ai_err = None
         pending = []
         cost_msg = None
         cost_est = None
@@ -1972,15 +1984,13 @@ class RequestHandler(BaseHTTPRequestHandler):
             cost_msg = res_ai.get("ui_cost_message")
             cost_est = res_ai.get("cost_estimated_usd")
             if res_ai.get("error"):
-                ai_err = "No se pudieron completar las columnas con IA: revisa la API."
+                logger.info("No se pudieron completar las columnas con IA: revisa la API.")
         self._set_json()
-        payload = {"inserted": inserted}
+        payload: Dict[str, Any] = {}
         if cost_est is not None:
             payload["cost_estimated_usd"] = cost_est
         if cost_msg:
             payload["ui_cost_message"] = cost_msg
-        if ai_err:
-            payload["ai_error"] = ai_err
         if pending:
             payload["pending_ids"] = pending
         self._safe_write(json.dumps(payload).encode('utf-8'))

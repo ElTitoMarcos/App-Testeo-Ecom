@@ -159,6 +159,12 @@ body.dark .popover {
 .table tbody tr.selected { background: #cde8ff; }
 body.dark .table tbody tr.selected { background: #243150; }
 
+.cell-date-range {
+  white-space: pre-line;
+  min-width: 20ch;
+  max-width: 24ch;
+}
+
 /* Spacing for configuration panel */
 #config {
   display: flex;
