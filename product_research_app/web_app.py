@@ -42,12 +42,20 @@ from .services import ai_columns
 from .services import winner_v2 as winner_calc
 from . import gpt
 from . import title_analyzer
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 WINNER_V2_FIELDS = winner_calc.ALL_METRICS
 
 APP_DIR = Path(__file__).resolve().parent
 DB_PATH = APP_DIR / "data.sqlite3"
 STATIC_DIR = APP_DIR / "static"
+TEMPLATE_ENV = Environment(
+    loader=FileSystemLoader(APP_DIR / "templates"),
+    autoescape=select_autoescape(["html", "xml"]),
+)
+TEMPLATE_ENV.globals["url_for"] = lambda endpoint, **values: (
+    f"/static/{values.get('filename', '')}" if endpoint == "static" else "/"
+)
 logger = logging.getLogger(__name__)
 
 # Heuristic scoring for offline evaluation.
@@ -544,6 +552,15 @@ class RequestHandler(BaseHTTPRequestHandler):
         with open(file_path, "rb") as f:
             self.wfile.write(f.read())
 
+    def _serve_template(self, template_name: str):
+        try:
+            html = TEMPLATE_ENV.get_template(template_name).render()
+        except Exception:
+            self.send_error(500)
+            return
+        self._set_html()
+        self.wfile.write(html.encode("utf-8"))
+
     def _parse_multipart_file(self):
         ctype = self.headers.get('Content-Type', '')
         if not ctype.startswith('multipart/form-data'):
@@ -582,6 +599,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         path = parsed.path
         if path == "/" or path == "/index.html":
             self._serve_static("index.html")
+            return
+        if path == "/settings":
+            self._serve_template("settings.html")
             return
         if path.startswith("/static/"):
             rel = path[len("/static/") :]
