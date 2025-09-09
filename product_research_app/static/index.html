@@ -95,7 +95,7 @@ body.dark pre { background:#2e315f; }
 </div>
 <div id="weightsCard" class="card" style="display:none;">
   <strong>Ponderaciones Winner Score</strong>
-  <ul id="weightsList" style="list-style:none; margin-top:8px; padding:0;"></ul>
+  <ul id="ws-list" style="list-style:none; margin-top:8px; padding:0;"></ul>
   <div style="margin-top:10px; display:flex; flex-wrap:wrap; gap:6px;">
     <button id="resetWeights">Reset</button>
     <button id="aiWeights">Ajustar pesos con IA</button>
@@ -507,7 +507,7 @@ function loadWinnerOrderV2(){ try{ return JSON.parse(localStorage.getItem(ORDER_
 function saveWinnerOrderV2(order){ localStorage.setItem(ORDER_KEY, JSON.stringify(order)); }
 
 function renderWeights(){
-  const list=document.getElementById('weightsList');
+  const list=document.querySelector('#ws-list');
   if(!list) return;
   list.innerHTML='';
   state.winnerOrderV2.forEach(key=>{
@@ -520,8 +520,15 @@ function renderWeights(){
     li.innerHTML=`<span class="ws-handle">≡</span><span class="ws-name">${def.label}</span><input type="range" min="0" max="100" step="1" value="${state.winnerWeightsV2[key]||0}" class="ws-slider" data-metric="${key}"><span class="ws-value">${state.winnerWeightsV2[key]||0}</span>`;
     list.appendChild(li);
   });
-  Sortable.create(list,{ handle:'.ws-handle', filter:'.ws-slider', preventOnFilter:true, animation:150, onEnd:()=>{ state.winnerOrderV2=Array.from(list.children).map(li=>li.dataset.key); saveWinnerOrderV2(state.winnerOrderV2); }});
-  attachWeightSliderListeners();
+  if (window._wsSortable) window._wsSortable.destroy?.();
+  window._wsSortable = new Sortable(list, {
+    handle: '.ws-handle',
+    animation: 150,
+    filter: '.ws-slider',
+    preventOnFilter: true,
+    onEnd:()=>{ state.winnerOrderV2=Array.from(list.children).map(li=>li.dataset.key); saveWinnerOrderV2(state.winnerOrderV2); }
+  });
+  attachWSListeners();
 }
 
 function resetWeights(){
@@ -533,32 +540,31 @@ function resetWeights(){
   recalculateWinnerScoreV2();
 }
 
-function attachWeightSliderListeners(){
+function attachWSListeners(){
   document.querySelectorAll('.ws-slider').forEach(sl=>{
     sl.removeAttribute('disabled');
     sl.removeAttribute('readonly');
-    sl.style.pointerEvents = 'auto';
-    sl.addEventListener('input', onWeightInput, {passive:true});
-    sl.addEventListener('change', onWeightChange, {passive:true});
     sl.addEventListener('mousedown', e=>e.stopPropagation());
     sl.addEventListener('touchstart', e=>e.stopPropagation(), {passive:true});
+    sl.addEventListener('input', onWeightInput, {passive:true});
+    sl.addEventListener('change', onWeightChange, {passive:true});
   });
 }
 
+document.addEventListener('DOMContentLoaded', attachWSListeners);
+
 function onWeightInput(e){
-  const metric = e.target.dataset.metric;
-  const val = Number(e.target.value);
-  state.winnerWeightsV2[metric] = val;
+  const k = e.target.dataset.metric;
+  const v = Number(e.target.value);
+  state.winnerWeightsV2[k] = v;
   const li = e.target.closest('.ws-row');
-  if(li){ const span = li.querySelector('.ws-value'); if(span) span.textContent = String(val); }
+  if(li){ const span = li.querySelector('.ws-value'); if(span) span.textContent = String(v); }
   saveWinnerWeightsV2(state.winnerWeightsV2);
   if (window._wsRAF) cancelAnimationFrame(window._wsRAF);
   window._wsRAF = requestAnimationFrame(recalculateWinnerScoreV2);
 }
 
-function onWeightChange(e){
-  onWeightInput(e);
-}
+function onWeightChange(e){ onWeightInput(e); }
 
 function chunkProductsForAI(list, size=30){
   const byCat={};
