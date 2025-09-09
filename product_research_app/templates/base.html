@@ -7,5 +7,6 @@
 <body>
   {% block content %}{% endblock %}
   {% include "partials/_api_key_modal.html" %}
+  <script src="{{ url_for('static', filename='js/api_key.js') }}"></script>
 </body>
 </html>
