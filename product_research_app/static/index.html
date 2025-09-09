@@ -489,16 +489,16 @@ function renderWeights(){
   weightOrder.forEach(key=>{
     const def=metricDefs.find(m=>m.key===key);
     const li=document.createElement('li');
-    li.className='metric-row';
+    li.className='ws-row';
     li.dataset.key=key;
-    li.innerHTML=`<span class="ws-handle">≡</span><span class="ws-name">${def.label}</span><div class="ws-slider-wrap"><input type="range" min="0" max="100" step="1" value="${weightValues[key]||0}" class="ws-slider"></div><span class="ws-value">${weightValues[key]||0}</span>`;
+    li.innerHTML=`<span class="ws-handle">≡</span><span class="ws-name">${def.label}</span><input type="range" min="0" max="100" step="1" value="${weightValues[key]||0}" class="ws-slider"><span class="ws-value">${weightValues[key]||0}</span>`;
     const range=li.querySelector('.ws-slider');
     const val=li.querySelector('.ws-value');
     range.addEventListener('input',()=>{ weightValues[key]=Number(range.value); val.textContent=range.value; saveState(); });
     ['mousedown','touchstart'].forEach(ev=>{ range.addEventListener(ev,e=>{ e.stopPropagation(); }); });
     list.appendChild(li);
   });
-  Sortable.create(list,{ handle:'.ws-handle', animation:150, onEnd:()=>{ weightOrder=Array.from(list.children).map(li=>li.dataset.key); saveState(); }});
+  Sortable.create(list,{ handle:'.ws-handle', filter:'.ws-slider', preventOnFilter:true, animation:150, onEnd:()=>{ weightOrder=Array.from(list.children).map(li=>li.dataset.key); saveState(); }});
 }
 
 function saveState(){
