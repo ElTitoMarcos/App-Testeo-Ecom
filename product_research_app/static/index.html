@@ -244,12 +244,12 @@ function formatPrice(n) {
   return '$' + num.toFixed(2).replace(/\.00$/, '');
 }
 
-  function showImportBanner(msg = 'Importando productos, espera…', sub) {
-    const b = document.getElementById('importBanner');
-    if (!b) return;
-    b.innerHTML = sub ? `<div>${msg}</div><div style="font-size:12px;">${sub}</div>` : msg;
-    b.style.display = 'block';
-  }
+function showImportBanner(msg) {
+  const b = document.getElementById('importBanner');
+  if (!b) return;
+  b.textContent = msg;
+  b.style.display = 'block';
+}
 
 function hideImportBanner() {
   const b = document.getElementById('importBanner');
@@ -263,13 +263,7 @@ async function pollImportStatus(id) {
       if (data.ui_cost_message) showImportBanner(data.ui_cost_message);
       importPollTimer = setTimeout(() => pollImportStatus(id), 2000);
     } else if (data.status === 'ai') {
-      const counts = data.ai_counts || {};
-      const total = counts.n_para_ia ?? data.ai_total ?? 0;
-      const done = data.ai_done ?? counts.n_procesados ?? 0;
-      const retries = counts.n_reintentados || 0;
-      const skipped = counts.n_omitidos_por_valor_existente || 0;
-      const label = counts.truncated ? `Aplicado límite de coste: procesados ${done} de ${total}.` : null;
-      showImportBanner(`Rellenando columnas con IA (auto)… Procesados ${done}/${total} · Reintentos ${retries} · Omitidos ${skipped}.`, label);
+      if (data.ui_cost_message) showImportBanner(data.ui_cost_message);
       importPollTimer = setTimeout(() => pollImportStatus(id), 2000);
     } else {
       localStorage.removeItem(IMPORT_TASK_LS_KEY);
@@ -287,23 +281,15 @@ async function pollImportStatus(id) {
         if (data.ai_error) {
           toast.info('No se pudieron completar las columnas con IA: revisa la API.');
         }
-        let html = '';
-        if (counts.truncated) html += `<div style="font-size:12px;">Aplicado límite de coste: procesados ${done} de ${total}.` + `</div>`;
-        if (data.pending_ids && data.pending_ids.length) html += `<div><button id="retryIaNow">Reintentar IA ahora</button></div>`;
-        if (html) showImportBanner(html); else hideImportBanner();
+        hideImportBanner();
         if (data.pending_ids && data.pending_ids.length) {
-            const btn = document.getElementById('retryIaNow');
-            if (btn) {
-              btn.onclick = async () => {
-                btn.disabled = true;
-                try {
-                  await window.handleCompletarIA({ ids: data.pending_ids });
-                  fetchProducts();
-                } finally {
-                  btn.disabled = false;
-                }
-              };
+          toast.info('Quedan productos pendientes de IA', {
+            actionText: 'Reintentar IA ahora',
+            onAction: async () => {
+              await window.handleCompletarIA({ ids: data.pending_ids });
+              fetchProducts();
             }
+          });
         }
       } else {
         toast.error(data.error || 'Error en importación');
@@ -433,7 +419,7 @@ const columns = [
   { key: 'Revenue($)', label: 'Ingresos', type: 'number' },
   { key: 'Creator Conversion Ratio', label: 'Tasa Conversión', type: 'string' },
   { key: 'Launch Date', label: 'Fecha Lanzamiento', type: 'string' },
-  { key: 'date_range', label: 'Rango Fechas', type: 'string' },
+  { key: 'date_range', label: 'Rango Fechas', type: 'string', headerClass: 'cell-date-range', cellClass: 'cell-date-range' },
   { key: 'desire', label: 'Desire', type: 'string', headerClass: 'ec-col ec-col-desire', cellClass: 'ec-col ec-col-desire', dataEcCol: 'desire' },
   { key: 'desire_magnitude', label: 'Desire magnetitude', type: 'string', headerClass: 'ec-col ec-col-desire-mag', cellClass: 'ec-col ec-col-desire-mag', dataEcCol: 'desire_magnitude' },
   { key: 'awareness_level', label: 'Awerness Level', type: 'string', headerClass: 'ec-col ec-col-awareness', cellClass: 'ec-col ec-col-awareness', dataEcCol: 'awareness_level' },
@@ -792,21 +778,7 @@ function renderTable() {
           td.appendChild(btnCopy);
         }
       } else if (key === 'price') {
-        const input = document.createElement('input');
-        input.type = 'text';
-        input.value = value != null ? formatPrice(value) : '';
-        input.addEventListener('focus', () => {
-          input.value = input.value.replace(/[^0-9.-]+/g, '');
-        });
-        input.addEventListener('blur', async () => {
-          let raw = input.value.trim().replace(/[^0-9.-]+/g, '');
-          const num = parseFloat(raw);
-          const val = isNaN(num) ? null : num;
-          try { await fetchJson(`/products/${item.id}`, {method:'PUT', body: JSON.stringify({price: val})}); } catch(e) {}
-          item.price = val;
-          input.value = val != null ? formatPrice(val) : '';
-        });
-        td.appendChild(input);
+        td.textContent = value != null ? formatPrice(value) : '';
       } else if (key === 'desire') {
         const input = document.createElement('input');
         input.type = 'text';
@@ -953,7 +925,6 @@ window.onload = () => {
   fetchProducts();
   const tid = localStorage.getItem(IMPORT_TASK_LS_KEY);
   if(tid){
-    showImportBanner();
     toast.info('Reanudando IA post-import desde el último punto guardado…');
     pollImportStatus(tid);
   }
@@ -1150,8 +1121,6 @@ fileInputEl.onchange = async (ev) => {
     const data = await fetchJson('/upload', {method:'POST', body: formData});
     if (data.ui_cost_message) {
       showImportBanner(data.ui_cost_message);
-    } else {
-      showImportBanner();
     }
     if(data.task_id){
       localStorage.setItem(IMPORT_TASK_LS_KEY, data.task_id);
