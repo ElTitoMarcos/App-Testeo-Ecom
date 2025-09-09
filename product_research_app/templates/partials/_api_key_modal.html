@@ -1,0 +1,30 @@
+<div id="apiKeyModal" class="modal-overlay hidden">
+  <div class="modal-card">
+    <div class="modal-header"><h3 id="apiKeyModalTitle">Añadir API Key</h3></div>
+    <div class="modal-body">
+      <p id="apiKeyModalHelp" class="muted">Necesitas una clave de API para usar la IA. Se guarda localmente (config.json).</p>
+      <div class="field">
+        <label for="apiKeyInput">API Key</label>
+        <input id="apiKeyInput" type="password" placeholder="sk-..." autocomplete="off" />
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button id="apiKeyCancel" class="btn btn-ghost">Cancelar</button>
+      <button id="apiKeySave" class="btn btn-primary">Guardar</button>
+    </div>
+  </div>
+</div>
+<style>
+  .modal-overlay { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,.55); z-index:9999; }
+  .modal-card { width:min(520px,92vw); background:#141827; color:#fff; border-radius:12px; box-shadow:0 10px 40px rgba(0,0,0,.5); }
+  .modal-header,.modal-footer { padding:16px 20px; border-bottom:1px solid #2a2f45; }
+  .modal-footer { border-top:1px solid #2a2f45; border-bottom:0; display:flex; gap:12px; justify-content:flex-end; }
+  .modal-body { padding:16px 20px; }
+  .field { display:flex; flex-direction:column; gap:8px; }
+  .field input { background:#0d1020; border:1px solid #2a2f45; border-radius:8px; padding:10px 12px; color:#fff; }
+  .btn { padding:8px 14px; border-radius:8px; border:0; cursor:pointer; }
+  .btn-primary { background:#6c4cf7; }
+  .btn-ghost { background:transparent; color:#b7b9c9; }
+  .hidden { display:none; }
+  .muted { color:#b7b9c9; font-size:.95rem; }
+</style>
