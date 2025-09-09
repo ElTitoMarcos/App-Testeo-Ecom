@@ -2667,7 +2667,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             if pid not in id_set:
                 continue
             existing = database.get_scores_for_product(conn, pid)
-            if any((sc.get("winner_score_v2_pct") or 0) > 0 for sc in existing):
+            if any((dict(sc).get("winner_score_v2_pct") or 0) > 0 for sc in existing):
                 continue
             missing: list[str] = []
             pct = winner_calc.score_product(prod, weights, ranges, missing) * 100
@@ -2695,7 +2695,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             )
             saved = database.get_scores_for_product(conn, pid)
             if saved:
-                updated[str(pid)] = int(saved[0].get("winner_score_v2_pct") or 0)
+                updated[str(pid)] = int(
+                    dict(saved[0]).get("winner_score_v2_pct") or 0
+                )
 
         self._set_json()
         self.wfile.write(json.dumps({"updated": len(updated), "scores": updated}).encode("utf-8"))
