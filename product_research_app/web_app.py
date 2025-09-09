@@ -34,6 +34,7 @@ import threading
 import time
 import sqlite3
 import math
+import hashlib
 from typing import Dict, Any, List
 
 from . import database
@@ -699,13 +700,17 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/config":
             # return stored configuration (without exposing the API key)
             cfg = config.load_config()
+            key = cfg.get("api_key") or ""
             data = {
                 "model": cfg.get("model", "gpt-4o"),
                 "weights": cfg.get("weights", {}),
                 "scoring_v2_weights": cfg.get("scoring_v2_weights", {}),
-                "has_api_key": bool(cfg.get("api_key")),
-                # do not include the API key for security
+                "has_api_key": bool(key),
             }
+            if key:
+                data["api_key_last4"] = key[-4:]
+                data["api_key_length"] = len(key)
+                data["api_key_hash"] = hashlib.sha256(key.encode("utf-8")).hexdigest()
             self._set_json()
             self.wfile.write(json.dumps(data).encode("utf-8"))
             return
@@ -2166,8 +2171,13 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
             return
         cfg = config.load_config()
-        if 'api_key' in data and data['api_key']:
-            cfg['api_key'] = data['api_key']
+        if 'api_key' in data:
+            key = str(data.get('api_key', '')).strip()
+            if not key:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"error": "empty_api_key"}).encode('utf-8'))
+                return
+            cfg['api_key'] = key
         if 'model' in data and data['model']:
             cfg['model'] = data['model']
         if 'weights' in data and isinstance(data['weights'], dict):

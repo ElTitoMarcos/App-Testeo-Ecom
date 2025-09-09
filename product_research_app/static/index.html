@@ -89,7 +89,10 @@ body.dark pre { background:#2e315f; }
   </div>
   <div class="api-row">
     <label for="apiKey">API Key</label>
-    <input type="password" id="apiKey" />
+    <div class="api-input-row">
+      <input type="password" id="apiKey" />
+      <button id="saveApiKey" disabled aria-label="Guardar API Key" title="Guardar API Key">Guardar API Key</button>
+    </div>
   </div>
 </div>
 <div id="weightsCard" class="card" style="display:none;">
@@ -231,6 +234,8 @@ window.fetchJson = fetchJson;
 window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
 let importPollTimer = null;
+let savedApiKeyHash = null;
+let savedApiKeyLength = 0;
 
 function formatPrice(n) {
   const num = parseFloat(n);
@@ -248,6 +253,14 @@ function showImportBanner(msg) {
 function hideImportBanner() {
   const b = document.getElementById('importBanner');
   if (b) b.style.display = 'none';
+}
+
+async function sha256(str) {
+  const buf = new TextEncoder().encode(str);
+  const hashBuf = await crypto.subtle.digest('SHA-256', buf);
+  return Array.from(new Uint8Array(hashBuf))
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('');
 }
 
 async function pollImportStatus(id) {
@@ -629,10 +642,22 @@ async function loadConfig() {
   if (cfg.model) {
     document.getElementById('modelSelect').value = cfg.model;
   }
+  const input = document.getElementById('apiKey');
+  const saveBtn = document.getElementById('saveApiKey');
   if (cfg.has_api_key) {
+    savedApiKeyHash = cfg.api_key_hash || null;
+    savedApiKeyLength = cfg.api_key_length || 0;
+    const masked = '•'.repeat(Math.max(savedApiKeyLength - 4, 0)) + (cfg.api_key_last4 || '');
+    if (input) input.value = masked;
+    if (saveBtn) saveBtn.disabled = true;
     const row = document.querySelector('#config .api-row');
     if (row) row.style.display = 'none';
     document.getElementById('toggleApiKey').style.display = 'inline-flex';
+  } else {
+    savedApiKeyHash = null;
+    savedApiKeyLength = 0;
+    if (input) input.value = '';
+    if (saveBtn) saveBtn.disabled = true;
   }
   initWeights();
 }
@@ -1160,8 +1185,61 @@ document.getElementById('toggleApiKey').onclick = () => {
   if (row) row.style.display = 'flex';
   document.getElementById('toggleApiKey').style.display = 'none';
   const input = document.getElementById('apiKey');
-  if (input) input.focus();
+  if (input) {
+    input.focus();
+    input.select();
+  }
+  const saveBtn = document.getElementById('saveApiKey');
+  if (saveBtn) saveBtn.disabled = true;
 };
+
+const apiKeyInput = document.getElementById('apiKey');
+const saveApiKeyBtn = document.getElementById('saveApiKey');
+
+apiKeyInput.addEventListener('input', async () => {
+  const val = apiKeyInput.value.trim();
+  let same = false;
+  if (savedApiKeyHash && val) {
+    const hash = await sha256(val);
+    same = hash === savedApiKeyHash;
+  }
+  saveApiKeyBtn.disabled = !val || same;
+});
+
+saveApiKeyBtn.addEventListener('click', async () => {
+  let value = apiKeyInput.value.trim();
+  if (!value) {
+    toast.error('La API Key no puede estar vacía');
+    return;
+  }
+  if (value.startsWith('sk-') && value.length < 40) {
+    toast.info('La API Key parece incompleta');
+  }
+  try {
+    const resp = await fetch('/setconfig', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: value })
+    });
+    if (!resp.ok) {
+      let msg = 'No se pudo guardar la API Key';
+      try { const err = await resp.json(); if (err.error) msg += `: ${err.error}`; } catch {}
+      toast.error(msg);
+      return;
+    }
+    toast.success('API Key guardada');
+    savedApiKeyHash = await sha256(value);
+    savedApiKeyLength = value.length;
+    const masked = '•'.repeat(Math.max(savedApiKeyLength - 4, 0)) + value.slice(-4);
+    apiKeyInput.value = masked;
+    saveApiKeyBtn.disabled = true;
+    const row = document.querySelector('#config .api-row');
+    if (row) row.style.display = 'none';
+    document.getElementById('toggleApiKey').style.display = 'inline-flex';
+  } catch (err) {
+    toast.error('No se pudo guardar la API Key');
+  }
+});
 
 // Show overlay with larger image
 function showOverlay(src){
