@@ -625,9 +625,11 @@ th.ec-col-competition,   td.ec-col-competition   { width: var(--ec-w-competition
 /* Winner Score slider styles */
 .ws-handle{ cursor:grab; padding-inline:4px; }
 #weightsCard{ overflow-x:hidden; }
-.ws-row{ display:grid; grid-template-columns:18px minmax(140px,auto) 480px 44px; gap:8px; align-items:center; }
+.ws-row{ display:grid; grid-template-columns:18px minmax(140px,auto) 480px 44px; gap:8px; align-items:center; position:relative; }
+.ws-row *{ pointer-events:auto; }
+.ws-overlay{ pointer-events:none !important; }
 .ws-name{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.ws-slider{ width:100%; height:12px; cursor:pointer; accent-color:#0077cc; }
+.ws-slider{ width:100%; height:12px; cursor:pointer; accent-color:#0077cc; pointer-events:auto; }
 body.dark .ws-slider{ accent-color:#7a53d6; }
 .ws-slider::-webkit-slider-thumb{ width:20px; height:20px; border-radius:50%; cursor:pointer; }
 .ws-slider::-moz-range-thumb{ width:20px; height:20px; border-radius:50%; cursor:pointer; }
