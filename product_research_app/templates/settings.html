@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Configuración{% endblock %}
+{% block content %}
+<div id="settingsContainer">
+  <!-- existing configuration controls remain here -->
+  <div class="settings-row">
+    <label>API Key</label>
+    <div class="hstack" style="gap:10px;">
+      <button class="btn btn-primary" id="btnChangeApi">Cambiar API</button>
+      <span class="muted">La clave se guarda localmente y puedes cambiarla cuando quieras.</span>
+    </div>
+  </div>
+</div>
+<script>
+  document.addEventListener("DOMContentLoaded", () => {
+    const btn = document.getElementById("btnChangeApi");
+    if (btn) btn.addEventListener("click", () => window.showApiKeyModal(false));
+  });
+</script>
+{% endblock %}
