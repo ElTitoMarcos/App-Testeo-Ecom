@@ -2654,6 +2654,13 @@ class RequestHandler(BaseHTTPRequestHandler):
         products_all = [dict(r) for r in database.list_products(conn)]
         ranges = winner_calc.compute_ranges(products_all)
         weights = config.get_scoring_v2_weights()
+        total_w = sum(weights.values())
+        if total_w <= 0:
+            logger.warning("Winner Score generation aborted: weight sum <= 0")
+            self._set_json()
+            self.wfile.write(json.dumps({"updated": 0, "scores": {}}).encode("utf-8"))
+            return
+        weights = {k: v / total_w for k, v in weights.items()}
         updated: Dict[str, int] = {}
         for prod in products_all:
             pid = prod["id"]
@@ -2686,7 +2693,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                 explanations={},
                 winner_score_v2_pct=pct,
             )
-            updated[str(pid)] = pct
+            saved = database.get_scores_for_product(conn, pid)
+            if saved:
+                updated[str(pid)] = int(saved[0].get("winner_score_v2_pct") or 0)
 
         self._set_json()
         self.wfile.write(json.dumps({"updated": len(updated), "scores": updated}).encode("utf-8"))
