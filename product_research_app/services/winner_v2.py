@@ -77,16 +77,23 @@ def normalize_metric(name: str, value: Any, ranges: Dict[str, Dict[str,float]]) 
         return math.exp(-float(value)/180.0)
     return None
 
-def score_product(prod: Dict[str, Any], weights: Dict[str, float], ranges: Dict[str, Dict[str,float]] | None = None) -> float:
+def score_product(
+    prod: Dict[str, Any],
+    weights: Dict[str, float],
+    ranges: Dict[str, Dict[str, float]] | None = None,
+    missing: list[str] | None = None,
+) -> float:
     if ranges is None:
         ranges = compute_ranges([prod])
     total_w = 0.0
     score = 0.0
     for k, w in weights.items():
         val = normalize_metric(k, prod.get(k), ranges)
-        if val is None:
-            continue
         total_w += w
+        if val is None:
+            if missing is not None:
+                missing.append(k)
+            continue
         score += w * val
     if total_w <= 0:
         return 0.0
