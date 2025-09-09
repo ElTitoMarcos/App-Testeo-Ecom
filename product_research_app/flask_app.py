@@ -26,7 +26,6 @@ def create_app() -> Flask:
     @app.get("/")
     def index() -> str:
         return render_template("index.html")
-
     return app
 
 
