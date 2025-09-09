@@ -609,3 +609,16 @@ th.ec-col-competition,   td.ec-col-competition   { width: var(--ec-w-competition
 }
 @keyframes ecspin { to { transform: rotate(360deg); } }
 .ec-btn-loading{ pointer-events:none; }
+
+/* Winner Score slider styles */
+.ws-handle{ cursor:grab; padding-inline:4px; }
+.metric-row{ display:flex; align-items:center; gap:8px; }
+.ws-name{ flex:0 0 120px; }
+.ws-slider-wrap{ display:flex; align-items:center; flex:1; gap:8px; }
+.ws-endcap-left, .ws-endcap-right{ font-size:11px; white-space:nowrap; }
+.ws-slider{ flex:1; width:100%; min-width:160px; padding-inline:8px; height:12px; cursor:pointer; accent-color:#0077cc; }
+body.dark .ws-slider{ accent-color:#7a53d6; }
+.ws-slider::-webkit-slider-thumb{ width:20px; height:20px; border-radius:50%; cursor:pointer; }
+.ws-slider::-moz-range-thumb{ width:20px; height:20px; border-radius:50%; cursor:pointer; }
+.ws-value{ width:40px; text-align:right; }
+
