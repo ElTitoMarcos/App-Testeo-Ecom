@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Product Research App</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+</head>
+<body class="dark">
+  <div class="topbar">
+    <div class="right">
+      <button id="openSettings" class="bar-btn">Configuración</button>
+      <button id="generateWinner" class="bar-btn">Generar Winner Score</button>
+    </div>
+  </div>
+  <main>
+    <table id="productsTable"></table>
+  </main>
+
+  <div id="settingsModal" class="modal">
+    <div class="modal-content">
+      <h2>Configuración</h2>
+      <div class="section">
+        <label for="modelSelect">Modelo</label>
+        <select id="modelSelect">
+          <option value="gpt-4o">GPT-4o</option>
+          <option value="gpt-4">GPT-4</option>
+          <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
+        </select>
+      </div>
+      <div class="section">
+        <label for="apiKeyInput">API Key</label>
+        <div class="api-row">
+          <input type="password" id="apiKeyInput" />
+          <button id="saveApiKey" class="bar-btn">Guardar clave</button>
+        </div>
+      </div>
+      <div class="weights-card">
+        <strong>Ponderaciones Winner Score</strong>
+        <ul id="weightsList" class="weights-list"></ul>
+        <div class="weights-actions">
+          <button id="resetWeights" class="bar-btn">Reset</button>
+          <button id="aiWeights" class="bar-btn">Ajustar pesos con IA</button>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="closeSettings" class="bar-btn">Cerrar</button>
+      </div>
+    </div>
+  </div>
+  <script src="{{ url_for('static', filename='js/settings.js') }}"></script>
+</body>
+</html>

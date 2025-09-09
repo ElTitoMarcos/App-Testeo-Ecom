@@ -609,3 +609,53 @@ th.ec-col-competition,   td.ec-col-competition   { width: var(--ec-w-competition
 }
 @keyframes ecspin { to { transform: rotate(360deg); } }
 .ec-btn-loading{ pointer-events:none; }
+/* Topbar and settings modal */
+.topbar {
+  position: sticky;
+  top: 0;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #131A2E;
+  z-index: 50;
+}
+body.dark .topbar {
+  background: #131A2E;
+}
+.topbar .bar-btn {
+  margin-left: 8px;
+}
+
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+.modal.open {
+  display: flex;
+}
+.modal-content {
+  background: #0F1424;
+  color: #E5EAF5;
+  padding: 20px;
+  border-radius: 8px;
+  width: 90%;
+  max-width: 500px;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+.section { margin-top: 10px; }
+.api-row { display: flex; gap: 8px; align-items: center; }
+.weights-card { margin-top: 20px; }
+.weights-list { list-style: none; padding: 0; margin: 10px 0; }
+.weights-list li { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.weights-list li .drag { cursor: move; padding: 0 4px; }
+.weights-list li input[type=range] { flex: 1; }
+.weights-list li .value { width: 32px; text-align: right; }
+.weights-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.modal-actions { margin-top: 16px; text-align: right; }

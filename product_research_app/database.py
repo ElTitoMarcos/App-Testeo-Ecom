@@ -95,6 +95,8 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         cur.execute("ALTER TABLE products ADD COLUMN date_range TEXT")
     if "ai_columns_completed_at" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN ai_columns_completed_at TEXT")
+    if "winner_score" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN winner_score REAL")
     # drop obsolete columns if present
     for obsolete in [
         "facilidad_anuncio",
@@ -210,6 +212,15 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         cur.execute("ALTER TABLE import_jobs ADD COLUMN ai_pending TEXT")
     except Exception:
         pass
+    # Settings table for application configuration
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
 
 
@@ -608,6 +619,54 @@ def json_dump(obj: Any) -> str:
     import json
 
     return json.dumps(obj or {}, ensure_ascii=False)
+
+
+def get_settings(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Retrieve application settings from the database.
+
+    Returns a dictionary with keys ``weights``, ``order`` and ``openai_api_key``
+    if present. JSON values are decoded automatically.
+    """
+    cur = conn.cursor()
+    cur.execute("SELECT key, value FROM app_settings")
+    rows = cur.fetchall()
+    raw = {row["key"]: row["value"] for row in rows}
+    settings: Dict[str, Any] = {}
+    if "winner_weights" in raw:
+        try:
+            settings["weights"] = json.loads(raw["winner_weights"])
+        except Exception:
+            settings["weights"] = {}
+    if "winner_order" in raw:
+        try:
+            settings["order"] = json.loads(raw["winner_order"])
+        except Exception:
+            settings["order"] = []
+    if "openai_api_key" in raw:
+        settings["openai_api_key"] = raw["openai_api_key"]
+    return settings
+
+
+def set_setting(conn: sqlite3.Connection, key: str, value: Any) -> None:
+    """Persist a single application setting."""
+    cur = conn.cursor()
+    if isinstance(value, (dict, list)):
+        val = json_dump(value)
+    else:
+        val = str(value) if value is not None else ""
+    cur.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)",
+        (key, val),
+    )
+    conn.commit()
+
+
+def get_api_key(conn: sqlite3.Connection) -> Optional[str]:
+    """Return the stored OpenAI API key if available."""
+    cur = conn.cursor()
+    cur.execute("SELECT value FROM app_settings WHERE key='openai_api_key'")
+    row = cur.fetchone()
+    return row[0] if row else None
 
 
 def find_product_by_name(conn: sqlite3.Connection, name: str) -> Optional[sqlite3.Row]:
