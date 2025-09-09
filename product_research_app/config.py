@@ -193,14 +193,16 @@ def is_scoring_v2_enabled() -> bool:
 # ---------------- Winner Score v2 weights -----------------
 
 SCORING_V2_DEFAULT_WEIGHTS: Dict[str, float] = {
-    "magnitud_deseo": 0.125,
-    "nivel_consciencia": 0.125,
-    "saturacion_mercado": 0.125,
-    "facilidad_anuncio": 0.125,
-    "facilidad_logistica": 0.125,
-    "escalabilidad": 0.125,
-    "engagement_shareability": 0.125,
-    "durabilidad_recurrencia": 0.125,
+    "magnitud_deseo": 1.0,
+    "nivel_consciencia_headroom": 1.0,
+    "evidencia_demanda": 1.0,
+    "tasa_conversion": 1.0,
+    "ventas_por_dia": 1.0,
+    "recencia_lanzamiento": 1.0,
+    "competition_level_invertido": 1.0,
+    "facilidad_anuncio": 1.0,
+    "escalabilidad": 1.0,
+    "durabilidad_recurrencia": 1.0,
 }
 
 

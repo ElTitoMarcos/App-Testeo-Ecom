@@ -422,6 +422,37 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                 rows_imported += 1
                 inserted_ids.append(row_id)
             conn.commit()
+        if inserted_ids:
+            products_all = [dict(r) for r in database.list_products(conn)]
+            ranges = winner_calc.compute_ranges(products_all)
+            weights = config.get_scoring_v2_weights()
+            for prod in products_all:
+                if prod["id"] not in inserted_ids:
+                    continue
+                missing: list[str] = []
+                pct = winner_calc.score_product(prod, weights, ranges, missing) * 100
+                pct = max(0, min(100, round(pct)))
+                if missing:
+                    logger.debug(
+                        "Winner Score missing metrics for product %s: %s",
+                        prod["id"],
+                        ",".join(missing),
+                    )
+                database.insert_score(
+                    conn,
+                    product_id=prod["id"],
+                    model="winner_v2",
+                    total_score=0,
+                    momentum=0,
+                    saturation=0,
+                    differentiation=0,
+                    social_proof=0,
+                    margin=0,
+                    logistics=0,
+                    summary="",
+                    explanations={},
+                    winner_score_v2_pct=pct,
+                )
         if inserted_ids and config.is_auto_fill_ia_on_import_enabled():
             database.start_import_job_ai(conn, job_id, len(inserted_ids))
             cfg_cost = config.get_ai_cost_config()
@@ -1157,6 +1188,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/scoring/v2/gpt-summary":
             self.handle_scoring_v2_gpt_summary()
+            return
+        if path == "/scoring/v2/generate":
+            self.handle_scoring_v2_generate()
             return
         if path == "/delete":
             self.handle_delete()
@@ -1978,9 +2012,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             conn_ws = ensure_db()
             products_all = [dict(r) for r in database.list_products(conn_ws)]
             ranges = winner_calc.compute_ranges(products_all)
-            weights = {k: 50 for k in winner_calc.ALL_METRICS}
+            weights = {k: 1.0 for k in winner_calc.ALL_METRICS}
             for prod in products_all:
                 pct = winner_calc.score_product(prod, weights, ranges) * 100
+                pct = max(0, min(100, round(pct)))
                 database.insert_score(
                     conn_ws,
                     product_id=prod['id'],
@@ -2588,6 +2623,73 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         self._set_json()
         self.wfile.write(json.dumps({"summary": summary}).encode("utf-8"))
+
+    def handle_scoring_v2_generate(self):
+        """Compute Winner Score for selected products."""
+
+        if not config.is_scoring_v2_enabled():
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "scoring v2 disabled"}).encode("utf-8"))
+            return
+
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length).decode("utf-8") if length else ""
+        try:
+            data = json.loads(body) if body else {}
+            ids = data.get("ids") or []
+            if not isinstance(ids, list):
+                raise ValueError
+        except Exception:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode("utf-8"))
+            return
+
+        id_set = {int(i) for i in ids if str(i).isdigit()}
+        if not id_set:
+            self._set_json()
+            self.wfile.write(json.dumps({"updated": 0, "scores": {}}).encode("utf-8"))
+            return
+
+        conn = ensure_db()
+        products_all = [dict(r) for r in database.list_products(conn)]
+        ranges = winner_calc.compute_ranges(products_all)
+        weights = config.get_scoring_v2_weights()
+        updated: Dict[str, int] = {}
+        for prod in products_all:
+            pid = prod["id"]
+            if pid not in id_set:
+                continue
+            existing = database.get_scores_for_product(conn, pid)
+            if any((sc.get("winner_score_v2_pct") or 0) > 0 for sc in existing):
+                continue
+            missing: list[str] = []
+            pct = winner_calc.score_product(prod, weights, ranges, missing) * 100
+            pct = max(0, min(100, round(pct)))
+            if missing:
+                logger.debug(
+                    "Winner Score missing metrics for product %s: %s",
+                    pid,
+                    ",".join(missing),
+                )
+            database.insert_score(
+                conn,
+                product_id=pid,
+                model="winner_v2",
+                total_score=0,
+                momentum=0,
+                saturation=0,
+                differentiation=0,
+                social_proof=0,
+                margin=0,
+                logistics=0,
+                summary="",
+                explanations={},
+                winner_score_v2_pct=pct,
+            )
+            updated[str(pid)] = pct
+
+        self._set_json()
+        self.wfile.write(json.dumps({"updated": len(updated), "scores": updated}).encode("utf-8"))
 
     def handle_create_list(self):
         """Create a new user defined list (group) of products."""
