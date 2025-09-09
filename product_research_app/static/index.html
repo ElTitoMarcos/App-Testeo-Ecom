@@ -44,12 +44,17 @@ pre { white-space:pre-wrap; background:#f5f7ff; padding:8px; border-radius:4px; 
 body.dark pre { background:#2e315f; }
 /* Weight slider styling */
 .weight-slider {
-  width:120px;
   accent-color:#0077cc;
 }
 body.dark .weight-slider {
   accent-color:#7a53d6;
 }
+.metric-row { display:flex; align-items:center; gap:6px; }
+.metric-row .drag { cursor:move; padding:0 4px; }
+.metric-row .chip { background:#e0f0ff; padding:2px 4px; border-radius:8px; font-size:11px; }
+body.dark .metric-row .chip { background:#2a2d5c; color:#a9a9ff; }
+.metric-row input[type=range] { flex:1; }
+.metric-row .value { width:32px; text-align:right; }
 </style>
 </head>
 <body class="dark">
@@ -102,10 +107,11 @@ body.dark .weight-slider {
 </div>
 <div id="weightsCard" class="card" style="display:none; max-width:420px;">
   <strong>Ponderaciones Winner Score</strong>
-  <div id="weightsContainer" style="margin-top:8px; display:flex; flex-direction:column; gap:6px;"></div>
+  <ul id="weightsList" style="list-style:none; margin-top:8px; padding:0;"></ul>
   <div style="margin-top:10px; display:flex; flex-wrap:wrap; gap:6px;">
-    <button id="autoWeightsGpt">Ajustar pesos con IA</button>
-    <button id="autoWeightsStat">Ajustar estadístico</button>
+    <button id="resetWeights">Reset</button>
+    <button id="savePreset">Guardar preset</button>
+    <button id="loadPreset">Cargar preset</button>
   </div>
 </div>
 <div id="custom" style="display:none;">
@@ -230,6 +236,7 @@ body.dark .weight-slider {
 <script src="/static/js/columns.js"></script>
 <script type="module" src="/static/js/add-group.js"></script>
 <script type="module" src="/static/js/manage-groups.js"></script>
+<script src="/static/js/winner_v2.js"></script>
 <script type="module">
 import { fetchJson } from "/static/js/net.js";
 import * as groupsService from "/static/js/groups-service.js";
@@ -468,122 +475,38 @@ function preprocessProducts(list){
   dupMap.forEach(arr => { if (arr.length > 1) arr.forEach(it => it.isDuplicate = true); });
 }
 
-const weightFields = [
-  'magnitud_deseo',
-  'nivel_consciencia',
-  'saturacion_mercado',
-  'facilidad_anuncio',
-  'facilidad_logistica',
-  'escalabilidad',
-  'engagement_shareability',
-  'durabilidad_recurrencia'
-];
-const WEIGHTS_LS_KEY = 'winnerScoreWeights:v1';
-let weightStore = {};
-let persistTimer;
-let backendWeightsEnabled = true;
+const metricDefs = window.winnerV2.metricDefs;
+const metricKeys = metricDefs.map(m=>m.key);
+const WEIGHT_KEY = 'winnerWeightsV2';
+const ORDER_KEY = 'winnerOrderV2';
+const PRESET_W_KEY = 'winnerPresetWeightsV2';
+const PRESET_O_KEY = 'winnerPresetOrderV2';
+let weightValues = {};
+let weightOrder = [];
 
-function defaultWeights(){
-  const w = {};
-  const v = 1 / weightFields.length;
-  weightFields.forEach(k => w[k] = v);
-  return w;
-}
+function defaultWeights(){ const w={}; metricDefs.forEach(m=>w[m.key]=50); return w; }
+function defaultOrder(){ return metricDefs.map(m=>m.key); }
 
-function normalizeWeights(obj){
-  let total = 0;
-  weightFields.forEach(k => { total += parseFloat(obj[k]) || 0; });
-  if(total <= 0) return defaultWeights();
-  const out = {};
-  weightFields.forEach(k => { out[k] = ((parseFloat(obj[k]) || 0) / total); });
-  return out;
-}
+function loadWeights(){ try{ weightValues = JSON.parse(localStorage.getItem(WEIGHT_KEY)||'{}'); } catch(e){ weightValues={}; } weightValues = { ...defaultWeights(), ...weightValues }; }
+function loadOrder(){ try{ weightOrder = JSON.parse(localStorage.getItem(ORDER_KEY)||'[]'); } catch(e){ weightOrder=[]; } if(!Array.isArray(weightOrder) || weightOrder.length !== metricDefs.length){ weightOrder = defaultOrder(); } }
 
-function renderWeights(weights){
-  const container = document.getElementById('weightsContainer');
-  if (!container) return;
-  container.innerHTML = '';
-  weightFields.forEach(key => {
-    const row = document.createElement('div');
-    row.style.display = 'flex';
-    row.style.alignItems = 'center';
-    row.style.gap = '6px';
-    const label = document.createElement('label');
-    label.textContent = key;
-    label.style.minWidth = '160px';
-    const input = document.createElement('input');
-    input.type = 'number';
-    input.step = '0.01';
-    input.min = '0';
-    input.max = '1';
-    input.value = (weights[key] ?? 0).toFixed(3);
-    input.dataset.key = key;
-    input.className = 'weight-slider';
-    input.addEventListener('input', e => {
-      weightStore[e.target.dataset.key] = parseFloat(e.target.value) || 0;
-      scheduleWeightPersist();
-    });
-    row.appendChild(label);
-    row.appendChild(input);
-    container.appendChild(row);
-  });
-}
+function renderWeights(){ const list=document.getElementById('weightsList'); if(!list) return; list.innerHTML=''; weightOrder.forEach(key=>{ const def=metricDefs.find(m=>m.key===key); const li=document.createElement('li'); li.className='metric-row'; li.draggable=true; li.dataset.key=key; li.innerHTML=`<span class="drag">☰</span><span title="${def.tip}" style="min-width:140px;">${def.label}</span><span class="chip">Mín. (0)</span><input type="range" min="0" max="100" value="${weightValues[key]||0}" class="weight-slider"><span class="chip">Máx. (100)</span><span class="value">${weightValues[key]||0}</span>`; const range=li.querySelector('input'); const val=li.querySelector('.value'); range.addEventListener('input',()=>{ weightValues[key]=Number(range.value); val.textContent=range.value; saveState(); }); li.addEventListener('dragstart',e=>{ e.dataTransfer.setData('text/plain',key); }); li.addEventListener('dragover',e=>{ e.preventDefault(); }); li.addEventListener('drop',e=>{ e.preventDefault(); const k=e.dataTransfer.getData('text/plain'); const idx=weightOrder.indexOf(k); const idx2=weightOrder.indexOf(key); weightOrder.splice(idx,1); weightOrder.splice(idx2,0,k); renderWeights(); saveState(); }); list.appendChild(li); }); }
 
-function scheduleWeightPersist(){
-  clearTimeout(persistTimer);
-  persistTimer = setTimeout(persistWeights, 400);
-}
+function saveState(){ localStorage.setItem(WEIGHT_KEY, JSON.stringify(weightValues)); localStorage.setItem(ORDER_KEY, JSON.stringify(weightOrder)); recalcWinnerScores(); toast.success('Winner Score actualizado'); }
 
-let persistRetryDelay = 1000;
-async function persistWeights(){
-  weightStore = normalizeWeights(weightStore);
-  localStorage.setItem(WEIGHTS_LS_KEY, JSON.stringify(weightStore));
-  if(!backendWeightsEnabled){
-    toast.success('Pesos guardados');
-    renderWeights(weightStore);
-    return;
-  }
-  try{
-    const res = await fetch('/settings/winner-score',{method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(weightStore)});
-    if(!res.ok) throw new Error('bad status');
-    persistRetryDelay = 1000;
-    toast.success('Pesos guardados');
-  }catch(e){
-    toast.error('No se pudieron guardar, reintentaremos');
-    setTimeout(persistWeights, persistRetryDelay);
-    persistRetryDelay = Math.min(persistRetryDelay * 2, 30000);
-  }
-  renderWeights(weightStore);
-}
+function resetWeights(){ weightValues=defaultWeights(); weightOrder=defaultOrder(); saveState(); renderWeights(); }
+function savePreset(){ localStorage.setItem(PRESET_W_KEY, JSON.stringify(weightValues)); localStorage.setItem(PRESET_O_KEY, JSON.stringify(weightOrder)); toast.success('Preset guardado'); }
+function loadPreset(){ try{ weightValues = JSON.parse(localStorage.getItem(PRESET_W_KEY)||'{}'); weightOrder = JSON.parse(localStorage.getItem(PRESET_O_KEY)||'[]'); if(!Array.isArray(weightOrder) || weightOrder.length !== metricDefs.length){ weightOrder = defaultOrder(); } saveState(); renderWeights(); } catch(e){ toast.error('No hay preset'); } }
 
-function initWeights(cfgWeights){
-  let weights = cfgWeights;
-  if(!weights || Object.keys(weights).length === 0){
-    try{
-      const saved = localStorage.getItem(WEIGHTS_LS_KEY);
-      if(saved) weights = JSON.parse(saved);
-    }catch(e){}
-  }
-  if(!weights) weights = {};
-  weightStore = { ...defaultWeights(), ...weights };
-  renderWeights(weightStore);
-}
+function initWeights(){ loadWeights(); loadOrder(); renderWeights(); document.getElementById('resetWeights').onclick=resetWeights; document.getElementById('savePreset').onclick=savePreset; document.getElementById('loadPreset').onclick=loadPreset; }
 
-async function applyWeights(newWeights, persistNow = true){
-  weightStore = {...newWeights};
-  renderWeights(weightStore);
-  if(persistNow){
-    clearTimeout(persistTimer);
-    await persistWeights();
-  }
-}
+function recalcWinnerScores(){ if(!Array.isArray(allProducts)) return; const ranges = window.winnerV2.computeRanges(allProducts); allProducts.forEach(p=>{ const s = window.winnerV2.scoreProduct(p, weightValues, ranges); p.winner_score_v2_pct = s*100; }); renderTable(); }
 
 async function loadConfig() {
   let cfg = {};
   try {
     cfg = await fetchJson('/config');
   } catch (err) {
-    backendWeightsEnabled = false;
     console.error('Error loading config', err);
   }
   if (cfg.model) {
@@ -594,7 +517,7 @@ async function loadConfig() {
     if (row) row.style.display = 'none';
     document.getElementById('toggleApiKey').style.display = 'inline-flex';
   }
-  initWeights(cfg.scoring_v2_weights);
+  initWeights();
 }
 
 // Microinteraction progress bar
@@ -646,6 +569,7 @@ async function fetchProducts(preserve=true) {
   }
   updateMasterState();
   renderTable();
+  recalcWinnerScores();
 }
 
 function renderTable() {
@@ -713,7 +637,7 @@ function renderTable() {
       if (col.minWidth) td.style.minWidth = col.minWidth + 'px';
       if (col.maxWidth) td.style.maxWidth = col.maxWidth + 'px';
       let value = '';
-      if (weightFields.includes(key)) {
+      if (metricKeys.includes(key)) {
         value = item.winner_score_v2_breakdown && item.winner_score_v2_breakdown.scores ? item.winner_score_v2_breakdown.scores[key] : '';
         if (item.winner_score_v2_breakdown && item.winner_score_v2_breakdown.justifications) {
           const j = item.winner_score_v2_breakdown.justifications[key];
@@ -894,7 +818,7 @@ function sortBy(field, type) {
     if (field === 'id' || field === 'name' || field === 'category' || field === 'price' || field === 'image_url' || field === 'winner_score_v2_pct' || field === 'desire' || field === 'desire_magnitude' || field === 'awareness_level' || field === 'competition_level') {
       va = a[field];
       vb = b[field];
-    } else if (weightFields.includes(field)) {
+    } else if (metricKeys.includes(field)) {
       va = a.winner_score_v2_breakdown && a.winner_score_v2_breakdown.scores ? a.winner_score_v2_breakdown.scores[field] : undefined;
       vb = b.winner_score_v2_breakdown && b.winner_score_v2_breakdown.scores ? b.winner_score_v2_breakdown.scores[field] : undefined;
     } else {
@@ -962,144 +886,6 @@ document.getElementById('configBtn').onclick = () => {
 };
 
 
-const autoGptBtn = document.getElementById('autoWeightsGpt');
-const autoStatBtn = document.getElementById('autoWeightsStat');
-function buildWeightPayload(list){
-  const featureKeys = Object.keys(weightStore || {});
-  const rows = [];
-  let targetKey = '';
-  for(const p of list){
-    let tVal = null;
-    if(p.extras){
-      for(const key of ['revenue','sales','gmv','orders','units']){
-        const v = p.extras[key];
-        if(v !== undefined){
-          const num = parseFloat(v);
-          if(!isNaN(num)){ tVal = num; targetKey = targetKey || key; }
-          break;
-        }
-      }
-    }
-    if(tVal === null || isNaN(tVal)) continue;
-    const row = { target: tVal };
-    featureKeys.forEach(f => {
-      const v = p?.winner_score_v2_breakdown?.scores?.[f];
-      const num = parseFloat(v);
-      row[f] = isNaN(num) ? null : num;
-    });
-    rows.push(row);
-  }
-  if(rows.length === 0) return { ok:false, rowsOK:0, featuresOK:0, minRows:0, minFeaturesVivas:3 };
-  const stats = {};
-  featureKeys.forEach(f => {
-    const vals = rows.map(r => r[f]).filter(v => typeof v === 'number');
-    const missRatio = 1 - (vals.length / rows.length);
-    if(vals.length && missRatio <= 0.4){
-      vals.sort((a,b)=>a-b);
-      const mid = Math.floor(vals.length/2);
-      const med = vals.length % 2 ? vals[mid] : (vals[mid-1]+vals[mid])/2;
-      stats[f] = med;
-    }
-  });
-  const features = Object.keys(stats);
-  const rowsOK = rows.length;
-  const minFeaturesVivas = 3;
-  const minRows = Math.max(30, 5 * features.length);
-  if(rowsOK < minRows || features.length < minFeaturesVivas){
-    return { ok:false, rowsOK, featuresOK: features.length, minRows, minFeaturesVivas };
-  }
-  rows.forEach(r => {
-    features.forEach(f => { if(r[f] === null || isNaN(r[f])) r[f] = stats[f]; });
-  });
-  const sampleSize = Math.min(500, rowsOK);
-  const isDiscrete = rows.every(r => Number.isInteger(r.target));
-  const sample = isDiscrete ? stratifiedSample(rows, sampleSize) : randomSample(rows, sampleSize);
-  return {
-    ok:true,
-    payload:{
-      features,
-      data_sample: sample.map(r => {
-        const obj = { target: r.target };
-        features.forEach(f => obj[f] = r[f]);
-        return obj;
-      }),
-      target: targetKey || 'revenue',
-      constraints: { non_negative: true, normalize: 'sum1' },
-      context: { locale: 'es-ES' }
-    },
-    rowsOK,
-    featuresOK: features.length,
-    minRows,
-    minFeaturesVivas
-  };
-}
-
-function shuffle(arr){
-  for(let i=arr.length-1;i>0;i--){
-    const j=Math.floor(Math.random()*(i+1));
-    [arr[i],arr[j]]=[arr[j],arr[i]];
-  }
-}
-
-function randomSample(arr,n){
-  const copy=[...arr];
-  shuffle(copy);
-  return copy.slice(0,n);
-}
-
-function stratifiedSample(rows,n){
-  const groups={};
-  rows.forEach(r=>{ const k=r.target; (groups[k]=groups[k]||[]).push(r); });
-  const keys=Object.keys(groups);
-  const total=rows.length;
-  const sample=[];
-  let taken=0;
-  keys.forEach((k,idx)=>{
-    const g=groups[k];
-    let want=idx===keys.length-1? n-taken : Math.round(g.length/total*n);
-    if(want>g.length) want=g.length;
-    shuffle(g);
-    sample.push(...g.slice(0,want));
-    taken+=want;
-  });
-  return sample;
-}
-
-async function handleAutoWeights(endpoint, type){
-  let res = buildWeightPayload(products);
-  if(!res.ok){
-    res = buildWeightPayload(allProducts);
-    if(!res.ok){
-      toast.error(`Datos insuficientes: necesitas ≥${res.minRows} filas con target y ≥${res.minFeaturesVivas} variables numéricas. Tienes ${res.rowsOK} filas y ${res.featuresOK} variables.`);
-      return;
-    }
-  }
-  const payload = res.payload;
-  const gptLabel = autoGptBtn.textContent;
-  const statLabel = autoStatBtn.textContent;
-  autoGptBtn.disabled = autoStatBtn.disabled = true;
-  autoGptBtn.classList.add('loading');
-  autoStatBtn.classList.add('loading');
-  autoGptBtn.textContent = autoStatBtn.textContent = 'Ajustando…';
-  try{
-    const resp = await fetchJson(endpoint,{method:'POST', body: JSON.stringify(payload)});
-    const weights = { ...weightStore };
-    payload.features.forEach(f => { weights[f] = parseFloat(resp.weights?.[f]) || 0; });
-    await applyWeights(weights, true);
-    toast.success(type==='gpt' ? 'Pesos ajustados con IA' : 'Pesos ajustados estadístico');
-  }catch(err){
-    // errores ya mostrados por fetchJson
-  }finally{
-    autoGptBtn.textContent = gptLabel;
-    autoStatBtn.textContent = statLabel;
-    autoGptBtn.classList.remove('loading');
-    autoStatBtn.classList.remove('loading');
-    autoGptBtn.disabled = autoStatBtn.disabled = false;
-  }
-}
-
-autoGptBtn.onclick = () => handleAutoWeights('/scoring/v2/auto-weights-gpt','gpt');
-autoStatBtn.onclick = () => handleAutoWeights('/scoring/v2/auto-weights-stat','stat');
 // Handle file upload: clicking the upload button opens file chooser
 const fileInputEl = document.getElementById('fileInput');
 document.getElementById('uploadBtn').onclick = () => {

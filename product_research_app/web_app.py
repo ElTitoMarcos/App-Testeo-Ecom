@@ -39,19 +39,11 @@ from typing import Dict, Any, List
 from . import database
 from . import config
 from .services import ai_columns
+from .services import winner_v2 as winner_calc
 from . import gpt
 from . import title_analyzer
 
-WINNER_V2_FIELDS = [
-    "magnitud_deseo",
-    "nivel_consciencia",
-    "saturacion_mercado",
-    "facilidad_anuncio",
-    "facilidad_logistica",
-    "escalabilidad",
-    "engagement_shareability",
-    "durabilidad_recurrencia",
-]
+WINNER_V2_FIELDS = winner_calc.ALL_METRICS
 
 APP_DIR = Path(__file__).resolve().parent
 DB_PATH = APP_DIR / "data.sqlite3"
@@ -1968,6 +1960,29 @@ class RequestHandler(BaseHTTPRequestHandler):
                     logistics=metrics['logistics'],
                     summary=offline['summary'],
                     explanations=offline['explanations'],
+                )
+        # Recalculate Winner Score using numeric metrics
+        if inserted_ids:
+            conn_ws = ensure_db()
+            products_all = [dict(r) for r in database.list_products(conn_ws)]
+            ranges = winner_calc.compute_ranges(products_all)
+            weights = {k: 50 for k in winner_calc.ALL_METRICS}
+            for prod in products_all:
+                pct = winner_calc.score_product(prod, weights, ranges) * 100
+                database.insert_score(
+                    conn_ws,
+                    product_id=prod['id'],
+                    model='winner_v2',
+                    total_score=0,
+                    momentum=0,
+                    saturation=0,
+                    differentiation=0,
+                    social_proof=0,
+                    margin=0,
+                    logistics=0,
+                    summary='',
+                    explanations={},
+                    winner_score_v2_pct=pct,
                 )
         pending = []
         cost_msg = None
