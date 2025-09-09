@@ -71,6 +71,7 @@ body.dark pre { background:#2e315f; }
     <button id="createListBtn">Crear</button>
     <textarea id="gptPrompt" rows="1" maxlength="2000" placeholder="Escribe consulta para GPT..." aria-label="Escribe consulta para GPT..."></textarea>
     <button id="sendPrompt">Enviar consulta a GPT</button>
+    <button id="btnRecalcWinnerTop">Generar Winner Score</button>
     <div id="searchRowRight">
       <div id="listMeta">0 resultados</div>
     </div>
@@ -502,7 +503,7 @@ function renderWeights(){
     const li=document.createElement('li');
     li.className='ws-row';
     li.dataset.key=key;
-    li.draggable=false;
+    li.removeAttribute('draggable');
     li.style.pointerEvents='auto';
     li.innerHTML=`<span class="ws-handle">≡</span><span class="ws-name">${def.label}</span><input type="range" min="0" max="100" step="1" value="${state.winnerWeightsV2[key]||0}" class="ws-slider" data-metric="${key}"><span class="ws-value">${state.winnerWeightsV2[key]||0}</span>`;
     list.appendChild(li);
@@ -527,9 +528,8 @@ function attachWeightSliderListeners(){
     sl.style.pointerEvents = 'auto';
     sl.addEventListener('input', onWeightInput, {passive:true});
     sl.addEventListener('change', onWeightChange, {passive:true});
-    ['mousedown','touchstart'].forEach(ev=>{
-      sl.addEventListener(ev, e=>e.stopPropagation(), {passive:true});
-    });
+    sl.addEventListener('mousedown', e=>e.stopPropagation());
+    sl.addEventListener('touchstart', e=>e.stopPropagation(), {passive:true});
   });
 }
 
@@ -1214,6 +1214,7 @@ document.getElementById('searchBtn').onclick = () => {
 };
 const gptField = document.getElementById('gptPrompt');
 const sendPromptBtn = document.getElementById('sendPrompt');
+const btnRecalcWinnerTop = document.getElementById('btnRecalcWinnerTop');
 
 function autoGrow(el){
   el.style.height = 'auto';
@@ -1268,6 +1269,9 @@ async function sendPromptHandler(){
 }
 
 sendPromptBtn.onclick = sendPromptHandler;
+if(btnRecalcWinnerTop){
+  btnRecalcWinnerTop.addEventListener('click', ()=>{ recalculateWinnerScoreV2(); });
+}
 document.getElementById('darkToggle').onclick = () => {
   document.body.classList.toggle('dark');
 };
