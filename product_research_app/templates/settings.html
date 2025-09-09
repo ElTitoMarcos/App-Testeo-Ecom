@@ -5,16 +5,66 @@
   <!-- existing configuration controls remain here -->
   <div class="settings-row">
     <label>API Key</label>
-    <div class="hstack" style="gap:10px;">
-      <button class="btn btn-primary" id="btnChangeApi">Cambiar API</button>
-      <span class="muted">La clave se guarda localmente y puedes cambiarla cuando quieras.</span>
+    <div class="hstack" style="gap:10px; align-items:center; flex-wrap:wrap;">
+      <input id="apiKeyPlainInput" type="password" placeholder="sk-..." autocomplete="off"
+             class="input" style="min-width:320px;" />
+      <button id="btnSaveApiKey" class="btn btn-primary">Añadir API</button>
+      <button id="btnChangeApi" class="btn" type="button" style="display:none;">Cambiar (modal)</button>
+      <span id="apiKeyStatus" class="muted"></span>
     </div>
   </div>
 </div>
+
 <script>
-  document.addEventListener("DOMContentLoaded", () => {
-    const btn = document.getElementById("btnChangeApi");
-    if (btn) btn.addEventListener("click", () => window.showApiKeyModal(false));
-  });
+document.addEventListener("DOMContentLoaded", () => {
+  const input  = document.getElementById("apiKeyPlainInput");
+  const save   = document.getElementById("btnSaveApiKey");
+  const status = document.getElementById("apiKeyStatus");
+  const btnModal = document.getElementById("btnChangeApi");
+
+  async function refreshButton() {
+    try {
+      const r = await fetch("/api/config");
+      const j = await r.json();
+      // Cambia el texto del botón según exista o no clave
+      save.textContent = j.has_api_key ? "Actualizar API" : "Añadir API";
+      // Si existe showApiKeyModal (del modal global), permite abrirlo también desde aquí
+      if (window.showApiKeyModal) { btnModal.style.display = "inline-flex"; btnModal.onclick = () => window.showApiKeyModal(false); }
+    } catch (e) {
+      // si algo falla, mantenemos "Añadir API"
+    }
+  }
+
+  async function doSave() {
+    const key = (input.value || "").trim();
+    if (!key) { alert("Introduce una API key válida"); input.focus(); return; }
+    save.disabled = true;
+    status.textContent = "Guardando...";
+    try {
+      const r = await fetch("/api/config/api-key", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ api_key: key })
+      });
+      const j = await r.json();
+      if (j.ok) {
+        status.textContent = "API guardada correctamente.";
+        input.value = "";
+        document.dispatchEvent(new CustomEvent("api-key:updated"));
+        if (window.toast) toast("API Key guardada");
+        await refreshButton();
+      } else {
+        status.textContent = j.error || "Error guardando la API.";
+      }
+    } catch (e) {
+      status.textContent = "Error de red guardando la API.";
+    } finally {
+      save.disabled = false;
+    }
+  }
+
+  save.addEventListener("click", doSave);
+  refreshButton();
+});
 </script>
 {% endblock %}
