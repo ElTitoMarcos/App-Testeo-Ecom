@@ -531,7 +531,7 @@ function stratifiedSample(list, n){
 }
 
 async function adjustWeightsAI(){
-  if (!(await window.requireApiKeyOrAsk())) return;
+  if (window.requireApiKeyOrAsk && !(await window.requireApiKeyOrAsk())) return;
   try{
     let sample=stratifiedSample(allProducts||[],30);
     let payload=sample.map(p=>({name:p.name,category:p.category,price:p.price,units:p.units_sold||(p.extras&&p.extras['Item Sold'])||0,ingresos:p.revenue||(p.extras&&p.extras['Revenue($)'])||0,conversion:p.extras&&p.extras['Creator Conversion Ratio'],fecha:p.extras&&p.extras['date_range'],desire:p.desire_magnitude,awareness:p.awareness_level,competition:p.competition_level}));
@@ -1104,7 +1104,7 @@ if(gptField){
 }
 
 async function sendPromptHandler(){
-  if (!(await window.requireApiKeyOrAsk())) return;
+  if (window.requireApiKeyOrAsk && !(await window.requireApiKeyOrAsk())) return;
   const prompt = gptField.value.trim();
   if(!prompt){ toast.info('Escribe una consulta'); return; }
   sendPromptBtn.disabled = true;

@@ -91,7 +91,7 @@ async function processBatch(items) {
 }
 
 window.handleCompletarIA = async function(opts = {}) {
-  if (!(await window.requireApiKeyOrAsk())) return;
+  if (window.requireApiKeyOrAsk && !(await window.requireApiKeyOrAsk())) return;
   const ids = opts.ids;
   let all;
   if (ids && Array.isArray(ids)) {
