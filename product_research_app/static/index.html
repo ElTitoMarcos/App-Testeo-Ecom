@@ -70,7 +70,10 @@ body.dark pre { background:#2e315f; }
     <input type="text" id="newListName" placeholder="Nombre del grupo" style="padding:4px; min-width:120px;">
     <button id="createListBtn">Crear</button>
     <textarea id="gptPrompt" rows="1" maxlength="2000" placeholder="Escribe consulta para GPT..." aria-label="Escribe consulta para GPT..."></textarea>
-    <button id="sendPrompt">Enviar consulta a GPT</button>
+    <div id="gptActions">
+      <button id="sendPrompt">Enviar consulta a GPT</button>
+      <button id="btnGenWinner" class="bar-btn" disabled title="Generar Winner Score" aria-label="Generar Winner Score">Generar Winner Score</button>
+    </div>
     <div id="searchRowRight">
       <div id="listMeta">0 resultados</div>
     </div>
@@ -174,7 +177,6 @@ body.dark pre { background:#2e315f; }
   <button id="btnManageGroups" class="bar-btn" title="Gestionar grupos" aria-label="Gestionar grupos">Gestionar grupos</button>
   <button id="btnDelete" class="bar-btn" disabled title="Eliminar seleccionados" aria-label="Eliminar seleccionados">Eliminar</button>
   <button id="btnExport" class="bar-btn" disabled title="Exportar seleccionados" aria-label="Exportar seleccionados">Exportar</button>
-  <button id="btnGenWinner" class="bar-btn" disabled title="Generar Winner Score" aria-label="Generar Winner Score">Generar Winner Score</button>
   <button id="btnColumns" class="bar-btn" title="Gestionar columnas" aria-label="Gestionar columnas">Columnas</button>
 </div>
 <div id="legendPop" class="popover hidden">
@@ -1331,20 +1333,38 @@ document.getElementById('btnExport').onclick = async () => {
 // Generate Winner Score for selected products
 document.getElementById('btnGenWinner').onclick = async () => {
   const ids = Array.from(selection, Number);
-  if(!ids.length){ toast.info('Selecciona productos'); return; }
+  const pending = ids.filter(id => {
+    const prod = (allProducts || []).find(p => p.id === id);
+    const val = prod ? Number(prod.winner_score_v2_pct) : 0;
+    return !val;
+  });
+  if(!pending.length){
+    toast.info('No se actualizó ningún producto. Revisa que tengan métricas y que el campo Winner Score esté vacío o 0.');
+    return;
+  }
   startProgress();
   try{
-    const res = await fetchJson('/scoring/v2/generate', {method:'POST', body: JSON.stringify({ids})});
+    const res = await fetchJson('/scoring/v2/generate', {method:'POST', body: JSON.stringify({ids: pending})});
     if(res.error){ throw new Error(res.error); }
     const scores = res.scores || {};
-    let count = 0;
-    Object.entries(scores).forEach(([id, sc]) => {
-      const prod = (allProducts || []).find(p => p.id === Number(id));
-      if(prod){ prod.winner_score_v2_pct = sc; count++; }
+    const idsWithScore = Object.keys(scores);
+    if((res.updated||0) === 0 || idsWithScore.length === 0){
+      toast.info('No se actualizó ningún producto. Revisa que tengan métricas y que el campo Winner Score esté vacío o 0.');
+      updateMasterState();
+      return;
+    }
+    allProducts = allProducts.map(p => {
+      const sc = scores[String(p.id)];
+      return sc != null ? {...p, winner_score_v2_pct: sc} : p;
     });
+    products = products.map(p => {
+      const sc = scores[String(p.id)];
+      return sc != null ? {...p, winner_score_v2_pct: sc} : p;
+    });
+    window.allProducts = allProducts;
     renderTable();
     updateMasterState();
-    toast.success(`Winner Score generado para ${count} productos`);
+    toast.success(`Winner Score generado para ${res.updated} productos`);
   }catch(err){
     console.error(err);
     toast.error('No se pudo generar el Winner Score');

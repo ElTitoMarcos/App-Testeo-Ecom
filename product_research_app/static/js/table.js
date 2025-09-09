@@ -28,20 +28,28 @@ function updateMasterState(){
   const selectedOnPage = currentPageIds.filter(id => selection.has(id)).length;
   master.indeterminate = selectedOnPage>0 && selectedOnPage<currentPageIds.length;
   master.checked = selectedOnPage===currentPageIds.length && currentPageIds.length>0;
-  const disable = selection.size===0;
+  const noneSelected = selection.size===0;
   const btnDel = document.getElementById('btnDelete');
   const btnExp = document.getElementById('btnExport');
   const btnAdd = document.getElementById('btnAddToGroup');
   const btnGen = document.getElementById('btnGenWinner');
-  if(btnDel) btnDel.disabled = disable;
-  if(btnExp) btnExp.disabled = disable;
-  if(btnAdd) btnAdd.disabled = disable;
-  if(btnGen) btnGen.disabled = disable;
+  if(btnDel) btnDel.disabled = noneSelected;
+  if(btnExp) btnExp.disabled = noneSelected;
+  if(btnAdd) btnAdd.disabled = noneSelected;
+  if(btnGen){
+    const ap = window.allProducts || [];
+    const needs = Array.from(selection).some(id => {
+      const prod = ap.find(p => String(p.id)===String(id));
+      const val = prod ? Number(prod.winner_score_v2_pct) : 0;
+      return !val;
+    });
+    btnGen.disabled = noneSelected || !needs;
+  }
   if(bottomBar){
     const selEl = document.getElementById('selCount');
     if(selEl) selEl.textContent = `${selection.size} seleccionados`;
-    bottomBar.classList.toggle('hidden', disable);
-    if(!disable){
+    bottomBar.classList.toggle('hidden', noneSelected);
+    if(!noneSelected){
       document.body.style.paddingBottom = bottomBar.offsetHeight + 'px';
     } else {
       document.body.style.paddingBottom = '';

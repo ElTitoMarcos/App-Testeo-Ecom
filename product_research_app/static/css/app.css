@@ -309,6 +309,12 @@ body.dark #gptPrompt {
   gap: 8px;
 }
 
+#gptActions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+
 #listMeta { white-space: nowrap; }
 
 #groupSelect { min-width: 120px; }
