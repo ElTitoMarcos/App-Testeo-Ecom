@@ -199,6 +199,15 @@ body.dark .table tbody tr.selected { background: #243150; }
   gap: 4px;
 }
 
+#config .api-row .api-input-row {
+  display: flex;
+  gap: 4px;
+}
+
+#config .api-row .api-input-row input {
+  flex: 1;
+}
+
 #config select,
 #config input {
   min-height: 36px;
