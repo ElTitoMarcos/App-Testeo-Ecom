@@ -658,27 +658,19 @@ class RequestHandler(BaseHTTPRequestHandler):
                 if 'revenue' in extra_dict and 'Revenue($)' not in extra_dict:
                     extra_dict['Revenue($)'] = extra_dict['revenue']
                 score_value = None
+                breakdown_data = {}
                 if score:
-                    key = (
-                        "winner_score_v2_pct"
-                        if config.is_scoring_v2_enabled()
-                        else "total_score"
-                    )
-                    if key in score.keys():
-                        score_value = score[key]
-                    else:
-                        score_value = None
-                    breakdown_data = {}
-                    if config.is_scoring_v2_enabled():
-                        try:
-                            raw_breakdown = (
-                                score["winner_score_v2_breakdown"]
-                                if "winner_score_v2_breakdown" in score.keys()
-                                else None
-                            )
-                            breakdown_data = json.loads(raw_breakdown or "{}")
-                        except Exception:
-                            breakdown_data = {}
+                    if "winner_score_v2_pct" in score.keys():
+                        score_value = score["winner_score_v2_pct"]
+                    try:
+                        raw_breakdown = (
+                            score["winner_score_v2_breakdown"]
+                            if "winner_score_v2_breakdown" in score.keys()
+                            else None
+                        )
+                        breakdown_data = json.loads(raw_breakdown or "{}")
+                    except Exception:
+                        breakdown_data = {}
                 dr = p["date_range"]
                 if dr is None:
                     dr = extra_dict.get("date_range")
@@ -700,12 +692,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "date_range": dr or "",
                     "extras": extra_dict,
                 }
-                if config.is_scoring_v2_enabled():
-                    row["winner_score_v2_pct"] = score_value
-                    if score:
-                        row["winner_score_v2_breakdown"] = breakdown_data
-                else:
-                    row["score"] = score_value
+                row["winner_score"] = score_value
+                row["winner_score_v2_pct"] = score_value
+                if score:
+                    row["winner_score_v2_breakdown"] = breakdown_data
                 rows.append(row)
             self._set_json()
             self.wfile.write(json_dumps(rows).encode("utf-8"))
@@ -780,27 +770,19 @@ class RequestHandler(BaseHTTPRequestHandler):
                     except Exception:
                         extra_dict = {}
                     score_value = None
+                    breakdown_data = {}
                     if score:
-                        key = (
-                            "winner_score_v2_pct"
-                            if config.is_scoring_v2_enabled()
-                            else "total_score"
-                        )
-                        if key in score.keys():
-                            score_value = score[key]
-                        else:
-                            score_value = None
-                        breakdown_data = {}
-                        if config.is_scoring_v2_enabled():
-                            try:
-                                raw_breakdown = (
-                                    score["winner_score_v2_breakdown"]
-                                    if "winner_score_v2_breakdown" in score.keys()
-                                    else None
-                                )
-                                breakdown_data = json.loads(raw_breakdown or "{}")
-                            except Exception:
-                                breakdown_data = {}
+                        if "winner_score_v2_pct" in score.keys():
+                            score_value = score["winner_score_v2_pct"]
+                        try:
+                            raw_breakdown = (
+                                score["winner_score_v2_breakdown"]
+                                if "winner_score_v2_breakdown" in score.keys()
+                                else None
+                            )
+                            breakdown_data = json.loads(raw_breakdown or "{}")
+                        except Exception:
+                            breakdown_data = {}
                     row = {
                         "id": p["id"],
                         "name": p["name"],
@@ -809,12 +791,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                         "image_url": p["image_url"],
                         "extras": extra_dict,
                     }
-                    if config.is_scoring_v2_enabled():
-                        row["winner_score_v2_pct"] = score_value
-                        if score:
-                            row["winner_score_v2_breakdown"] = breakdown_data
-                    else:
-                        row["score"] = score_value
+                    row["winner_score"] = score_value
+                    row["winner_score_v2_pct"] = score_value
+                    if score:
+                        row["winner_score_v2_breakdown"] = breakdown_data
                     rows.append(row)
                 self._set_json()
                 self.wfile.write(json_dumps(rows).encode("utf-8"))
@@ -1158,6 +1138,24 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/auto_weights":
             self.handle_auto_weights()
+            return
+        # Legacy scoring routes (v1) redirect to v2 handlers
+        if path in (
+            "/scoring/auto-weights-gpt",
+            "/scoring/auto-weights-stat",
+            "/scoring/gpt-evaluate",
+            "/scoring/gpt-summary",
+            "/scoring/generate",
+        ):
+            logger.info("scoring v1 deprecated -> using v2")
+            mapping = {
+                "/scoring/auto-weights-gpt": self.handle_scoring_v2_auto_weights_gpt,
+                "/scoring/auto-weights-stat": self.handle_scoring_v2_auto_weights_stat,
+                "/scoring/gpt-evaluate": self.handle_scoring_v2_gpt_evaluate,
+                "/scoring/gpt-summary": self.handle_scoring_v2_gpt_summary,
+                "/scoring/generate": self.handle_scoring_v2_generate,
+            }
+            mapping[path]()
             return
         if path == "/scoring/v2/auto-weights-gpt":
             self.handle_scoring_v2_auto_weights_gpt()
