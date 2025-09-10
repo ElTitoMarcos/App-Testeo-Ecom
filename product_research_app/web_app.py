@@ -448,23 +448,15 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             if any((dict(sc).get("winner_score_v2_pct") or 0) > 0 for sc in existing):
                 skipped_scores += 1
                 continue
-            missing: list[str] = []
-            pct_val = winner_calc.score_product(prod, weights, ranges, missing)
-            if pct_val is None or math.isnan(pct_val) or len(missing) == len(weights):
+            pct_val = winner_calc.score_product(prod, weights, ranges)
+            if pct_val is None or math.isnan(pct_val):
                 logger.warning(
-                    "Winner Score fallback 50 for product %s: invalid metrics",
+                    "Winner Score fallback 50 for product %s: no valid metrics",
                     pid,
                 )
                 pct = 50
             else:
                 pct = max(0, min(100, round(pct_val * 100)))
-            if missing:
-                for m in missing:
-                    logger.warning(
-                        "Winner Score missing metric for product %s: %s",
-                        pid,
-                        m,
-                    )
             logger.debug(
                 "Winner Score import product %s: raw=%s final=%s",
                 pid,
@@ -485,8 +477,10 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                 summary="",
                 explanations={},
                 winner_score_v2_pct=pct,
+                commit=False,
             )
             updated_scores += 1
+        conn.commit()
         logger.info(
             "Winner Score import/backfill: imported=%d updated=%d skipped=%d",
             len(inserted_ids),
@@ -2060,8 +2054,15 @@ class RequestHandler(BaseHTTPRequestHandler):
             ranges = winner_calc.compute_ranges(products_all)
             weights = {k: 1.0 for k in winner_calc.ALL_METRICS}
             for prod in products_all:
-                pct = winner_calc.score_product(prod, weights, ranges) * 100
-                pct = max(0, min(100, round(pct)))
+                pct_val = winner_calc.score_product(prod, weights, ranges)
+                if pct_val is None or math.isnan(pct_val):
+                    logger.warning(
+                        "Winner Score fallback 50 for product %s: no valid metrics",
+                        prod['id'],
+                    )
+                    pct = 50
+                else:
+                    pct = max(0, min(100, round(pct_val * 100)))
                 database.insert_score(
                     conn_ws,
                     product_id=prod['id'],
@@ -2076,7 +2077,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                     summary='',
                     explanations={},
                     winner_score_v2_pct=pct,
+                    commit=False,
                 )
+            conn_ws.commit()
         pending = []
         cost_msg = None
         cost_est = None
@@ -2720,6 +2723,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         updated: Dict[str, int] = {}
         skipped = 0
         details: list[dict[str, int | str]] = []
+        used_metrics: set[str] = set()
+        missing_metrics: set[str] = set()
         for prod in products_all:
             pid = prod["id"]
             if pid not in id_set:
@@ -2730,23 +2735,20 @@ class RequestHandler(BaseHTTPRequestHandler):
                 details.append({"id": pid, "reason": "already_scored"})
                 continue
             missing: list[str] = []
-            pct_val = winner_calc.score_product(prod, weights, ranges, missing)
+            used: list[str] = []
+            pct_val = winner_calc.score_product(prod, weights, ranges, missing, used)
             reason: str | None = None
-            if pct_val is None or math.isnan(pct_val) or len(missing) == len(weights):
+            if pct_val is None or math.isnan(pct_val):
                 logger.warning(
-                    "Winner Score fallback 50 for product %s: invalid metrics", pid
+                    "Winner Score fallback 50 for product %s: no valid metrics",
+                    pid,
                 )
                 pct = 50
-                reason = "invalid_metrics"
+                reason = "no_metrics"
             else:
                 pct = max(0, min(100, round(pct_val * 100)))
-            if missing:
-                for m in missing:
-                    logger.warning(
-                        "Winner Score missing metric for product %s: %s",
-                        pid,
-                        m,
-                    )
+            used_metrics.update(used)
+            missing_metrics.update(missing)
             logger.debug(
                 "Winner Score generate product %s: raw=%s final=%s",
                 pid,
@@ -2767,6 +2769,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 summary="",
                 explanations={},
                 winner_score_v2_pct=pct,
+                commit=False,
             )
             updated[str(pid)] = pct
             if reason:
@@ -2787,6 +2790,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 {
                     "updated": len(updated),
                     "skipped": skipped,
+                    "used_metrics": sorted(used_metrics),
+                    "missing_metrics": sorted(missing_metrics),
                     "details": details,
                 }
             ).encode("utf-8")
