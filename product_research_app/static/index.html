@@ -1348,6 +1348,14 @@ document.getElementById('btnGenWinner').onclick = async () => {
     await fetchProducts();
     const updated = res.updated || 0;
     const skipped = res.skipped || 0;
+    const withPartial = res.with_partial || 0;
+    const fallbackOnly = res.fallback_only || 0;
+    if(withPartial > 0){
+      toast.info(`Winner Score calculado con métricas parciales (${withPartial} productos)`);
+    }
+    if(fallbackOnly > 0){
+      toast.warn(`${fallbackOnly} productos sin datos suficientes (score=50)`);
+    }
     if(updated === 0){
       toast.info('No se actualizó ningún producto.');
     } else if(skipped > 0){

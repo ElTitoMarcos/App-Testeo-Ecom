@@ -511,21 +511,26 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             if any((dict(sc).get("winner_score_v2_pct") or 0) > 0 for sc in existing):
                 skipped_scores += 1
                 continue
-            pct_val = winner_calc.score_product(prod, weights, ranges)
-            if pct_val is None or math.isnan(pct_val):
-                logger.warning(
-                    "Winner Score fallback 50 for product %s: no valid metrics",
-                    pid,
-                )
+            missing: list[str] = []
+            used: list[str] = []
+            pct_val = winner_calc.score_product(prod, weights, ranges, missing, used)
+            used_count = len(used)
+            missing_count = len(missing)
+            fallback = used_count == 0 or pct_val is None or (isinstance(pct_val, float) and math.isnan(pct_val))
+            if fallback:
                 pct = 50
             else:
                 pct = max(0, min(100, round(pct_val * 100)))
-            logger.debug(
-                "Winner Score import product %s: raw=%s final=%s",
-                pid,
-                pct_val,
-                pct,
-            )
+            if missing_count > 0:
+                level = logging.WARNING if fallback else logging.INFO
+                logger.log(
+                    level,
+                    "Winner Score: product=%s used=%d missing=%d fallback=%s",
+                    pid,
+                    used_count,
+                    missing_count,
+                    str(fallback).lower(),
+                )
             database.insert_score(
                 conn,
                 product_id=pid,
@@ -2117,15 +2122,26 @@ class RequestHandler(BaseHTTPRequestHandler):
             ranges = winner_calc.compute_ranges(products_all)
             weights = {k: 1.0 for k in winner_calc.ALL_METRICS}
             for prod in products_all:
-                pct_val = winner_calc.score_product(prod, weights, ranges)
-                if pct_val is None or math.isnan(pct_val):
-                    logger.warning(
-                        "Winner Score fallback 50 for product %s: no valid metrics",
-                        prod['id'],
-                    )
+                missing: list[str] = []
+                used: list[str] = []
+                pct_val = winner_calc.score_product(prod, weights, ranges, missing, used)
+                used_count = len(used)
+                missing_count = len(missing)
+                fallback = used_count == 0 or pct_val is None or (isinstance(pct_val, float) and math.isnan(pct_val))
+                if fallback:
                     pct = 50
                 else:
                     pct = max(0, min(100, round(pct_val * 100)))
+                if missing_count > 0:
+                    level = logging.WARNING if fallback else logging.INFO
+                    logger.log(
+                        level,
+                        "Winner Score: product=%s used=%d missing=%d fallback=%s",
+                        prod['id'],
+                        used_count,
+                        missing_count,
+                        str(fallback).lower(),
+                    )
                 database.insert_score(
                     conn_ws,
                     product_id=prod['id'],
@@ -2788,6 +2804,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         details: list[dict[str, int | str]] = []
         used_metrics: set[str] = set()
         missing_metrics: set[str] = set()
+        with_partial = 0
+        fallback_only = 0
         for prod in products_all:
             pid = prod["id"]
             if pid not in id_set:
@@ -2800,24 +2818,30 @@ class RequestHandler(BaseHTTPRequestHandler):
             missing: list[str] = []
             used: list[str] = []
             pct_val = winner_calc.score_product(prod, weights, ranges, missing, used)
+            used_count = len(used)
+            missing_count = len(missing)
+            fallback = used_count == 0 or pct_val is None or (isinstance(pct_val, float) and math.isnan(pct_val))
             reason: str | None = None
-            if pct_val is None or math.isnan(pct_val):
-                logger.warning(
-                    "Winner Score fallback 50 for product %s: no valid metrics",
-                    pid,
-                )
+            if fallback:
                 pct = 50
                 reason = "no_metrics"
+                fallback_only += 1
             else:
                 pct = max(0, min(100, round(pct_val * 100)))
+                if missing_count > 0:
+                    with_partial += 1
             used_metrics.update(used)
             missing_metrics.update(missing)
-            logger.debug(
-                "Winner Score generate product %s: raw=%s final=%s",
-                pid,
-                pct_val,
-                pct,
-            )
+            if missing_count > 0:
+                level = logging.WARNING if fallback else logging.INFO
+                logger.log(
+                    level,
+                    "Winner Score: product=%s used=%d missing=%d fallback=%s",
+                    pid,
+                    used_count,
+                    missing_count,
+                    str(fallback).lower(),
+                )
             database.insert_score(
                 conn,
                 product_id=pid,
@@ -2853,6 +2877,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 {
                     "updated": len(updated),
                     "skipped": skipped,
+                    "with_partial": with_partial,
+                    "fallback_only": fallback_only,
                     "used_metrics": sorted(used_metrics),
                     "missing_metrics": sorted(missing_metrics),
                     "details": details,
