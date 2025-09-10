@@ -18,7 +18,7 @@ function isEditing(pid, field) {
   const tr = active.closest('tr');
   if (!tr) return false;
   const cb = tr.querySelector('input.rowCheck');
-  if (!cb || cb.dataset.id !== String(pid)) return false;
+  if (!cb || Number(cb.dataset.id) !== Number(pid)) return false;
   const td = active.closest('td[data-key]');
   if (!td) return false;
   return td.dataset.key === field;
@@ -78,7 +78,7 @@ async function processBatch(items) {
   const okMap = data.ok || {};
   const koMap = data.ko || {};
   Object.keys(okMap).forEach(id => {
-    const product = (window.products || []).find(p => String(p.id) === String(id));
+    const product = (window.products || []).find(p => p.id === Number(id));
     if (product) {
       applyUpdates(product, okMap[id]);
       ok++;
