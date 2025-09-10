@@ -68,7 +68,10 @@ def normalize_metric(name: str, value: Any, ranges: Dict[str, Dict[str,float]]) 
         r = ranges.get(name, {})
         return clamp((v - r.get("p5",0.0)) / (r.get("p95",1.0) - r.get("p5",0.0) or 1))
     if name == "tasa_conversion":
-        return clamp(float(value)/100.0)
+        v = float(value)
+        if v > 1:
+            v /= 100.0
+        return clamp(v)
     if name == "ventas_por_dia":
         v = float(value)
         r = ranges.get(name, {})
@@ -82,19 +85,24 @@ def score_product(
     weights: Dict[str, float],
     ranges: Dict[str, Dict[str, float]] | None = None,
     missing: list[str] | None = None,
-) -> float:
+    used: list[str] | None = None,
+) -> float | None:
     if ranges is None:
         ranges = compute_ranges([prod])
     total_w = 0.0
     score = 0.0
     for k, w in weights.items():
+        if w <= 0:
+            continue
         val = normalize_metric(k, prod.get(k), ranges)
-        total_w += w
         if val is None or (isinstance(val, float) and math.isnan(val)):
             if missing is not None:
                 missing.append(k)
             continue
+        if used is not None:
+            used.append(k)
         score += w * val
+        total_w += w
     if total_w <= 0:
-        return 0.0
+        return None
     return score / total_w
