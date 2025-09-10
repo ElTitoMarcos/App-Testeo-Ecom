@@ -68,7 +68,10 @@ def normalize_metric(name: str, value: Any, ranges: Dict[str, Dict[str,float]]) 
         r = ranges.get(name, {})
         return clamp((v - r.get("p5",0.0)) / (r.get("p95",1.0) - r.get("p5",0.0) or 1))
     if name == "tasa_conversion":
-        return clamp(float(value)/100.0)
+        v = float(value)
+        if v > 1:
+            v /= 100.0
+        return clamp(v)
     if name == "ventas_por_dia":
         v = float(value)
         r = ranges.get(name, {})

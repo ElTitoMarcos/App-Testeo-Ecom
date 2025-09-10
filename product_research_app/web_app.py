@@ -303,6 +303,54 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             cat_col = find_key(headers, ["category", "categoria", "niche", "segment"])
             curr_col = find_key(headers, ["currency", "moneda"])
 
+            metric_names = [
+                "magnitud_deseo",
+                "nivel_consciencia_headroom",
+                "evidencia_demanda",
+                "tasa_conversion",
+                "ventas_por_dia",
+                "recencia_lanzamiento",
+                "competition_level_invertido",
+                "facilidad_anuncio",
+                "escalabilidad",
+                "durabilidad_recurrencia",
+            ]
+
+            def sanitize(name: str) -> str:
+                return "".join(ch for ch in name if ch.isalnum())
+
+            metric_cols = {m: find_key(headers, [sanitize(m)]) for m in metric_names}
+
+            def parse_number(val: Any) -> float | None:
+                if val in (None, ''):
+                    return None
+                s = str(val).strip()
+                if not s:
+                    return None
+                percent = '%' in s
+                s = s.replace('%', '').replace(' ', '').replace(',', '.')
+                s = re.sub(r'[^0-9.+-]', '', s)
+                try:
+                    num = float(s)
+                    if percent:
+                        num /= 100.0
+                    return num
+                except Exception:
+                    return None
+
+            def parse_text(val: Any) -> str | None:
+                if val is None:
+                    return None
+                s = str(val).strip()
+                return s or None
+
+            numeric_metrics = {
+                "evidencia_demanda",
+                "tasa_conversion",
+                "ventas_por_dia",
+                "recencia_lanzamiento",
+            }
+
             cur = conn.cursor()
             cur.execute("BEGIN")
             cur.execute("SELECT COUNT(*) FROM products")
@@ -330,6 +378,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                 date_range = (row.get(range_col) or '').strip() if range_col else ''
 
                 extras = {}
+                metrics: dict[str, object] = {}
 
                 rating_val = None
                 if rating_col and row.get(rating_col) not in (None, ''):
@@ -382,6 +431,17 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                 set_extra(conv_col, 'conversion_rate')
                 set_extra(launch_col, 'launch_date')
 
+                for m in metric_names:
+                    col = metric_cols.get(m)
+                    raw = row.get(col) if col else None
+                    if raw not in (None, ''):
+                        if m in numeric_metrics:
+                            val = parse_number(raw)
+                        else:
+                            val = parse_text(raw)
+                        if val is not None:
+                            metrics[m] = val
+
                 recognized = {
                     name_col,
                     desc_col,
@@ -396,14 +456,15 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                     launch_col,
                     range_col,
                 }
+                recognized.update(c for c in metric_cols.values() if c)
                 for k, v in row.items():
                     if k not in recognized:
                         extras[k] = v
 
                 rows_validas.append(
-                    (name, description, category, price, currency, image_url, date_range, extras)
+                    (name, description, category, price, currency, image_url, date_range, extras, metrics)
                 )
-            for idx, (name, description, category, price, currency, image_url, date_range, extra_cols) in enumerate(rows_validas):
+            for idx, (name, description, category, price, currency, image_url, date_range, extra_cols, metrics) in enumerate(rows_validas):
                 row_id = base_id + idx
                 database.insert_product(
                     conn,
@@ -419,6 +480,8 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                     commit=False,
                     product_id=row_id,
                 )
+                if metrics:
+                    database.update_product(conn, row_id, **metrics)
                 rows_imported += 1
                 inserted_ids.append(row_id)
             conn.commit()
