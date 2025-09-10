@@ -616,26 +616,14 @@ class RequestHandler(BaseHTTPRequestHandler):
             conn = ensure_db()
             row = database.get_import_job(conn, task_id)
             if row:
-                data = dict(row)
-                try:
-                    if data.get("ai_counts"):
-                        data["ai_counts"] = json.loads(data["ai_counts"])
-                except Exception:
-                    data["ai_counts"] = {}
-                try:
-                    if data.get("ai_pending"):
-                        data["pending_ids"] = json.loads(data["ai_pending"])
-                    else:
-                        data["pending_ids"] = []
-                except Exception:
-                    data["pending_ids"] = []
-                data.pop("ai_pending", None)
-                data["message"] = (
-                    "Importando productos, por favor espera... El winner score se ha calculado."
-                )
-                data["imported"] = data.get("rows_imported", 0)
-                data["winner_score_updated"] = data.get("winner_score_updated", 0)
-                self.safe_write(lambda: self.send_json(data))
+                imported = row["rows_imported"] or 0
+                ws_updated = row["winner_score_updated"] or 0
+                result = {
+                    "message": "Importando productos, por favor espera... El winner score se ha calculado.",
+                    "imported": imported,
+                    "winner_score_updated": ws_updated,
+                }
+                self.safe_write(lambda: self.send_json(result))
             else:
                 self.safe_write(lambda: self.send_json({"error": "not found"}, status=404))
             return
