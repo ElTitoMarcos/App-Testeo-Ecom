@@ -473,6 +473,8 @@ def insert_score(
     winner_score_v2_raw: Optional[float] = None,
     winner_score_v2_pct: Optional[float] = None,
     winner_score_v2_breakdown: Optional[Dict[str, Any]] = None,
+    *,
+    commit: bool = True,
 ) -> int:
     """Insert a new AI score for a product."""
 
@@ -517,7 +519,8 @@ def insert_score(
             json_dump(winner_score_v2_breakdown),
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return cur.lastrowid
 
 def remove_product_from_list(conn: sqlite3.Connection, list_id: int, product_id: int) -> None:
