@@ -630,7 +630,9 @@ function recalculateWinnerScoreV2(){
       if(v!=null){ total+=w; score+=w*v; }
     });
     const raw = total>0 ? (score/total)*100 : 0;
-    p.winner_score = Math.max(0, Math.min(100, Math.round(raw)));
+    const sc = Math.max(0, Math.min(100, Math.round(raw)));
+    p.winner_score = sc;
+    p.winner_score_v2_pct = sc;
   });
   if(sortField==='winner_score'){
     sortProducts();
@@ -700,11 +702,10 @@ async function fetchProducts(preserve=true, bust=false) {
   const opts = bust ? {cache:'no-store'} : undefined;
   const prevSel = new Set(selection);
   const data = await fetchJson(url, opts);
-  allProducts = data.map(p => ({
-    ...p,
-    id: Number(p.id),
-    winner_score: p.winner_score != null ? Number(p.winner_score) : Number(p.winner_score_v2_pct)
-  }));
+  allProducts = data.map(p => {
+    const sc = p.winner_score != null ? Number(p.winner_score) : null;
+    return { ...p, id: Number(p.id), winner_score: sc, winner_score_v2_pct: sc };
+  });
   preprocessProducts(allProducts);
   allProducts.sort((a,b)=> (a.id||0) - (b.id||0));
   sortField = 'id';
@@ -1358,12 +1359,12 @@ document.getElementById('btnGenWinner').onclick = async () => {
       const map = new Map(res.rows.map(r => [Number(r.id), r.winner_score]));
       (window.allProducts||[]).forEach(p => {
         const ns = map.get(p.id);
-        if(ns != null){ p.winner_score = ns; }
+        if(ns != null){ p.winner_score = ns; p.winner_score_v2_pct = ns; }
       });
       if(Array.isArray(window.products)){
         window.products.forEach(p => {
           const ns = map.get(p.id);
-          if(ns != null){ p.winner_score = ns; }
+          if(ns != null){ p.winner_score = ns; p.winner_score_v2_pct = ns; }
         });
       }
       if(sortField==='winner_score') sortProducts();

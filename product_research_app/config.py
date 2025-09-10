@@ -177,18 +177,12 @@ def get_weights() -> Dict[str, float]:
 def is_scoring_v2_enabled() -> bool:
     """Return whether Winner Score v2 flow is enabled.
 
-    The configuration may contain a nested structure like::
-
-        {"scoring": {"v2": {"enabled": true}}}
-
-    If the key is missing or invalid the flag defaults to ``True``.
+    Winner Score v2 is now the only supported scoring flow.  The function
+    remains for backward compatibility but always returns ``True`` so that the
+    v2 code path is active regardless of any user configuration.
     """
 
-    cfg = load_config()
-    try:
-        return bool(cfg.get("scoring", {}).get("v2", {}).get("enabled", True))
-    except Exception:
-        return True
+    return True
 
 # ---------------- Winner Score v2 weights -----------------
 
