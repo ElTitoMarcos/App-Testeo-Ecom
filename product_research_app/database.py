@@ -95,13 +95,30 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         cur.execute("ALTER TABLE products ADD COLUMN date_range TEXT")
     if "ai_columns_completed_at" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN ai_columns_completed_at TEXT")
+    metric_text_cols = [
+        "magnitud_deseo",
+        "nivel_consciencia_headroom",
+        "competition_level_invertido",
+        "facilidad_anuncio",
+        "escalabilidad",
+        "durabilidad_recurrencia",
+    ]
+    metric_real_cols = [
+        "evidencia_demanda",
+        "tasa_conversion",
+        "ventas_por_dia",
+        "recencia_lanzamiento",
+    ]
+    for col in metric_text_cols:
+        if col not in cols:
+            cur.execute(f"ALTER TABLE products ADD COLUMN {col} TEXT")
+    for col in metric_real_cols:
+        if col not in cols:
+            cur.execute(f"ALTER TABLE products ADD COLUMN {col} REAL")
     # drop obsolete columns if present
     for obsolete in [
-        "facilidad_anuncio",
         "facilidad_logistica",
-        "escalabilidad",
         "engagement_shareability",
-        "durabilidad_recurrencia",
     ]:
         if obsolete in cols:
             try:
@@ -428,6 +445,16 @@ def update_product(
         "competition_level",
         "date_range",
         "ai_columns_completed_at",
+        "magnitud_deseo",
+        "nivel_consciencia_headroom",
+        "evidencia_demanda",
+        "tasa_conversion",
+        "ventas_por_dia",
+        "recencia_lanzamiento",
+        "competition_level_invertido",
+        "facilidad_anuncio",
+        "escalabilidad",
+        "durabilidad_recurrencia",
     }
     data = {k: v for k, v in fields.items() if k in allowed_cols}
     if not data:
@@ -473,6 +500,8 @@ def insert_score(
     winner_score_v2_raw: Optional[float] = None,
     winner_score_v2_pct: Optional[float] = None,
     winner_score_v2_breakdown: Optional[Dict[str, Any]] = None,
+    *,
+    commit: bool = True,
 ) -> int:
     """Insert a new AI score for a product."""
 
@@ -517,7 +546,8 @@ def insert_score(
             json_dump(winner_score_v2_breakdown),
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return cur.lastrowid
 
 def remove_product_from_list(conn: sqlite3.Connection, list_id: int, product_id: int) -> None:

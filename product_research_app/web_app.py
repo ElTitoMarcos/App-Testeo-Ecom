@@ -303,6 +303,54 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             cat_col = find_key(headers, ["category", "categoria", "niche", "segment"])
             curr_col = find_key(headers, ["currency", "moneda"])
 
+            metric_names = [
+                "magnitud_deseo",
+                "nivel_consciencia_headroom",
+                "evidencia_demanda",
+                "tasa_conversion",
+                "ventas_por_dia",
+                "recencia_lanzamiento",
+                "competition_level_invertido",
+                "facilidad_anuncio",
+                "escalabilidad",
+                "durabilidad_recurrencia",
+            ]
+
+            def sanitize(name: str) -> str:
+                return "".join(ch for ch in name if ch.isalnum())
+
+            metric_cols = {m: find_key(headers, [sanitize(m)]) for m in metric_names}
+
+            def parse_number(val: Any) -> float | None:
+                if val in (None, ''):
+                    return None
+                s = str(val).strip()
+                if not s:
+                    return None
+                percent = '%' in s
+                s = s.replace('%', '').replace(' ', '').replace(',', '.')
+                s = re.sub(r'[^0-9.+-]', '', s)
+                try:
+                    num = float(s)
+                    if percent:
+                        num /= 100.0
+                    return num
+                except Exception:
+                    return None
+
+            def parse_text(val: Any) -> str | None:
+                if val is None:
+                    return None
+                s = str(val).strip()
+                return s or None
+
+            numeric_metrics = {
+                "evidencia_demanda",
+                "tasa_conversion",
+                "ventas_por_dia",
+                "recencia_lanzamiento",
+            }
+
             cur = conn.cursor()
             cur.execute("BEGIN")
             cur.execute("SELECT COUNT(*) FROM products")
@@ -330,6 +378,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                 date_range = (row.get(range_col) or '').strip() if range_col else ''
 
                 extras = {}
+                metrics: dict[str, object] = {}
 
                 rating_val = None
                 if rating_col and row.get(rating_col) not in (None, ''):
@@ -382,6 +431,17 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                 set_extra(conv_col, 'conversion_rate')
                 set_extra(launch_col, 'launch_date')
 
+                for m in metric_names:
+                    col = metric_cols.get(m)
+                    raw = row.get(col) if col else None
+                    if raw not in (None, ''):
+                        if m in numeric_metrics:
+                            val = parse_number(raw)
+                        else:
+                            val = parse_text(raw)
+                        if val is not None:
+                            metrics[m] = val
+
                 recognized = {
                     name_col,
                     desc_col,
@@ -396,14 +456,15 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                     launch_col,
                     range_col,
                 }
+                recognized.update(c for c in metric_cols.values() if c)
                 for k, v in row.items():
                     if k not in recognized:
                         extras[k] = v
 
                 rows_validas.append(
-                    (name, description, category, price, currency, image_url, date_range, extras)
+                    (name, description, category, price, currency, image_url, date_range, extras, metrics)
                 )
-            for idx, (name, description, category, price, currency, image_url, date_range, extra_cols) in enumerate(rows_validas):
+            for idx, (name, description, category, price, currency, image_url, date_range, extra_cols, metrics) in enumerate(rows_validas):
                 row_id = base_id + idx
                 database.insert_product(
                     conn,
@@ -419,6 +480,8 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                     commit=False,
                     product_id=row_id,
                 )
+                if metrics:
+                    database.update_product(conn, row_id, **metrics)
                 rows_imported += 1
                 inserted_ids.append(row_id)
             conn.commit()
@@ -449,28 +512,25 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                 skipped_scores += 1
                 continue
             missing: list[str] = []
-            pct_val = winner_calc.score_product(prod, weights, ranges, missing)
-            if pct_val is None or math.isnan(pct_val) or len(missing) == len(weights):
-                logger.warning(
-                    "Winner Score fallback 50 for product %s: invalid metrics",
-                    pid,
-                )
+            used: list[str] = []
+            pct_val = winner_calc.score_product(prod, weights, ranges, missing, used)
+            used_count = len(used)
+            missing_count = len(missing)
+            fallback = used_count == 0 or pct_val is None or (isinstance(pct_val, float) and math.isnan(pct_val))
+            if fallback:
                 pct = 50
             else:
                 pct = max(0, min(100, round(pct_val * 100)))
-            if missing:
-                for m in missing:
-                    logger.warning(
-                        "Winner Score missing metric for product %s: %s",
-                        pid,
-                        m,
-                    )
-            logger.debug(
-                "Winner Score import product %s: raw=%s final=%s",
-                pid,
-                pct_val,
-                pct,
-            )
+            if missing_count > 0:
+                level = logging.WARNING if fallback else logging.INFO
+                logger.log(
+                    level,
+                    "Winner Score: product=%s used=%d missing=%d fallback=%s",
+                    pid,
+                    used_count,
+                    missing_count,
+                    str(fallback).lower(),
+                )
             database.insert_score(
                 conn,
                 product_id=pid,
@@ -485,8 +545,10 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                 summary="",
                 explanations={},
                 winner_score_v2_pct=pct,
+                commit=False,
             )
             updated_scores += 1
+        conn.commit()
         logger.info(
             "Winner Score import/backfill: imported=%d updated=%d skipped=%d",
             len(inserted_ids),
@@ -2060,8 +2122,26 @@ class RequestHandler(BaseHTTPRequestHandler):
             ranges = winner_calc.compute_ranges(products_all)
             weights = {k: 1.0 for k in winner_calc.ALL_METRICS}
             for prod in products_all:
-                pct = winner_calc.score_product(prod, weights, ranges) * 100
-                pct = max(0, min(100, round(pct)))
+                missing: list[str] = []
+                used: list[str] = []
+                pct_val = winner_calc.score_product(prod, weights, ranges, missing, used)
+                used_count = len(used)
+                missing_count = len(missing)
+                fallback = used_count == 0 or pct_val is None or (isinstance(pct_val, float) and math.isnan(pct_val))
+                if fallback:
+                    pct = 50
+                else:
+                    pct = max(0, min(100, round(pct_val * 100)))
+                if missing_count > 0:
+                    level = logging.WARNING if fallback else logging.INFO
+                    logger.log(
+                        level,
+                        "Winner Score: product=%s used=%d missing=%d fallback=%s",
+                        prod['id'],
+                        used_count,
+                        missing_count,
+                        str(fallback).lower(),
+                    )
                 database.insert_score(
                     conn_ws,
                     product_id=prod['id'],
@@ -2076,7 +2156,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                     summary='',
                     explanations={},
                     winner_score_v2_pct=pct,
+                    commit=False,
                 )
+            conn_ws.commit()
         pending = []
         cost_msg = None
         cost_est = None
@@ -2720,6 +2802,10 @@ class RequestHandler(BaseHTTPRequestHandler):
         updated: Dict[str, int] = {}
         skipped = 0
         details: list[dict[str, int | str]] = []
+        used_metrics: set[str] = set()
+        missing_metrics: set[str] = set()
+        with_partial = 0
+        fallback_only = 0
         for prod in products_all:
             pid = prod["id"]
             if pid not in id_set:
@@ -2730,29 +2816,32 @@ class RequestHandler(BaseHTTPRequestHandler):
                 details.append({"id": pid, "reason": "already_scored"})
                 continue
             missing: list[str] = []
-            pct_val = winner_calc.score_product(prod, weights, ranges, missing)
+            used: list[str] = []
+            pct_val = winner_calc.score_product(prod, weights, ranges, missing, used)
+            used_count = len(used)
+            missing_count = len(missing)
+            fallback = used_count == 0 or pct_val is None or (isinstance(pct_val, float) and math.isnan(pct_val))
             reason: str | None = None
-            if pct_val is None or math.isnan(pct_val) or len(missing) == len(weights):
-                logger.warning(
-                    "Winner Score fallback 50 for product %s: invalid metrics", pid
-                )
+            if fallback:
                 pct = 50
-                reason = "invalid_metrics"
+                reason = "no_metrics"
+                fallback_only += 1
             else:
                 pct = max(0, min(100, round(pct_val * 100)))
-            if missing:
-                for m in missing:
-                    logger.warning(
-                        "Winner Score missing metric for product %s: %s",
-                        pid,
-                        m,
-                    )
-            logger.debug(
-                "Winner Score generate product %s: raw=%s final=%s",
-                pid,
-                pct_val,
-                pct,
-            )
+                if missing_count > 0:
+                    with_partial += 1
+            used_metrics.update(used)
+            missing_metrics.update(missing)
+            if missing_count > 0:
+                level = logging.WARNING if fallback else logging.INFO
+                logger.log(
+                    level,
+                    "Winner Score: product=%s used=%d missing=%d fallback=%s",
+                    pid,
+                    used_count,
+                    missing_count,
+                    str(fallback).lower(),
+                )
             database.insert_score(
                 conn,
                 product_id=pid,
@@ -2767,6 +2856,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 summary="",
                 explanations={},
                 winner_score_v2_pct=pct,
+                commit=False,
             )
             updated[str(pid)] = pct
             if reason:
@@ -2787,6 +2877,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                 {
                     "updated": len(updated),
                     "skipped": skipped,
+                    "with_partial": with_partial,
+                    "fallback_only": fallback_only,
+                    "used_metrics": sorted(used_metrics),
+                    "missing_metrics": sorted(missing_metrics),
                     "details": details,
                 }
             ).encode("utf-8")
