@@ -180,6 +180,7 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             rows_imported INTEGER DEFAULT 0,
+            winner_score_updated INTEGER DEFAULT 0,
             error TEXT,
             temp_path TEXT,
             ai_total INTEGER DEFAULT 0,
@@ -208,6 +209,10 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         pass
     try:
         cur.execute("ALTER TABLE import_jobs ADD COLUMN ai_pending TEXT")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE import_jobs ADD COLUMN winner_score_updated INTEGER DEFAULT 0")
     except Exception:
         pass
     conn.commit()
@@ -651,8 +656,8 @@ def create_import_job(conn: sqlite3.Connection, temp_path: str) -> int:
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO import_jobs (status, created_at, updated_at, rows_imported, error, temp_path, ai_total, ai_done, ai_error)
-        VALUES ('pending', ?, ?, 0, NULL, ?, 0, 0, NULL)
+        INSERT INTO import_jobs (status, created_at, updated_at, rows_imported, winner_score_updated, error, temp_path, ai_total, ai_done, ai_error)
+        VALUES ('pending', ?, ?, 0, 0, NULL, ?, 0, 0, NULL)
         """,
         (now, now, temp_path),
     )
@@ -660,17 +665,19 @@ def create_import_job(conn: sqlite3.Connection, temp_path: str) -> int:
     return cur.lastrowid
 
 
-def complete_import_job(conn: sqlite3.Connection, job_id: int, rows: int) -> None:
+def complete_import_job(
+    conn: sqlite3.Connection, job_id: int, rows: int, winner_score_updated: int = 0
+) -> None:
     """Mark an import job as completed."""
     now = datetime.utcnow().isoformat()
     cur = conn.cursor()
     cur.execute(
         """
         UPDATE import_jobs
-        SET status='done', updated_at=?, rows_imported=?, error=NULL
+        SET status='done', updated_at=?, rows_imported=?, winner_score_updated=?, error=NULL
         WHERE id=?
         """,
-        (now, rows, job_id),
+        (now, rows, winner_score_updated, job_id),
     )
     conn.commit()
 
@@ -740,7 +747,7 @@ def get_import_history(conn: sqlite3.Connection, limit: int = 20) -> List[sqlite
     """Return recent import jobs ordered by creation time."""
     cur = conn.cursor()
     cur.execute(
-        "SELECT id AS task_id, status, rows_imported, created_at, updated_at, error, ai_total, ai_done, ai_error, ai_counts, ai_pending FROM import_jobs ORDER BY created_at DESC LIMIT ?",
+        "SELECT id AS task_id, status, rows_imported, winner_score_updated, created_at, updated_at, error, ai_total, ai_done, ai_error, ai_counts, ai_pending FROM import_jobs ORDER BY created_at DESC LIMIT ?",
         (limit,),
     )
     return cur.fetchall()
@@ -750,7 +757,7 @@ def get_import_job(conn: sqlite3.Connection, job_id: int) -> Optional[sqlite3.Ro
     """Return a single import job by ID."""
     cur = conn.cursor()
     cur.execute(
-        "SELECT id AS task_id, status, rows_imported, created_at, updated_at, error, ai_total, ai_done, ai_error, ai_counts, ai_pending FROM import_jobs WHERE id=?",
+        "SELECT id AS task_id, status, rows_imported, winner_score_updated, created_at, updated_at, error, ai_total, ai_done, ai_error, ai_counts, ai_pending FROM import_jobs WHERE id=?",
         (job_id,),
     )
     return cur.fetchone()
