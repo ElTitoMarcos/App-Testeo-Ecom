@@ -1907,6 +1907,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                                 )
                                 raw_score = weighted * 8.0
                                 pct = ((raw_score - 8.0) / 32.0) * 100.0
+                                pct = max(0, min(100, round(pct)))
                                 breakdown = {
                                     "scores": scores,
                                     "justifications": justifs,
@@ -2125,6 +2126,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     )
                     raw_score = weighted * 8.0
                     pct = ((raw_score - 8.0) / 32.0) * 100.0
+                    pct = max(0, min(100, round(pct)))
                     breakdown = {
                         "scores": scores,
                         "justifications": justifs,

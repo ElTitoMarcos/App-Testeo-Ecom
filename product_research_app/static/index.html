@@ -801,7 +801,8 @@ function renderTable() {
       if (key === 'winner_score_v2_pct') {
         const sc = parseFloat(value);
         if (!isNaN(sc)) {
-          td.innerHTML = '<span class="' + winnerScoreClass(sc) + '">' + Math.round(sc) + '</span>';
+          const scInt = Math.round(sc);
+          td.innerHTML = '<span class="' + winnerScoreClass(scInt) + '">' + scInt.toLocaleString(undefined,{maximumFractionDigits:0}) + '</span>';
           if (item.winner_score_v2_breakdown && item.winner_score_v2_breakdown.justifications) {
             const j = item.winner_score_v2_breakdown.justifications;
             const tooltip = Object.entries(j).map(([k,v])=>`${k}: ${v}`).join('\n');
@@ -1474,7 +1475,7 @@ async function loadTrends(){
   let html = '<h3>Tendencias</h3>';
   if(data.top_products && data.top_products.length){
     html += '<strong>Top productos por Winner Score:</strong><ol>';
-      data.top_products.forEach(item=>{ html += `<li>${item.name} (Winner Score: ${Math.round(item.winner_score_v2_pct)})</li>`; });
+        data.top_products.forEach(item=>{ const sc = Math.round(item.winner_score_v2_pct || 0); html += `<li>${item.name} (Winner Score: ${sc.toLocaleString(undefined,{maximumFractionDigits:0})})</li>`; });
     html += '</ol>';
   }
   cont.innerHTML = html;
