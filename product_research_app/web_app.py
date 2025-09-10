@@ -422,37 +422,77 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                 rows_imported += 1
                 inserted_ids.append(row_id)
             conn.commit()
-        if inserted_ids:
-            products_all = [dict(r) for r in database.list_products(conn)]
-            ranges = winner_calc.compute_ranges(products_all)
-            weights = config.get_scoring_v2_weights()
-            for prod in products_all:
-                if prod["id"] not in inserted_ids:
-                    continue
-                missing: list[str] = []
-                pct = winner_calc.score_product(prod, weights, ranges, missing) * 100
-                pct = max(0, min(100, round(pct)))
-                if missing:
-                    logger.debug(
-                        "Winner Score missing metrics for product %s: %s",
-                        prod["id"],
-                        ",".join(missing),
-                    )
-                database.insert_score(
-                    conn,
-                    product_id=prod["id"],
-                    model="winner_v2",
-                    total_score=0,
-                    momentum=0,
-                    saturation=0,
-                    differentiation=0,
-                    social_proof=0,
-                    margin=0,
-                    logistics=0,
-                    summary="",
-                    explanations={},
-                    winner_score_v2_pct=pct,
+        
+        products_all = [dict(r) for r in database.list_products(conn)]
+        ranges = winner_calc.compute_ranges(products_all)
+        weights = config.get_scoring_v2_weights()
+        total_w = sum(weights.values())
+        if total_w <= 0:
+            logger.warning(
+                "Winner Score import: weight sum <= 0, using uniform weights",
+            )
+            n = len(weights) or 1
+            weights = {k: 1 / n for k in weights}
+        else:
+            weights = {k: v / total_w for k, v in weights.items()}
+        logger.info(
+            "Winner Score import: weights=%s sum=%s",
+            weights,
+            sum(weights.values()),
+        )
+        updated_scores = 0
+        skipped_scores = 0
+        for prod in products_all:
+            pid = prod["id"]
+            existing = database.get_scores_for_product(conn, pid)
+            if any((dict(sc).get("winner_score_v2_pct") or 0) > 0 for sc in existing):
+                skipped_scores += 1
+                continue
+            missing: list[str] = []
+            pct_val = winner_calc.score_product(prod, weights, ranges, missing)
+            if pct_val is None or math.isnan(pct_val) or len(missing) == len(weights):
+                logger.warning(
+                    "Winner Score fallback 50 for product %s: invalid metrics",
+                    pid,
                 )
+                pct = 50
+            else:
+                pct = max(0, min(100, round(pct_val * 100)))
+            if missing:
+                for m in missing:
+                    logger.warning(
+                        "Winner Score missing metric for product %s: %s",
+                        pid,
+                        m,
+                    )
+            logger.debug(
+                "Winner Score import product %s: raw=%s final=%s",
+                pid,
+                pct_val,
+                pct,
+            )
+            database.insert_score(
+                conn,
+                product_id=pid,
+                model="winner_v2",
+                total_score=0,
+                momentum=0,
+                saturation=0,
+                differentiation=0,
+                social_proof=0,
+                margin=0,
+                logistics=0,
+                summary="",
+                explanations={},
+                winner_score_v2_pct=pct,
+            )
+            updated_scores += 1
+        logger.info(
+            "Winner Score import/backfill: imported=%d updated=%d skipped=%d",
+            len(inserted_ids),
+            updated_scores,
+            skipped_scores,
+        )
         if inserted_ids and config.is_auto_fill_ia_on_import_enabled():
             database.start_import_job_ai(conn, job_id, len(inserted_ids))
             cfg_cost = config.get_ai_cost_config()
@@ -467,7 +507,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             database.set_import_job_ai_counts(conn, job_id, counts, res.get("pending_ids", []))
             if res.get("error"):
                 database.set_import_job_ai_error(conn, job_id, "No se pudieron completar las columnas con IA: revisa la API.")
-        database.complete_import_job(conn, job_id, rows_imported)
+        database.complete_import_job(conn, job_id, rows_imported, updated_scores)
     except Exception as exc:
         try:
             conn.rollback()
@@ -653,6 +693,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                 except Exception:
                     data["pending_ids"] = []
                 data.pop("ai_pending", None)
+                data["message"] = (
+                    "Importando productos, por favor espera... El winner score se ha calculado."
+                )
+                data["imported"] = data.get("rows_imported", 0)
+                data["winner_score_updated"] = data.get("winner_score_updated", 0)
                 self.safe_write(lambda: self.send_json(data))
             else:
                 self.safe_write(lambda: self.send_json({"error": "not found"}, status=404))
@@ -1874,6 +1919,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                                 )
                                 raw_score = weighted * 8.0
                                 pct = ((raw_score - 8.0) / 32.0) * 100.0
+                                pct = max(0, min(100, round(pct)))
                                 breakdown = {
                                     "scores": scores,
                                     "justifications": justifs,
@@ -2092,6 +2138,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     )
                     raw_score = weighted * 8.0
                     pct = ((raw_score - 8.0) / 32.0) * 100.0
+                    pct = max(0, min(100, round(pct)))
                     breakdown = {
                         "scores": scores,
                         "justifications": justifs,
@@ -2644,10 +2691,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode("utf-8"))
             return
 
+        logger.info("Winner Score generate: ids_length=%d", len(ids))
         id_set = {int(i) for i in ids if str(i).isdigit()}
         if not id_set:
-            self._set_json()
-            self.wfile.write(json.dumps({"updated": 0, "scores": {}}).encode("utf-8"))
+            logger.info("Winner Score generate: received_ids=0")
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "no_selection"}).encode("utf-8"))
             return
 
         conn = ensure_db()
@@ -2656,28 +2705,54 @@ class RequestHandler(BaseHTTPRequestHandler):
         weights = config.get_scoring_v2_weights()
         total_w = sum(weights.values())
         if total_w <= 0:
-            logger.warning("Winner Score generation aborted: weight sum <= 0")
-            self._set_json()
-            self.wfile.write(json.dumps({"updated": 0, "scores": {}}).encode("utf-8"))
-            return
-        weights = {k: v / total_w for k, v in weights.items()}
+            logger.warning(
+                "Winner Score generate: weight sum <= 0, using uniform weights"
+            )
+            n = len(weights) or 1
+            weights = {k: 1 / n for k in weights}
+        else:
+            weights = {k: v / total_w for k, v in weights.items()}
+        logger.info(
+            "Winner Score generate: weights=%s sum=%s",
+            weights,
+            sum(weights.values()),
+        )
         updated: Dict[str, int] = {}
+        skipped = 0
+        details: list[dict[str, int | str]] = []
         for prod in products_all:
             pid = prod["id"]
             if pid not in id_set:
                 continue
             existing = database.get_scores_for_product(conn, pid)
             if any((dict(sc).get("winner_score_v2_pct") or 0) > 0 for sc in existing):
+                skipped += 1
+                details.append({"id": pid, "reason": "already_scored"})
                 continue
             missing: list[str] = []
-            pct = winner_calc.score_product(prod, weights, ranges, missing) * 100
-            pct = max(0, min(100, round(pct)))
-            if missing:
-                logger.debug(
-                    "Winner Score missing metrics for product %s: %s",
-                    pid,
-                    ",".join(missing),
+            pct_val = winner_calc.score_product(prod, weights, ranges, missing)
+            reason: str | None = None
+            if pct_val is None or math.isnan(pct_val) or len(missing) == len(weights):
+                logger.warning(
+                    "Winner Score fallback 50 for product %s: invalid metrics", pid
                 )
+                pct = 50
+                reason = "invalid_metrics"
+            else:
+                pct = max(0, min(100, round(pct_val * 100)))
+            if missing:
+                for m in missing:
+                    logger.warning(
+                        "Winner Score missing metric for product %s: %s",
+                        pid,
+                        m,
+                    )
+            logger.debug(
+                "Winner Score generate product %s: raw=%s final=%s",
+                pid,
+                pct_val,
+                pct,
+            )
             database.insert_score(
                 conn,
                 product_id=pid,
@@ -2693,14 +2768,29 @@ class RequestHandler(BaseHTTPRequestHandler):
                 explanations={},
                 winner_score_v2_pct=pct,
             )
-            saved = database.get_scores_for_product(conn, pid)
-            if saved:
-                updated[str(pid)] = int(
-                    dict(saved[0]).get("winner_score_v2_pct") or 0
-                )
+            updated[str(pid)] = pct
+            if reason:
+                details.append({"id": pid, "reason": reason})
+            else:
+                details.append({"id": pid})
 
+        conn.commit()
+        logger.info(
+            "Winner Score generate: received_ids=%d updated=%d skipped=%d",
+            len(id_set),
+            len(updated),
+            skipped,
+        )
         self._set_json()
-        self.wfile.write(json.dumps({"updated": len(updated), "scores": updated}).encode("utf-8"))
+        self.wfile.write(
+            json.dumps(
+                {
+                    "updated": len(updated),
+                    "skipped": skipped,
+                    "details": details,
+                }
+            ).encode("utf-8")
+        )
 
     def handle_create_list(self):
         """Create a new user defined list (group) of products."""

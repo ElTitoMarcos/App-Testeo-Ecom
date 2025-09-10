@@ -279,9 +279,11 @@ async function pollImportStatus(id) {
       localStorage.removeItem(IMPORT_TASK_LS_KEY);
       if (data.status === 'done') {
         await fetchProducts();
-        toast.success('Winner Score actualizado tras importar');
-        const n = data.rows_imported || 0;
+        toast.success(data.message || 'Winner Score actualizado tras importar');
+        const n = data.imported || data.rows_imported || 0;
+        const ws = data.winner_score_updated || 0;
         toast.success(`Importación completada: ${n} filas nuevas. IDs desde 0 si era la primera importación.`);
+        if (ws) toast.success(`Winner Score actualizado en ${ws} productos`);
         const counts = data.ai_counts || {};
         const done = counts.n_procesados || 0;
         const total = counts.n_para_ia || 0;
@@ -799,7 +801,8 @@ function renderTable() {
       if (key === 'winner_score_v2_pct') {
         const sc = parseFloat(value);
         if (!isNaN(sc)) {
-          td.innerHTML = '<span class="' + winnerScoreClass(sc) + '">' + Math.round(sc) + '</span>';
+          const scInt = Math.round(sc);
+          td.innerHTML = '<span class="' + winnerScoreClass(scInt) + '">' + scInt.toLocaleString(undefined,{maximumFractionDigits:0}) + '</span>';
           if (item.winner_score_v2_breakdown && item.winner_score_v2_breakdown.justifications) {
             const j = item.winner_score_v2_breakdown.justifications;
             const tooltip = Object.entries(j).map(([k,v])=>`${k}: ${v}`).join('\n');
@@ -1333,41 +1336,30 @@ document.getElementById('btnExport').onclick = async () => {
 // Generate Winner Score for selected products
 document.getElementById('btnGenWinner').onclick = async () => {
   const ids = Array.from(selection, Number);
-  const pending = ids.filter(id => {
-    const prod = (allProducts || []).find(p => p.id === id);
-    const val = prod ? Number(prod.winner_score_v2_pct) : 0;
-    return !val;
-  });
-  if(!pending.length){
-    toast.info('No se actualizó ningún producto. Revisa que tengan métricas y que el campo Winner Score esté vacío o 0.');
+  if(!ids.length){
+    toast.error('Selecciona al menos un producto');
     return;
   }
+  const btn = document.getElementById('btnGenWinner');
+  btn.disabled = true;
   startProgress();
   try{
-    const res = await fetchJson('/scoring/v2/generate', {method:'POST', body: JSON.stringify({ids: pending})});
-    if(res.error){ throw new Error(res.error); }
-    const scores = res.scores || {};
-    const idsWithScore = Object.keys(scores);
-    if((res.updated||0) === 0 || idsWithScore.length === 0){
-      toast.info('No se actualizó ningún producto. Revisa que tengan métricas y que el campo Winner Score esté vacío o 0.');
-      updateMasterState();
-      return;
+    const res = await fetchJson('/scoring/v2/generate', {method:'POST', body: JSON.stringify({ids})});
+    await fetchProducts();
+    const updated = res.updated || 0;
+    const skipped = res.skipped || 0;
+    if(updated === 0){
+      toast.info('No se actualizó ningún producto.');
+    } else if(skipped > 0){
+      toast.warn(`Winner Score actualizado en ${updated} productos, ${skipped} omitidos`);
+    } else {
+      toast.success(`Winner Score actualizado en ${updated} productos`);
     }
-    allProducts = allProducts.map(p => {
-      const sc = scores[String(p.id)];
-      return sc != null ? {...p, winner_score_v2_pct: sc} : p;
-    });
-    products = products.map(p => {
-      const sc = scores[String(p.id)];
-      return sc != null ? {...p, winner_score_v2_pct: sc} : p;
-    });
-    window.allProducts = allProducts;
-    renderTable();
-    updateMasterState();
-    toast.success(`Winner Score generado para ${res.updated} productos`);
   }catch(err){
     console.error(err);
-    toast.error('No se pudo generar el Winner Score');
+    toast.error('No se pudo actualizar el Winner Score');
+  } finally {
+    btn.disabled = false;
   }
 };
 
@@ -1483,7 +1475,7 @@ async function loadTrends(){
   let html = '<h3>Tendencias</h3>';
   if(data.top_products && data.top_products.length){
     html += '<strong>Top productos por Winner Score:</strong><ol>';
-      data.top_products.forEach(item=>{ html += `<li>${item.name} (Winner Score: ${Math.round(item.winner_score_v2_pct)})</li>`; });
+        data.top_products.forEach(item=>{ const sc = Math.round(item.winner_score_v2_pct || 0); html += `<li>${item.name} (Winner Score: ${sc.toLocaleString(undefined,{maximumFractionDigits:0})})</li>`; });
     html += '</ol>';
   }
   cont.innerHTML = html;

@@ -431,6 +431,7 @@ def evaluate_product(conn: database.sqlite3.Connection) -> None:
             weighted = sum(scores.get(f, 3) * weights_map.get(f, 0.0) for f in WINNER_V2_FIELDS)
             raw_score = weighted * 8.0
             pct = ((raw_score - 8.0) / 32.0) * 100.0
+            pct = max(0, min(100, round(pct)))
             breakdown = {
                 "scores": scores,
                 "justifications": justifs,
