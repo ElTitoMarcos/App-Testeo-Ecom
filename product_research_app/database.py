@@ -126,18 +126,68 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             explanations JSON,
             created_at TEXT NOT NULL,
             winner_score_v2_raw REAL,
-            winner_score_v2_pct REAL,
+            winner_score_v2_pct INTEGER,
             winner_score_v2_breakdown JSON,
             FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
         )
         """
     )
     cur.execute("PRAGMA table_info(scores)")
-    cols = [row[1] for row in cur.fetchall()]
+    info = cur.fetchall()
+    cols = [row[1] for row in info]
+    types = {row[1]: row[2].upper() for row in info}
     if "winner_score_v2_raw" not in cols:
         cur.execute("ALTER TABLE scores ADD COLUMN winner_score_v2_raw REAL")
     if "winner_score_v2_pct" not in cols:
-        cur.execute("ALTER TABLE scores ADD COLUMN winner_score_v2_pct REAL")
+        cur.execute("ALTER TABLE scores ADD COLUMN winner_score_v2_pct INTEGER")
+    elif types.get("winner_score_v2_pct") != "INTEGER":
+        cur.execute("ALTER TABLE scores RENAME TO scores_old")
+        cur.execute(
+            """
+            CREATE TABLE scores (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_id INTEGER NOT NULL,
+                model TEXT NOT NULL,
+                total_score REAL,
+                momentum REAL,
+                saturation REAL,
+                differentiation REAL,
+                social_proof REAL,
+                margin REAL,
+                logistics REAL,
+                summary TEXT,
+                explanations JSON,
+                created_at TEXT NOT NULL,
+                winner_score_v2_raw REAL,
+                winner_score_v2_pct INTEGER,
+                winner_score_v2_breakdown JSON,
+                FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
+            )
+            """
+        )
+        cur.execute(
+            """
+            INSERT INTO scores (
+                id, product_id, model, total_score, momentum, saturation, differentiation,
+                social_proof, margin, logistics, summary, explanations, created_at,
+                winner_score_v2_raw, winner_score_v2_pct, winner_score_v2_breakdown
+            )
+            SELECT
+                id, product_id, model, total_score, momentum, saturation, differentiation,
+                social_proof, margin, logistics, summary, explanations, created_at,
+                winner_score_v2_raw,
+                CASE
+                    WHEN winner_score_v2_pct IS NULL THEN NULL
+                    ELSE CAST(MIN(100, MAX(0, ROUND(winner_score_v2_pct))) AS INTEGER)
+                END,
+                winner_score_v2_breakdown
+            FROM scores_old
+            """
+        )
+        cur.execute("DROP TABLE scores_old")
+        cur.execute("PRAGMA table_info(scores)")
+        info = cur.fetchall()
+        cols = [row[1] for row in info]
     if "winner_score_v2_breakdown" not in cols:
         cur.execute("ALTER TABLE scores ADD COLUMN winner_score_v2_breakdown JSON")
     if "winner_score_v2" in cols:
@@ -145,7 +195,7 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             "UPDATE scores SET winner_score_v2_raw = winner_score_v2 WHERE winner_score_v2_raw IS NULL"
         )
     cur.execute(
-        "UPDATE scores SET winner_score_v2_pct = ((winner_score_v2_raw - 8) / 32.0) * 100 WHERE winner_score_v2_raw IS NOT NULL AND winner_score_v2_pct IS NULL"
+        "UPDATE scores SET winner_score_v2_pct = MIN(100, MAX(0, ROUND(((winner_score_v2_raw - 8) / 32.0) * 100))) WHERE winner_score_v2_raw IS NOT NULL AND winner_score_v2_pct IS NULL"
     )
     cur.execute(
         "UPDATE scores SET winner_score_v2_breakdown = '{}' WHERE winner_score_v2_breakdown IS NULL"
@@ -180,6 +230,7 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             rows_imported INTEGER DEFAULT 0,
+            winner_score_updated INTEGER DEFAULT 0,
             error TEXT,
             temp_path TEXT,
             ai_total INTEGER DEFAULT 0,
@@ -208,6 +259,10 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         pass
     try:
         cur.execute("ALTER TABLE import_jobs ADD COLUMN ai_pending TEXT")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE import_jobs ADD COLUMN winner_score_updated INTEGER DEFAULT 0")
     except Exception:
         pass
     conn.commit()
@@ -423,10 +478,17 @@ def insert_score(
 
     cur = conn.cursor()
     created_at = datetime.utcnow().isoformat()
-    if winner_score_v2_raw is None and winner_score_v2_pct is not None:
+    if winner_score_v2_pct is not None:
+        try:
+            pct = int(round(float(winner_score_v2_pct)))
+        except Exception:
+            pct = 0
+        winner_score_v2_pct = max(0, min(100, pct))
         winner_score_v2_raw = 8 + (winner_score_v2_pct / 100.0) * 32
-    if winner_score_v2_pct is None and winner_score_v2_raw is not None:
-        winner_score_v2_pct = ((winner_score_v2_raw - 8) / 32.0) * 100
+    elif winner_score_v2_raw is not None:
+        pct = int(round(((winner_score_v2_raw - 8) / 32.0) * 100))
+        winner_score_v2_pct = max(0, min(100, pct))
+        winner_score_v2_raw = 8 + (winner_score_v2_pct / 100.0) * 32
     if winner_score_v2_breakdown is None:
         winner_score_v2_breakdown = {}
     cur.execute(
@@ -651,8 +713,8 @@ def create_import_job(conn: sqlite3.Connection, temp_path: str) -> int:
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO import_jobs (status, created_at, updated_at, rows_imported, error, temp_path, ai_total, ai_done, ai_error)
-        VALUES ('pending', ?, ?, 0, NULL, ?, 0, 0, NULL)
+        INSERT INTO import_jobs (status, created_at, updated_at, rows_imported, winner_score_updated, error, temp_path, ai_total, ai_done, ai_error)
+        VALUES ('pending', ?, ?, 0, 0, NULL, ?, 0, 0, NULL)
         """,
         (now, now, temp_path),
     )
@@ -660,17 +722,19 @@ def create_import_job(conn: sqlite3.Connection, temp_path: str) -> int:
     return cur.lastrowid
 
 
-def complete_import_job(conn: sqlite3.Connection, job_id: int, rows: int) -> None:
+def complete_import_job(
+    conn: sqlite3.Connection, job_id: int, rows: int, winner_score_updated: int = 0
+) -> None:
     """Mark an import job as completed."""
     now = datetime.utcnow().isoformat()
     cur = conn.cursor()
     cur.execute(
         """
         UPDATE import_jobs
-        SET status='done', updated_at=?, rows_imported=?, error=NULL
+        SET status='done', updated_at=?, rows_imported=?, winner_score_updated=?, error=NULL
         WHERE id=?
         """,
-        (now, rows, job_id),
+        (now, rows, winner_score_updated, job_id),
     )
     conn.commit()
 
@@ -740,7 +804,7 @@ def get_import_history(conn: sqlite3.Connection, limit: int = 20) -> List[sqlite
     """Return recent import jobs ordered by creation time."""
     cur = conn.cursor()
     cur.execute(
-        "SELECT id AS task_id, status, rows_imported, created_at, updated_at, error, ai_total, ai_done, ai_error, ai_counts, ai_pending FROM import_jobs ORDER BY created_at DESC LIMIT ?",
+        "SELECT id AS task_id, status, rows_imported, winner_score_updated, created_at, updated_at, error, ai_total, ai_done, ai_error, ai_counts, ai_pending FROM import_jobs ORDER BY created_at DESC LIMIT ?",
         (limit,),
     )
     return cur.fetchall()
@@ -750,7 +814,7 @@ def get_import_job(conn: sqlite3.Connection, job_id: int) -> Optional[sqlite3.Ro
     """Return a single import job by ID."""
     cur = conn.cursor()
     cur.execute(
-        "SELECT id AS task_id, status, rows_imported, created_at, updated_at, error, ai_total, ai_done, ai_error, ai_counts, ai_pending FROM import_jobs WHERE id=?",
+        "SELECT id AS task_id, status, rows_imported, winner_score_updated, created_at, updated_at, error, ai_total, ai_done, ai_error, ai_counts, ai_pending FROM import_jobs WHERE id=?",
         (job_id,),
     )
     return cur.fetchone()
