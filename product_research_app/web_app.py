@@ -35,6 +35,7 @@ import time
 import sqlite3
 import math
 import hashlib
+from functools import partial
 from typing import Dict, Any, List
 
 from . import database
@@ -43,6 +44,7 @@ from .services import ai_columns
 from .services import winner_v2 as winner_calc
 from . import gpt
 from . import title_analyzer
+from .utils.time import today_utc_date
 
 WINNER_V2_FIELDS = winner_calc.ALL_METRICS
 
@@ -50,6 +52,16 @@ APP_DIR = Path(__file__).resolve().parent
 DB_PATH = APP_DIR / "data.sqlite3"
 STATIC_DIR = APP_DIR / "static"
 logger = logging.getLogger(__name__)
+
+
+def _iso(o):
+    from datetime import date, datetime
+    if isinstance(o, (date, datetime)):
+        return o.isoformat()
+    raise TypeError
+
+
+json_dumps = partial(json.dumps, default=_iso)
 
 # Heuristic scoring for offline evaluation.
 def offline_evaluate(product: dict) -> dict:
@@ -262,7 +274,7 @@ def parse_xlsx(binary: bytes):
 
 def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
     """Background task to import XLSX data into the database."""
-    from datetime import datetime, timezone
+    from datetime import datetime
     import unicodedata
     import math
 
@@ -288,7 +300,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             cur.execute("SELECT COALESCE(MAX(id), -1) FROM products")
             max_id = cur.fetchone()[0]
             base_id = 0 if count == 0 else (max_id + 1)
-            today = datetime.now(timezone.utc).date()
+            today = today_utc_date()
 
             def parse_float(val):
                 if val in (None, ''):
@@ -529,7 +541,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def send_json(self, obj: Any, status: int = 200):
         self._set_json(status)
-        self.wfile.write(json.dumps(obj).encode('utf-8'))
+        self.wfile.write(json_dumps(obj).encode('utf-8'))
 
     def _safe_write(self, data: bytes) -> bool:
         return self.safe_write(lambda: self.wfile.write(data))
@@ -696,7 +708,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     row["score"] = score_value
                 rows.append(row)
             self._set_json()
-            self.wfile.write(json.dumps(rows).encode("utf-8"))
+            self.wfile.write(json_dumps(rows).encode("utf-8"))
             return
         if path == "/config":
             # return stored configuration (without exposing the API key)
@@ -713,13 +725,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                 data["api_key_length"] = len(key)
                 data["api_key_hash"] = hashlib.sha256(key.encode("utf-8")).hexdigest()
             self._set_json()
-            self.wfile.write(json.dumps(data).encode("utf-8"))
+            self.wfile.write(json_dumps(data).encode("utf-8"))
             return
         if path == "/settings/winner-score":
             cfg = config.load_config()
             weights = cfg.get("scoring_v2_weights", {})
             self._set_json()
-            self.wfile.write(json.dumps(weights).encode("utf-8"))
+            self.wfile.write(json_dumps(weights).encode("utf-8"))
             return
         if path.startswith("/score/"):
             try:
@@ -731,11 +743,11 @@ class RequestHandler(BaseHTTPRequestHandler):
             scores = database.get_scores_for_product(conn, pid)
             if not scores:
                 self._set_json(404)
-                self.wfile.write(json.dumps({"error": "No score"}).encode("utf-8"))
+                self.wfile.write(json_dumps({"error": "No score"}).encode("utf-8"))
                 return
             score = scores[0]
             self._set_json()
-            self.wfile.write(json.dumps({key: score[key] for key in score.keys()}).encode("utf-8"))
+            self.wfile.write(json_dumps({key: score[key] for key in score.keys()}).encode("utf-8"))
             return
         if path == "/lists":
             # return all saved groups/lists with product counts
@@ -745,7 +757,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             for l in lsts:
                 data.append({"id": l["id"], "name": l["name"], "count": l["count"]})
             self._set_json()
-            self.wfile.write(json.dumps(data).encode("utf-8"))
+            self.wfile.write(json_dumps(data).encode("utf-8"))
             return
         if path.startswith("/list/"):
             # return products belonging to a list
@@ -805,7 +817,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         row["score"] = score_value
                     rows.append(row)
                 self._set_json()
-                self.wfile.write(json.dumps(rows).encode("utf-8"))
+                self.wfile.write(json_dumps(rows).encode("utf-8"))
                 return
         # trends endpoint: compute analytics for categories, keywords and scatter plots
         if path == "/trends":
@@ -819,7 +831,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     return None
                 for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d/%m/%Y"):
                     try:
-                        return datetime.strptime(val, fmt)
+                        return datetime.strptime(val, fmt).date()
                     except Exception:
                         continue
                 return None
@@ -1020,7 +1032,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             top_products = [{"id": r[0], "name": r[1], key_name: r[2]} for r in rows[:10]]
 
             self._set_json()
-            self.wfile.write(json.dumps({
+            self.wfile.write(json_dumps({
                 "kpis": {
                     "total_revenue": total_revenue,
                     "total_units": total_units,
@@ -1084,7 +1096,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     from openpyxl import Workbook
                 except Exception:
                     self._set_json(500)
-                    self.wfile.write(json.dumps({"error": "openpyxl not installed"}).encode('utf-8'))
+                    self.wfile.write(json_dumps({"error": "openpyxl not installed"}).encode('utf-8'))
                     return
                 wb = Workbook()
                 ws = wb.active
@@ -1189,7 +1201,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     raise ValueError
             except Exception:
                 self._set_json(400)
-                self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+                self.wfile.write(json_dumps({"error": "Invalid JSON"}).encode('utf-8'))
                 return
             if "price" in data and data.get("source") != "import":
                 logger.info(
@@ -1215,7 +1227,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             )
             product = database.get_product(conn, pid)
             self._set_json()
-            self.wfile.write(json.dumps(dict(product)).encode('utf-8'))
+            self.wfile.write(json_dumps(dict(product)).encode('utf-8'))
             return
         self.send_error(404)
 
@@ -1227,7 +1239,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 pid = int(path.split("/")[-1])
             except Exception:
                 self._set_json(400)
-                self.wfile.write(json.dumps({"error": "Invalid ID"}).encode('utf-8'))
+                self.wfile.write(json_dumps({"error": "Invalid ID"}).encode('utf-8'))
                 return
             length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(length).decode('utf-8')
@@ -1237,7 +1249,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     raise ValueError
             except Exception:
                 self._set_json(400)
-                self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+                self.wfile.write(json_dumps({"error": "Invalid JSON"}).encode('utf-8'))
                 return
             if "price" in data and data.get("source") != "import":
                 logger.info(
@@ -1251,7 +1263,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             product = database.get_product(conn, pid)
             if product:
                 self._set_json()
-                self.wfile.write(json.dumps(dict(product)).encode('utf-8'))
+                self.wfile.write(json_dumps(dict(product)).encode('utf-8'))
             else:
                 self.send_error(404)
             return
@@ -1264,7 +1276,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     raise ValueError
             except Exception:
                 self._set_json(400)
-                self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+                self.wfile.write(json_dumps({"error": "Invalid JSON"}).encode('utf-8'))
                 return
             cfg = config.load_config()
             weights_v2 = cfg.get('scoring_v2_weights', {})
@@ -1276,7 +1288,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             cfg['scoring_v2_weights'] = weights_v2
             config.save_config(cfg)
             self._set_json()
-            self.wfile.write(json.dumps({"status": "ok"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"status": "ok"}).encode('utf-8'))
             return
         self.send_error(404)
 
@@ -1396,7 +1408,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
 
         result = title_analyzer.analyze_titles(items)
-        resp = json.dumps({'items': result}).encode('utf-8')
+        resp = json_dumps({'items': result}).encode('utf-8')
         self.send_response(200)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.end_headers()
@@ -1872,7 +1884,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         inserted_ids.append(pid)
                 except Exception as exc:
                     self._set_json(500)
-                    self._safe_write(json.dumps({"error": f"Error al procesar XLSX: {exc}"}).encode('utf-8'))
+                    self._safe_write(json_dumps({"error": f"Error al procesar XLSX: {exc}"}).encode('utf-8'))
                     return
             else:
                 # treat as image; save temporarily and attempt to extract products using GPT vision
@@ -1920,11 +1932,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                         inserted = 0
                 # respond with info about image and inserted count
                 self._set_json()
-                self._safe_write(json.dumps({"uploaded_image": f"/uploads/{filename}", "inserted": inserted}).encode('utf-8'))
+                self._safe_write(json_dumps({"uploaded_image": f"/uploads/{filename}", "inserted": inserted}).encode('utf-8'))
                 return
         except Exception as exc:
             self._set_json(500)
-            self._safe_write(json.dumps({"error": str(exc)}).encode('utf-8'))
+            self._safe_write(json_dumps({"error": str(exc)}).encode('utf-8'))
             return
         # Automatically evaluate newly inserted products with offline heuristic if any
         if inserted_ids:
@@ -2046,7 +2058,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             payload["ui_cost_message"] = cost_msg
         if pending:
             payload["pending_ids"] = pending
-        self._safe_write(json.dumps(payload).encode('utf-8'))
+        self._safe_write(json_dumps(payload).encode('utf-8'))
 
     def handle_evaluate_all(self):
         conn = ensure_db()
@@ -2110,7 +2122,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 except Exception:
                     continue
             self._set_json()
-            self.wfile.write(json.dumps({"evaluated": evaluated}).encode('utf-8'))
+            self.wfile.write(json_dumps({"evaluated": evaluated}).encode('utf-8'))
             return
         # Fallback to legacy evaluation if v2 is disabled
         evaluated = 0
@@ -2186,7 +2198,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             )
             evaluated += 1
         self._set_json()
-        self.wfile.write(json.dumps({"evaluated": evaluated}).encode('utf-8'))
+        self.wfile.write(json_dumps({"evaluated": evaluated}).encode('utf-8'))
 
     def handle_setconfig(self):
         length = int(self.headers.get('Content-Length', 0))
@@ -2195,14 +2207,14 @@ class RequestHandler(BaseHTTPRequestHandler):
             data = json.loads(body)
         except Exception:
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "Invalid JSON"}).encode('utf-8'))
             return
         cfg = config.load_config()
         if 'api_key' in data:
             key = str(data.get('api_key', '')).strip()
             if not key:
                 self._set_json(400)
-                self.wfile.write(json.dumps({"error": "empty_api_key"}).encode('utf-8'))
+                self.wfile.write(json_dumps({"error": "empty_api_key"}).encode('utf-8'))
                 return
             cfg['api_key'] = key
         if 'model' in data and data['model']:
@@ -2228,7 +2240,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             cfg['autoFillIAOnImport'] = bool(data['autoFillIAOnImport'])
         config.save_config(cfg)
         self._set_json()
-        self.wfile.write(json.dumps({"status": "ok"}).encode('utf-8'))
+        self.wfile.write(json_dumps({"status": "ok"}).encode('utf-8'))
 
     def handle_custom_gpt(self):
         length = int(self.headers.get('Content-Length', 0))
@@ -2238,13 +2250,13 @@ class RequestHandler(BaseHTTPRequestHandler):
             prompt = data['prompt']
         except Exception:
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "Invalid request"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "Invalid request"}).encode('utf-8'))
             return
         api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
         model = config.get_model()
         if not api_key:
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "No API key configured"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "No API key configured"}).encode('utf-8'))
             return
         try:
             resp = gpt.call_openai_chat(api_key, model, [
@@ -2253,10 +2265,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             ])
             content = resp['choices'][0]['message']['content']
             self._set_json()
-            self.wfile.write(json.dumps({"response": content}).encode('utf-8'))
+            self.wfile.write(json_dumps({"response": content}).encode('utf-8'))
         except Exception as exc:
             self._set_json(500)
-            self.wfile.write(json.dumps({"error": str(exc)}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": str(exc)}).encode('utf-8'))
 
     def handle_ba_insights(self):
         length = int(self.headers.get('Content-Length', 0))
@@ -2267,28 +2279,28 @@ class RequestHandler(BaseHTTPRequestHandler):
             model = payload.get("model") or "gpt-4o-mini-2024-07-18"
         except Exception:
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "Invalid JSON"}).encode('utf-8'))
             return
         if not isinstance(product, dict) or not product.get("id"):
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "Missing product"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "Missing product"}).encode('utf-8'))
             return
         api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
         if not api_key:
             self._set_json(503)
-            self.wfile.write(json.dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
             return
         try:
             grid_updates, usage, duration = gpt.generate_ba_insights(api_key, model, product)
             logger.info("/api/ba/insights tokens=%s duration=%.2fs", usage.get('total_tokens'), duration)
             self._set_json()
-            self.wfile.write(json.dumps({"grid_updates": grid_updates}).encode('utf-8'))
+            self.wfile.write(json_dumps({"grid_updates": grid_updates}).encode('utf-8'))
         except gpt.InvalidJSONError:
             self._set_json(502)
-            self.wfile.write(json.dumps({"error": "Respuesta IA no es JSON"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "Respuesta IA no es JSON"}).encode('utf-8'))
         except Exception:
             self._set_json(503)
-            self.wfile.write(json.dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
 
     def handle_ia_batch_columns(self):
         length = int(self.headers.get('Content-Length', 0))
@@ -2301,24 +2313,24 @@ class RequestHandler(BaseHTTPRequestHandler):
                 raise ValueError
         except Exception:
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "Invalid JSON"}).encode('utf-8'))
             return
         api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
         if not api_key:
             self._set_json(503)
-            self.wfile.write(json.dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
             return
         try:
             ok, ko, usage, duration = gpt.generate_batch_columns(api_key, model, items)
             logger.info("/api/ia/batch-columns tokens=%s duration=%.2fs", usage.get('total_tokens'), duration)
             self._set_json()
-            self.wfile.write(json.dumps({"ok": ok, "ko": ko}).encode('utf-8'))
+            self.wfile.write(json_dumps({"ok": ok, "ko": ko}).encode('utf-8'))
         except gpt.InvalidJSONError:
             self._set_json(502)
-            self.wfile.write(json.dumps({"error": "Respuesta IA no es JSON"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "Respuesta IA no es JSON"}).encode('utf-8'))
         except Exception:
             self._set_json(503)
-            self.wfile.write(json.dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
 
     def handle_auto_weights(self):
         """
@@ -2388,7 +2400,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             for k in weights:
                 weights[k] *= factor
         self._set_json()
-        self.wfile.write(json.dumps(weights).encode('utf-8'))
+        self.wfile.write(json_dumps(weights).encode('utf-8'))
 
     def _collect_samples_for_weights(self):
         """Gather products with Winner Score v2 breakdown and success metric."""
@@ -2443,14 +2455,14 @@ class RequestHandler(BaseHTTPRequestHandler):
             data = json.loads(body) if body else {}
         except Exception:
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "Invalid JSON"}).encode('utf-8'))
             return
         features = data.get("features") or WINNER_V2_FIELDS
         samples_in = data.get("data_sample") or []
         target = data.get("target") or ""
         if not samples_in or not target:
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "Datos insuficientes"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "Datos insuficientes"}).encode('utf-8'))
             return
         samples = []
         for s in samples_in:
@@ -2463,7 +2475,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         model = config.get_model()
         if not api_key or not model:
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "No API key configured"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "No API key configured"}).encode('utf-8'))
             return
         try:
             result = gpt.recommend_winner_weights(api_key, model, samples, target)
@@ -2471,7 +2483,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             notes = result.get("justification", "")
         except Exception as exc:
             self._set_json(500)
-            self.wfile.write(json.dumps({"error": str(exc)}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": str(exc)}).encode('utf-8'))
             return
         resp = {
             "weights": {k: weights.get(k, 0.0) for k in features},
@@ -2479,7 +2491,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             "diagnostics": {"notes": notes},
         }
         self._set_json()
-        self.wfile.write(json.dumps(resp).encode('utf-8'))
+        self.wfile.write(json_dumps(resp).encode('utf-8'))
 
     def handle_scoring_v2_auto_weights_stat(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -2488,14 +2500,14 @@ class RequestHandler(BaseHTTPRequestHandler):
             data = json.loads(body) if body else {}
         except Exception:
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "Invalid JSON"}).encode('utf-8'))
             return
         features = data.get("features") or WINNER_V2_FIELDS
         samples_in = data.get("data_sample") or []
         target = data.get("target") or ""
         if not samples_in or not target or len(samples_in) < 2:
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "Datos insuficientes"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "Datos insuficientes"}).encode('utf-8'))
             return
         ys = [float(s.get("target", 0.0)) for s in samples_in]
         mean_y = sum(ys) / len(ys)
@@ -2512,14 +2524,14 @@ class RequestHandler(BaseHTTPRequestHandler):
         weights = {k: v / total for k, v in weights.items()}
         resp = {"weights": {k: weights.get(k, 0.0) for k in features}, "method": "stat", "diagnostics": {"n": len(samples_in)}}
         self._set_json()
-        self.wfile.write(json.dumps(resp).encode('utf-8'))
+        self.wfile.write(json_dumps(resp).encode('utf-8'))
 
     def handle_scoring_v2_gpt_evaluate(self):
         """Endpoint that evaluates Winner Score v2 variables via GPT."""
 
         if not config.is_scoring_v2_enabled():
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "scoring v2 disabled"}).encode("utf-8"))
+            self.wfile.write(json_dumps({"error": "scoring v2 disabled"}).encode("utf-8"))
             return
 
         length = int(self.headers.get("Content-Length", 0))
@@ -2528,7 +2540,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             data = json.loads(body) if body else {}
         except Exception:
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode("utf-8"))
+            self.wfile.write(json_dumps({"error": "Invalid JSON"}).encode("utf-8"))
             return
 
         title = data.get("title") or data.get("name") or ""
@@ -2543,7 +2555,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         if need:
             if not api_key or not model:
                 self._set_json(400)
-                self.wfile.write(json.dumps({"error": "No API key configured"}).encode("utf-8"))
+                self.wfile.write(json_dumps({"error": "No API key configured"}).encode("utf-8"))
                 return
             try:
                 resp = gpt.evaluate_winner_score(
@@ -2558,7 +2570,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 )
             except Exception as exc:
                 self._set_json(500)
-                self.wfile.write(json.dumps({"error": str(exc)}).encode("utf-8"))
+                self.wfile.write(json_dumps({"error": str(exc)}).encode("utf-8"))
                 return
             rs = resp.get("scores", {})
             js = resp.get("justifications", {})
@@ -2568,7 +2580,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 sources[f] = "gpt"
         out = {**scores, "justificacion": justifs, "source": sources}
         self._set_json()
-        self.wfile.write(json.dumps(out).encode("utf-8"))
+        self.wfile.write(json_dumps(out).encode("utf-8"))
 
     def handle_scoring_v2_gpt_summary(self):
         """Generate an executive summary of top products using GPT."""
@@ -2576,7 +2588,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         if not config.is_scoring_v2_enabled():
             self._set_json(400)
             self.wfile.write(
-                json.dumps({"error": "scoring v2 disabled"}).encode("utf-8")
+                json_dumps({"error": "scoring v2 disabled"}).encode("utf-8")
             )
             return
 
@@ -2586,14 +2598,14 @@ class RequestHandler(BaseHTTPRequestHandler):
             data = json.loads(body) if body else {}
         except Exception:
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode("utf-8"))
+            self.wfile.write(json_dumps({"error": "Invalid JSON"}).encode("utf-8"))
             return
 
         products = data.get("products") or []
         if not isinstance(products, list) or not products:
             self._set_json(400)
             self.wfile.write(
-                json.dumps({"error": "No products provided"}).encode("utf-8")
+                json_dumps({"error": "No products provided"}).encode("utf-8")
             )
             return
 
@@ -2602,7 +2614,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         if not api_key or not model:
             self._set_json(400)
             self.wfile.write(
-                json.dumps({"error": "No API key configured"}).encode("utf-8")
+                json_dumps({"error": "No API key configured"}).encode("utf-8")
             )
             return
 
@@ -2610,17 +2622,17 @@ class RequestHandler(BaseHTTPRequestHandler):
             summary = gpt.summarize_top_products(api_key, model, products)
         except Exception as exc:
             self._set_json(500)
-            self.wfile.write(json.dumps({"error": str(exc)}).encode("utf-8"))
+            self.wfile.write(json_dumps({"error": str(exc)}).encode("utf-8"))
             return
 
         self._set_json()
-        self.wfile.write(json.dumps({"summary": summary}).encode("utf-8"))
+        self.wfile.write(json_dumps({"summary": summary}).encode("utf-8"))
     def handle_scoring_v2_generate(self):
         """Compute Winner Score for selected products."""
 
         if not config.is_scoring_v2_enabled():
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "scoring v2 disabled"}).encode("utf-8"))
+            self.wfile.write(json_dumps({"error": "scoring v2 disabled"}).encode("utf-8"))
             return
 
         length = int(self.headers.get("Content-Length", 0))
@@ -2632,14 +2644,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                 raise ValueError
         except Exception:
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode("utf-8"))
+            self.wfile.write(json_dumps({"error": "Invalid JSON"}).encode("utf-8"))
             return
 
         logger.info("Winner Score generate: ids_length=%d", len(ids))
         id_set = {int(i) for i in ids if str(i).isdigit()}
         if not id_set:
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "no_selection"}).encode("utf-8"))
+            self.wfile.write(json_dumps({"error": "no_selection"}).encode("utf-8"))
             return
 
         conn = ensure_db()
@@ -2716,7 +2728,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         )
         self._set_json()
         self.wfile.write(
-            json.dumps(
+            json_dumps(
                 {
                     "processed": processed,
                     "updated": updated,
@@ -2735,17 +2747,17 @@ class RequestHandler(BaseHTTPRequestHandler):
             data = json.loads(body) if body else {}
         except Exception:
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "Invalid JSON"}).encode('utf-8'))
             return
         name = (data.get('name') or '').strip()
         if not name:
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "Nombre no proporcionado"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "Nombre no proporcionado"}).encode('utf-8'))
             return
         conn = ensure_db()
         list_id = database.create_list(conn, name)
         self._set_json()
-        self.wfile.write(json.dumps({"id": list_id, "name": name}).encode('utf-8'))
+        self.wfile.write(json_dumps({"id": list_id, "name": name}).encode('utf-8'))
 
     def handle_delete_list(self):
         """Delete an existing list by ID with options to move or remove products."""
@@ -2755,7 +2767,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             data = json.loads(body) if body else {}
         except Exception:
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "Invalid JSON"}).encode('utf-8'))
             return
         try:
             lid = int(data.get('id'))
@@ -2765,16 +2777,16 @@ class RequestHandler(BaseHTTPRequestHandler):
                 tgt = int(tgt)
         except Exception:
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "Datos inválidos"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "Datos inválidos"}).encode('utf-8'))
             return
         conn = ensure_db()
         try:
             result = database.delete_list(conn, lid, mode=mode, target_list_id=tgt)
             self._set_json()
-            self.wfile.write(json.dumps(result).encode('utf-8'))
+            self.wfile.write(json_dumps(result).encode('utf-8'))
         except Exception as exc:
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": str(exc)}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": str(exc)}).encode('utf-8'))
 
     def handle_add_to_list(self):
         """Add one or more products to a list."""
@@ -2784,25 +2796,25 @@ class RequestHandler(BaseHTTPRequestHandler):
             data = json.loads(body) if body else {}
         except Exception:
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "Invalid JSON"}).encode('utf-8'))
             return
         try:
             lid = int(data.get('id'))
             ids = [int(x) for x in data.get('ids', [])]
         except Exception:
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "Datos inválidos"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "Datos inválidos"}).encode('utf-8'))
             return
         conn = ensure_db()
         for pid in ids:
             database.add_product_to_list(conn, lid, pid)
         self._set_json()
-        self.wfile.write(json.dumps({"added": len(ids)}).encode('utf-8'))
+        self.wfile.write(json_dumps({"added": len(ids)}).encode('utf-8'))
 
     def handle_shutdown(self):
         """Shutdown the HTTP server."""
         self._set_json()
-        self.wfile.write(json.dumps({"ok": True}).encode('utf-8'))
+        self.wfile.write(json_dumps({"ok": True}).encode('utf-8'))
         threading.Thread(target=self.server.shutdown, daemon=True).start()
 
     def handle_delete(self):
@@ -2818,12 +2830,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             data = json.loads(body or '{}')
         except Exception:
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "Invalid JSON"}).encode('utf-8'))
             return
         ids = data.get('ids')
         if not isinstance(ids, list):
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "Missing or invalid ids"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "Missing or invalid ids"}).encode('utf-8'))
             return
         conn = ensure_db()
         deleted = 0
@@ -2838,7 +2850,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             except Exception:
                 continue
         self._set_json()
-        self.wfile.write(json.dumps({"deleted": deleted}).encode('utf-8'))
+        self.wfile.write(json_dumps({"deleted": deleted}).encode('utf-8'))
 
     def handle_remove_from_list(self):
         """Remove products from a specific list without deleting them globally.
@@ -2852,7 +2864,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             data = json.loads(body or '{}')
         except Exception:
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "Invalid JSON"}).encode('utf-8'))
             return
         list_id = data.get('list_id')
         ids = data.get('ids')
@@ -2860,11 +2872,11 @@ class RequestHandler(BaseHTTPRequestHandler):
             list_id_int = int(list_id)
         except Exception:
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "Invalid list_id"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "Invalid list_id"}).encode('utf-8'))
             return
         if not isinstance(ids, list):
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "Missing or invalid ids"}).encode('utf-8'))
+            self.wfile.write(json_dumps({"error": "Missing or invalid ids"}).encode('utf-8'))
             return
         conn = ensure_db()
         removed = 0
@@ -2879,7 +2891,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             except Exception:
                 continue
         self._set_json()
-        self.wfile.write(json.dumps({"removed": removed}).encode('utf-8'))
+        self.wfile.write(json_dumps({"removed": removed}).encode('utf-8'))
 
 
 def run(host: str = '127.0.0.1', port: int = 8000):
