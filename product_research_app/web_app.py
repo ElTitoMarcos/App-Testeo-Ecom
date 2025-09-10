@@ -262,6 +262,10 @@ def parse_xlsx(binary: bytes):
 
 def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
     """Background task to import XLSX data into the database."""
+    from datetime import datetime
+    import unicodedata
+    import math
+
     conn = ensure_db()
     rows_imported = 0
     inserted_ids: List[int] = []
@@ -269,247 +273,126 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
         data = tmp_path.read_bytes()
         records = parse_xlsx(data)
 
-        used_cols: set[str] = set()
-
-        def find_key(keys, patterns):
-            for k in keys:
-                if k in used_cols:
-                    continue
-                sanitized = ''.join(ch.lower() for ch in k if ch.isalnum())
-                for p in patterns:
-                    if p in sanitized:
-                        used_cols.add(k)
-                        return k
-            return None
-
         if records:
-            headers = list(records[0].keys())
-            # identify columns with tolerant synonyms
-            rating_col = find_key(headers, ["rating", "stars", "valoracion", "puntuacion"])
-            units_col = find_key(headers, ["unitssold", "units", "ventas", "sold"])
-            revenue_col = find_key(headers, ["revenue", "sales", "ingresos"])
-            conv_col = find_key(headers, ["conversion", "cr", "tasaconversion"])
-            launch_col = find_key(headers, ["launchdate", "fecha", "date", "firstseen"])
-            range_col = None
-            if "Date Range" in headers:
-                range_col = "Date Range"
-                used_cols.add(range_col)
-            else:
-                range_col = find_key(headers, ["daterange", "fecharango", "rangofechas"])
-            price_col = find_key(headers, ["price", "precio", "cost", "unitprice"])
-            img_col = find_key(headers, ["imageurl", "image", "imagelink", "mainimage", "mainimageurl", "img", "imagen", "picture", "primaryimage"])
-            name_col = find_key(headers, ["name", "productname", "title", "product", "producto"])
-            desc_col = find_key(headers, ["description", "descripcion", "desc"])
-            cat_col = find_key(headers, ["category", "categoria", "niche", "segment"])
-            curr_col = find_key(headers, ["currency", "moneda"])
+            def norm_key(s: str) -> str:
+                s = ''.join(c for c in unicodedata.normalize('NFD', s.lower()) if unicodedata.category(c) != 'Mn')
+                s = re.sub(r'[^a-z0-9]+', '_', s)
+                s = re.sub(r'_+', '_', s).strip('_')
+                return s
 
-            metric_names = [
-                "magnitud_deseo",
-                "nivel_consciencia_headroom",
-                "evidencia_demanda",
-                "tasa_conversion",
-                "ventas_por_dia",
-                "recencia_lanzamiento",
-                "competition_level_invertido",
-                "facilidad_anuncio",
-                "escalabilidad",
-                "durabilidad_recurrencia",
-            ]
-
-            def sanitize(name: str) -> str:
-                return "".join(ch for ch in name if ch.isalnum())
-
-            metric_cols = {m: find_key(headers, [sanitize(m)]) for m in metric_names}
-
-            def parse_number(val: Any) -> float | None:
-                if val in (None, ''):
-                    return None
-                s = str(val).strip()
-                if not s:
-                    return None
-                percent = '%' in s
-                s = s.replace('%', '').replace(' ', '').replace(',', '.')
-                s = re.sub(r'[^0-9.+-]', '', s)
-                try:
-                    num = float(s)
-                    if percent:
-                        num /= 100.0
-                    return num
-                except Exception:
-                    return None
-
-            def parse_text(val: Any) -> str | None:
-                if val is None:
-                    return None
-                s = str(val).strip()
-                return s or None
-
-            numeric_metrics = {
-                "evidencia_demanda",
-                "tasa_conversion",
-                "ventas_por_dia",
-                "recencia_lanzamiento",
-            }
-
+            norm_records = [{norm_key(k): v for k, v in r.items()} for r in records]
             cur = conn.cursor()
             cur.execute("BEGIN")
             cur.execute("SELECT COUNT(*) FROM products")
             count = cur.fetchone()[0]
             cur.execute("SELECT COALESCE(MAX(id), -1) FROM products")
             max_id = cur.fetchone()[0]
-            is_empty = count == 0
-            base_id = 0 if is_empty else (max_id + 1)
-            rows_validas = []
-            for row in records:
-                name = (row.get(name_col) or '').strip() if name_col else None
+            base_id = 0 if count == 0 else (max_id + 1)
+            today = datetime.utcnow().date()
+
+            def parse_float(val):
+                if val in (None, ''):
+                    return None
+                s = str(val).strip().replace(',', '.')
+                s = re.sub(r'[^0-9.+-]', '', s)
+                try:
+                    return float(s)
+                except Exception:
+                    return None
+
+            def parse_int(val):
+                f = parse_float(val)
+                return int(f) if f is not None else None
+
+            for row in norm_records:
+                name = (row.get('product_name') or '').strip()
                 if not name:
                     continue
-                description = (row.get(desc_col) or '').strip() if desc_col else None
-                category = (row.get(cat_col) or '').strip() if cat_col else None
-                price = None
-                if price_col and row.get(price_col):
-                    try:
-                        price = float(str(row.get(price_col)).replace(',', '.'))
-                    except Exception:
-                        price = None
-                currency = (row.get(curr_col) or '').strip() if curr_col else None
-                image_url = (row.get(img_col) or '').strip() if img_col else None
-
-                date_range = (row.get(range_col) or '').strip() if range_col else ''
-
+                category = (row.get('category') or '').strip() or None
+                price = parse_float(row.get('price'))
+                image_url = (row.get('img_url') or '').strip() or None
+                date_range = (row.get('date_range') or '').strip()
                 extras = {}
-                metrics: dict[str, object] = {}
-
-                rating_val = None
-                if rating_col and row.get(rating_col) not in (None, ''):
-                    try:
-                        s = str(row.get(rating_col)).strip().replace(' ', '').replace(',', '.')
-                        s = re.sub(r'[^0-9.]+', '', s)
-                        if s.count('.') > 1:
-                            parts = s.split('.')
-                            s = ''.join(parts[:-1]) + '.' + parts[-1]
-                        rating_val = float(s) if s else None
-                    except Exception:
-                        rating_val = None
-                if rating_val is not None:
-                    extras['rating'] = rating_val
-                    extras['Product Rating'] = rating_val
-
-                units_val = None
-                if units_col and row.get(units_col) not in (None, ''):
-                    try:
-                        s = re.sub(r'[^0-9]+', '', str(row.get(units_col)))
-                        units_val = int(s) if s else None
-                    except Exception:
-                        units_val = None
-                if units_val is not None:
-                    extras['units_sold'] = units_val
-                    extras['Item Sold'] = units_val
-
-                revenue_val = None
-                if revenue_col and row.get(revenue_col) not in (None, ''):
-                    try:
-                        s = str(row.get(revenue_col)).strip().replace(' ', '').replace(',', '.')
-                        s = re.sub(r'[^0-9.]+', '', s)
-                        if s.count('.') > 1:
-                            parts = s.split('.')
-                            s = ''.join(parts[:-1]) + '.' + parts[-1]
-                        revenue_val = float(s) if s else None
-                    except Exception:
-                        revenue_val = None
-                if revenue_val is None and price is not None and units_val is not None:
-                    revenue_val = price * units_val
-                if revenue_val is not None:
-                    extras['revenue'] = revenue_val
-                    extras['Revenue($)'] = revenue_val
-
-                def set_extra(col, key):
-                    val = row.get(col) if col else None
-                    if val is not None and str(val).strip():
-                        extras[key] = str(val).strip()
-
-                set_extra(conv_col, 'conversion_rate')
-                set_extra(launch_col, 'launch_date')
-
-                for m in metric_names:
-                    col = metric_cols.get(m)
-                    raw = row.get(col) if col else None
-                    if raw not in (None, ''):
-                        if m in numeric_metrics:
-                            val = parse_number(raw)
-                        else:
-                            val = parse_text(raw)
-                        if val is not None:
-                            metrics[m] = val
-
-                recognized = {
-                    name_col,
-                    desc_col,
-                    cat_col,
-                    price_col,
-                    curr_col,
-                    img_col,
-                    rating_col,
-                    units_col,
-                    revenue_col,
-                    conv_col,
-                    launch_col,
-                    range_col,
-                }
-                recognized.update(c for c in metric_cols.values() if c)
-                for k, v in row.items():
-                    if k not in recognized:
-                        extras[k] = v
-
-                rows_validas.append(
-                    (name, description, category, price, currency, image_url, date_range, extras, metrics)
-                )
-            for idx, (name, description, category, price, currency, image_url, date_range, extra_cols, metrics) in enumerate(rows_validas):
-                row_id = base_id + idx
+                for key in ['avg_unit_price', 'commission_rate', 'kalodataurl', 'tiktokurl']:
+                    val = row.get(key)
+                    if val not in (None, ''):
+                        extras[key] = val
+                pid = base_id + len(inserted_ids)
                 database.insert_product(
                     conn,
                     name=name,
-                    description=description,
+                    description=None,
                     category=category,
                     price=price,
-                    currency=currency,
+                    currency=None,
                     image_url=image_url,
                     date_range=date_range,
                     source=filename,
-                    extra=extra_cols,
+                    extra=extras,
                     commit=False,
-                    product_id=row_id,
+                    product_id=pid,
                 )
+                metrics: dict[str, object] = {}
+                rating = parse_float(row.get('product_rating'))
+                if rating is not None:
+                    metrics['magnitud_deseo'] = rating
+                revenues = [parse_float(row.get(k)) for k in ['revenue', 'live_revenue', 'video_revenue', 'shopping_mall_revenue']]
+                rev_vals = [v for v in revenues if v is not None]
+                if rev_vals:
+                    metrics['evidencia_demanda'] = sum(rev_vals)
+                conv_raw = row.get('creator_conversion_ratio')
+                conv_val = parse_float(conv_raw)
+                if conv_val is not None:
+                    if isinstance(conv_raw, str) and '%' in conv_raw:
+                        conv_val /= 100.0
+                    elif conv_val > 1:
+                        conv_val /= 100.0
+                    metrics['tasa_conversion'] = conv_val
+                item_sold = parse_float(row.get('item_sold'))
+                if item_sold is not None:
+                    days = 1
+                    dr = row.get('date_range')
+                    if dr:
+                        try:
+                            start_str, end_str = dr.split('~')
+                            start = datetime.strptime(start_str.strip(), "%Y-%m-%d").date()
+                            end = datetime.strptime(end_str.strip(), "%Y-%m-%d").date()
+                            days = max(1, (end - start).days + 1)
+                        except Exception:
+                            pass
+                    metrics['ventas_por_dia'] = item_sold / days
+                launch_str = row.get('launch_date')
+                if launch_str:
+                    try:
+                        launch_date = datetime.strptime(launch_str.strip()[:10], "%Y-%m-%d").date()
+                        rec = (today - launch_date).days
+                        if rec < 0:
+                            rec = 0
+                        metrics['recencia_lanzamiento'] = rec
+                    except Exception:
+                        pass
+                creator_num = parse_int(row.get('creator_number'))
+                if creator_num is not None:
+                    metrics['competition_level_invertido'] = creator_num
                 if metrics:
-                    database.update_product(conn, row_id, **metrics)
+                    database.update_product(conn, pid, **metrics)
+                inserted_ids.append(pid)
                 rows_imported += 1
-                inserted_ids.append(row_id)
             conn.commit()
-        
+
         products_all = [dict(r) for r in database.list_products(conn)]
         ranges = winner_calc.compute_ranges(products_all)
         weights = config.get_scoring_v2_weights()
         total_w = sum(weights.values())
         if total_w <= 0:
-            logger.warning(
-                "Winner Score import: weight sum <= 0, using uniform weights",
-            )
             n = len(weights) or 1
             weights = {k: 1 / n for k in weights}
         else:
             weights = {k: v / total_w for k, v in weights.items()}
-        logger.info(
-            "Winner Score import: weights=%s sum=%s",
-            weights,
-            sum(weights.values()),
-        )
         updated_scores = 0
-        skipped_scores = 0
-        for prod in products_all:
-            pid = prod["id"]
-            existing = database.get_scores_for_product(conn, pid)
-            if any((dict(sc).get("winner_score_v2_pct") or 0) > 0 for sc in existing):
-                skipped_scores += 1
+        for pid in inserted_ids:
+            prod = next((p for p in products_all if p['id'] == pid), None)
+            if not prod:
                 continue
             missing: list[str] = []
             used: list[str] = []
@@ -517,20 +400,14 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             used_count = len(used)
             missing_count = len(missing)
             fallback = used_count == 0 or pct_val is None or (isinstance(pct_val, float) and math.isnan(pct_val))
-            if fallback:
-                pct = 50
-            else:
-                pct = max(0, min(100, round(pct_val * 100)))
-            if missing_count > 0:
-                level = logging.WARNING if fallback else logging.INFO
-                logger.log(
-                    level,
-                    "Winner Score: product=%s used=%d missing=%d fallback=%s",
-                    pid,
-                    used_count,
-                    missing_count,
-                    str(fallback).lower(),
-                )
+            pct = 50 if fallback else max(0, min(100, round(pct_val * 100)))
+            logger.info(
+                "Winner Score: product=%s used=%d missing=%d fallback=%s",
+                pid,
+                used_count,
+                missing_count,
+                str(fallback).lower(),
+            )
             database.insert_score(
                 conn,
                 product_id=pid,
@@ -548,12 +425,12 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                 commit=False,
             )
             updated_scores += 1
-        conn.commit()
+        if updated_scores:
+            conn.commit()
         logger.info(
-            "Winner Score import/backfill: imported=%d updated=%d skipped=%d",
+            "Winner Score import/backfill: imported=%d updated=%d",
             len(inserted_ids),
             updated_scores,
-            skipped_scores,
         )
         if inserted_ids and config.is_auto_fill_ia_on_import_enabled():
             database.start_import_job_ai(conn, job_id, len(inserted_ids))
@@ -581,8 +458,6 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             tmp_path.unlink()
         except Exception:
             pass
-
-
 def resume_incomplete_imports():
     """Mark stale pending imports as failed and remove orphan temp files."""
     conn = ensure_db()
@@ -2752,7 +2627,6 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         self._set_json()
         self.wfile.write(json.dumps({"summary": summary}).encode("utf-8"))
-
     def handle_scoring_v2_generate(self):
         """Compute Winner Score for selected products."""
 
@@ -2765,7 +2639,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(length).decode("utf-8") if length else ""
         try:
             data = json.loads(body) if body else {}
-            ids = data.get("ids") or []
+            ids = data.get("ids") or data.get("selectedIds") or []
             if not isinstance(ids, list):
                 raise ValueError
         except Exception:
@@ -2776,7 +2650,6 @@ class RequestHandler(BaseHTTPRequestHandler):
         logger.info("Winner Score generate: ids_length=%d", len(ids))
         id_set = {int(i) for i in ids if str(i).isdigit()}
         if not id_set:
-            logger.info("Winner Score generate: received_ids=0")
             self._set_json(400)
             self.wfile.write(json.dumps({"error": "no_selection"}).encode("utf-8"))
             return
@@ -2788,7 +2661,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         total_w = sum(weights.values())
         if total_w <= 0:
             logger.warning(
-                "Winner Score generate: weight sum <= 0, using uniform weights"
+                "Winner Score generate: weight sum <= 0, using uniform weights",
             )
             n = len(weights) or 1
             weights = {k: 1 / n for k in weights}
@@ -2799,21 +2672,13 @@ class RequestHandler(BaseHTTPRequestHandler):
             weights,
             sum(weights.values()),
         )
-        updated: Dict[str, int] = {}
-        skipped = 0
-        details: list[dict[str, int | str]] = []
-        used_metrics: set[str] = set()
-        missing_metrics: set[str] = set()
+        processed = len(id_set)
+        updated = 0
         with_partial = 0
         fallback_only = 0
         for prod in products_all:
             pid = prod["id"]
             if pid not in id_set:
-                continue
-            existing = database.get_scores_for_product(conn, pid)
-            if any((dict(sc).get("winner_score_v2_pct") or 0) > 0 for sc in existing):
-                skipped += 1
-                details.append({"id": pid, "reason": "already_scored"})
                 continue
             missing: list[str] = []
             used: list[str] = []
@@ -2821,27 +2686,20 @@ class RequestHandler(BaseHTTPRequestHandler):
             used_count = len(used)
             missing_count = len(missing)
             fallback = used_count == 0 or pct_val is None or (isinstance(pct_val, float) and math.isnan(pct_val))
-            reason: str | None = None
             if fallback:
                 pct = 50
-                reason = "no_metrics"
                 fallback_only += 1
             else:
                 pct = max(0, min(100, round(pct_val * 100)))
                 if missing_count > 0:
                     with_partial += 1
-            used_metrics.update(used)
-            missing_metrics.update(missing)
-            if missing_count > 0:
-                level = logging.WARNING if fallback else logging.INFO
-                logger.log(
-                    level,
-                    "Winner Score: product=%s used=%d missing=%d fallback=%s",
-                    pid,
-                    used_count,
-                    missing_count,
-                    str(fallback).lower(),
-                )
+            logger.info(
+                "Winner Score: product=%s used=%d missing=%d fallback=%s",
+                pid,
+                used_count,
+                missing_count,
+                str(fallback).lower(),
+            )
             database.insert_score(
                 conn,
                 product_id=pid,
@@ -2858,30 +2716,22 @@ class RequestHandler(BaseHTTPRequestHandler):
                 winner_score_v2_pct=pct,
                 commit=False,
             )
-            updated[str(pid)] = pct
-            if reason:
-                details.append({"id": pid, "reason": reason})
-            else:
-                details.append({"id": pid})
+            updated += 1
 
         conn.commit()
         logger.info(
-            "Winner Score generate: received_ids=%d updated=%d skipped=%d",
-            len(id_set),
-            len(updated),
-            skipped,
+            "Winner Score generate: processed=%d updated=%d",
+            processed,
+            updated,
         )
         self._set_json()
         self.wfile.write(
             json.dumps(
                 {
-                    "updated": len(updated),
-                    "skipped": skipped,
+                    "processed": processed,
+                    "updated": updated,
                     "with_partial": with_partial,
                     "fallback_only": fallback_only,
-                    "used_metrics": sorted(used_metrics),
-                    "missing_metrics": sorted(missing_metrics),
-                    "details": details,
                 }
             ).encode("utf-8")
         )

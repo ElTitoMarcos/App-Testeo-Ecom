@@ -61,6 +61,21 @@ def compute_ranges(products: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str,flo
 def normalize_metric(name: str, value: Any, ranges: Dict[str, Dict[str,float]]) -> float | None:
     if value is None:
         return None
+    if name == "magnitud_deseo":
+        try:
+            return clamp(float(value) / 5.0)
+        except Exception:
+            return MAPS[name].get(str(value).lower())
+    if name == "competition_level_invertido":
+        try:
+            v = float(value)
+        except Exception:
+            return MAPS[name].get(str(value).lower())
+        if v <= 0:
+            return 1.0
+        if v >= 5000:
+            return 0.0
+        return clamp(1 - v / 5000.0)
     if name in MAPS:
         return MAPS[name].get(str(value).lower())
     if name == "evidencia_demanda":
