@@ -426,12 +426,28 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             products_all = [dict(r) for r in database.list_products(conn)]
             ranges = winner_calc.compute_ranges(products_all)
             weights = config.get_scoring_v2_weights()
+            total_w = sum(weights.values())
+            if total_w <= 0:
+                logger.warning(
+                    "Winner Score import: weight sum <= 0, using uniform weights"
+                )
+                n = len(weights) or 1
+                weights = {k: 1 / n for k in weights}
+            else:
+                weights = {k: v / total_w for k, v in weights.items()}
             for prod in products_all:
                 if prod["id"] not in inserted_ids:
                     continue
                 missing: list[str] = []
-                pct = winner_calc.score_product(prod, weights, ranges, missing) * 100
-                pct = max(0, min(100, round(pct)))
+                pct_val = winner_calc.score_product(prod, weights, ranges, missing)
+                if pct_val is None or math.isnan(pct_val) or len(missing) == len(weights):
+                    logger.warning(
+                        "Winner Score fallback 50 for product %s: invalid metrics",
+                        prod["id"],
+                    )
+                    pct = 50
+                else:
+                    pct = max(0, min(100, round(pct_val * 100)))
                 if missing:
                     logger.debug(
                         "Winner Score missing metrics for product %s: %s",
@@ -2646,8 +2662,11 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         id_set = {int(i) for i in ids if str(i).isdigit()}
         if not id_set:
-            self._set_json()
-            self.wfile.write(json.dumps({"updated": 0, "scores": {}}).encode("utf-8"))
+            logger.info("Winner Score generate: received_ids=0")
+            self._set_json(400)
+            self.wfile.write(
+                json.dumps({"error": "No IDs provided"}).encode("utf-8")
+            )
             return
 
         conn = ensure_db()
@@ -2656,22 +2675,32 @@ class RequestHandler(BaseHTTPRequestHandler):
         weights = config.get_scoring_v2_weights()
         total_w = sum(weights.values())
         if total_w <= 0:
-            logger.warning("Winner Score generation aborted: weight sum <= 0")
-            self._set_json()
-            self.wfile.write(json.dumps({"updated": 0, "scores": {}}).encode("utf-8"))
-            return
-        weights = {k: v / total_w for k, v in weights.items()}
+            logger.warning(
+                "Winner Score generate: weight sum <= 0, using uniform weights"
+            )
+            n = len(weights) or 1
+            weights = {k: 1 / n for k in weights}
+        else:
+            weights = {k: v / total_w for k, v in weights.items()}
         updated: Dict[str, int] = {}
+        skipped = 0
         for prod in products_all:
             pid = prod["id"]
             if pid not in id_set:
                 continue
             existing = database.get_scores_for_product(conn, pid)
             if any((dict(sc).get("winner_score_v2_pct") or 0) > 0 for sc in existing):
+                skipped += 1
                 continue
             missing: list[str] = []
-            pct = winner_calc.score_product(prod, weights, ranges, missing) * 100
-            pct = max(0, min(100, round(pct)))
+            pct_val = winner_calc.score_product(prod, weights, ranges, missing)
+            if pct_val is None or math.isnan(pct_val) or len(missing) == len(weights):
+                logger.warning(
+                    "Winner Score fallback 50 for product %s: invalid metrics", pid
+                )
+                pct = 50
+            else:
+                pct = max(0, min(100, round(pct_val * 100)))
             if missing:
                 logger.debug(
                     "Winner Score missing metrics for product %s: %s",
@@ -2698,9 +2727,18 @@ class RequestHandler(BaseHTTPRequestHandler):
                 updated[str(pid)] = int(
                     dict(saved[0]).get("winner_score_v2_pct") or 0
                 )
-
+        logger.info(
+            "Winner Score generate: received_ids=%d updated=%d skipped=%d",
+            len(id_set),
+            len(updated),
+            skipped,
+        )
         self._set_json()
-        self.wfile.write(json.dumps({"updated": len(updated), "scores": updated}).encode("utf-8"))
+        self.wfile.write(
+            json.dumps({"updated": len(updated), "skipped": skipped, "scores": updated}).encode(
+                "utf-8"
+            )
+        )
 
     def handle_create_list(self):
         """Create a new user defined list (group) of products."""

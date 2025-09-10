@@ -1364,7 +1364,11 @@ document.getElementById('btnGenWinner').onclick = async () => {
     window.allProducts = allProducts;
     renderTable();
     updateMasterState();
-    toast.success(`Winner Score generado para ${res.updated} productos`);
+    if(res.skipped>0){
+      toast.error(`Winner Score generado parcialmente: ${res.updated} actualizados, ${res.skipped} omitidos`);
+    } else {
+      toast.success(`Winner Score generado para ${res.updated} productos`);
+    }
   }catch(err){
     console.error(err);
     toast.error('No se pudo generar el Winner Score');
