@@ -262,7 +262,7 @@ def parse_xlsx(binary: bytes):
 
 def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
     """Background task to import XLSX data into the database."""
-    from datetime import datetime
+    from datetime import datetime, timezone
     import unicodedata
     import math
 
@@ -288,7 +288,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             cur.execute("SELECT COALESCE(MAX(id), -1) FROM products")
             max_id = cur.fetchone()[0]
             base_id = 0 if count == 0 else (max_id + 1)
-            today = datetime.utcnow().date()
+            today = datetime.now(timezone.utc).date()
 
             def parse_float(val):
                 if val in (None, ''):

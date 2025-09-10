@@ -18,7 +18,7 @@ All date/time fields are stored as ISO 8601 strings for simplicity.
 
 import json
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -325,7 +325,7 @@ def insert_product(
         The product ID (auto‑generated or explicit).
     """
     cur = conn.cursor()
-    import_date = datetime.utcnow().isoformat()
+    import_date = datetime.now(timezone.utc).isoformat()
     if desire is not None and len(desire) > 180:
         desire = desire[:180]
     allowed_tri = {"Low", "Medium", "High"}
@@ -506,7 +506,7 @@ def insert_score(
     """Insert a new AI score for a product."""
 
     cur = conn.cursor()
-    created_at = datetime.utcnow().isoformat()
+    created_at = datetime.now(timezone.utc).isoformat()
     if winner_score_v2_pct is not None:
         try:
             pct = int(round(float(winner_score_v2_pct)))
@@ -739,7 +739,7 @@ def delete_product(conn: sqlite3.Connection, product_id: int) -> None:
 
 def create_import_job(conn: sqlite3.Connection, temp_path: str) -> int:
     """Create a new pending import job and return its ID."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     cur = conn.cursor()
     cur.execute(
         """
@@ -756,7 +756,7 @@ def complete_import_job(
     conn: sqlite3.Connection, job_id: int, rows: int, winner_score_updated: int = 0
 ) -> None:
     """Mark an import job as completed."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     cur = conn.cursor()
     cur.execute(
         """
@@ -771,7 +771,7 @@ def complete_import_job(
 
 def fail_import_job(conn: sqlite3.Connection, job_id: int, error: str) -> None:
     """Mark an import job as failed."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     cur = conn.cursor()
     cur.execute(
         """
@@ -785,7 +785,7 @@ def fail_import_job(conn: sqlite3.Connection, job_id: int, error: str) -> None:
 
 
 def start_import_job_ai(conn: sqlite3.Connection, job_id: int, total: int) -> None:
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     cur = conn.cursor()
     cur.execute(
         """
@@ -799,7 +799,7 @@ def start_import_job_ai(conn: sqlite3.Connection, job_id: int, total: int) -> No
 
 
 def update_import_job_ai_progress(conn: sqlite3.Connection, job_id: int, done: int) -> None:
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     cur = conn.cursor()
     cur.execute(
         "UPDATE import_jobs SET ai_done=?, updated_at=? WHERE id=?",
@@ -809,7 +809,7 @@ def update_import_job_ai_progress(conn: sqlite3.Connection, job_id: int, done: i
 
 
 def set_import_job_ai_error(conn: sqlite3.Connection, job_id: int, error: str) -> None:
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     cur = conn.cursor()
     cur.execute(
         "UPDATE import_jobs SET ai_error=?, updated_at=? WHERE id=?",
@@ -821,7 +821,7 @@ def set_import_job_ai_error(conn: sqlite3.Connection, job_id: int, error: str) -
 def set_import_job_ai_counts(
     conn: sqlite3.Connection, job_id: int, counts: Dict[str, Any], pending_ids: List[int]
 ) -> None:
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     cur = conn.cursor()
     cur.execute(
         "UPDATE import_jobs SET ai_counts=?, ai_pending=?, updated_at=? WHERE id=?",
@@ -851,7 +851,7 @@ def get_import_job(conn: sqlite3.Connection, job_id: int) -> Optional[sqlite3.Ro
 
 def mark_stale_pending_imports(conn: sqlite3.Connection, minutes: int) -> None:
     """Mark pending imports older than X minutes as errored after restart."""
-    cutoff = (datetime.utcnow() - timedelta(minutes=minutes)).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
     cur = conn.cursor()
     cur.execute(
         "SELECT id, temp_path FROM import_jobs WHERE status='pending' AND created_at <= ?",
@@ -861,7 +861,7 @@ def mark_stale_pending_imports(conn: sqlite3.Connection, minutes: int) -> None:
     for row in rows:
         cur.execute(
             "UPDATE import_jobs SET status='error', updated_at=?, error='server restarted' WHERE id=?",
-            (datetime.utcnow().isoformat(), row["id"]),
+            (datetime.now(timezone.utc).isoformat(), row["id"]),
         )
         if row["temp_path"]:
             try:
