@@ -33,9 +33,9 @@ import * as groupsService from './groups-service.js';
           const scoreMap = {};
           ids.forEach(pid => {
             const prod = (window.allProducts || []).find(p => p.id === pid);
-            if(prod && prod.winner_score_v2_pct!=null) scoreMap[pid] = prod.winner_score_v2_pct;
+            if(prod && prod.winner_score!=null) scoreMap[pid] = prod.winner_score;
           });
-          await fetchJson('/add_to_list', {method:'POST', body: JSON.stringify({id, ids, winner_score_v2_pct: scoreMap})});
+          await fetchJson('/add_to_list', {method:'POST', body: JSON.stringify({id, ids, winner_score: scoreMap})});
           toast.success(`${ids.length} añadidos a ${groupName}`);
           hide();
           loadLists();

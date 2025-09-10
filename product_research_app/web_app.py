@@ -288,7 +288,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             cur.execute("SELECT COALESCE(MAX(id), -1) FROM products")
             max_id = cur.fetchone()[0]
             base_id = 0 if count == 0 else (max_id + 1)
-            today = datetime.utcnow().date()
+            today = datetime.now(datetime.UTC).date()
 
             def parse_float(val):
                 if val in (None, ''):
@@ -616,26 +616,14 @@ class RequestHandler(BaseHTTPRequestHandler):
             conn = ensure_db()
             row = database.get_import_job(conn, task_id)
             if row:
-                data = dict(row)
-                try:
-                    if data.get("ai_counts"):
-                        data["ai_counts"] = json.loads(data["ai_counts"])
-                except Exception:
-                    data["ai_counts"] = {}
-                try:
-                    if data.get("ai_pending"):
-                        data["pending_ids"] = json.loads(data["ai_pending"])
-                    else:
-                        data["pending_ids"] = []
-                except Exception:
-                    data["pending_ids"] = []
-                data.pop("ai_pending", None)
-                data["message"] = (
-                    "Importando productos, por favor espera... El winner score se ha calculado."
-                )
-                data["imported"] = data.get("rows_imported", 0)
-                data["winner_score_updated"] = data.get("winner_score_updated", 0)
-                self.safe_write(lambda: self.send_json(data))
+                imported = row["rows_imported"] or 0
+                ws_updated = row["winner_score_updated"] or 0
+                result = {
+                    "message": "Importando productos, por favor espera... El winner score se ha calculado.",
+                    "imported": imported,
+                    "winner_score_updated": ws_updated,
+                }
+                self.safe_write(lambda: self.send_json(result))
             else:
                 self.safe_write(lambda: self.send_json({"error": "not found"}, status=404))
             return
@@ -2676,6 +2664,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         updated = 0
         with_partial = 0
         fallback_only = 0
+        rows = []
         for prod in products_all:
             pid = prod["id"]
             if pid not in id_set:
@@ -2690,7 +2679,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 pct = 50
                 fallback_only += 1
             else:
-                pct = max(0, min(100, round(pct_val * 100)))
+                pct = max(0, min(100, int(round(pct_val * 100))))
                 if missing_count > 0:
                     with_partial += 1
             logger.info(
@@ -2716,6 +2705,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 winner_score_v2_pct=pct,
                 commit=False,
             )
+            rows.append({"id": pid, "winner_score": pct})
             updated += 1
 
         conn.commit()
@@ -2732,6 +2722,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "updated": updated,
                     "with_partial": with_partial,
                     "fallback_only": fallback_only,
+                    "rows": rows,
                 }
             ).encode("utf-8")
         )

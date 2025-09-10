@@ -278,7 +278,7 @@ async function pollImportStatus(id) {
     } else {
       localStorage.removeItem(IMPORT_TASK_LS_KEY);
       if (data.status === 'done') {
-        await fetchProducts();
+        await fetchProducts(true, true);
         toast.success(data.message || 'Winner Score actualizado tras importar');
         const n = data.imported || data.rows_imported || 0;
         const ws = data.winner_score_updated || 0;
@@ -300,7 +300,7 @@ async function pollImportStatus(id) {
             actionText: 'Reintentar IA ahora',
             onAction: async () => {
               await window.handleCompletarIA({ ids: data.pending_ids });
-              fetchProducts();
+              fetchProducts(true, true);
             }
           });
         }
@@ -438,7 +438,7 @@ const columns = [
   { key: 'desire_magnitude', label: 'Desire magnetitude', type: 'string', headerClass: 'ec-col ec-col-desire-mag', cellClass: 'ec-col ec-col-desire-mag', dataEcCol: 'desire_magnitude' },
   { key: 'awareness_level', label: 'Awerness Level', type: 'string', headerClass: 'ec-col ec-col-awareness', cellClass: 'ec-col ec-col-awareness', dataEcCol: 'awareness_level' },
   { key: 'competition_level', label: 'Competition level', type: 'string', headerClass: 'ec-col ec-col-competition', cellClass: 'ec-col ec-col-competition', dataEcCol: 'competition_level' },
-  { key: 'winner_score_v2_pct', label: 'Winner Score', type: 'number' },
+  { key: 'winner_score', label: 'Winner Score', type: 'number' },
 ];
 
 let trendingWords = [];
@@ -630,9 +630,9 @@ function recalculateWinnerScoreV2(){
       if(v!=null){ total+=w; score+=w*v; }
     });
     const raw = total>0 ? (score/total)*100 : 0;
-    p.winner_score_v2_pct = Math.max(0, Math.min(100, Math.round(raw)));
+    p.winner_score = Math.max(0, Math.min(100, Math.round(raw)));
   });
-  if(sortField==='winner_score_v2_pct'){
+  if(sortField==='winner_score'){
     sortProducts();
   }
   renderTable();
@@ -694,12 +694,19 @@ function isTrending(name) {
   return words.some(w => trendingWords.includes(w));
 }
 
-async function fetchProducts(preserve=true) {
+async function fetchProducts(preserve=true, bust=false) {
+  if (typeof preserve !== 'boolean') preserve = true;
+  const url = bust ? `/products?ts=${Date.now()}` : '/products';
+  const opts = bust ? {cache:'no-store'} : undefined;
   const prevSel = new Set(selection);
-  const data = await fetchJson('/products');
-  allProducts = data;
+  const data = await fetchJson(url, opts);
+  allProducts = data.map(p => ({
+    ...p,
+    id: Number(p.id),
+    winner_score: p.winner_score != null ? Number(p.winner_score) : Number(p.winner_score_v2_pct)
+  }));
   preprocessProducts(allProducts);
-  allProducts.sort((a,b)=> (Number(a.id)||0) - (Number(b.id)||0));
+  allProducts.sort((a,b)=> (a.id||0) - (b.id||0));
   sortField = 'id';
   sortDir = 1;
   sortType = 'number';
@@ -711,7 +718,7 @@ async function fetchProducts(preserve=true) {
   } else {
     renderTable();
   }
-  const visibleIds = new Set(products.map(p => String(p.id)));
+  const visibleIds = new Set(products.map(p => p.id));
   selection.clear();
   for (const id of prevSel) {
     if (visibleIds.has(id)) selection.add(id);
@@ -744,7 +751,7 @@ function renderTable() {
       if (col.width) th.style.width = col.width + 'px';
       if (col.minWidth) th.style.minWidth = col.minWidth + 'px';
       if (col.maxWidth) th.style.maxWidth = col.maxWidth + 'px';
-      if (col.key === 'winner_score_v2_pct') th.title = 'Suma ponderada de 10 métricas normalizadas (v2)';
+      if (col.key === 'winner_score') th.title = 'Suma ponderada de 10 métricas normalizadas (v2)';
       th.onclick = () => sortBy(col.key, col.type);
       headerRow.appendChild(th);
     });
@@ -765,12 +772,13 @@ function renderTable() {
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.classList.add('rowCheck');
-    const rowId = String(item.id);
+    const rowId = item.id;
+    tr.dataset.id = rowId;
     cb.dataset.id = rowId;
     cb.checked = selection.has(rowId);
     tr.classList.toggle('selected', cb.checked);
     cb.addEventListener('change', () => {
-      const id = cb.dataset.id;
+      const id = Number(cb.dataset.id);
       if (cb.checked) selection.add(id); else selection.delete(id);
       tr.classList.toggle('selected', cb.checked);
       updateMasterState();
@@ -793,15 +801,16 @@ function renderTable() {
           const j = item.winner_score_v2_breakdown.justifications[key];
           if (j) td.title = 'Justificación: ' + j;
         }
-      } else if (['id','name','category','price','image_url','winner_score_v2_pct','desire','desire_magnitude','awareness_level','competition_level','date_range'].includes(key)) {
+      } else if (['id','name','category','price','image_url','winner_score','desire','desire_magnitude','awareness_level','competition_level','date_range'].includes(key)) {
         value = item[key];
       } else {
         value = item.extras ? item.extras[key] : '';
       }
-      if (key === 'winner_score_v2_pct') {
-        const sc = parseFloat(value);
-        if (!isNaN(sc)) {
-          const scInt = Math.round(sc);
+      if (key === 'winner_score') {
+        if (value == null || value === '') {
+          td.textContent = '—';
+        } else {
+          const scInt = Math.round(Number(value));
           td.innerHTML = '<span class="' + winnerScoreClass(scInt) + '">' + scInt.toLocaleString(undefined,{maximumFractionDigits:0}) + '</span>';
           if (item.winner_score_v2_breakdown && item.winner_score_v2_breakdown.justifications) {
             const j = item.winner_score_v2_breakdown.justifications;
@@ -944,7 +953,7 @@ function renderTable() {
     tr.appendChild(tdDel);
     tbody.appendChild(tr);
   });
-  currentPageIds = products.map(p => String(p.id));
+  currentPageIds = products.map(p => p.id);
   updateResultsBadge(currentPageIds.length);
   if (window.refreshColumns) window.refreshColumns();
   if (window.applyColumnVisibility) window.applyColumnVisibility();
@@ -962,7 +971,7 @@ function sortProducts(){
   const type = sortType;
   products.sort((a,b)=>{
     let va; let vb;
-    if (field === 'id' || field === 'name' || field === 'category' || field === 'price' || field === 'image_url' || field === 'winner_score_v2_pct' || field === 'desire' || field === 'desire_magnitude' || field === 'awareness_level' || field === 'competition_level') {
+  if (field === 'id' || field === 'name' || field === 'category' || field === 'price' || field === 'image_url' || field === 'winner_score' || field === 'desire' || field === 'desire_magnitude' || field === 'awareness_level' || field === 'competition_level') {
       va = a[field];
       vb = b[field];
     } else if (metricKeys.includes(field)) {
@@ -1335,7 +1344,7 @@ document.getElementById('btnExport').onclick = async () => {
 
 // Generate Winner Score for selected products
 document.getElementById('btnGenWinner').onclick = async () => {
-  const ids = Array.from(selection, Number);
+  const ids = Array.from(selection);
   if(!ids.length){
     toast.error('Selecciona al menos un producto');
     return;
@@ -1345,9 +1354,23 @@ document.getElementById('btnGenWinner').onclick = async () => {
   startProgress();
   try{
     const res = await fetchJson('/scoring/v2/generate', {method:'POST', body: JSON.stringify({ids})});
-    await fetchProducts();
+    if(Array.isArray(res.rows)){
+      const map = new Map(res.rows.map(r => [Number(r.id), r.winner_score]));
+      (window.allProducts||[]).forEach(p => {
+        const ns = map.get(p.id);
+        if(ns != null){ p.winner_score = ns; }
+      });
+      if(Array.isArray(window.products)){
+        window.products.forEach(p => {
+          const ns = map.get(p.id);
+          if(ns != null){ p.winner_score = ns; }
+        });
+      }
+      if(sortField==='winner_score') sortProducts();
+      renderTable();
+    }
+    const processed = res.processed || 0;
     const updated = res.updated || 0;
-    const skipped = res.skipped || 0;
     const withPartial = res.with_partial || 0;
     const fallbackOnly = res.fallback_only || 0;
     if(withPartial > 0){
@@ -1356,10 +1379,10 @@ document.getElementById('btnGenWinner').onclick = async () => {
     if(fallbackOnly > 0){
       toast.warn(`${fallbackOnly} productos sin datos suficientes (score=50)`);
     }
-    if(updated === 0){
+    if(processed === 0){
+      toast.info('No se procesó ningún producto.');
+    } else if(updated === 0){
       toast.info('No se actualizó ningún producto.');
-    } else if(skipped > 0){
-      toast.warn(`Winner Score actualizado en ${updated} productos, ${skipped} omitidos`);
     } else {
       toast.success(`Winner Score actualizado en ${updated} productos`);
     }
@@ -1483,7 +1506,7 @@ async function loadTrends(){
   let html = '<h3>Tendencias</h3>';
   if(data.top_products && data.top_products.length){
     html += '<strong>Top productos por Winner Score:</strong><ol>';
-        data.top_products.forEach(item=>{ const sc = Math.round(item.winner_score_v2_pct || 0); html += `<li>${item.name} (Winner Score: ${sc.toLocaleString(undefined,{maximumFractionDigits:0})})</li>`; });
+        data.top_products.forEach(item=>{ const sc = Math.round(item.winner_score || 0); html += `<li>${item.name} (Winner Score: ${sc.toLocaleString(undefined,{maximumFractionDigits:0})})</li>`; });
     html += '</ol>';
   }
   cont.innerHTML = html;

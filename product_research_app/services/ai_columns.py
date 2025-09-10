@@ -230,7 +230,7 @@ def fill_ai_columns(
     to_process: List[Dict[str, Any]] = []
     selected_ids: List[int] = []
     records: Dict[str, Any] = {}
-    now_ts = datetime.utcnow().isoformat()
+    now_ts = datetime.now(datetime.UTC).isoformat()
 
     for pid in product_ids:
         rec = database.get_product(conn, pid)
@@ -427,12 +427,12 @@ def fill_ai_columns(
     errors = 0
     for pid, apply in updates_final.items():
         if apply:
-            apply["ai_columns_completed_at"] = datetime.utcnow().isoformat()
+            apply["ai_columns_completed_at"] = datetime.now(datetime.UTC).isoformat()
             database.update_product(conn, int(pid), **apply)
             applied_ok[pid] = {k: v for k, v in apply.items() if k != "ai_columns_completed_at"}
             success += 1
         else:
-            database.update_product(conn, int(pid), ai_columns_completed_at=datetime.utcnow().isoformat())
+            database.update_product(conn, int(pid), ai_columns_completed_at=datetime.now(datetime.UTC).isoformat())
             ko_all[pid] = ko_all.get(pid, "existing")
             errors += 1
 

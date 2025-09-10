@@ -13,8 +13,8 @@ function ensureMaster(){
     master = document.getElementById('selectAll');
     if(master){
       master.addEventListener('change', ()=>{
-        if(master.checked){ currentPageIds.forEach(id=>selection.add(String(id))); }
-        else { currentPageIds.forEach(id=>selection.delete(String(id))); }
+        if(master.checked){ currentPageIds.forEach(id=>selection.add(Number(id))); }
+        else { currentPageIds.forEach(id=>selection.delete(Number(id))); }
         renderTable();
         updateMasterState();
       });
@@ -39,8 +39,8 @@ function updateMasterState(){
   if(btnGen){
     const ap = window.allProducts || [];
     const needs = Array.from(selection).some(id => {
-      const prod = ap.find(p => String(p.id)===String(id));
-      const val = prod ? Number(prod.winner_score_v2_pct) : 0;
+      const prod = ap.find(p => p.id===id);
+      const val = prod ? Number(prod.winner_score) : 0;
       return !val;
     });
     btnGen.disabled = noneSelected || !needs;
