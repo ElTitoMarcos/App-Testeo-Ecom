@@ -279,9 +279,11 @@ async function pollImportStatus(id) {
       localStorage.removeItem(IMPORT_TASK_LS_KEY);
       if (data.status === 'done') {
         await fetchProducts();
-        toast.success('Winner Score actualizado tras importar');
-        const n = data.rows_imported || 0;
+        toast.success(data.message || 'Winner Score actualizado tras importar');
+        const n = data.imported || data.rows_imported || 0;
+        const ws = data.winner_score_updated || 0;
         toast.success(`Importación completada: ${n} filas nuevas. IDs desde 0 si era la primera importación.`);
+        if (ws) toast.success(`Winner Score actualizado en ${ws} productos`);
         const counts = data.ai_counts || {};
         const done = counts.n_procesados || 0;
         const total = counts.n_para_ia || 0;
