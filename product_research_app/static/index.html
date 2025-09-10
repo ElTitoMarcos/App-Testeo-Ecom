@@ -1335,45 +1335,30 @@ document.getElementById('btnExport').onclick = async () => {
 // Generate Winner Score for selected products
 document.getElementById('btnGenWinner').onclick = async () => {
   const ids = Array.from(selection, Number);
-  const pending = ids.filter(id => {
-    const prod = (allProducts || []).find(p => p.id === id);
-    const val = prod ? Number(prod.winner_score_v2_pct) : 0;
-    return !val;
-  });
-  if(!pending.length){
-    toast.info('No se actualizó ningún producto. Revisa que tengan métricas y que el campo Winner Score esté vacío o 0.');
+  if(!ids.length){
+    toast.error('Selecciona al menos un producto');
     return;
   }
+  const btn = document.getElementById('btnGenWinner');
+  btn.disabled = true;
   startProgress();
   try{
-    const res = await fetchJson('/scoring/v2/generate', {method:'POST', body: JSON.stringify({ids: pending})});
-    if(res.error){ throw new Error(res.error); }
-    const scores = res.scores || {};
-    const idsWithScore = Object.keys(scores);
-    if((res.updated||0) === 0 || idsWithScore.length === 0){
-      toast.info('No se actualizó ningún producto. Revisa que tengan métricas y que el campo Winner Score esté vacío o 0.');
-      updateMasterState();
-      return;
-    }
-    allProducts = allProducts.map(p => {
-      const sc = scores[String(p.id)];
-      return sc != null ? {...p, winner_score_v2_pct: sc} : p;
-    });
-    products = products.map(p => {
-      const sc = scores[String(p.id)];
-      return sc != null ? {...p, winner_score_v2_pct: sc} : p;
-    });
-    window.allProducts = allProducts;
-    renderTable();
-    updateMasterState();
-    if(res.skipped>0){
-      toast.error(`Winner Score generado parcialmente: ${res.updated} actualizados, ${res.skipped} omitidos`);
+    const res = await fetchJson('/scoring/v2/generate', {method:'POST', body: JSON.stringify({ids})});
+    await fetchProducts();
+    const updated = res.updated || 0;
+    const skipped = res.skipped || 0;
+    if(updated === 0){
+      toast.info('No se actualizó ningún producto.');
+    } else if(skipped > 0){
+      toast.warn(`Winner Score actualizado en ${updated} productos, ${skipped} omitidos`);
     } else {
-      toast.success(`Winner Score generado para ${res.updated} productos`);
+      toast.success(`Winner Score actualizado en ${updated} productos`);
     }
   }catch(err){
     console.error(err);
-    toast.error('No se pudo generar el Winner Score');
+    toast.error('No se pudo actualizar el Winner Score');
+  } finally {
+    btn.disabled = false;
   }
 };
 
