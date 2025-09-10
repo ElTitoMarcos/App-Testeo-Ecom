@@ -435,6 +435,11 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             weights = {k: 1 / n for k in weights}
         else:
             weights = {k: v / total_w for k, v in weights.items()}
+        logger.info(
+            "Winner Score import: weights=%s sum=%s",
+            weights,
+            sum(weights.values()),
+        )
         updated_scores = 0
         skipped_scores = 0
         for prod in products_all:
@@ -454,11 +459,18 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             else:
                 pct = max(0, min(100, round(pct_val * 100)))
             if missing:
-                logger.debug(
-                    "Winner Score missing metrics for product %s: %s",
-                    pid,
-                    ",".join(missing),
-                )
+                for m in missing:
+                    logger.warning(
+                        "Winner Score missing metric for product %s: %s",
+                        pid,
+                        m,
+                    )
+            logger.debug(
+                "Winner Score import product %s: raw=%s final=%s",
+                pid,
+                pct_val,
+                pct,
+            )
             database.insert_score(
                 conn,
                 product_id=pid,
@@ -2679,6 +2691,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode("utf-8"))
             return
 
+        logger.info("Winner Score generate: ids_length=%d", len(ids))
         id_set = {int(i) for i in ids if str(i).isdigit()}
         if not id_set:
             logger.info("Winner Score generate: received_ids=0")
@@ -2699,6 +2712,11 @@ class RequestHandler(BaseHTTPRequestHandler):
             weights = {k: 1 / n for k in weights}
         else:
             weights = {k: v / total_w for k, v in weights.items()}
+        logger.info(
+            "Winner Score generate: weights=%s sum=%s",
+            weights,
+            sum(weights.values()),
+        )
         updated: Dict[str, int] = {}
         skipped = 0
         details: list[dict[str, int | str]] = []
@@ -2723,11 +2741,18 @@ class RequestHandler(BaseHTTPRequestHandler):
             else:
                 pct = max(0, min(100, round(pct_val * 100)))
             if missing:
-                logger.debug(
-                    "Winner Score missing metrics for product %s: %s",
-                    pid,
-                    ",".join(missing),
-                )
+                for m in missing:
+                    logger.warning(
+                        "Winner Score missing metric for product %s: %s",
+                        pid,
+                        m,
+                    )
+            logger.debug(
+                "Winner Score generate product %s: raw=%s final=%s",
+                pid,
+                pct_val,
+                pct,
+            )
             database.insert_score(
                 conn,
                 product_id=pid,

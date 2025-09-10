@@ -90,7 +90,7 @@ def score_product(
     for k, w in weights.items():
         val = normalize_metric(k, prod.get(k), ranges)
         total_w += w
-        if val is None:
+        if val is None or (isinstance(val, float) and math.isnan(val)):
             if missing is not None:
                 missing.append(k)
             continue
