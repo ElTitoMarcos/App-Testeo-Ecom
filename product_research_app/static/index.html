@@ -277,8 +277,15 @@ async function pollImportStatus(id) {
       importPollTimer = setTimeout(() => pollImportStatus(id), 2000);
     } else {
       localStorage.removeItem(IMPORT_TASK_LS_KEY);
+      if (data.done && data.scores_ready) {
+        if (window.productsTable && typeof window.productsTable.reload === 'function') {
+          window.productsTable.reload();
+        } else {
+          await fetchProducts();
+        }
+        showToast('Importación completada. Winner Score actualizado.');
+      }
       if (data.status === 'done') {
-        await fetchProducts();
         toast.success(data.message || 'Winner Score actualizado tras importar');
         const n = data.imported || data.rows_imported || 0;
         const ws = data.winner_score_updated || 0;
@@ -799,6 +806,7 @@ function renderTable() {
         value = item.extras ? item.extras[key] : '';
       }
       if (key === 'winner_score') {
+        td.contentEditable = 'false';
         const sc = parseFloat(value);
         if (!isNaN(sc)) {
           const scInt = Math.round(sc);
@@ -808,6 +816,8 @@ function renderTable() {
             const tooltip = Object.entries(j).map(([k,v])=>`${k}: ${v}`).join('\n');
             td.title = tooltip;
           }
+        } else {
+          td.textContent = '—';
         }
       } else if (key === 'image_url' && value) {
         const img = document.createElement('img');
@@ -1331,25 +1341,6 @@ document.getElementById('btnExport').onclick = async () => {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   } catch(err){ console.error(err); toast.error('Error al exportar'); }
-};
-
-// Generate Winner Score for selected products
-document.getElementById('btnGenWinner').onclick = async () => {
-  const ids = Array.from(selection, Number);
-  if(!ids.length){
-    toast.error('Selecciona al menos un producto');
-    return;
-  }
-  const btn = document.getElementById('btnGenWinner');
-  btn.disabled = true;
-  startProgress();
-  try{
-    await winnerScore.generate(ids);
-  }catch(err){
-    console.error(err);
-  } finally {
-    btn.disabled = false;
-  }
 };
 
 // -------- Group management --------

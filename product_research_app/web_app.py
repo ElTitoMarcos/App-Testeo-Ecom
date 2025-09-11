@@ -619,6 +619,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                 )
                 data["imported"] = data.get("rows_imported", 0)
                 data["winner_score_updated"] = data.get("winner_score_updated", 0)
+                status_val = data.get("status")
+                data["done"] = status_val == "done"
+                data["scores_ready"] = status_val == "done"
                 self.safe_write(lambda: self.send_json(data))
             else:
                 self.safe_write(lambda: self.send_json({"error": "not found"}, status=404))
@@ -2408,6 +2411,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         try:
             data = json.loads(body) if body else {}
             ids = data.get("ids") or []
+            all_flag = bool(data.get("all"))
+            force = bool(data.get("force"))
             if not isinstance(ids, list):
                 raise ValueError
         except Exception:
@@ -2415,11 +2420,15 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode("utf-8"))
             return
 
-        logger.info("Winner Score generate: ids_length=%d", len(ids))
         id_list = [int(i) for i in ids if str(i).isdigit()]
-        received = len(id_list)
-
         conn = ensure_db()
+        if all_flag or not id_list:
+            cur = conn.execute("SELECT id FROM products")
+            id_list = [row[0] for row in cur.fetchall()]
+            all_flag = True
+
+        logger.info("Winner Score generate: ids_length=%d all=%s force=%s", len(id_list), all_flag, force)
+        received = len(id_list)
         weights = config.get_weights()
         updated = 0
         skipped = 0
@@ -2428,7 +2437,15 @@ class RequestHandler(BaseHTTPRequestHandler):
             prod = database.get_product(conn, pid)
             if not prod:
                 skipped += 1
-                details.append({"id": pid, "score": None, "used": 0, "missing": len(winner_calc.FEATURE_MAP), "fallback": True, "updated": 0, "missing_fields": list(winner_calc.FEATURE_MAP.keys())})
+                details.append({
+                    "id": pid,
+                    "score": None,
+                    "used": 0,
+                    "missing": len(winner_calc.FEATURE_MAP),
+                    "missing_fields": list(winner_calc.FEATURE_MAP.keys()),
+                    "fallback": True,
+                    "updated": 0,
+                })
                 continue
             res = winner_calc.compute_winner_score_v2(prod, weights)
             if res["score"] is None:
@@ -2451,11 +2468,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "updated": 0,
                 })
                 continue
-            cur = conn.execute(
-                "UPDATE products SET winner_score = ? WHERE id = ? AND winner_score <> ?",
-                (res["score"], pid, res["score"]),
+            old_score = rget(prod, "winner_score")
+            conn.execute(
+                "UPDATE products SET winner_score = ? WHERE id = ?",
+                (res["score"], pid),
             )
-            changed = 1 if cur.rowcount else 0
+            changed = 1 if res["score"] != old_score else 0
             if changed:
                 updated += 1
             else:
@@ -2479,9 +2497,29 @@ class RequestHandler(BaseHTTPRequestHandler):
                 "updated": changed,
             })
         conn.commit()
-        logger.info("Winner Score generate: received_ids=%d updated=%d skipped=%d", received, updated, skipped)
+        logger.info(
+            "Winner Score generate: received_ids=%d updated=%d skipped=%d force=%s all=%s",
+            received,
+            updated,
+            skipped,
+            str(force).lower(),
+            str(all_flag).lower(),
+        )
         self._set_json()
-        self.wfile.write(json.dumps({"success": True, "received": received, "updated": updated, "skipped": skipped, "details": details}).encode("utf-8"))
+        self.wfile.write(
+            json.dumps(
+                {
+                    "success": True,
+                    "received": received,
+                    "received_ids": id_list,
+                    "updated": updated,
+                    "skipped": skipped,
+                    "details": details,
+                    "force": force,
+                    "all": all_flag,
+                }
+            ).encode("utf-8")
+        )
 
     def handle_create_list(self):
         """Create a new user defined list (group) of products."""

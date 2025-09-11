@@ -122,3 +122,15 @@ if (tbody) {
     lastClickedCheck = cb;
   });
 }
+
+// expose helpers for other modules
+window.getSelectedIds = function () {
+  return Array.from(selection, (id) => Number(id));
+};
+
+window.productsTable = window.productsTable || {};
+window.productsTable.reload = function () {
+  if (typeof fetchProducts === 'function') {
+    fetchProducts(true);
+  }
+};

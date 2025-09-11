@@ -15,4 +15,8 @@
     setTimeout(()=>{ if(el.parentNode) c.removeChild(el); }, opt.duration||5000);
   }
   window.toast = { success:(m,o)=>make('success',m,o), error:(m,o)=>make('error',m,o), info:(m,o)=>make('info',m,o) };
+  window.showToast = function(msg, type='info'){
+    const fn = window.toast[type] || window.toast.info;
+    fn(msg);
+  };
 })();
