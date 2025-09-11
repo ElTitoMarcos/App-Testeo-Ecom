@@ -684,6 +684,7 @@ async function fetchProducts(preserve=true) {
 
 window.fetchProducts = fetchProducts;
 async function reloadTable(){ await fetchProducts(); }
+async function reloadRows(ids){ await fetchProducts(); }
 
 function renderTable() {
   const headerRow = document.getElementById('headerRow');
@@ -1290,19 +1291,31 @@ document.getElementById('btnExport').onclick = async () => {
 
 // Generate Winner Score for selected or all products
 document.getElementById('btnGenWinner').onclick = async () => {
-  const ids = Array.from(selection, Number);
+  const selectedIds = Array.from(selection, Number);
   const btn = document.getElementById('btnGenWinner');
   const prev = btn.textContent;
   btn.disabled = true;
   btn.textContent = 'Actualizando…';
   startProgress();
-  try{
-    const res = await winnerScore.generate(ids);
-    toast.success(`Winner Score actualizado (${res.updated || 0})`);
-    if(!ids.length){
-      await reloadTable();
+  try {
+    const res = await winnerScore.generate(selectedIds);
+    const processed = res?.processed || 0;
+    const updated = res?.updated || 0;
+    if (processed > 0) {
+      if (selectedIds.length) {
+        toast.success(`Winner Score recalculado: ${updated}/${processed} cambiaron.`);
+        await reloadRows(selectedIds);
+      } else {
+        toast.success(`Winner Score recalculado para ${processed} productos (${updated} cambiaron).`);
+        await reloadTable();
+      }
+      if (updated === 0) {
+        toast.info('Los nuevos pesos no cambiaron el valor entero (0–100) por redondeo.');
+      }
+    } else {
+      toast.info('Nada que recalcular (0 seleccionados).');
     }
-  }catch(err){
+  } catch (err) {
     console.error(err);
     toast.error('No se pudo actualizar el Winner Score');
   } finally {
