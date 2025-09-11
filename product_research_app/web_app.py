@@ -45,7 +45,7 @@ from . import gpt
 from . import title_analyzer
 from .utils.db import row_to_dict, rget
 
-WINNER_SCORE_FIELDS = winner_calc.ALL_METRICS
+WINNER_SCORE_FIELDS = list(winner_calc.FEATURE_MAP.keys())
 
 APP_DIR = Path(__file__).resolve().parent
 DB_PATH = APP_DIR / "data.sqlite3"
@@ -378,75 +378,6 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                 inserted_ids.append(row_id)
             conn.commit()
         
-        products_all = [row_to_dict(r) for r in database.list_products(conn)]
-        ranges = winner_calc.compute_ranges(products_all)
-        weights = config.get_weights()
-        total_w = sum(weights.values())
-        if total_w <= 0:
-            logger.warning(
-                "Winner Score import: weight sum <= 0, using uniform weights",
-            )
-            n = len(weights) or 1
-            weights = {k: 1 / n for k in weights}
-        else:
-            weights = {k: v / total_w for k, v in weights.items()}
-        logger.info(
-            "Winner Score import: weights=%s sum=%s",
-            weights,
-            sum(weights.values()),
-        )
-        updated_scores = 0
-        skipped_scores = 0
-        for prod in products_all:
-            pid = prod["id"]
-            existing = database.get_scores_for_product(conn, pid)
-            if any((rget(row_to_dict(sc), "winner_score", 0) or 0) > 0 for sc in existing):
-                skipped_scores += 1
-                continue
-            missing: list[str] = []
-            used: list[str] = []
-            pct_val = winner_calc.score_product(prod, weights, ranges, missing, used)
-            used_count = len(used)
-            missing_count = len(missing)
-            fallback = used_count == 0 or pct_val is None or (isinstance(pct_val, float) and math.isnan(pct_val))
-            if fallback:
-                pct = 50
-            else:
-                pct = max(0, min(100, round(pct_val * 100)))
-            if missing_count > 0:
-                level = logging.WARNING if fallback else logging.INFO
-                logger.log(
-                    level,
-                    "Winner Score: product=%s used=%d missing=%d fallback=%s",
-                    pid,
-                    used_count,
-                    missing_count,
-                    str(fallback).lower(),
-                )
-            database.insert_score(
-                conn,
-                product_id=pid,
-                model="winner_score",
-                total_score=0,
-                momentum=0,
-                saturation=0,
-                differentiation=0,
-                social_proof=0,
-                margin=0,
-                logistics=0,
-                summary="",
-                explanations={},
-                winner_score=pct,
-                commit=False,
-            )
-            updated_scores += 1
-        conn.commit()
-        logger.info(
-            "Winner Score import/backfill: imported=%d updated=%d skipped=%d",
-            len(inserted_ids),
-            updated_scores,
-            skipped_scores,
-        )
         if inserted_ids and config.is_auto_fill_ia_on_import_enabled():
             database.start_import_job_ai(conn, job_id, len(inserted_ids))
             cfg_cost = config.get_ai_cost_config()
@@ -461,6 +392,38 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             database.set_import_job_ai_counts(conn, job_id, counts, res.get("pending_ids", []))
             if res.get("error"):
                 database.set_import_job_ai_error(conn, job_id, "No se pudieron completar las columnas con IA: revisa la API.")
+        weights = config.get_weights()
+        updates: list[tuple[int, int]] = []
+        skipped_scores = 0
+        for pid in inserted_ids:
+            prod = database.get_product(conn, pid)
+            res_ws = winner_calc.compute_winner_score_v2(prod, weights)
+            logger.info(
+                "Winner Score: product=%s used=%d missing=%d missing_fields=%s fallback=%s%s",
+                pid,
+                res_ws["used"],
+                res_ws["missing"],
+                res_ws.get("missing_fields"),
+                str(res_ws.get("fallback")).lower(),
+                f" score={res_ws['score']}" if res_ws.get("score") is not None else "",
+            )
+            if res_ws.get("score") is not None:
+                updates.append((res_ws["score"], pid))
+            else:
+                skipped_scores += 1
+        if updates:
+            conn.executemany(
+                "UPDATE products SET winner_score = ? WHERE id = ?",
+                updates,
+            )
+        conn.commit()
+        updated_scores = len(updates)
+        logger.info(
+            "Winner Score import/post: imported=%d updated=%d skipped=%d",
+            len(inserted_ids),
+            updated_scores,
+            skipped_scores,
+        )
         database.complete_import_job(conn, job_id, rows_imported, updated_scores)
     except Exception as exc:
         try:
@@ -2460,14 +2423,34 @@ class RequestHandler(BaseHTTPRequestHandler):
         weights = config.get_weights()
         updated = 0
         skipped = 0
-        details: list[dict[str, int | bool]] = []
+        details: list[dict[str, Any]] = []
         for pid in id_list:
             prod = database.get_product(conn, pid)
             if not prod:
                 skipped += 1
-                details.append({"id": pid, "score": 50, "used": 0, "missing": 10, "fallback": True, "updated": 0})
+                details.append({"id": pid, "score": None, "used": 0, "missing": len(winner_calc.FEATURE_MAP), "fallback": True, "updated": 0, "missing_fields": list(winner_calc.FEATURE_MAP.keys())})
                 continue
             res = winner_calc.compute_winner_score_v2(prod, weights)
+            if res["score"] is None:
+                skipped += 1
+                logger.info(
+                    "Winner Score: product=%s used=%d missing=%d missing_fields=%s fallback=%s",
+                    pid,
+                    res["used"],
+                    res["missing"],
+                    res.get("missing_fields"),
+                    str(res.get("fallback")).lower(),
+                )
+                details.append({
+                    "id": pid,
+                    "score": None,
+                    "used": res["used"],
+                    "missing": res["missing"],
+                    "missing_fields": res.get("missing_fields"),
+                    "fallback": res["fallback"],
+                    "updated": 0,
+                })
+                continue
             cur = conn.execute(
                 "UPDATE products SET winner_score = ? WHERE id = ? AND winner_score <> ?",
                 (res["score"], pid, res["score"]),
@@ -2478,17 +2461,20 @@ class RequestHandler(BaseHTTPRequestHandler):
             else:
                 skipped += 1
             logger.info(
-                "Winner Score: product=%s used=%d missing=%d fallback=%s",
+                "Winner Score: product=%s used=%d missing=%d missing_fields=%s fallback=%s score=%s",
                 pid,
                 res["used"],
                 res["missing"],
+                res.get("missing_fields"),
                 str(res["fallback"]).lower(),
+                res["score"],
             )
             details.append({
                 "id": pid,
                 "score": res["score"],
                 "used": res["used"],
                 "missing": res["missing"],
+                "missing_fields": res.get("missing_fields"),
                 "fallback": res["fallback"],
                 "updated": changed,
             })

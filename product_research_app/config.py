@@ -157,16 +157,16 @@ def is_auto_fill_ia_on_import_enabled() -> bool:
 
 
 SCORING_DEFAULT_WEIGHTS: Dict[str, float] = {
-    "magnitud_deseo": 1.0,
-    "nivel_consciencia_headroom": 1.0,
-    "evidencia_demanda": 1.0,
-    "tasa_conversion": 1.0,
-    "ventas_por_dia": 1.0,
-    "recencia_lanzamiento": 1.0,
-    "competition_level_invertido": 1.0,
-    "facilidad_anuncio": 1.0,
-    "escalabilidad": 1.0,
-    "durabilidad_recurrencia": 1.0,
+    "price": 1.0,
+    "rating": 1.0,
+    "units_sold": 1.0,
+    "revenue": 1.0,
+    "review_count": 1.0,
+    "image_count": 1.0,
+    "shipping_days": 1.0,
+    "profit_margin": 1.0,
+    "desire": 1.0,
+    "competition": 1.0,
 }
 
 

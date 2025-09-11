@@ -32,16 +32,16 @@ def make_xlsx(path: Path, rows: List[List[object]]):
     ws = wb.active
     ws.append([
         "name",
-        "magnitud_deseo",
-        "nivel_consciencia_headroom",
-        "evidencia_demanda",
-        "tasa_conversion",
-        "ventas_por_dia",
-        "recencia_lanzamiento",
-        "competition_level_invertido",
-        "facilidad_anuncio",
-        "escalabilidad",
-        "durabilidad_recurrencia",
+        "price",
+        "rating",
+        "units_sold",
+        "revenue",
+        "review_count",
+        "image_count",
+        "shipping_days",
+        "profit_margin",
+        "desire",
+        "competition",
     ])
     for r in rows:
         ws.append(r)
@@ -60,8 +60,8 @@ def test_import_generates_scores(tmp_path, monkeypatch):
     make_xlsx(
         xlsx,
         [
-            ["Prod1", "high", "unaware", 100, 0.5, 10, 30, "low", "high", "high", "consumible"],
-            ["Prod2", "medium", "solution", 50, 0.3, 5, 60, "medium", "med", "med", "intermedio"],
+            ["Prod1", 10, 4.5, 100, 1000, 50, 3, 5, 0.3, "High", "Low"],
+            ["Prod2", 20, 3.0, 50, 500, 10, 2, 7, 0.2, "Medium", "Medium"],
         ],
     )
     job_id = database.create_import_job(conn, str(xlsx))
@@ -69,8 +69,7 @@ def test_import_generates_scores(tmp_path, monkeypatch):
     products = [row_to_dict(r) for r in database.list_products(conn)]
     assert len(products) == 2
     for p in products:
-        score = database.get_scores_for_product(conn, p["id"])[0]
-        assert 0 <= score["winner_score"] <= 100
+        assert 0 <= p.get("winner_score", 0) <= 100
 
 def test_scoring_v2_generate_cases(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)
@@ -80,7 +79,7 @@ def test_scoring_v2_generate_cases(tmp_path, monkeypatch):
         name="A",
         description="",
         category="",
-        price=0.0,
+        price=None,
         currency=None,
         image_url="",
         source="",
@@ -92,15 +91,13 @@ def test_scoring_v2_generate_cases(tmp_path, monkeypatch):
         name="B",
         description="",
         category="",
-        price=0.0,
+        price=20.0,
         currency=None,
         image_url="",
         source="",
-        extra={},
+        extra={"rating": 4.0},
         product_id=2,
     )
-    database.update_product(conn, pid_b, magnitud_deseo=80, tasa_conversion=0.5)
-
     body = json.dumps({"ids": [pid_a, pid_b]})
     class Dummy:
         def __init__(self, body):
@@ -114,11 +111,11 @@ def test_scoring_v2_generate_cases(tmp_path, monkeypatch):
     web_app.RequestHandler.handle_scoring_v2_generate(handler)
     resp = json.loads(handler.wfile.getvalue().decode("utf-8"))
     assert resp["success"] is True
-    assert resp["updated"] == 2
+    assert resp["updated"] == 1
     details = {d["id"]: d for d in resp["details"]}
     da = details[pid_a]
     db = details[pid_b]
-    assert da["score"] == 50 and da["fallback"] is True and da["used"] == 0
+    assert da["score"] is None and da["fallback"] is True and da["used"] == 0
     assert db["fallback"] is False and db["used"] > 0 and 0 <= db["score"] <= 100
     prod_b = database.get_product(conn, pid_b)
     assert prod_b["winner_score"] == db["score"]
