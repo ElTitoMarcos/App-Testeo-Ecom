@@ -378,7 +378,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                 inserted_ids.append(row_id)
             conn.commit()
         
-        products_all = [dict(r) for r in database.list_products(conn)]
+        products_all = [row_to_dict(r) for r in database.list_products(conn)]
         ranges = winner_calc.compute_ranges(products_all)
         weights = config.get_weights()
         total_w = sum(weights.values())
@@ -400,7 +400,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
         for prod in products_all:
             pid = prod["id"]
             existing = database.get_scores_for_product(conn, pid)
-            if any((dict(sc).get("winner_score") or 0) > 0 for sc in existing):
+            if any((rget(row_to_dict(sc), "winner_score", 0) or 0) > 0 for sc in existing):
                 skipped_scores += 1
                 continue
             missing: list[str] = []
@@ -664,8 +664,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             # Return a list of products including extra metadata for UI display
             conn = ensure_db()
             rows = []
-            for p in database.list_products(conn):
-                extra = p["extra"] if "extra" in p.keys() else {}
+            for p_row in database.list_products(conn):
+                p = row_to_dict(p_row)
+                extra = rget(p, "extra", {})
                 try:
                     extra_dict = json.loads(extra) if isinstance(extra, str) else (extra or {})
                 except Exception:
@@ -676,20 +677,20 @@ class RequestHandler(BaseHTTPRequestHandler):
                     extra_dict['Item Sold'] = extra_dict['units_sold']
                 if 'revenue' in extra_dict and 'Revenue($)' not in extra_dict:
                     extra_dict['Revenue($)'] = extra_dict['revenue']
-                score_value = p.get("winner_score", 0)
-                dr = p["date_range"]
+                score_value = rget(p, "winner_score", 0)
+                dr = rget(p, "date_range")
                 if dr is None:
                     dr = extra_dict.get("date_range")
                 row = {
-                    "id": p["id"],
-                    "name": p["name"],
-                    "category": p["category"],
-                    "price": p["price"],
-                    "image_url": p["image_url"],
-                    "desire": p["desire"],
-                    "desire_magnitude": p["desire_magnitude"],
-                    "awareness_level": p["awareness_level"],
-                    "competition_level": p["competition_level"],
+                    "id": rget(p, "id"),
+                    "name": rget(p, "name"),
+                    "category": rget(p, "category"),
+                    "price": rget(p, "price"),
+                    "image_url": rget(p, "image_url"),
+                    "desire": rget(p, "desire"),
+                    "desire_magnitude": rget(p, "desire_magnitude"),
+                    "awareness_level": rget(p, "awareness_level"),
+                    "competition_level": rget(p, "competition_level"),
                     "rating": extra_dict.get("rating"),
                     "units_sold": extra_dict.get("units_sold"),
                     "revenue": extra_dict.get("revenue"),
@@ -1196,9 +1197,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                 competition_level=data.get("competition_level"),
                 extra=data.get("extras"),
             )
-            product = database.get_product(conn, pid)
+            product = row_to_dict(database.get_product(conn, pid))
             self._set_json()
-            self.wfile.write(json.dumps(dict(product)).encode('utf-8'))
+            self.wfile.write(json.dumps(product).encode('utf-8'))
             return
         self.send_error(404)
 
@@ -1231,10 +1232,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                 data.pop("price", None)
             conn = ensure_db()
             database.update_product(conn, pid, **data)
-            product = database.get_product(conn, pid)
+            product = row_to_dict(database.get_product(conn, pid))
             if product:
                 self._set_json()
-                self.wfile.write(json.dumps(dict(product)).encode('utf-8'))
+                self.wfile.write(json.dumps(product).encode('utf-8'))
             else:
                 self.send_error(404)
             return
@@ -1904,18 +1905,18 @@ class RequestHandler(BaseHTTPRequestHandler):
         # Calculate Winner Score for newly inserted products
         if inserted_ids:
             conn_ws = ensure_db()
-            products_all = [dict(r) for r in database.list_products(conn_ws)]
+            products_all = [row_to_dict(r) for r in database.list_products(conn_ws)]
             ranges = winner_calc.compute_ranges(products_all)
             weights_cfg = config.get_weights()
             total_w = sum(weights_cfg.values()) or 1.0
             weights = {k: v / total_w for k, v in weights_cfg.items()}
             for pid in inserted_ids:
-                prod = database.get_product(conn_ws, pid)
+                prod = row_to_dict(database.get_product(conn_ws, pid))
                 if not prod:
                     continue
                 missing: list[str] = []
                 used: list[str] = []
-                pct_val = winner_calc.score_product(dict(prod), weights, ranges, missing, used)
+                pct_val = winner_calc.score_product(prod, weights, ranges, missing, used)
                 fallback = not used or pct_val is None or (isinstance(pct_val, float) and math.isnan(pct_val))
                 pct = 50 if fallback else max(0, min(100, round(pct_val * 100)))
                 database.insert_score(
@@ -1967,23 +1968,25 @@ class RequestHandler(BaseHTTPRequestHandler):
         model = config.get_model()
         evaluated = 0
         weights_map = config.get_weights()
-        for p in database.list_products(conn):
-            if database.get_scores_for_product(conn, p['id']):
+        for p_row in database.list_products(conn):
+            p = row_to_dict(p_row)
+            pid = rget(p, 'id')
+            if database.get_scores_for_product(conn, pid):
                 continue
             if not (api_key and model):
                 continue
             try:
                 try:
-                    extra = json.loads(p.get("extra") or "{}")
+                    extra = json.loads(rget(p, "extra") or "{}")
                 except Exception:
                     extra = {}
                 resp = gpt.evaluate_winner_score(
                     api_key,
                     model,
                     {
-                        "title": p.get("name"),
-                        "description": p.get("description"),
-                        "category": p.get("category"),
+                        "title": rget(p, "name"),
+                        "description": rget(p, "description"),
+                        "category": rget(p, "category"),
                         "metrics": extra,
                     },
                 )
@@ -2003,7 +2006,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 }
                 database.insert_score(
                     conn,
-                    product_id=p['id'],
+                    product_id=pid,
                     model=model,
                     total_score=0,
                     momentum=0,
@@ -2168,11 +2171,11 @@ class RequestHandler(BaseHTTPRequestHandler):
             scores = database.get_scores_for_product(conn, p["id"])
             if not scores:
                 continue
-            s = scores[0]
+            s = row_to_dict(scores[0])
             count += 1
             for m in metrics:
                 try:
-                    val = float(s.get(m) or 0.0)
+                    val = float(rget(s, m, 0.0))
                 except Exception:
                     val = 0.0
                 sums[m] += val

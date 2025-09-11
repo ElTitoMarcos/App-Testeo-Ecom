@@ -9,6 +9,7 @@ from typing import List
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from product_research_app import web_app, database, config
+from product_research_app.utils.db import row_to_dict
 
 def setup_env(tmp_path, monkeypatch):
     monkeypatch.setattr(web_app, "DB_PATH", tmp_path / "data.sqlite3")
@@ -65,7 +66,7 @@ def test_import_generates_scores(tmp_path, monkeypatch):
     )
     job_id = database.create_import_job(conn, str(xlsx))
     web_app._process_import_job(job_id, xlsx, "products.xlsx")
-    products = [dict(r) for r in database.list_products(conn)]
+    products = [row_to_dict(r) for r in database.list_products(conn)]
     assert len(products) == 2
     for p in products:
         score = database.get_scores_for_product(conn, p["id"])[0]
@@ -129,6 +130,46 @@ def test_scoring_v2_generate_cases(tmp_path, monkeypatch):
     assert resp2["success"] is True
     assert resp2["updated"] == 0
     assert resp2["skipped"] == 1
+
+def test_products_endpoint_serializes_rows(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(web_app, "ensure_db", lambda: conn)
+    pid = database.insert_product(
+        conn,
+        name="X",
+        description="",
+        category="",
+        price=0.0,
+        currency=None,
+        image_url="",
+        source="",
+        extra={},
+        product_id=1,
+    )
+
+    class Dummy:
+        def __init__(self):
+            self.path = "/products"
+            self.headers = {}
+            self.wfile = io.BytesIO()
+
+        def _set_json(self, code=200):
+            self.status = code
+
+        def send_error(self, code, msg=None):
+            raise AssertionError(f"error {code}")
+
+        def safe_write(self, func):
+            try:
+                func()
+                return True
+            except Exception:
+                return False
+
+    handler = Dummy()
+    web_app.RequestHandler.do_GET(handler)
+    resp = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert isinstance(resp, list) and resp and resp[0]["id"] == pid
 
 def test_get_endpoints_return_json(tmp_path, monkeypatch):
     setup_env(tmp_path, monkeypatch)

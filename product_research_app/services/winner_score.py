@@ -4,6 +4,8 @@ import json
 import math
 from typing import Dict, Any, Iterable, Optional
 
+from ..utils.db import rget
+
 # Mapping tables for categorical metrics
 MAGNITUD_DESEO = {"low":0.33, "medium":0.66, "high":1.0}
 NIVEL_CONSCIENCIA_HEADROOM = {"unaware":1.0, "problem":0.8, "solution":0.6, "product":0.4, "most":0.2}
@@ -113,16 +115,6 @@ def score_product(
 
 FeatureDict = Dict[str, Optional[float]]
 
-
-def _safe_get(row: Any, key: str) -> Any:
-    try:
-        if isinstance(row, dict):
-            return row.get(key)
-        return row[key]
-    except Exception:
-        return None
-
-
 def extract_features_v2(product_row: Any) -> FeatureDict:
     """Extract Winner Score features from a product row safely.
 
@@ -131,9 +123,9 @@ def extract_features_v2(product_row: Any) -> FeatureDict:
     JSON column.
     """
 
-    extras = _safe_get(product_row, "extras")
+    extras = rget(product_row, "extras")
     if extras is None:
-        extras = _safe_get(product_row, "extra")
+        extras = rget(product_row, "extra")
     if isinstance(extras, str):
         try:
             extras = json.loads(extras)
@@ -141,7 +133,7 @@ def extract_features_v2(product_row: Any) -> FeatureDict:
             extras = None
 
     def get_val(key: str) -> Optional[float]:
-        val = _safe_get(product_row, key)
+        val = rget(product_row, key)
         if val is None and isinstance(extras, dict):
             val = extras.get(key)
         try:
