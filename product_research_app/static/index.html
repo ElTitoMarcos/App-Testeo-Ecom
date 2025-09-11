@@ -1299,21 +1299,22 @@ document.getElementById('btnGenWinner').onclick = async () => {
   startProgress();
   try {
     const res = await winnerScore.generate(selectedIds);
+    if (res?.weights_hash) console.log('Recalc with weights', res.weights_hash);
     const processed = res?.processed || 0;
     const updated = res?.updated || 0;
-    if (processed > 0) {
-      if (selectedIds.length) {
+    if (processed === 0) {
+      toast.info('Nada que recalcular (0 seleccionados).');
+    } else {
+      if (updated > 0) {
         toast.success(`Winner Score recalculado: ${updated}/${processed} cambiaron.`);
+      } else {
+        toast.info(`Recalculado ${processed} · el entero 0–100 no varió (redondeo).`);
+      }
+      if (selectedIds.length) {
         await reloadRows(selectedIds);
       } else {
-        toast.success(`Winner Score recalculado para ${processed} productos (${updated} cambiaron).`);
         await reloadTable();
       }
-      if (updated === 0) {
-        toast.info('Los nuevos pesos no cambiaron el valor entero (0–100) por redondeo.');
-      }
-    } else {
-      toast.info('Nada que recalcular (0 seleccionados).');
     }
   } catch (err) {
     console.error(err);

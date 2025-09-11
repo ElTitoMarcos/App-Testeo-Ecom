@@ -113,6 +113,8 @@ def test_scoring_v2_generate_cases(tmp_path, monkeypatch):
     assert resp["ok"] is True
     assert resp["processed"] == 2
     assert resp["updated"] == 1
+    assert resp["weights_hash"]
+    assert isinstance(resp["weights_version"], int)
     prod_a = database.get_product(conn, pid_a)
     prod_b = database.get_product(conn, pid_b)
     assert prod_a["winner_score"] == 0
@@ -125,6 +127,8 @@ def test_scoring_v2_generate_cases(tmp_path, monkeypatch):
     assert resp2["ok"] is True
     assert resp2["processed"] == 1
     assert resp2["updated"] == 0
+    assert resp2["weights_hash"]
+    assert isinstance(resp2["weights_version"], int)
 
 
 def test_scoring_v2_generate_all_when_no_ids(tmp_path, monkeypatch):
@@ -170,6 +174,8 @@ def test_scoring_v2_generate_all_when_no_ids(tmp_path, monkeypatch):
     web_app.RequestHandler.handle_scoring_v2_generate(handler)
     resp = json.loads(handler.wfile.getvalue().decode("utf-8"))
     assert resp["processed"] == 2
+    assert resp["weights_hash"]
+    assert isinstance(resp["weights_version"], int)
 
 def test_products_endpoint_serializes_rows(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)
@@ -363,6 +369,7 @@ def test_recalculate_selected_and_all(tmp_path, monkeypatch):
 
     h = Dummy(body)
     web_app.RequestHandler.handle_scoring_v2_generate(h)
+    json.loads(h.wfile.getvalue().decode("utf-8"))
     for pid in subset:
         assert database.get_product(conn, pid)["winner_score"] != 1
     for pid in ids[5:]:
@@ -371,5 +378,64 @@ def test_recalculate_selected_and_all(tmp_path, monkeypatch):
     body2 = json.dumps({})
     h2 = Dummy(body2)
     web_app.RequestHandler.handle_scoring_v2_generate(h2)
+    json.loads(h2.wfile.getvalue().decode("utf-8"))
     for pid in ids:
         assert database.get_product(conn, pid)["winner_score"] != 1
+
+
+def test_weights_hash_changes_after_patch(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(web_app, "ensure_db", lambda: conn)
+
+    pid = database.insert_product(
+        conn,
+        name="P0",
+        description="",
+        category="",
+        price=None,
+        currency=None,
+        image_url="",
+        source="",
+        extra={"rating": 4.5},
+        product_id=1,
+    )
+    conn.execute("UPDATE products SET winner_score=1 WHERE id=?", (pid,))
+    conn.commit()
+
+    body = json.dumps({})
+
+    class Dummy:
+        def __init__(self, body):
+            self.headers = {"Content-Length": str(len(body))}
+            self.rfile = io.BytesIO(body.encode("utf-8"))
+            self.wfile = io.BytesIO()
+
+        def _set_json(self, code=200):
+            self.status = code
+
+    h1 = Dummy(body)
+    web_app.RequestHandler.handle_scoring_v2_generate(h1)
+    resp1 = json.loads(h1.wfile.getvalue().decode("utf-8"))
+    hash1 = resp1["weights_hash"]
+    ver1 = resp1["weights_version"]
+
+    body_patch = json.dumps({"key": "rating_weight", "value": 0.2})
+
+    class Patcher:
+        def __init__(self, body):
+            self.path = "/api/config/winner-weights"
+            self.headers = {"Content-Length": str(len(body))}
+            self.rfile = io.BytesIO(body.encode("utf-8"))
+            self.wfile = io.BytesIO()
+
+        def _set_json(self, code=200):
+            self.status = code
+
+    p = Patcher(body_patch)
+    web_app.RequestHandler.do_PATCH(p)
+
+    h2 = Dummy(body)
+    web_app.RequestHandler.handle_scoring_v2_generate(h2)
+    resp2 = json.loads(h2.wfile.getvalue().decode("utf-8"))
+    assert resp2["weights_hash"] != hash1
+    assert resp2["weights_version"] == ver1 + 1

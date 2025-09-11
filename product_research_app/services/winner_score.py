@@ -5,6 +5,7 @@ import math
 import hashlib
 import logging
 import sqlite3
+from datetime import datetime
 from typing import Dict, Any, Iterable, Optional, Callable
 
 from ..utils.db import rget
@@ -272,6 +273,12 @@ NORMALIZERS: Dict[str, Callable[[float], float]] = {
 }
 
 
+def load_winner_weights() -> Dict[str, float]:
+    """Load Winner Score weights from persistent configuration."""
+
+    return config.get_weights()
+
+
 def compute_winner_score_v2(product_row: Any, weights: Dict[str, float]) -> Dict[str, Any]:
     """Compute Winner Score using available features only.
 
@@ -325,7 +332,7 @@ def generate_winner_scores(
     conn: sqlite3.Connection,
     product_ids: Optional[Iterable[Any]] = None,
     weights: Optional[Dict[str, float]] = None,
-) -> Dict[str, int]:
+    ) -> Dict[str, int | str]:
     """Recalculate and persist Winner Scores for the given products.
 
     Args:
@@ -335,11 +342,13 @@ def generate_winner_scores(
         weights: Optional weighting factors. If ``None``, weights are loaded
             fresh from configuration on each call.
 
-    Returns a dict with ``processed`` and ``updated`` counts.
+    Returns a dict with counts and weight metadata.
     """
 
     if weights is None:
-        weights = config.get_weights()
+        weights = load_winner_weights()
+
+    weights_version = config.get_weights_version()
 
     ids: Optional[set[int]] = None
     if product_ids:
@@ -353,26 +362,49 @@ def generate_winner_scores(
         rows = database.list_products(conn)
 
     processed = 0
-    updated = 0
+    updated_int = 0
     snapshot = hashlib.sha1(
         json.dumps(weights, sort_keys=True).encode("utf-8")
     ).hexdigest()[:8]
+    now = datetime.utcnow().isoformat()
     for row in rows:
         pid = row["id"]
         old_score = row["winner_score"]
         res = compute_winner_score_v2(row, weights)
         sf = res.get("score_float")
+        present = set(FEATURE_MAP.keys()) - set(res.get("missing_fields", []))
         if sf is None:
+            score_raw_0_100 = None
             new_score = old_score
         else:
-            new_score = int(round(max(0.0, min(1.0, sf)) * 100))
-        if new_score != old_score:
-            conn.execute("UPDATE products SET winner_score = ? WHERE id = ?", (new_score, pid))
-            updated += 1
+            score_raw_0_100 = max(0.0, min(1.0, sf)) * 100.0
+            new_score = int(round(score_raw_0_100))
+        if score_raw_0_100 is not None:
+            if new_score != old_score:
+                conn.execute(
+                    "UPDATE products SET winner_score = ?, winner_score_raw = ?, winner_score_updated_at = ? WHERE id = ?",
+                    (new_score, score_raw_0_100, now, pid),
+                )
+                updated_int += 1
+            else:
+                conn.execute(
+                    "UPDATE products SET winner_score_raw = ?, winner_score_updated_at = ? WHERE id = ?",
+                    (score_raw_0_100, now, pid),
+                )
         logger.info(
-            "Winner Score: product=%s score=%s weights_snapshot=%s", pid, new_score, snapshot
+            "Winner Score: product=%s score_int=%s score_raw=%s weights_snapshot=%s present=%s",
+            pid,
+            new_score,
+            f"{score_raw_0_100:.3f}" if score_raw_0_100 is not None else "nan",
+            snapshot,
+            present,
         )
         processed += 1
 
     conn.commit()
-    return {"processed": processed, "updated": updated}
+    return {
+        "processed": processed,
+        "updated": updated_int,
+        "weights_hash": snapshot,
+        "weights_version": weights_version,
+    }

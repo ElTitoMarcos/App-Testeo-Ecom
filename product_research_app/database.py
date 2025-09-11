@@ -71,7 +71,10 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             awareness_level TEXT,
             competition_level TEXT,
             date_range TEXT,
-            extra JSON
+            extra JSON,
+            winner_score_raw REAL,
+            winner_score INTEGER NOT NULL DEFAULT 0,
+            winner_score_updated_at TEXT
         )
         """
     )
@@ -100,6 +103,10 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         cols = ["winner_score" if c == "winner_score_v2" else c for c in cols]
     if "winner_score" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN winner_score INTEGER NOT NULL DEFAULT 0")
+    if "winner_score_raw" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN winner_score_raw REAL")
+    if "winner_score_updated_at" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN winner_score_updated_at TEXT")
     metric_text_cols = [
         "magnitud_deseo",
         "nivel_consciencia_headroom",
