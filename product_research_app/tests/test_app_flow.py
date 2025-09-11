@@ -441,7 +441,6 @@ def test_weights_hash_changes_after_patch(tmp_path, monkeypatch):
     assert resp2["weights_hash"] != hash1
     assert resp2["weights_version"] == ver1 + 1
 
-
 def test_logging_and_explain_endpoint(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)
     monkeypatch.setattr(web_app, "ensure_db", lambda: conn)
