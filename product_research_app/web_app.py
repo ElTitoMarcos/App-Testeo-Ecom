@@ -2430,7 +2430,13 @@ class RequestHandler(BaseHTTPRequestHandler):
         self._set_json()
         self.wfile.write(
             json.dumps(
-                {"ok": True, "processed": result.get("processed", 0), "updated": result.get("updated", 0)}
+                {
+                    "ok": True,
+                    "processed": result.get("processed", 0),
+                    "updated": result.get("updated", 0),
+                    "weights_hash": result.get("weights_hash"),
+                    "weights_version": result.get("weights_version"),
+                }
             ).encode("utf-8")
         )
 
