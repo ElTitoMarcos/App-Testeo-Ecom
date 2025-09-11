@@ -110,23 +110,21 @@ def test_scoring_v2_generate_cases(tmp_path, monkeypatch):
     handler = Dummy(body)
     web_app.RequestHandler.handle_scoring_v2_generate(handler)
     resp = json.loads(handler.wfile.getvalue().decode("utf-8"))
-    assert resp["success"] is True
+    assert resp["ok"] is True
+    assert resp["processed"] == 2
     assert resp["updated"] == 1
-    details = {d["id"]: d for d in resp["details"]}
-    da = details[pid_a]
-    db = details[pid_b]
-    assert da["score"] is None and da["fallback"] is True and da["used"] == 0
-    assert db["fallback"] is False and db["used"] > 0 and 0 <= db["score"] <= 100
+    prod_a = database.get_product(conn, pid_a)
     prod_b = database.get_product(conn, pid_b)
-    assert prod_b["winner_score"] == db["score"]
+    assert prod_a["winner_score"] == 0
+    assert 0 <= prod_b["winner_score"] <= 100
 
     body2 = json.dumps({"ids": [pid_b]})
     handler2 = Dummy(body2)
     web_app.RequestHandler.handle_scoring_v2_generate(handler2)
     resp2 = json.loads(handler2.wfile.getvalue().decode("utf-8"))
-    assert resp2["success"] is True
+    assert resp2["ok"] is True
+    assert resp2["processed"] == 1
     assert resp2["updated"] == 0
-    assert resp2["skipped"] == 1
 
 
 def test_scoring_v2_generate_all_when_no_ids(tmp_path, monkeypatch):
@@ -171,7 +169,7 @@ def test_scoring_v2_generate_all_when_no_ids(tmp_path, monkeypatch):
     handler = Dummy(body)
     web_app.RequestHandler.handle_scoring_v2_generate(handler)
     resp = json.loads(handler.wfile.getvalue().decode("utf-8"))
-    assert resp["received"] == 2
+    assert resp["processed"] == 2
 
 def test_products_endpoint_serializes_rows(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)
