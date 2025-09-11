@@ -2,9 +2,15 @@
 from __future__ import annotations
 import json
 import math
+import hashlib
+import logging
+import sqlite3
 from typing import Dict, Any, Iterable, Optional, Callable
 
 from ..utils.db import rget
+from .. import config, database
+
+logger = logging.getLogger(__name__)
 
 # Mapping tables for categorical metrics
 MAGNITUD_DESEO = {"low":0.33, "medium":0.66, "high":1.0}
@@ -287,7 +293,14 @@ def compute_winner_score_v2(product_row: Any, weights: Dict[str, float]) -> Dict
     used = len(feats)
     missing = len(FEATURE_MAP) - used
     if used == 0:
-        return {"score": None, "used": 0, "missing": len(FEATURE_MAP), "missing_fields": missing_fields, "fallback": True}
+        return {
+            "score": None,
+            "score_float": None,
+            "used": 0,
+            "missing": len(FEATURE_MAP),
+            "missing_fields": missing_fields,
+            "fallback": True,
+        }
 
     weights_used = {k: weights.get(k, 0.0) for k in feats}
     total_w = sum(weights_used.values())
@@ -296,12 +309,70 @@ def compute_winner_score_v2(product_row: Any, weights: Dict[str, float]) -> Dict
     else:
         weights_used = {k: v / total_w for k, v in weights_used.items()}
 
-    score = sum(feats[k] * weights_used.get(k, 0.0) for k in feats)
-    score_int = int(round(score * 100))
+    score_float = sum(feats[k] * weights_used.get(k, 0.0) for k in feats)
+    score_int = int(round(score_float * 100))
     return {
         "score": score_int,
+        "score_float": score_float,
         "used": used,
         "missing": missing,
         "missing_fields": missing_fields,
         "fallback": False,
     }
+
+
+def generate_winner_scores(
+    conn: sqlite3.Connection,
+    product_ids: Optional[Iterable[Any]] = None,
+    weights: Optional[Dict[str, float]] = None,
+) -> Dict[str, int]:
+    """Recalculate and persist Winner Scores for the given products.
+
+    Args:
+        conn: Database connection.
+        product_ids: Iterable of product IDs to update. If ``None`` or empty,
+            all products are processed.
+        weights: Optional weighting factors. If ``None``, weights are loaded
+            fresh from configuration on each call.
+
+    Returns a dict with ``processed`` and ``updated`` counts.
+    """
+
+    if weights is None:
+        weights = config.get_weights()
+
+    ids: Optional[set[int]] = None
+    if product_ids:
+        ids = {int(pid) for pid in product_ids if str(pid).strip()}
+
+    if ids:
+        placeholders = ",".join("?" for _ in ids)
+        cur = conn.execute(f"SELECT * FROM products WHERE id IN ({placeholders})", tuple(ids))
+        rows = cur.fetchall()
+    else:
+        rows = database.list_products(conn)
+
+    processed = 0
+    updated = 0
+    snapshot = hashlib.sha1(
+        json.dumps(weights, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:8]
+    for row in rows:
+        pid = row["id"]
+        old_score = row["winner_score"]
+        res = compute_winner_score_v2(row, weights)
+        sf = res.get("score_float")
+        if sf is None:
+            new_score = old_score
+        else:
+            new_score = int(round(max(0.0, min(1.0, sf)) * 100))
+        if new_score != old_score:
+            conn.execute("UPDATE products SET winner_score = ? WHERE id = ?", (new_score, pid))
+            updated += 1
+        logger.info(
+            "Winner Score: product=%s score=%s weights_snapshot=%s", pid, new_score, snapshot
+        )
+        processed += 1
+
+    conn.commit()
+    return {"processed": processed, "updated": updated}
