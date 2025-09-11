@@ -213,16 +213,20 @@ def set_weights(weights: Dict[str, float]) -> None:
 def update_weight(key: str, value: float) -> None:
     """Update a single Winner Score weight and persist immediately."""
 
+    from .services import winner_score  # lazy import to avoid circular
+
+    norm_key = winner_score.normalize_weight_key(key)
     cfg = load_config()
     weights = cfg.get("weights", {})
     try:
-        weights[key] = float(value)
+        weights[norm_key] = float(value)
     except Exception:
-        weights[key] = value
+        weights[norm_key] = value
     cfg["weights"] = weights
     cfg["weightsVersion"] = int(cfg.get("weightsVersion", 0)) + 1
     cfg["weightsUpdatedAt"] = datetime.utcnow().isoformat()
     save_config(cfg)
+    winner_score.invalidate_weights_cache()
 
 
 def get_weights_version() -> int:

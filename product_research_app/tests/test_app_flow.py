@@ -105,6 +105,7 @@ def test_scoring_v2_generate_cases(tmp_path, monkeypatch):
             self.headers = {"Content-Length": str(len(body))}
             self.rfile = io.BytesIO(body.encode("utf-8"))
             self.wfile = io.BytesIO()
+            self.path = "/api/winner-score/generate"
         def _set_json(self, code=200):
             self.status = code
 
@@ -167,6 +168,7 @@ def test_scoring_v2_generate_all_when_no_ids(tmp_path, monkeypatch):
             self.headers = {"Content-Length": str(len(body))}
             self.rfile = io.BytesIO(body.encode("utf-8"))
             self.wfile = io.BytesIO()
+            self.path = "/api/winner-score/generate"
 
         def _set_json(self, code=200):
             self.status = code
@@ -364,6 +366,7 @@ def test_recalculate_selected_and_all(tmp_path, monkeypatch):
             self.headers = {"Content-Length": str(len(body))}
             self.rfile = io.BytesIO(body.encode("utf-8"))
             self.wfile = io.BytesIO()
+            self.path = "/api/winner-score/generate"
 
         def _set_json(self, code=200):
             self.status = code
@@ -393,7 +396,7 @@ def test_weights_hash_changes_after_patch(tmp_path, monkeypatch):
         name="P0",
         description="",
         category="",
-        price=None,
+        price=10.0,
         currency=None,
         image_url="",
         source="",
@@ -410,6 +413,7 @@ def test_weights_hash_changes_after_patch(tmp_path, monkeypatch):
             self.headers = {"Content-Length": str(len(body))}
             self.rfile = io.BytesIO(body.encode("utf-8"))
             self.wfile = io.BytesIO()
+            self.path = "/api/winner-score/generate"
 
         def _set_json(self, code=200):
             self.status = code
@@ -418,6 +422,7 @@ def test_weights_hash_changes_after_patch(tmp_path, monkeypatch):
     web_app.RequestHandler.handle_scoring_v2_generate(h1)
     resp1 = json.loads(h1.wfile.getvalue().decode("utf-8"))
     hash1 = resp1["weights_all"]
+    eff1 = resp1["weights_eff"]
     ver1 = config.get_weights_version()
 
     body_patch = json.dumps({"key": "rating_weight", "value": 0.2})
@@ -439,6 +444,7 @@ def test_weights_hash_changes_after_patch(tmp_path, monkeypatch):
     web_app.RequestHandler.handle_scoring_v2_generate(h2)
     resp2 = json.loads(h2.wfile.getvalue().decode("utf-8"))
     assert resp2["weights_all"] != hash1
+    assert resp2["weights_eff"] != eff1
     assert config.get_weights_version() == ver1 + 1
 
 def test_logging_and_explain_endpoint(tmp_path, monkeypatch):
@@ -468,6 +474,7 @@ def test_logging_and_explain_endpoint(tmp_path, monkeypatch):
             self.headers = {"Content-Length": str(len(body))}
             self.rfile = io.BytesIO(body.encode("utf-8"))
             self.wfile = io.BytesIO()
+            self.path = "/api/winner-score/generate"
 
         def _set_json(self, code=200):
             self.status = code
@@ -495,3 +502,64 @@ def test_logging_and_explain_endpoint(tmp_path, monkeypatch):
     assert "rating" in info["present"]
     assert "review_count" in info["missing"]
     assert info["effective_weights"] == {"rating": 1.0}
+
+
+def test_weights_eff_stable_when_touching_missing_metric(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(web_app, "ensure_db", lambda: conn)
+
+    pid = database.insert_product(
+        conn,
+        name="MM",
+        description="",
+        category="",
+        price=None,
+        currency=None,
+        image_url="",
+        source="",
+        extra={"rating": 4.5},
+        product_id=1,
+    )
+    conn.commit()
+
+    config.update_weight("rating", 0.0)
+
+    body = json.dumps({"product_ids": [pid]})
+
+    class Dummy:
+        def __init__(self, body, path="/api/winner-score/generate?debug=1"):
+            self.path = path
+            self.headers = {"Content-Length": str(len(body))}
+            self.rfile = io.BytesIO(body.encode("utf-8"))
+            self.wfile = io.BytesIO()
+
+        def _set_json(self, code=200):
+            self.status = code
+
+    h1 = Dummy(body)
+    web_app.RequestHandler.handle_scoring_v2_generate(h1)
+    resp1 = json.loads(h1.wfile.getvalue().decode("utf-8"))
+    hash_all1 = resp1["weights_all"]
+    hash_eff1 = resp1["weights_eff"]
+    assert resp1["diag"]["sum_filtered"] == 0.0
+
+    body_patch = json.dumps({"key": "orders", "value": 1.0})
+    class Patcher:
+        def __init__(self, body):
+            self.path = "/api/config/winner-weights"
+            self.headers = {"Content-Length": str(len(body))}
+            self.rfile = io.BytesIO(body.encode("utf-8"))
+            self.wfile = io.BytesIO()
+
+        def _set_json(self, code=200):
+            self.status = code
+
+    p = Patcher(body_patch)
+    web_app.RequestHandler.do_PATCH(p)
+
+    h2 = Dummy(body)
+    web_app.RequestHandler.handle_scoring_v2_generate(h2)
+    resp2 = json.loads(h2.wfile.getvalue().decode("utf-8"))
+    assert resp2["weights_all"] != hash_all1
+    assert resp2["weights_eff"] == hash_eff1
+    assert resp2["diag"]["sum_filtered"] == 0.0
