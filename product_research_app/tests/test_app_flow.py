@@ -9,6 +9,7 @@ from typing import List
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from product_research_app import web_app, database, config
+from product_research_app.utils.db import row_to_dict
 
 def setup_env(tmp_path, monkeypatch):
     monkeypatch.setattr(web_app, "DB_PATH", tmp_path / "data.sqlite3")
@@ -65,14 +66,75 @@ def test_import_generates_scores(tmp_path, monkeypatch):
     )
     job_id = database.create_import_job(conn, str(xlsx))
     web_app._process_import_job(job_id, xlsx, "products.xlsx")
-    products = [dict(r) for r in database.list_products(conn)]
+    products = [row_to_dict(r) for r in database.list_products(conn)]
     assert len(products) == 2
     for p in products:
         score = database.get_scores_for_product(conn, p["id"])[0]
         assert 0 <= score["winner_score"] <= 100
 
-def test_generate_endpoint_updates_scores(tmp_path, monkeypatch):
+def test_scoring_v2_generate_cases(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(web_app, "ensure_db", lambda: conn)
+    pid_a = database.insert_product(
+        conn,
+        name="A",
+        description="",
+        category="",
+        price=0.0,
+        currency=None,
+        image_url="",
+        source="",
+        extra={},
+        product_id=1,
+    )
+    pid_b = database.insert_product(
+        conn,
+        name="B",
+        description="",
+        category="",
+        price=0.0,
+        currency=None,
+        image_url="",
+        source="",
+        extra={},
+        product_id=2,
+    )
+    database.update_product(conn, pid_b, magnitud_deseo=80, tasa_conversion=0.5)
+
+    body = json.dumps({"ids": [pid_a, pid_b]})
+    class Dummy:
+        def __init__(self, body):
+            self.headers = {"Content-Length": str(len(body))}
+            self.rfile = io.BytesIO(body.encode("utf-8"))
+            self.wfile = io.BytesIO()
+        def _set_json(self, code=200):
+            self.status = code
+
+    handler = Dummy(body)
+    web_app.RequestHandler.handle_scoring_v2_generate(handler)
+    resp = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert resp["success"] is True
+    assert resp["updated"] == 2
+    details = {d["id"]: d for d in resp["details"]}
+    da = details[pid_a]
+    db = details[pid_b]
+    assert da["score"] == 50 and da["fallback"] is True and da["used"] == 0
+    assert db["fallback"] is False and db["used"] > 0 and 0 <= db["score"] <= 100
+    prod_b = database.get_product(conn, pid_b)
+    assert prod_b["winner_score"] == db["score"]
+
+    body2 = json.dumps({"ids": [pid_b]})
+    handler2 = Dummy(body2)
+    web_app.RequestHandler.handle_scoring_v2_generate(handler2)
+    resp2 = json.loads(handler2.wfile.getvalue().decode("utf-8"))
+    assert resp2["success"] is True
+    assert resp2["updated"] == 0
+    assert resp2["skipped"] == 1
+
+
+def test_products_endpoint_serializes_rows(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(web_app, "ensure_db", lambda: conn)
     pid = database.insert_product(
         conn,
         name="X",
@@ -83,36 +145,32 @@ def test_generate_endpoint_updates_scores(tmp_path, monkeypatch):
         image_url="",
         source="",
         extra={},
-        product_id=10,
+        product_id=1,
     )
-    database.update_product(
-        conn,
-        pid,
-        magnitud_deseo="high",
-        nivel_consciencia_headroom="unaware",
-        evidencia_demanda=100,
-        tasa_conversion=0.5,
-        ventas_por_dia=10,
-        recencia_lanzamiento=30,
-        competition_level_invertido="low",
-        facilidad_anuncio="high",
-        escalabilidad="high",
-        durabilidad_recurrencia="consumible",
-    )
-    body = json.dumps({"ids": [pid]})
+
     class Dummy:
-        def __init__(self, body):
-            self.headers = {"Content-Length": str(len(body))}
-            self.rfile = io.BytesIO(body.encode("utf-8"))
+        def __init__(self):
+            self.path = "/products"
+            self.headers = {}
             self.wfile = io.BytesIO()
+
         def _set_json(self, code=200):
             self.status = code
-    handler = Dummy(body)
-    web_app.RequestHandler.handle_scoring_v2_generate(handler)
+
+        def send_error(self, code, msg=None):
+            raise AssertionError(f"error {code}")
+
+        def safe_write(self, func):
+            try:
+                func()
+                return True
+            except Exception:
+                return False
+
+    handler = Dummy()
+    web_app.RequestHandler.do_GET(handler)
     resp = json.loads(handler.wfile.getvalue().decode("utf-8"))
-    assert resp["updated"] == 1
-    score = database.get_scores_for_product(conn, pid)[0]
-    assert 0 <= score["winner_score"] <= 100
+    assert isinstance(resp, list) and resp and resp[0]["id"] == pid
 
 def test_get_endpoints_return_json(tmp_path, monkeypatch):
     setup_env(tmp_path, monkeypatch)
@@ -128,7 +186,10 @@ def test_get_endpoints_return_json(tmp_path, monkeypatch):
         time.sleep(0.1)
         resp = urllib.request.urlopen(f"http://127.0.0.1:{port}/config")
         assert resp.status == 200
-        json.loads(resp.read().decode("utf-8"))
+        cfg = json.loads(resp.read().decode("utf-8"))
+        weights = cfg.get("weights", {})
+        assert abs(sum(weights.values()) - 1.0) < 1e-6
+        assert set(weights.keys()) == set(config.SCORING_DEFAULT_WEIGHTS.keys())
         resp = urllib.request.urlopen(f"http://127.0.0.1:{port}/lists")
         assert resp.status == 200
         json.loads(resp.read().decode("utf-8"))

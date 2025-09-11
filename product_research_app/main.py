@@ -28,6 +28,7 @@ from . import config
 from . import database
 from . import gpt
 from . import scraper
+from .utils.db import row_to_dict, rget
 
 import sqlite3
 
@@ -371,7 +372,7 @@ def view_product(conn: database.sqlite3.Connection) -> None:
     except ValueError:
         print("ID inválido.")
         return
-    product = database.get_product(conn, pid)
+    product = row_to_dict(database.get_product(conn, pid))
     if not product:
         print("Producto no encontrado.")
         return
@@ -411,16 +412,16 @@ def evaluate_product(conn: database.sqlite3.Connection) -> None:
     print(f"Evaluando producto '{product['name']}' con el modelo {model}...")
     try:
         try:
-            extra = json.loads(product.get("extra") or "{}")
+            extra = json.loads(rget(product, "extra") or "{}")
         except Exception:
             extra = {}
         resp = gpt.evaluate_winner_score(
             api_key,
             model,
             {
-                "title": product.get("name"),
-                "description": product.get("description"),
-                "category": product.get("category"),
+                "title": rget(product, "name"),
+                "description": rget(product, "description"),
+                "category": rget(product, "category"),
                 "metrics": extra,
             },
         )

@@ -112,5 +112,44 @@
     return score/totalW;
   }
 
-  global.winnerScore = {metricDefs, MAPS, normalizeMetric, computeRanges, scoreProduct, getDefaultWeights};
+  async function generate(ids){
+    const res = await fetchJson('/scoring/v2/generate', {method:'POST', body: JSON.stringify({ids})});
+    if(res && res.success){
+      const updated = res.updated || 0;
+      const skipped = res.skipped || 0;
+      if(Array.isArray(res.details)){
+        res.details.forEach(d=>{
+          const cb = document.querySelector(`input.rowCheck[data-id="${d.id}"]`);
+          if(cb){
+            const tr = cb.closest('tr');
+            const cell = tr ? tr.querySelector('td[data-key="winner_score"]') : null;
+            if(cell && typeof d.score==='number'){
+              const sc = Math.round(d.score);
+              cell.innerHTML = `<span class="${winnerScoreClass(sc)}">${sc.toLocaleString(undefined,{maximumFractionDigits:0})}</span>`;
+            }
+          }
+          if(window.allProducts){
+            const p = window.allProducts.find(p=>String(p.id)===String(d.id));
+            if(p) p.winner_score = d.score;
+          }
+          if(window.products){
+            const p = window.products.find(p=>String(p.id)===String(d.id));
+            if(p) p.winner_score = d.score;
+          }
+        });
+      }
+      if(updated>0){
+        toast.success(`Winner Score actualizado para ${updated} productos`);
+      }else if(skipped>0){
+        toast.info(`No hubo cambios (${skipped} ya estaban al día)`);
+      }else{
+        toast.info('No hubo cambios');
+      }
+    }else{
+      toast.error('No se pudo actualizar el Winner Score');
+    }
+    return res;
+  }
+
+  global.winnerScore = {metricDefs, MAPS, normalizeMetric, computeRanges, scoreProduct, getDefaultWeights, generate};
 })(window);
