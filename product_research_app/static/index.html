@@ -458,7 +458,21 @@ function preprocessProducts(list){
   dupMap.forEach(arr => { if (arr.length > 1) arr.forEach(it => it.isDuplicate = true); });
 }
 
-const metricDefs = window.winnerScore.metricDefs;
+const WEIGHT_KEYS = ['price','rating','units_sold','revenue','desire','competition','review_count','image_count','profit_margin','shipping_days'];
+const ALIASES = { unitsSold:'units_sold', orders:'units_sold', reviews:'review_count', imgs:'image_count', ship_days:'shipping_days' };
+function normalizeKey(k){ return ALIASES[k] || k; }
+const metricDefs = [
+  {key:'price',label:'Price'},
+  {key:'rating',label:'Rating'},
+  {key:'units_sold',label:'Units Sold'},
+  {key:'revenue',label:'Revenue'},
+  {key:'desire',label:'Desire'},
+  {key:'competition',label:'Competition'},
+  {key:'review_count',label:'Review Count'},
+  {key:'image_count',label:'Image Count'},
+  {key:'profit_margin',label:'Profit Margin'},
+  {key:'shipping_days',label:'Shipping Days'}
+];
 const metricKeys = metricDefs.map(m=>m.key);
 let weightValues = {};
 let weightOrder = [];
@@ -467,22 +481,26 @@ function debounce(fn, ms=150){
   let t; return (...args)=>{ clearTimeout(t); t=setTimeout(()=>fn(...args), ms); };
 }
 
-function defaultWeights(){ return { ...window.winnerScore.getDefaultWeights().lanzamiento }; }
-function defaultOrder(){ return metricDefs.map(m=>m.key); }
+function defaultWeights(){ const o={}; WEIGHT_KEYS.forEach(k=>o[k]=0); return o; }
+function defaultOrder(){ return [...WEIGHT_KEYS]; }
 
 const saveFns = {};
-function saveWeightDebounced(key, value, statusEl){
+function saveWeightDebounced(key, value){
   if(!saveFns[key]){
-    saveFns[key] = debounce(async (val)=>{
-      try{
-        await fetchJson('/api/config/winner-weights', {method:'PATCH', body: JSON.stringify({key, value: val})});
-        if(statusEl){ statusEl.textContent='Guardado ✓'; setTimeout(()=>statusEl.textContent='',1000); }
-      }catch(e){
-        if(statusEl){ statusEl.textContent='✗'; }
-      }
+    saveFns[key] = debounce(val=>{
+      fetch('/api/config/winner-weights', {
+        method:'PATCH',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ key, value: val })
+      }).then(()=> showSavedTick(key));
     },300);
   }
   saveFns[key](value);
+}
+
+function showSavedTick(key){
+  const el = document.querySelector(`#weightsList li[data-key="${key}"] .ws-status`);
+  if(el){ el.textContent='✓'; setTimeout(()=>{ el.textContent=''; },1000); }
 }
 
 function renderWeights(){
@@ -497,8 +515,13 @@ function renderWeights(){
     li.innerHTML=`<span class="ws-handle">≡</span><span class="ws-name">${def.label}</span><div class="ws-slider-wrap"><input type="range" name="${key}" min="0" max="100" step="1" value="${weightValues[key]||0}" class="ws-slider"></div><span class="ws-value">${weightValues[key]||0}</span><span class="ws-status"></span>`;
     const range=li.querySelector('.ws-slider');
     const val=li.querySelector('.ws-value');
-    const status=li.querySelector('.ws-status');
-    range.addEventListener('input',e=>{ const k=e.target.name; const v=parseFloat(e.target.value); weightValues[k]=v; val.textContent=e.target.value; if(Number.isFinite(v)) saveWeightDebounced(k, v, status); });
+    range.addEventListener('input',e=>{
+      const k=normalizeKey(e.target.name);
+      const v=parseFloat(e.target.value);
+      weightValues[k]=v;
+      val.textContent=e.target.value;
+      if(Number.isFinite(v)) saveWeightDebounced(k, v);
+    });
     ['mousedown','touchstart'].forEach(ev=>{ range.addEventListener(ev,e=>{ e.stopPropagation(); }); });
     list.appendChild(li);
   });
@@ -1288,38 +1311,33 @@ document.getElementById('btnExport').onclick = async () => {
   } catch(err){ console.error(err); toast.error('Error al exportar'); }
 };
 
+function getSelectedProductIds(){ return Array.from(selection, Number); }
+function setLoading(btn, s){ if(s){ btn.dataset.prev=btn.textContent; btn.textContent='Actualizando…'; } else { btn.textContent=btn.dataset.prev||btn.textContent; } }
+
 // Generate Winner Score for selected or all products
-document.getElementById('btnGenWinner').onclick = async () => {
-  const selectedIds = Array.from(selection, Number);
+document.getElementById('btnGenWinner').onclick = () => {
+  const ids = getSelectedProductIds();
+  const body = ids.length ? {product_ids: ids} : {};
   const btn = document.getElementById('btnGenWinner');
-  const prev = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = 'Actualizando…';
-  startProgress();
-  try {
-    const res = await winnerScore.generate(selectedIds);
-    if (res?.weights_all || res?.weights_eff) console.log('Recalc weights', res.weights_all, res.weights_eff);
-    const processed = res?.processed || 0;
-    const updated = res?.updated || 0;
-    if (processed === 0) {
-      toast.info('Nada que recalcular (0 seleccionados).');
-    } else if (updated > 0) {
-      toast.success(`Winner Score recalculado: ${updated}/${processed} cambiaron.`);
-    } else {
-      toast.info(`Recalculado ${processed} · el entero 0–100 no varió (redondeo).`);
+  btn.disabled = true; setLoading(btn, true);
+  fetch('/api/winner-score/generate?debug=1', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body)
+  }).then(r=>r.json()).then(({processed=0, updated=0, diag})=>{
+    if(!processed) toast.info('Nada que recalcular (0 seleccionados)');
+    else if(updated>0) toast.success(`Winner Score recalculado: ${updated}/${processed} cambiaron`);
+    else {
+      if(diag && diag.sum_filtered===0){
+        toast.info(`Recalculado ${processed}. No afectó: los pesos de métricas presentes suman 0 → fallback uniforme.`);
+      } else {
+        toast.info(`Recalculado ${processed}. El entero 0–100 no varió (redondeo).`);
+      }
     }
-    if (selectedIds.length) {
-      await reloadRows(selectedIds);
-    } else {
-      await reloadTable();
-    }
-  } catch (err) {
+    if(ids.length) reloadRows(ids); else reloadTable();
+  }).catch(err=>{
     console.error(err);
     toast.error('No se pudo actualizar el Winner Score');
-  } finally {
-    btn.disabled = false;
-    btn.textContent = prev;
-  }
+  }).finally(()=>{ btn.disabled=false; setLoading(btn,false); });
 };
 
 // -------- Group management --------

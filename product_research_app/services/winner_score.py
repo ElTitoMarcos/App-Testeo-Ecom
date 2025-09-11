@@ -13,6 +13,54 @@ from .. import config, database
 
 logger = logging.getLogger(__name__)
 
+# Winner Score weight keys and compatibility aliases
+WEIGHT_KEYS = [
+    "price",
+    "rating",
+    "units_sold",
+    "revenue",
+    "desire",
+    "competition",
+    "review_count",
+    "image_count",
+    "profit_margin",
+    "shipping_days",
+]
+
+ALIASES = {
+    "unitsSold": "units_sold",
+    "orders": "units_sold",
+    "reviews": "review_count",
+    "imgs": "image_count",
+    "ship_days": "shipping_days",
+}
+
+WEIGHTS_CACHE: Dict[str, float] | None = None
+WEIGHTS_VERSION: int = 0
+
+
+def invalidate_weights_cache() -> None:
+    global WEIGHTS_CACHE, WEIGHTS_VERSION
+    WEIGHTS_CACHE = None
+    WEIGHTS_VERSION += 1
+
+
+def normalize_weight_key(key: str) -> str:
+    """Return canonical weight key or raise ``ValueError``.
+
+    The function applies legacy alias mapping and accepts keys with an
+    optional ``_weight`` suffix.  Unknown keys raise ``ValueError`` with a
+    descriptive message.
+    """
+
+    k = str(key or "").strip()
+    if k.endswith("_weight"):
+        k = k[:-7]
+    k = ALIASES.get(k, k)
+    if k not in WEIGHT_KEYS:
+        raise ValueError(f"Invalid weight key: {key}")
+    return k
+
 # Mapping tables for categorical metrics
 MAGNITUD_DESEO = {"low":0.33, "medium":0.66, "high":1.0}
 NIVEL_CONSCIENCIA_HEADROOM = {"unaware":1.0, "problem":0.8, "solution":0.6, "product":0.4, "most":0.2}
@@ -127,18 +175,8 @@ FeatureDict = Dict[str, Optional[float]]
 DESIRE_LABELS = {"low": 0.2, "medium": 0.5, "med": 0.5, "high": 0.8}
 COMPETITION_LABELS = {"low": 0.8, "medium": 0.5, "med": 0.5, "high": 0.2}
 
-FEATURES = [
-    "price",
-    "rating",
-    "units_sold",
-    "revenue",
-    "review_count",
-    "image_count",
-    "shipping_days",
-    "profit_margin",
-    "desire",
-    "competition",
-]
+# Backwards-compatible alias for legacy imports
+FEATURES = WEIGHT_KEYS
 
 def _get_extras(product_row: Any) -> Dict[str, Any]:
     extras = rget(product_row, "extras")
@@ -284,7 +322,7 @@ def load_winner_weights() -> Dict[str, float]:
     cfg = config.load_config()
     stored = cfg.get("weights", {})
     weights: Dict[str, float] = {}
-    for key in FEATURES:
+    for key in WEIGHT_KEYS:
         try:
             weights[key] = float(stored.get(key, 0.0))
         except Exception:
@@ -323,6 +361,7 @@ def compute_winner_score_v2(product_row: Any, weights: Dict[str, float]) -> Dict
             "missing_fields": missing_fields,
             "present_fields": present,
             "effective_weights": {},
+            "sum_filtered": 0.0,
             "fallback": True,
         }
 
@@ -330,8 +369,10 @@ def compute_winner_score_v2(product_row: Any, weights: Dict[str, float]) -> Dict
     sum_filtered = sum(max(0.0, v) for v in filtered.values())
     if sum_filtered > 0:
         weights_used = {k: max(0.0, filtered.get(k, 0.0)) / sum_filtered for k in present}
+        fallback = False
     else:
         weights_used = {k: 1.0 / used for k in present}
+        fallback = True
 
     score_float = sum(feats[k] * weights_used.get(k, 0.0) for k in present)
     score_int = int(round(score_float * 100))
@@ -343,7 +384,8 @@ def compute_winner_score_v2(product_row: Any, weights: Dict[str, float]) -> Dict
         "missing_fields": missing_fields,
         "present_fields": present,
         "effective_weights": weights_used,
-        "fallback": False,
+        "sum_filtered": sum_filtered,
+        "fallback": fallback,
     }
 
 
@@ -351,7 +393,8 @@ def generate_winner_scores(
     conn: sqlite3.Connection,
     product_ids: Optional[Iterable[Any]] = None,
     weights: Optional[Dict[str, float]] = None,
-    ) -> Dict[str, int | str]:
+    debug: bool = False,
+    ) -> Dict[str, Any]:
     """Recalculate and persist Winner Scores for the given products.
 
     Args:
@@ -370,16 +413,7 @@ def generate_winner_scores(
     weights_hash_all = hashlib.sha1(
         json.dumps(weights, sort_keys=True).encode("utf-8")
     ).hexdigest()[:8]
-
-    pos = {k: max(0.0, v) for k, v in weights.items()}
-    sum_pos = sum(pos.values())
-    if sum_pos > 0:
-        eff_global = {k: v / sum_pos for k, v in pos.items() if v > 0}
-    else:
-        eff_global = {k: 1.0 / len(weights) for k in weights}
-    weights_hash_eff = hashlib.sha1(
-        json.dumps(eff_global, sort_keys=True).encode("utf-8")
-    ).hexdigest()[:8]
+    weights_hash_eff = ""
 
     ids: Optional[set[int]] = None
     if product_ids:
@@ -395,6 +429,10 @@ def generate_winner_scores(
     processed = 0
     updated_int = 0
     now = datetime.utcnow().isoformat()
+    diag_present: Optional[Iterable[str]] = None
+    diag_missing: Optional[Iterable[str]] = None
+    diag_sum_filtered: float = 0.0
+    diag_eff: Dict[str, float] = {}
     for row in rows:
         pid = row["id"]
         old_score = row["winner_score"]
@@ -406,6 +444,13 @@ def generate_winner_scores(
         eff_hash = hashlib.sha1(
             json.dumps(res.get("effective_weights", {}), sort_keys=True).encode("utf-8")
         ).hexdigest()[:8]
+        weights_hash_eff = eff_hash
+
+        if debug and diag_present is None:
+            diag_present = present
+            diag_missing = missing
+            diag_sum_filtered = float(res.get("sum_filtered", 0.0))
+            diag_eff = {k: round(v, 6) for k, v in res.get("effective_weights", {}).items()}
 
         score_raw_0_100 = max(0.0, min(1.0, sf)) * 100.0
         new_score = int(round(score_raw_0_100))
@@ -445,9 +490,17 @@ def generate_winner_scores(
         processed += 1
 
     conn.commit()
-    return {
+    result: Dict[str, Any] = {
         "processed": processed,
         "updated": updated_int,
         "weights_all": weights_hash_all,
         "weights_eff": weights_hash_eff,
     }
+    if debug:
+        result["diag"] = {
+            "present": sorted(diag_present or []),
+            "missing": sorted(diag_missing or []),
+            "sum_filtered": diag_sum_filtered,
+            "effective_weights": diag_eff,
+        }
+    return result

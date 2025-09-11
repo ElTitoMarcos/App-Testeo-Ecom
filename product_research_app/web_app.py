@@ -394,37 +394,12 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             database.set_import_job_ai_counts(conn, job_id, counts, res.get("pending_ids", []))
             if res.get("error"):
                 database.set_import_job_ai_error(conn, job_id, "No se pudieron completar las columnas con IA: revisa la API.")
-        weights = config.get_weights()
-        updates: list[tuple[int, int]] = []
-        skipped_scores = 0
-        for pid in inserted_ids:
-            prod = database.get_product(conn, pid)
-            res_ws = winner_calc.compute_winner_score_v2(prod, weights)
-            logger.info(
-                "Winner Score: product=%s used=%d missing=%d missing_fields=%s fallback=%s%s",
-                pid,
-                res_ws["used"],
-                res_ws["missing"],
-                res_ws.get("missing_fields"),
-                str(res_ws.get("fallback")).lower(),
-                f" score={res_ws['score']}" if res_ws.get("score") is not None else "",
-            )
-            if res_ws.get("score") is not None:
-                updates.append((res_ws["score"], pid))
-            else:
-                skipped_scores += 1
-        if updates:
-            conn.executemany(
-                "UPDATE products SET winner_score = ? WHERE id = ?",
-                updates,
-            )
-        conn.commit()
-        updated_scores = len(updates)
+        res_scores = winner_calc.generate_winner_scores(conn, product_ids=inserted_ids)
+        updated_scores = int(res_scores.get("updated", 0))
         logger.info(
-            "Winner Score import/post: imported=%d updated=%d skipped=%d",
+            "Winner Score import/post: imported=%d updated=%d",
             len(inserted_ids),
             updated_scores,
-            skipped_scores,
         )
         database.complete_import_job(conn, job_id, rows_imported, updated_scores)
     except Exception as exc:
@@ -1246,8 +1221,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._set_json(400)
                 self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
                 return
-            clean_key = key[:-7] if key.endswith("_weight") else key
-            config.update_weight(clean_key, value)
+            try:
+                config.update_weight(key, value)
+            except ValueError as exc:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"error": str(exc)}).encode('utf-8'))
+                return
             self._set_json()
             self.wfile.write(json.dumps({"status": "ok"}).encode('utf-8'))
             return
@@ -2417,6 +2396,10 @@ class RequestHandler(BaseHTTPRequestHandler):
     def handle_scoring_v2_generate(self):
         """Compute Winner Score for selected products."""
 
+        parsed = urlparse(self.path)
+        params = parse_qs(parsed.query)
+        debug = params.get("debug", ["0"])[0] == "1"
+
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length).decode("utf-8") if length else ""
         try:
@@ -2431,19 +2414,18 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         logger.info("Winner Score generate: ids_length=%d", len(ids))
         conn = ensure_db()
-        result = winner_calc.generate_winner_scores(conn, product_ids=ids or None)
+        result = winner_calc.generate_winner_scores(conn, product_ids=ids or None, debug=debug)
+        resp = {
+            "ok": True,
+            "processed": result.get("processed", 0),
+            "updated": result.get("updated", 0),
+            "weights_all": result.get("weights_all"),
+            "weights_eff": result.get("weights_eff"),
+        }
+        if debug:
+            resp["diag"] = result.get("diag", {})
         self._set_json()
-        self.wfile.write(
-            json.dumps(
-                {
-                    "ok": True,
-                    "processed": result.get("processed", 0),
-                    "updated": result.get("updated", 0),
-                    "weights_all": result.get("weights_all"),
-                    "weights_eff": result.get("weights_eff"),
-                }
-            ).encode("utf-8")
-        )
+        self.wfile.write(json.dumps(resp).encode("utf-8"))
 
     def handle_winner_score_explain(self, parsed):
         """Return detailed Winner Score components for debugging."""
