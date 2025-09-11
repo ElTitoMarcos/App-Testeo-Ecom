@@ -114,8 +114,8 @@ def test_scoring_v2_generate_cases(tmp_path, monkeypatch):
     assert resp["ok"] is True
     assert resp["processed"] == 2
     assert resp["updated"] == 1
-    assert resp["weights_hash"]
-    assert isinstance(resp["weights_version"], int)
+    assert resp["weights_all"]
+    assert resp["weights_eff"]
     prod_a = database.get_product(conn, pid_a)
     prod_b = database.get_product(conn, pid_b)
     assert prod_a["winner_score"] == 0
@@ -128,8 +128,8 @@ def test_scoring_v2_generate_cases(tmp_path, monkeypatch):
     assert resp2["ok"] is True
     assert resp2["processed"] == 1
     assert resp2["updated"] == 0
-    assert resp2["weights_hash"]
-    assert isinstance(resp2["weights_version"], int)
+    assert resp2["weights_all"]
+    assert resp2["weights_eff"]
 
 
 def test_scoring_v2_generate_all_when_no_ids(tmp_path, monkeypatch):
@@ -175,8 +175,8 @@ def test_scoring_v2_generate_all_when_no_ids(tmp_path, monkeypatch):
     web_app.RequestHandler.handle_scoring_v2_generate(handler)
     resp = json.loads(handler.wfile.getvalue().decode("utf-8"))
     assert resp["processed"] == 2
-    assert resp["weights_hash"]
-    assert isinstance(resp["weights_version"], int)
+    assert resp["weights_all"]
+    assert resp["weights_eff"]
 
 def test_products_endpoint_serializes_rows(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)
@@ -417,8 +417,8 @@ def test_weights_hash_changes_after_patch(tmp_path, monkeypatch):
     h1 = Dummy(body)
     web_app.RequestHandler.handle_scoring_v2_generate(h1)
     resp1 = json.loads(h1.wfile.getvalue().decode("utf-8"))
-    hash1 = resp1["weights_hash"]
-    ver1 = resp1["weights_version"]
+    hash1 = resp1["weights_all"]
+    ver1 = config.get_weights_version()
 
     body_patch = json.dumps({"key": "rating_weight", "value": 0.2})
 
@@ -438,8 +438,8 @@ def test_weights_hash_changes_after_patch(tmp_path, monkeypatch):
     h2 = Dummy(body)
     web_app.RequestHandler.handle_scoring_v2_generate(h2)
     resp2 = json.loads(h2.wfile.getvalue().decode("utf-8"))
-    assert resp2["weights_hash"] != hash1
-    assert resp2["weights_version"] == ver1 + 1
+    assert resp2["weights_all"] != hash1
+    assert config.get_weights_version() == ver1 + 1
 
 def test_logging_and_explain_endpoint(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)

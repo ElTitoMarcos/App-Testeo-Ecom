@@ -274,9 +274,22 @@ NORMALIZERS: Dict[str, Callable[[float], float]] = {
 
 
 def load_winner_weights() -> Dict[str, float]:
-    """Load Winner Score weights from persistent configuration."""
+    """Load Winner Score weights from persistent configuration.
 
-    return config.get_weights()
+    The configuration is read from disk on each call to avoid stale caches.
+    Any missing metric receives a weight of ``0.0`` and all values are
+    coerced to ``float``.
+    """
+
+    cfg = config.load_config()
+    stored = cfg.get("weights", {})
+    weights: Dict[str, float] = {}
+    for key in FEATURES:
+        try:
+            weights[key] = float(stored.get(key, 0.0))
+        except Exception:
+            weights[key] = 0.0
+    return weights
 
 
 def compute_winner_score_v2(product_row: Any, weights: Dict[str, float]) -> Dict[str, Any]:
@@ -313,12 +326,12 @@ def compute_winner_score_v2(product_row: Any, weights: Dict[str, float]) -> Dict
             "fallback": True,
         }
 
-    weights_used = {k: weights.get(k, 0.0) for k in present}
-    total_w = sum(weights_used.values())
-    if total_w <= 0:
-        weights_used = {k: 1.0 / used for k in present}
+    filtered = {k: weights.get(k, 0.0) for k in present}
+    sum_filtered = sum(max(0.0, v) for v in filtered.values())
+    if sum_filtered > 0:
+        weights_used = {k: max(0.0, filtered.get(k, 0.0)) / sum_filtered for k in present}
     else:
-        weights_used = {k: v / total_w for k, v in weights_used.items()}
+        weights_used = {k: 1.0 / used for k in present}
 
     score_float = sum(feats[k] * weights_used.get(k, 0.0) for k in present)
     score_int = int(round(score_float * 100))
@@ -354,7 +367,19 @@ def generate_winner_scores(
     if weights is None:
         weights = load_winner_weights()
 
-    weights_version = config.get_weights_version()
+    weights_hash_all = hashlib.sha1(
+        json.dumps(weights, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:8]
+
+    pos = {k: max(0.0, v) for k, v in weights.items()}
+    sum_pos = sum(pos.values())
+    if sum_pos > 0:
+        eff_global = {k: v / sum_pos for k, v in pos.items() if v > 0}
+    else:
+        eff_global = {k: 1.0 / len(weights) for k in weights}
+    weights_hash_eff = hashlib.sha1(
+        json.dumps(eff_global, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:8]
 
     ids: Optional[set[int]] = None
     if product_ids:
@@ -369,9 +394,6 @@ def generate_winner_scores(
 
     processed = 0
     updated_int = 0
-    snapshot = hashlib.sha1(
-        json.dumps(weights, sort_keys=True).encode("utf-8")
-    ).hexdigest()[:8]
     now = datetime.utcnow().isoformat()
     for row in rows:
         pid = row["id"]
@@ -381,6 +403,9 @@ def generate_winner_scores(
         present = set(res.get("present_fields", []))
         missing = set(res.get("missing_fields", []))
         eff_w = {k: round(v, 3) for k, v in res.get("effective_weights", {}).items()}
+        eff_hash = hashlib.sha1(
+            json.dumps(res.get("effective_weights", {}), sort_keys=True).encode("utf-8")
+        ).hexdigest()[:8]
 
         score_raw_0_100 = max(0.0, min(1.0, sf)) * 100.0
         new_score = int(round(score_raw_0_100))
@@ -395,22 +420,24 @@ def generate_winner_scores(
 
         if not present:
             logger.warning(
-                "Winner Score: product=%s score_int=%s score_raw=%.3f weights_snapshot=%s present=%s missing=%s effective_weights=%s no_features_present",
+                "Winner Score: product=%s score_int=%s score_raw=%.3f weights_all=%s weights_eff=%s present=%s missing=%s effective_weights=%s no_features_present",
                 pid,
                 new_score,
                 score_raw_0_100,
-                snapshot,
+                weights_hash_all,
+                eff_hash,
                 present,
                 missing,
                 eff_w,
             )
         else:
             logger.info(
-                "Winner Score: product=%s score_int=%s score_raw=%.3f weights_snapshot=%s present=%s missing=%s effective_weights=%s",
+                "Winner Score: product=%s score_int=%s score_raw=%.3f weights_all=%s weights_eff=%s present=%s missing=%s effective_weights=%s",
                 pid,
                 new_score,
                 score_raw_0_100,
-                snapshot,
+                weights_hash_all,
+                eff_hash,
                 present,
                 missing,
                 eff_w,
@@ -421,6 +448,6 @@ def generate_winner_scores(
     return {
         "processed": processed,
         "updated": updated_int,
-        "weights_hash": snapshot,
-        "weights_version": weights_version,
+        "weights_all": weights_hash_all,
+        "weights_eff": weights_hash_eff,
     }
