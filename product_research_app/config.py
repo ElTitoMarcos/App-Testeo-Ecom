@@ -7,6 +7,7 @@ file. If the file does not exist, default values are returned.
 """
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -34,6 +35,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "min_medium_pct": 0.05,
         "min_high_pct": 0.05,
     },
+    "weightsVersion": 0,
+    "weightsUpdatedAt": 0,
 }
 
 
@@ -202,6 +205,8 @@ def set_weights(weights: Dict[str, float]) -> None:
 
     cfg = load_config()
     cfg["weights"] = weights
+    cfg["weightsVersion"] = int(cfg.get("weightsVersion", 0)) + 1
+    cfg["weightsUpdatedAt"] = datetime.utcnow().isoformat()
     save_config(cfg)
 
 
@@ -215,4 +220,14 @@ def update_weight(key: str, value: float) -> None:
     except Exception:
         weights[key] = value
     cfg["weights"] = weights
+    cfg["weightsVersion"] = int(cfg.get("weightsVersion", 0)) + 1
+    cfg["weightsUpdatedAt"] = datetime.utcnow().isoformat()
     save_config(cfg)
+
+
+def get_weights_version() -> int:
+    cfg = load_config()
+    try:
+        return int(cfg.get("weightsVersion", 0))
+    except Exception:
+        return 0
