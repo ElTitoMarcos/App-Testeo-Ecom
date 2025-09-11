@@ -1106,7 +1106,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/scoring/v2/gpt-summary":
             self.handle_scoring_v2_gpt_summary()
             return
-        if path == "/scoring/v2/generate":
+        if path == "/scoring/v2/generate" or path == "/api/winner-score/generate":
             self.handle_scoring_v2_generate()
             return
         if path == "/delete":
@@ -2416,7 +2416,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(length).decode("utf-8") if length else ""
         try:
             data = json.loads(body) if body else {}
-            ids = data.get("ids") or []
+            ids = data.get("product_ids") or data.get("ids") or []
             if not isinstance(ids, list):
                 raise ValueError
         except Exception:
