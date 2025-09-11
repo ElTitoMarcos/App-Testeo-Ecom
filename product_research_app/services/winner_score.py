@@ -115,7 +115,6 @@ def score_product(
 
 FeatureDict = Dict[str, Optional[float]]
 
-
 def extract_features_v2(product_row: Any) -> FeatureDict:
     """Extract Winner Score features from a product row safely.
 

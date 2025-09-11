@@ -131,7 +131,6 @@ def test_scoring_v2_generate_cases(tmp_path, monkeypatch):
     assert resp2["updated"] == 0
     assert resp2["skipped"] == 1
 
-
 def test_products_endpoint_serializes_rows(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)
     monkeypatch.setattr(web_app, "ensure_db", lambda: conn)
