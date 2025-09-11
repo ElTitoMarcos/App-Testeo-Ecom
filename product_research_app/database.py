@@ -95,6 +95,11 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         cur.execute("ALTER TABLE products ADD COLUMN date_range TEXT")
     if "ai_columns_completed_at" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN ai_columns_completed_at TEXT")
+    if "winner_score_v2" in cols and "winner_score" not in cols:
+        cur.execute("ALTER TABLE products RENAME COLUMN winner_score_v2 TO winner_score")
+        cols = ["winner_score" if c == "winner_score_v2" else c for c in cols]
+    if "winner_score" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN winner_score INTEGER NOT NULL DEFAULT 0")
     metric_text_cols = [
         "magnitud_deseo",
         "nivel_consciencia_headroom",
@@ -119,6 +124,10 @@ def initialize_database(conn: sqlite3.Connection) -> None:
     for obsolete in [
         "facilidad_logistica",
         "engagement_shareability",
+        "winner_score_v1",
+        "score_v1",
+        "ws_v1",
+        "winner_score_version",
     ]:
         if obsolete in cols:
             try:
@@ -142,9 +151,9 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             summary TEXT,
             explanations JSON,
             created_at TEXT NOT NULL,
-            winner_score_v2_raw REAL,
-            winner_score_v2_pct INTEGER,
-            winner_score_v2_breakdown JSON,
+            winner_score_raw REAL,
+            winner_score INTEGER,
+            winner_score_breakdown JSON,
             FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
         )
         """
@@ -152,12 +161,27 @@ def initialize_database(conn: sqlite3.Connection) -> None:
     cur.execute("PRAGMA table_info(scores)")
     info = cur.fetchall()
     cols = [row[1] for row in info]
-    types = {row[1]: row[2].upper() for row in info}
-    if "winner_score_v2_raw" not in cols:
-        cur.execute("ALTER TABLE scores ADD COLUMN winner_score_v2_raw REAL")
-    if "winner_score_v2_pct" not in cols:
-        cur.execute("ALTER TABLE scores ADD COLUMN winner_score_v2_pct INTEGER")
-    elif types.get("winner_score_v2_pct") != "INTEGER":
+    colinfo = {row[1]: row for row in info}
+    if "winner_score_v2" in cols and "winner_score" not in cols:
+        cur.execute("ALTER TABLE scores RENAME COLUMN winner_score_v2 TO winner_score")
+        cur.execute("PRAGMA table_info(scores)")
+        info = cur.fetchall()
+        cols = [row[1] for row in info]
+        colinfo = {row[1]: row for row in info}
+    if "winner_score_raw" not in cols:
+        cur.execute("ALTER TABLE scores ADD COLUMN winner_score_raw REAL")
+        cur.execute("PRAGMA table_info(scores)")
+        info = cur.fetchall()
+        cols = [row[1] for row in info]
+        colinfo = {row[1]: row for row in info}
+    if "winner_score_v2" in cols:
+        cur.execute(
+            "UPDATE scores SET winner_score_raw = winner_score_v2 WHERE winner_score_raw IS NULL"
+        )
+    ws = colinfo.get("winner_score")
+    if ws is None:
+        cur.execute("ALTER TABLE scores ADD COLUMN winner_score INTEGER NOT NULL DEFAULT 0")
+    elif ws[2].upper() != "INTEGER" or ws[3] != 1 or (ws[4] is None or str(ws[4]).strip() not in {"0", "0.0"}):
         cur.execute("ALTER TABLE scores RENAME TO scores_old")
         cur.execute(
             """
@@ -175,9 +199,9 @@ def initialize_database(conn: sqlite3.Connection) -> None:
                 summary TEXT,
                 explanations JSON,
                 created_at TEXT NOT NULL,
-                winner_score_v2_raw REAL,
-                winner_score_v2_pct INTEGER,
-                winner_score_v2_breakdown JSON,
+                winner_score_raw REAL,
+                winner_score INTEGER NOT NULL DEFAULT 0,
+                winner_score_breakdown JSON,
                 FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
             )
             """
@@ -187,17 +211,17 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             INSERT INTO scores (
                 id, product_id, model, total_score, momentum, saturation, differentiation,
                 social_proof, margin, logistics, summary, explanations, created_at,
-                winner_score_v2_raw, winner_score_v2_pct, winner_score_v2_breakdown
+                winner_score_raw, winner_score, winner_score_breakdown
             )
             SELECT
                 id, product_id, model, total_score, momentum, saturation, differentiation,
                 social_proof, margin, logistics, summary, explanations, created_at,
-                winner_score_v2_raw,
+                winner_score_raw,
                 CASE
-                    WHEN winner_score_v2_pct IS NULL THEN NULL
-                    ELSE CAST(MIN(100, MAX(0, ROUND(winner_score_v2_pct))) AS INTEGER)
+                    WHEN winner_score IS NULL THEN 0
+                    ELSE CAST(MIN(100, MAX(0, ROUND(winner_score))) AS INTEGER)
                 END,
-                winner_score_v2_breakdown
+                winner_score_breakdown
             FROM scores_old
             """
         )
@@ -205,17 +229,29 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         cur.execute("PRAGMA table_info(scores)")
         info = cur.fetchall()
         cols = [row[1] for row in info]
-    if "winner_score_v2_breakdown" not in cols:
-        cur.execute("ALTER TABLE scores ADD COLUMN winner_score_v2_breakdown JSON")
-    if "winner_score_v2" in cols:
+    if "winner_score_breakdown" not in cols:
+        cur.execute("ALTER TABLE scores ADD COLUMN winner_score_breakdown JSON")
+    if "winner_score_v2" in cols and "winner_score" in cols:
         cur.execute(
-            "UPDATE scores SET winner_score_v2_raw = winner_score_v2 WHERE winner_score_v2_raw IS NULL"
+            "UPDATE scores SET winner_score = winner_score_v2 WHERE winner_score IS NULL OR winner_score = 0"
         )
+    for obsolete in [
+        "winner_score_v1",
+        "score_v1",
+        "ws_v1",
+        "winner_score_version",
+        "winner_score_v2",
+    ]:
+        if obsolete in cols:
+            try:
+                cur.execute(f"ALTER TABLE scores DROP COLUMN {obsolete}")
+            except Exception:
+                pass
     cur.execute(
-        "UPDATE scores SET winner_score_v2_pct = MIN(100, MAX(0, ROUND(((winner_score_v2_raw - 8) / 32.0) * 100))) WHERE winner_score_v2_raw IS NOT NULL AND winner_score_v2_pct IS NULL"
+        "UPDATE scores SET winner_score = MIN(100, MAX(0, ROUND(((winner_score_raw - 8) / 32.0) * 100))) WHERE winner_score_raw IS NOT NULL"
     )
     cur.execute(
-        "UPDATE scores SET winner_score_v2_breakdown = '{}' WHERE winner_score_v2_breakdown IS NULL"
+        "UPDATE scores SET winner_score_breakdown = '{}' WHERE winner_score_breakdown IS NULL",
     )
     # Lists table
     cur.execute(
@@ -497,9 +533,9 @@ def insert_score(
     logistics: float,
     summary: str,
     explanations: Dict[str, Any],
-    winner_score_v2_raw: Optional[float] = None,
-    winner_score_v2_pct: Optional[float] = None,
-    winner_score_v2_breakdown: Optional[Dict[str, Any]] = None,
+    winner_score_raw: Optional[float] = None,
+    winner_score: Optional[float] = None,
+    winner_score_breakdown: Optional[Dict[str, Any]] = None,
     *,
     commit: bool = True,
 ) -> int:
@@ -507,25 +543,25 @@ def insert_score(
 
     cur = conn.cursor()
     created_at = datetime.utcnow().isoformat()
-    if winner_score_v2_pct is not None:
+    if winner_score is not None:
         try:
-            pct = int(round(float(winner_score_v2_pct)))
+            pct = int(round(float(winner_score)))
         except Exception:
             pct = 0
-        winner_score_v2_pct = max(0, min(100, pct))
-        winner_score_v2_raw = 8 + (winner_score_v2_pct / 100.0) * 32
-    elif winner_score_v2_raw is not None:
-        pct = int(round(((winner_score_v2_raw - 8) / 32.0) * 100))
-        winner_score_v2_pct = max(0, min(100, pct))
-        winner_score_v2_raw = 8 + (winner_score_v2_pct / 100.0) * 32
-    if winner_score_v2_breakdown is None:
-        winner_score_v2_breakdown = {}
+        winner_score = max(0, min(100, pct))
+        winner_score_raw = 8 + (winner_score / 100.0) * 32
+    elif winner_score_raw is not None:
+        pct = int(round(((winner_score_raw - 8) / 32.0) * 100))
+        winner_score = max(0, min(100, pct))
+        winner_score_raw = 8 + (winner_score / 100.0) * 32
+    if winner_score_breakdown is None:
+        winner_score_breakdown = {}
     cur.execute(
         """
         INSERT INTO scores (
             product_id, model, total_score, momentum, saturation, differentiation,
             social_proof, margin, logistics, summary, explanations, created_at,
-            winner_score_v2_raw, winner_score_v2_pct, winner_score_v2_breakdown)
+            winner_score_raw, winner_score, winner_score_breakdown)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?), ?, ?, ?, json(?))
         """,
         (
@@ -541,9 +577,9 @@ def insert_score(
             summary,
             json_dump(explanations),
             created_at,
-            winner_score_v2_raw,
-            winner_score_v2_pct,
-            json_dump(winner_score_v2_breakdown),
+            winner_score_raw,
+            winner_score,
+            json_dump(winner_score_breakdown),
         ),
     )
     if commit:

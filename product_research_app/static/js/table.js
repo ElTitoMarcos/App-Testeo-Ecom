@@ -40,7 +40,7 @@ function updateMasterState(){
     const ap = window.allProducts || [];
     const needs = Array.from(selection).some(id => {
       const prod = ap.find(p => String(p.id)===String(id));
-      const val = prod ? Number(prod.winner_score_v2_pct) : 0;
+      const val = prod ? Number(prod.winner_score) : 0;
       return !val;
     });
     btnGen.disabled = noneSelected || !needs;
