@@ -49,11 +49,27 @@ WINNER_SCORE_FIELDS = winner_calc.ALL_METRICS
 APP_DIR = Path(__file__).resolve().parent
 DB_PATH = APP_DIR / "data.sqlite3"
 STATIC_DIR = APP_DIR / "static"
+ROOT_DIR = APP_DIR.parent
+LOG_DIR = ROOT_DIR / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+LOG_PATH = LOG_DIR / "app.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_PATH, encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
+)
 logger = logging.getLogger(__name__)
 
 def ensure_db():
-    conn = database.get_connection(DB_PATH)
-    database.initialize_database(conn)
+    try:
+        conn = database.get_connection(DB_PATH)
+        database.initialize_database(conn)
+    except Exception:
+        logger.exception("Database initialization failed")
+        raise
     # Remove any legacy dummy products (IDs 1, 2, 3 or names that suggest test rows)
     try:
         cur = conn.cursor()
@@ -64,6 +80,7 @@ def ensure_db():
         conn.commit()
     except Exception:
         pass
+    logger.info("Database ready at %s", DB_PATH)
     return conn
 
 
@@ -594,6 +611,10 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path.startswith("/static/"):
             rel = path[len("/static/") :]
             self._serve_static(rel)
+            return
+        if path == "/api/log-path":
+            self._set_json()
+            self.wfile.write(json.dumps({"path": str(LOG_PATH)}).encode("utf-8"))
             return
         if path == "/_import_history":
             params = parse_qs(parsed.query)
@@ -1972,45 +1993,45 @@ class RequestHandler(BaseHTTPRequestHandler):
                     model,
                     {
                         "title": p.get("name"),
-                            "description": p.get("description"),
-                            "category": p.get("category"),
-                            "metrics": extra,
-                        },
-                    )
-                    scores = resp.get("scores", {})
-                    justifs = resp.get("justifications", {})
-                    weighted = sum(
-                        scores.get(f, 3) * weights_map.get(f, 0.0)
-                        for f in WINNER_SCORE_FIELDS
-                    )
-                    raw_score = weighted * 8.0
-                    pct = ((raw_score - 8.0) / 32.0) * 100.0
-                    pct = max(0, min(100, round(pct)))
-                    breakdown = {
-                        "scores": scores,
-                        "justifications": justifs,
-                        "weights": weights_map,
-                    }
-                    database.insert_score(
-                        conn,
-                        product_id=p['id'],
-                        model=model,
-                        total_score=0,
-                        momentum=0,
-                        saturation=0,
-                        differentiation=0,
-                        social_proof=0,
-                        margin=0,
-                        logistics=0,
-                        summary="",
-                        explanations={},
-                        winner_score_raw=raw_score,
-                        winner_score=pct,
-                        winner_score_breakdown=breakdown,
-                    )
-                    evaluated += 1
-                except Exception:
-                    continue
+                        "description": p.get("description"),
+                        "category": p.get("category"),
+                        "metrics": extra,
+                    },
+                )
+                scores = resp.get("scores", {})
+                justifs = resp.get("justifications", {})
+                weighted = sum(
+                    scores.get(f, 3) * weights_map.get(f, 0.0)
+                    for f in WINNER_SCORE_FIELDS
+                )
+                raw_score = weighted * 8.0
+                pct = ((raw_score - 8.0) / 32.0) * 100.0
+                pct = max(0, min(100, round(pct)))
+                breakdown = {
+                    "scores": scores,
+                    "justifications": justifs,
+                    "weights": weights_map,
+                }
+                database.insert_score(
+                    conn,
+                    product_id=p['id'],
+                    model=model,
+                    total_score=0,
+                    momentum=0,
+                    saturation=0,
+                    differentiation=0,
+                    social_proof=0,
+                    margin=0,
+                    logistics=0,
+                    summary="",
+                    explanations={},
+                    winner_score_raw=raw_score,
+                    winner_score=pct,
+                    winner_score_breakdown=breakdown,
+                )
+                evaluated += 1
+            except Exception:
+                continue
             self._set_json()
             self.wfile.write(json.dumps({"evaluated": evaluated}).encode('utf-8'))
             return

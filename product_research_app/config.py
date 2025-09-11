@@ -57,7 +57,19 @@ def load_config() -> Dict[str, Any]:
         except Exception:
             data = {}
 
-    changed = _merge_defaults(data, DEFAULT_CONFIG)
+    changed = False
+    if "weights" not in data and isinstance(data.get("weights_v2"), dict):
+        data["weights"] = data["weights_v2"]
+        changed = True
+    for obsolete in ["weights_v1", "use_v1_by_default", "winner_score_version"]:
+        if obsolete in data:
+            data.pop(obsolete, None)
+            changed = True
+    if "weights_v2" in data:
+        data.pop("weights_v2", None)
+        changed = True
+    if _merge_defaults(data, DEFAULT_CONFIG):
+        changed = True
     if changed:
         save_config(data)
     return data
