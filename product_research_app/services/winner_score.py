@@ -2,7 +2,7 @@
 from __future__ import annotations
 import json
 import math
-from typing import Dict, Any, Iterable, Optional
+from typing import Dict, Any, Iterable, Optional, Callable
 
 from ..utils.db import rget
 
@@ -115,14 +115,25 @@ def score_product(
 
 FeatureDict = Dict[str, Optional[float]]
 
-def extract_features_v2(product_row: Any) -> FeatureDict:
-    """Extract Winner Score features from a product row safely.
+# --- New Winner Score V2 (feature based on real product fields) ---
 
-    Missing keys or non-numeric values yield ``None``; no exceptions are
-    raised. Values may be sourced from the row itself or from an ``extra``/``extras``
-    JSON column.
-    """
+DESIRE_LABELS = {"low": 0.2, "medium": 0.5, "med": 0.5, "high": 0.8}
+COMPETITION_LABELS = {"low": 0.8, "medium": 0.5, "med": 0.5, "high": 0.2}
 
+FEATURES = [
+    "price",
+    "rating",
+    "units_sold",
+    "revenue",
+    "review_count",
+    "image_count",
+    "shipping_days",
+    "profit_margin",
+    "desire",
+    "competition",
+]
+
+def _get_extras(product_row: Any) -> Dict[str, Any]:
     extras = rget(product_row, "extras")
     if extras is None:
         extras = rget(product_row, "extra")
@@ -131,53 +142,166 @@ def extract_features_v2(product_row: Any) -> FeatureDict:
             extras = json.loads(extras)
         except Exception:
             extras = None
+    return extras if isinstance(extras, dict) else {}
 
-    def get_val(key: str) -> Optional[float]:
-        val = rget(product_row, key)
-        if val is None and isinstance(extras, dict):
-            val = extras.get(key)
-        try:
-            return float(val)
-        except Exception:
+
+def _to_float(val: Any) -> Optional[float]:
+    try:
+        if val is None:
             return None
+        if isinstance(val, str):
+            val = val.strip()
+            if not val:
+                return None
+        num = float(val)
+        return num
+    except Exception:
+        return None
 
-    return {k: get_val(k) for k in ALL_METRICS}
+
+def _get_from_sources(product_row: Any, extras: Dict[str, Any], keys: Iterable[str]) -> Optional[float]:
+    for k in keys:
+        v = rget(product_row, k)
+        if v is None:
+            v = extras.get(k)
+        v = _to_float(v)
+        if v is not None:
+            return v
+    return None
 
 
-def compute_winner_score_v2(product_row: Any, weights: Dict[str, float]) -> Dict[str, int | bool]:
-    """Compute Winner Score V2 using available features only.
+def _feat_desire(product_row: Any, extras: Dict[str, Any]) -> Optional[float]:
+    num = _get_from_sources(product_row, extras, ["ai_desire_score", "desire_score", "_desire_score"])
+    if num is not None:
+        if num > 1:
+            num /= 100.0
+        return clamp(num)
+    lab = rget(product_row, "ai_desire_label") or rget(product_row, "desire_magnitude") or rget(product_row, "desire")
+    if lab is None:
+        lab = extras.get("ai_desire_label") or extras.get("desire_magnitude") or extras.get("desire")
+    if isinstance(lab, str):
+        return DESIRE_LABELS.get(lab.strip().lower())
+    return None
 
-    Args:
-        product_row: Source of metrics (dict or sqlite3.Row).
-        weights: Weight mapping for all metrics (will be renormalised).
 
-    Returns:
-        Dict with integer score 0-100, number of used/missing metrics and
-        fallback flag.
+def _feat_competition(product_row: Any, extras: Dict[str, Any]) -> Optional[float]:
+    num = _get_from_sources(product_row, extras, ["ai_competition_score", "competition_score", "_competition_score"])
+    if num is not None:
+        if num > 1:
+            num /= 100.0
+        return clamp(num)
+    lab = rget(product_row, "ai_competition_label") or rget(product_row, "competition_level")
+    if lab is None:
+        lab = extras.get("ai_competition_label") or extras.get("competition_level")
+    if isinstance(lab, str):
+        return COMPETITION_LABELS.get(lab.strip().lower())
+    return None
+
+
+FeatureGetter = Callable[[Any, Dict[str, Any]], Optional[float]]
+
+FEATURE_MAP: Dict[str, FeatureGetter] = {
+    "price": lambda p, e: _get_from_sources(p, e, ["price"]),
+    "rating": lambda p, e: _get_from_sources(p, e, ["rating", "Product Rating"]),
+    "units_sold": lambda p, e: _get_from_sources(p, e, ["units_sold", "Item Sold"]),
+    "revenue": lambda p, e: _get_from_sources(p, e, ["revenue", "Revenue($)"]),
+    "review_count": lambda p, e: _get_from_sources(p, e, ["review_count", "reviews", "reviewcount"]),
+    "image_count": lambda p, e: _get_from_sources(p, e, ["image_count", "images"]),
+    "shipping_days": lambda p, e: _get_from_sources(p, e, ["shipping_days", "shipping_time", "delivery_days"]),
+    "profit_margin": lambda p, e: _get_from_sources(p, e, ["profit_margin", "margin"]),
+    "desire": _feat_desire,
+    "competition": _feat_competition,
+}
+
+
+def _norm_price(v: float) -> float:
+    return clamp(v / 1000.0)
+
+
+def _norm_rating(v: float) -> float:
+    return clamp(v / 5.0)
+
+
+def _norm_units(v: float) -> float:
+    return clamp(math.log1p(v) / math.log1p(10000.0))
+
+
+def _norm_revenue(v: float) -> float:
+    return clamp(math.log1p(v) / math.log1p(1_000_000.0))
+
+
+def _norm_review(v: float) -> float:
+    return clamp(math.log1p(v) / math.log1p(10000.0))
+
+
+def _norm_image(v: float) -> float:
+    return clamp(v / 10.0)
+
+
+def _norm_shipping(v: float) -> float:
+    return clamp(1.0 - v / 30.0)
+
+
+def _norm_margin(v: float) -> float:
+    if v > 1:
+        v /= 100.0
+    return clamp(v)
+
+
+def _norm_identity(v: float) -> float:
+    return clamp(v)
+
+
+NORMALIZERS: Dict[str, Callable[[float], float]] = {
+    "price": _norm_price,
+    "rating": _norm_rating,
+    "units_sold": _norm_units,
+    "revenue": _norm_revenue,
+    "review_count": _norm_review,
+    "image_count": _norm_image,
+    "shipping_days": _norm_shipping,
+    "profit_margin": _norm_margin,
+    "desire": _norm_identity,
+    "competition": _norm_identity,
+}
+
+
+def compute_winner_score_v2(product_row: Any, weights: Dict[str, float]) -> Dict[str, Any]:
+    """Compute Winner Score using available features only.
+
+    Returns a dict with keys ``score`` (or ``None``), ``used``, ``missing``,
+    ``missing_fields`` and ``fallback``.
     """
 
-    feats = extract_features_v2(product_row)
-    present = {k: v for k, v in feats.items() if v is not None}
-    used = len(present)
-    missing = len(ALL_METRICS) - used
-    if not present:
-        return {"score": 50, "used": 0, "missing": len(ALL_METRICS), "fallback": True}
+    extras = _get_extras(product_row)
+    feats: Dict[str, float] = {}
+    missing_fields: list[str] = []
+    for name, getter in FEATURE_MAP.items():
+        val = getter(product_row, extras)
+        if val is None or (isinstance(val, float) and math.isnan(val)):
+            missing_fields.append(name)
+            continue
+        norm = NORMALIZERS[name](val)
+        feats[name] = norm
 
-    weights_used = {k: weights.get(k, 0.0) for k in present}
+    used = len(feats)
+    missing = len(FEATURE_MAP) - used
+    if used == 0:
+        return {"score": None, "used": 0, "missing": len(FEATURE_MAP), "missing_fields": missing_fields, "fallback": True}
+
+    weights_used = {k: weights.get(k, 0.0) for k in feats}
     total_w = sum(weights_used.values())
     if total_w <= 0:
-        weights_used = {k: 1.0 / used for k in present}
+        weights_used = {k: 1.0 / used for k in feats}
     else:
         weights_used = {k: v / total_w for k, v in weights_used.items()}
 
-    for k, v in list(present.items()):
-        if v <= 1:
-            v = v * 100
-        if v < 0:
-            v = 0
-        elif v > 100:
-            v = 100
-        present[k] = v
-
-    score = int(round(sum(present[k] * weights_used.get(k, 0.0) for k in present)))
-    return {"score": score, "used": used, "missing": missing, "fallback": False}
+    score = sum(feats[k] * weights_used.get(k, 0.0) for k in feats)
+    score_int = int(round(score * 100))
+    return {
+        "score": score_int,
+        "used": used,
+        "missing": missing,
+        "missing_fields": missing_fields,
+        "fallback": False,
+    }

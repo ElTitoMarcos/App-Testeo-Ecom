@@ -44,9 +44,9 @@ def test_insert_score_normalizes_to_int():
 def test_weights_persist(tmp_path, monkeypatch):
     cfg_file = tmp_path / 'config.json'
     monkeypatch.setattr(config, 'CONFIG_FILE', cfg_file)
-    config.set_weights({'magnitud_deseo': 2.0, 'nivel_consciencia_headroom': 1.0})
+    config.set_weights({'price': 2.0, 'rating': 1.0})
     w = config.get_weights()
-    assert w['magnitud_deseo'] > w['nivel_consciencia_headroom']
+    assert w['price'] > w['rating']
 
 def test_row_to_dict_and_rget_sqlite_row():
     conn = sqlite3.connect(':memory:')
