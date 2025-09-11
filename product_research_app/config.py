@@ -239,3 +239,31 @@ def set_scoring_v2_weights(weights: Dict[str, float]) -> None:
     cfg = load_config()
     cfg["scoring_v2_weights"] = weights
     save_config(cfg)
+
+# -------- Winner Score weights for enrichment ---------
+WINNER_SCORE_DEFAULT_WEIGHTS: Dict[str, float] = {
+    "review_count": 1.0,
+    "image_count": 1.0,
+    "shipping_days_median": 1.0,
+    "profit_margin_pct": 1.0,
+}
+
+
+def get_winner_score_weights() -> Dict[str, float]:
+    """Return weighting factors for Winner Score enrichment variables."""
+    cfg = load_config()
+    user_weights = cfg.get("winner_score_weights", {})
+    weights: Dict[str, float] = {}
+    total = 0.0
+    for key, default in WINNER_SCORE_DEFAULT_WEIGHTS.items():
+        try:
+            val = float(user_weights.get(key, default))
+            if val < 0:
+                val = default
+        except Exception:
+            val = default
+        weights[key] = val
+        total += val
+    if total <= 0:
+        return WINNER_SCORE_DEFAULT_WEIGHTS.copy()
+    return {k: v / total for k, v in weights.items()}
