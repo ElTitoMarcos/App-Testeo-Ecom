@@ -36,15 +36,7 @@ function updateMasterState(){
   if(btnDel) btnDel.disabled = noneSelected;
   if(btnExp) btnExp.disabled = noneSelected;
   if(btnAdd) btnAdd.disabled = noneSelected;
-  if(btnGen){
-    const ap = window.allProducts || [];
-    const needs = Array.from(selection).some(id => {
-      const prod = ap.find(p => String(p.id)===String(id));
-      const val = prod ? Number(prod.winner_score) : 0;
-      return !val;
-    });
-    btnGen.disabled = noneSelected || !needs;
-  }
+  if(btnGen) btnGen.disabled = false;
   if(bottomBar){
     const selEl = document.getElementById('selCount');
     if(selEl) selEl.textContent = `${selection.size} seleccionados`;
