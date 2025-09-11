@@ -748,10 +748,10 @@ def generate_batch_columns(api_key: str, model: str, items: List[Dict[str, Any]]
     return ok, ko, usage, duration
 
 
-# ---------------- Winner Score v2 evaluation -----------------
+# ---------------- Winner Score evaluation -----------------
 
 
-WINNER_SCORE_V2_FIELDS = [
+WINNER_SCORE_FIELDS = [
     "magnitud_deseo",
     "nivel_consciencia",
     "saturacion_mercado",
@@ -813,7 +813,7 @@ def compute_numeric_scores(
 
 
 def build_winner_score_prompt(product: Dict[str, Any]) -> str:
-    """Construct the Winner Score v2 prompt for a product.
+    """Construct the Winner Score prompt for a product.
     The prompt asks the model to rate eight qualitative variables between 1 and
     5 and provide a brief justification for each.  Optional metrics can be
     supplied to give the model additional context.
@@ -886,7 +886,7 @@ Las justificaciones deben ser frases cortas (máx 15 palabras).
 def evaluate_winner_score(
     api_key: str, model: str, product: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """Call OpenAI to obtain Winner Score v2 sub-scores for a product.
+    """Call OpenAI to obtain Winner Score sub-scores for a product.
 
     The function returns a mapping with two keys:
 
@@ -922,7 +922,7 @@ def evaluate_winner_score(
     scores: Dict[str, int] = {}
     justifs_raw = raw.get("justificacion") or {}
     justifs: Dict[str, str] = {}
-    for field in WINNER_SCORE_V2_FIELDS:
+    for field in WINNER_SCORE_FIELDS:
         val = raw.get(field)
         try:
             ival = int(val)
@@ -1003,14 +1003,14 @@ def recommend_winner_weights(
 
     if not samples:
         return {
-            "weights": {k: 1.0 / len(WINNER_SCORE_V2_FIELDS) for k in WINNER_SCORE_V2_FIELDS},
+            "weights": {k: 1.0 / len(WINNER_SCORE_FIELDS) for k in WINNER_SCORE_FIELDS},
             "justification": "",
         }
 
     sample_json = json.dumps(samples[:20], ensure_ascii=False)
     prompt = (
         "Eres un optimizador de modelos para e-commerce. Tengo una tabla de productos con las ocho "
-        f"variables de Winner Score v2 y un valor de éxito real '{success_key}'. "
+        f"variables de Winner Score y un valor de éxito real '{success_key}'. "
         "Quiero pesos normalizados (suma=1) que maximicen la correlación entre el score total y el éxito. "
         "Devuelve JSON con { 'pesos': {variable: peso}, 'justificacion': 'texto breve' }.\nMuestra:\n"
         + sample_json
@@ -1029,13 +1029,13 @@ def recommend_winner_weights(
         justification = parsed.get("justificacion") or parsed.get("justification") or ""
     except Exception:
         return {
-            "weights": {k: 1.0 / len(WINNER_SCORE_V2_FIELDS) for k in WINNER_SCORE_V2_FIELDS},
+            "weights": {k: 1.0 / len(WINNER_SCORE_FIELDS) for k in WINNER_SCORE_FIELDS},
             "justification": "",
         }
 
     total = 0.0
     cleaned: Dict[str, float] = {}
-    for key in WINNER_SCORE_V2_FIELDS:
+    for key in WINNER_SCORE_FIELDS:
         try:
             val = float(weights_raw.get(key, 0.0))
             if val < 0:
@@ -1046,7 +1046,7 @@ def recommend_winner_weights(
         total += val
     if total <= 0:
         return {
-            "weights": {k: 1.0 / len(WINNER_SCORE_V2_FIELDS) for k in WINNER_SCORE_V2_FIELDS},
+            "weights": {k: 1.0 / len(WINNER_SCORE_FIELDS) for k in WINNER_SCORE_FIELDS},
             "justification": justification,
         }
     normalized = {k: v / total for k, v in cleaned.items()}

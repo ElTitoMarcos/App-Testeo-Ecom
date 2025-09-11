@@ -21,7 +21,7 @@
     durabilidad_recurrencia:{consumible:1.0, durable:0.0, intermedio:0.5}
   };
 
-  function getDefaultWeightsV2(){
+  function getDefaultWeights(){
     return {
       lanzamiento:{
         magnitud_deseo:70,
@@ -112,5 +112,5 @@
     return score/totalW;
   }
 
-  global.winnerV2 = {metricDefs, MAPS, normalizeMetric, computeRanges, scoreProduct, getDefaultWeightsV2};
+  global.winnerScore = {metricDefs, MAPS, normalizeMetric, computeRanges, scoreProduct, getDefaultWeights};
 })(window);

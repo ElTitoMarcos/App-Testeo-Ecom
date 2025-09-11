@@ -1,4 +1,4 @@
-"""Winner Score v2 calculation utilities."""
+"""Winner Score calculation utilities."""
 from __future__ import annotations
 import math
 from typing import Dict, Any, Iterable
