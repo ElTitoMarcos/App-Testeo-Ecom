@@ -25,6 +25,8 @@ def setup_env(tmp_path, monkeypatch):
         force=True,
     )
     monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "config.json")
+    from product_research_app.services import winner_score
+    monkeypatch.setattr(winner_score, "WINNER_WEIGHTS_FILE", tmp_path / "winner_weights.json")
     return web_app.ensure_db()
 
 def make_xlsx(path: Path, rows: List[List[object]]):
@@ -243,8 +245,9 @@ def test_patch_winner_weights_persists(tmp_path, monkeypatch):
     web_app.RequestHandler.do_PATCH(handler)
     resp = json.loads(handler.wfile.getvalue().decode("utf-8"))
     assert resp.get("status") == "ok"
-    cfg = config.load_config()
-    assert cfg.get("weights", {}).get("rating") == 0.25
+    from product_research_app.services import winner_score
+    data = winner_score.load_winner_weights_raw()
+    assert data.get("weights", {}).get("rating") == 0.25
 
 def test_get_endpoints_return_json(tmp_path, monkeypatch):
     setup_env(tmp_path, monkeypatch)
@@ -310,9 +313,10 @@ def test_weight_changes_persist_without_score_reset(tmp_path, monkeypatch):
     patch_weight("rating_weight", 0.2)
     patch_weight("price_weight", 0.3)
     patch_weight("units_sold_weight", 0.5)
+    from product_research_app.services import winner_score
 
-    cfg = config.load_config()
-    weights = cfg.get("weights", {})
+    data = winner_score.load_winner_weights_raw()
+    weights = data.get("weights", {})
     assert weights.get("rating") == 0.2
     assert weights.get("price") == 0.3
     assert weights.get("units_sold") == 0.5
@@ -543,7 +547,7 @@ def test_weights_eff_stable_when_touching_missing_metric(tmp_path, monkeypatch):
     hash_eff1 = resp1["weights_eff"]
     assert resp1["diag"]["sum_filtered"] == 0.0
 
-    body_patch = json.dumps({"key": "orders", "value": 1.0})
+    body_patch = json.dumps({"key": "orders", "value": 2.0})
     class Patcher:
         def __init__(self, body):
             self.path = "/api/config/winner-weights"

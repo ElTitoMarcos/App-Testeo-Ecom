@@ -557,6 +557,20 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._set_json()
             self.wfile.write(json.dumps({"path": str(LOG_PATH)}).encode("utf-8"))
             return
+        if path == "/api/config/winner-weights":
+            from .services import winner_score
+
+            data = winner_score.load_winner_weights_raw()
+            weights = {k: float(v) for k, v in data.get("weights", {}).items()}
+            weights_rounded = {k: round(float(v), 3) for k, v in weights.items()}
+            resp = {
+                "weights": weights,
+                "updated_at": data.get("updated_at"),
+                "weights_rounded": weights_rounded,
+            }
+            self._set_json()
+            self.wfile.write(json.dumps(resp).encode("utf-8"))
+            return
         if path == "/_import_history":
             params = parse_qs(parsed.query)
             try:
@@ -600,7 +614,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             else:
                 self.safe_write(lambda: self.send_json({"error": "not found"}, status=404))
             return
-        if path == "/products":
+        if path in ("/products", "/api/products"):
             # Return a list of products including extra metadata for UI display
             conn = ensure_db()
             rows = []
@@ -621,11 +635,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                 dr = rget(p, "date_range")
                 if dr is None:
                     dr = extra_dict.get("date_range")
+                price_val = rget(p, "price")
                 row = {
                     "id": rget(p, "id"),
                     "name": rget(p, "name"),
                     "category": rget(p, "category"),
-                    "price": rget(p, "price"),
+                    "price": price_val,
                     "image_url": rget(p, "image_url"),
                     "desire": rget(p, "desire"),
                     "desire_magnitude": rget(p, "desire_magnitude"),
@@ -639,6 +654,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "date_range": dr or "",
                     "extras": extra_dict,
                 }
+                if price_val is not None:
+                    try:
+                        row["price_display"] = round(float(price_val), 2)
+                    except Exception:
+                        row["price_display"] = price_val
                 row["winner_score"] = score_value
                 rows.append(row)
             self._set_json()
@@ -1222,7 +1242,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
                 return
             try:
-                config.update_weight(key, value)
+                from .services import winner_score
+
+                winner_score.update_winner_weight(key, value)
             except ValueError as exc:
                 self._set_json(400)
                 self.wfile.write(json.dumps({"error": str(exc)}).encode('utf-8'))
