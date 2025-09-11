@@ -43,6 +43,7 @@ from .services import ai_columns
 from .services import winner_score as winner_calc
 from . import gpt
 from . import title_analyzer
+from .utils.db import row_to_dict, rget
 
 WINNER_SCORE_FIELDS = winner_calc.ALL_METRICS
 
@@ -623,7 +624,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             except Exception:
                 limit = 20
             conn = ensure_db()
-            rows = [dict(r) for r in database.get_import_history(conn, limit)]
+            rows = [row_to_dict(r) for r in database.get_import_history(conn, limit)]
             self.safe_write(lambda: self.send_json(rows))
             return
         if path == "/_import_status":
@@ -636,7 +637,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             conn = ensure_db()
             row = database.get_import_job(conn, task_id)
             if row:
-                data = dict(row)
+                data = row_to_dict(row)
                 try:
                     if data.get("ai_counts"):
                         data["ai_counts"] = json.loads(data["ai_counts"])
@@ -677,12 +678,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                     extra_dict['Item Sold'] = extra_dict['units_sold']
                 if 'revenue' in extra_dict and 'Revenue($)' not in extra_dict:
                     extra_dict['Revenue($)'] = extra_dict['revenue']
-                score_value = None
-                if score:
-                    score_value = score.get("winner_score")
-                    breakdown_data = {}
+                score_dict = row_to_dict(score)
+                score_value = rget(score_dict, "winner_score", 0)
+                breakdown_data = {}
+                if score_dict:
                     try:
-                        raw_breakdown = score.get("winner_score_breakdown")
+                        raw_breakdown = rget(score_dict, "winner_score_breakdown")
                         breakdown_data = json.loads(raw_breakdown or "{}")
                     except Exception:
                         breakdown_data = {}
@@ -708,7 +709,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "extras": extra_dict,
                 }
                 row["winner_score"] = score_value
-                if score:
+                if score_dict:
                     row["winner_score_breakdown"] = breakdown_data
                 rows.append(row)
             self._set_json()
@@ -748,9 +749,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._set_json(404)
                 self.wfile.write(json.dumps({"error": "No score"}).encode("utf-8"))
                 return
-            score = scores[0]
+            score = row_to_dict(scores[0])
             self._set_json()
-            self.wfile.write(json.dumps({key: score[key] for key in score.keys()}).encode("utf-8"))
+            self.wfile.write(json.dumps(score).encode("utf-8"))
             return
         if path == "/lists":
             # return all saved groups/lists with product counts
@@ -782,12 +783,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                         extra_dict = json.loads(extra) if isinstance(extra, str) else (extra or {})
                     except Exception:
                         extra_dict = {}
-                    score_value = None
-                    if score:
-                        score_value = score.get("winner_score")
-                        breakdown_data = {}
+                    score_dict = row_to_dict(score)
+                    score_value = rget(score_dict, "winner_score", 0)
+                    breakdown_data = {}
+                    if score_dict:
                         try:
-                            raw_breakdown = score.get("winner_score_breakdown")
+                            raw_breakdown = rget(score_dict, "winner_score_breakdown")
                             breakdown_data = json.loads(raw_breakdown or "{}")
                         except Exception:
                             breakdown_data = {}
@@ -800,7 +801,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         "extras": extra_dict,
                     }
                     row["winner_score"] = score_value
-                    if score:
+                    if score_dict:
                         row["winner_score_breakdown"] = breakdown_data
                     rows.append(row)
                 self._set_json()

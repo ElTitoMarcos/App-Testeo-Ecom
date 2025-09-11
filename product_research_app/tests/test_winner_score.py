@@ -5,6 +5,7 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 from product_research_app import config, database
+from product_research_app.utils.db import row_to_dict, rget
 
 def test_insert_score_normalizes_to_int():
     conn = sqlite3.connect(':memory:')
@@ -46,3 +47,14 @@ def test_weights_persist(tmp_path, monkeypatch):
     config.set_weights({'magnitud_deseo': 2.0, 'nivel_consciencia_headroom': 1.0})
     w = config.get_weights()
     assert w['magnitud_deseo'] > w['nivel_consciencia_headroom']
+
+def test_row_to_dict_and_rget_sqlite_row():
+    conn = sqlite3.connect(':memory:')
+    conn.row_factory = sqlite3.Row
+    conn.execute('CREATE TABLE t (id INTEGER, name TEXT)')
+    conn.execute('INSERT INTO t VALUES (1, "x")')
+    row = conn.execute('SELECT * FROM t').fetchone()
+    d = row_to_dict(row)
+    assert d == {"id": 1, "name": "x"}
+    assert rget(row, "name") == "x"
+    assert rget(row, "missing", 7) == 7

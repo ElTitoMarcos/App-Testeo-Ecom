@@ -113,3 +113,25 @@ def test_generate_endpoint_updates_scores(tmp_path, monkeypatch):
     assert resp["updated"] == 1
     score = database.get_scores_for_product(conn, pid)[0]
     assert 0 <= score["winner_score"] <= 100
+
+def test_get_endpoints_return_json(tmp_path, monkeypatch):
+    setup_env(tmp_path, monkeypatch)
+    from http.server import HTTPServer
+    import threading, urllib.request, json, time
+
+    server = HTTPServer(("127.0.0.1", 0), web_app.RequestHandler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever)
+    thread.daemon = True
+    thread.start()
+    try:
+        time.sleep(0.1)
+        resp = urllib.request.urlopen(f"http://127.0.0.1:{port}/config")
+        assert resp.status == 200
+        json.loads(resp.read().decode("utf-8"))
+        resp = urllib.request.urlopen(f"http://127.0.0.1:{port}/lists")
+        assert resp.status == 200
+        json.loads(resp.read().decode("utf-8"))
+    finally:
+        server.shutdown()
+        thread.join()
