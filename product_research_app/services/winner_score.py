@@ -1,7 +1,8 @@
 """Winner Score calculation utilities."""
 from __future__ import annotations
+import json
 import math
-from typing import Dict, Any, Iterable
+from typing import Dict, Any, Iterable, Optional
 
 # Mapping tables for categorical metrics
 MAGNITUD_DESEO = {"low":0.33, "medium":0.66, "high":1.0}
@@ -106,3 +107,85 @@ def score_product(
     if total_w <= 0:
         return None
     return score / total_w
+
+
+# ---- V2 utilities ----
+
+FeatureDict = Dict[str, Optional[float]]
+
+
+def _safe_get(row: Any, key: str) -> Any:
+    try:
+        if isinstance(row, dict):
+            return row.get(key)
+        return row[key]
+    except Exception:
+        return None
+
+
+def extract_features_v2(product_row: Any) -> FeatureDict:
+    """Extract Winner Score features from a product row safely.
+
+    Missing keys or non-numeric values yield ``None``; no exceptions are
+    raised. Values may be sourced from the row itself or from an ``extra``/``extras``
+    JSON column.
+    """
+
+    extras = _safe_get(product_row, "extras")
+    if extras is None:
+        extras = _safe_get(product_row, "extra")
+    if isinstance(extras, str):
+        try:
+            extras = json.loads(extras)
+        except Exception:
+            extras = None
+
+    def get_val(key: str) -> Optional[float]:
+        val = _safe_get(product_row, key)
+        if val is None and isinstance(extras, dict):
+            val = extras.get(key)
+        try:
+            return float(val)
+        except Exception:
+            return None
+
+    return {k: get_val(k) for k in ALL_METRICS}
+
+
+def compute_winner_score_v2(product_row: Any, weights: Dict[str, float]) -> Dict[str, int | bool]:
+    """Compute Winner Score V2 using available features only.
+
+    Args:
+        product_row: Source of metrics (dict or sqlite3.Row).
+        weights: Weight mapping for all metrics (will be renormalised).
+
+    Returns:
+        Dict with integer score 0-100, number of used/missing metrics and
+        fallback flag.
+    """
+
+    feats = extract_features_v2(product_row)
+    present = {k: v for k, v in feats.items() if v is not None}
+    used = len(present)
+    missing = len(ALL_METRICS) - used
+    if not present:
+        return {"score": 50, "used": 0, "missing": len(ALL_METRICS), "fallback": True}
+
+    weights_used = {k: weights.get(k, 0.0) for k in present}
+    total_w = sum(weights_used.values())
+    if total_w <= 0:
+        weights_used = {k: 1.0 / used for k in present}
+    else:
+        weights_used = {k: v / total_w for k, v in weights_used.items()}
+
+    for k, v in list(present.items()):
+        if v <= 1:
+            v = v * 100
+        if v < 0:
+            v = 0
+        elif v > 100:
+            v = 100
+        present[k] = v
+
+    score = int(round(sum(present[k] * weights_used.get(k, 0.0) for k in present)))
+    return {"score": score, "used": used, "missing": missing, "fallback": False}
