@@ -20,6 +20,14 @@
     localStorage.columnsVisibility = JSON.stringify(state);
   }
 
+  function ensureColumnVisible(key){
+    const state = loadState();
+    if(!(key in state)){
+      state[key] = true;
+      saveState(state);
+    }
+  }
+
   function apply(){
     const state = loadState();
     document.querySelectorAll('th[data-key], td[data-key]').forEach(el => {
@@ -104,7 +112,9 @@
 
   window.refreshColumns = build;
   window.applyColumnVisibility = apply;
+  window.ensureColumnVisible = ensureColumnVisible;
 
   // initial attempt (will populate once table is rendered)
+  ensureColumnVisible('price');
   build();
 })();

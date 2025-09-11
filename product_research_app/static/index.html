@@ -241,9 +241,9 @@ let savedApiKeyHash = null;
 let savedApiKeyLength = 0;
 
 function formatPrice(n) {
-  const num = parseFloat(n);
-  if (isNaN(num)) return '';
-  return '$' + num.toFixed(2).replace(/\.00$/, '');
+  const num = Number(n);
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 })
+    .format(Number.isFinite(num) ? num : 0);
 }
 
 function showImportBanner(msg) {
@@ -403,7 +403,8 @@ const columns = [
   { key: 'image_url', label: 'Imagen', type: 'image' },
   { key: 'name', label: 'Nombre', type: 'string' },
   { key: 'category', label: 'Categoría', type: 'string' },
-  { key: 'price', label: 'Precio', type: 'number' },
+  { key: 'price', label: 'Price', type: 'number', width: 110, align: 'right', editable: false,
+    render: row => new Intl.NumberFormat('en-US', { style:'currency', currency:'USD', maximumFractionDigits: 2 }).format(row.price ?? 0) },
   { key: 'Product Rating', label: 'Rating', type: 'number' },
   { key: 'Item Sold', label: 'Unidades Vendidas', type: 'number' },
   { key: 'Revenue($)', label: 'Ingresos', type: 'number' },
@@ -503,7 +504,13 @@ function showSavedTick(key){
   if(el){ el.textContent='✓'; setTimeout(()=>{ el.textContent=''; },1000); }
 }
 
-function renderWeights(){
+function updateSliderLabel(el, val) {
+  const num = Number(val);
+  const shown = Number.isFinite(num) ? num.toFixed(3) : '0.000';
+  el.nextElementSibling?.querySelector('.weight-value')?.replaceChildren(document.createTextNode(shown));
+}
+
+function renderWeights(rounded){
   const list=document.getElementById('weightsList');
   if(!list) return;
   list.innerHTML='';
@@ -512,17 +519,17 @@ function renderWeights(){
     const li=document.createElement('li');
     li.className='metric-row';
     li.dataset.key=key;
-    li.innerHTML=`<span class="ws-handle">≡</span><span class="ws-name">${def.label}</span><div class="ws-slider-wrap"><input type="range" name="${key}" min="0" max="100" step="1" value="${weightValues[key]||0}" class="ws-slider"></div><span class="ws-value">${weightValues[key]||0}</span><span class="ws-status"></span>`;
+    li.innerHTML=`<span class="ws-handle">≡</span><span class="ws-name">${def.label}</span><div class="ws-slider-wrap"><input type="range" name="${key}" min="0" max="100" step="0.001" value="${weightValues[key]||0}" class="ws-slider"><span class="ws-value"><span class="weight-value"></span></span></div><span class="ws-status"></span>`;
     const range=li.querySelector('.ws-slider');
-    const val=li.querySelector('.ws-value');
     range.addEventListener('input',e=>{
       const k=normalizeKey(e.target.name);
       const v=parseFloat(e.target.value);
       weightValues[k]=v;
-      val.textContent=e.target.value;
+      updateSliderLabel(range, range.value);
       if(Number.isFinite(v)) saveWeightDebounced(k, v);
     });
     ['mousedown','touchstart'].forEach(ev=>{ range.addEventListener(ev,e=>{ e.stopPropagation(); }); });
+    updateSliderLabel(range, rounded?.[key] ?? weightValues[key]);
     list.appendChild(li);
   });
   Sortable.create(list,{ handle:'.ws-handle', animation:150, onEnd:()=>{ weightOrder=Array.from(list.children).map(li=>li.dataset.key); }});
@@ -613,13 +620,20 @@ async function adjustWeightsAI(){
   }
 }
 
-function initWeights(cfg){
-  weightValues = { ...defaultWeights(), ...(cfg.weights || {}) };
-  weightOrder = defaultOrder();
-  renderWeights();
-  document.getElementById('resetWeights').onclick=resetWeights;
-  const aiBtn=document.getElementById('aiWeights');
-  if(aiBtn) aiBtn.onclick=adjustWeightsAI;
+
+async function loadWeights(){
+  try{
+    const res = await fetch('/api/config/winner-weights');
+    const { weights, weights_rounded } = await res.json();
+    weightValues = { ...weights };
+    weightOrder = defaultOrder();
+    renderWeights(weights_rounded);
+    document.getElementById('resetWeights').onclick = resetWeights;
+    const aiBtn=document.getElementById('aiWeights');
+    if(aiBtn) aiBtn.onclick=adjustWeightsAI;
+  }catch(err){
+    console.error('Error loading weights', err);
+  }
 }
 
 async function loadConfig() {
@@ -649,7 +663,7 @@ async function loadConfig() {
     if (input) input.value = '';
     if (saveBtn) saveBtn.disabled = true;
   }
-  initWeights(cfg);
+  await loadWeights();
 }
 
 // Microinteraction progress bar
@@ -731,6 +745,7 @@ function renderTable() {
       if (col.width) th.style.width = col.width + 'px';
       if (col.minWidth) th.style.minWidth = col.minWidth + 'px';
       if (col.maxWidth) th.style.maxWidth = col.maxWidth + 'px';
+      if (col.align) th.style.textAlign = col.align;
       if (col.key === 'winner_score') th.title = 'Suma ponderada de 10 métricas normalizadas';
       th.onclick = () => sortBy(col.key, col.type);
       headerRow.appendChild(th);
@@ -773,6 +788,7 @@ function renderTable() {
       if (col.width) td.style.width = col.width + 'px';
       if (col.minWidth) td.style.minWidth = col.minWidth + 'px';
       if (col.maxWidth) td.style.maxWidth = col.maxWidth + 'px';
+      if (col.align) td.style.textAlign = col.align;
       let value = '';
       if (metricKeys.includes(key)) {
         value = item.winner_score_breakdown && item.winner_score_breakdown.scores ? item.winner_score_breakdown.scores[key] : '';
@@ -785,7 +801,9 @@ function renderTable() {
       } else {
         value = item.extras ? item.extras[key] : '';
       }
-      if (key === 'winner_score') {
+      if (col.render) {
+        try { td.textContent = col.render(item); } catch (e) { td.textContent = ''; }
+      } else if (key === 'winner_score') {
         const sc = parseFloat(value);
         if (!isNaN(sc)) {
           const scInt = Math.round(sc);
@@ -839,8 +857,6 @@ function renderTable() {
           };
           td.appendChild(btnCopy);
         }
-      } else if (key === 'price') {
-        td.textContent = value != null ? formatPrice(value) : '';
       } else if (key === 'desire') {
         const input = document.createElement('input');
         input.type = 'text';
@@ -998,7 +1014,8 @@ window.onload = () => {
   }
 };
 // Toggle config panel
-document.getElementById('configBtn').onclick = () => {
+document.getElementById('configBtn').onclick = async () => {
+  await loadWeights();
   const cfg = document.getElementById('config');
   const wcard = document.getElementById('weightsCard');
   if(!cfg || !wcard || !window.modalManager) return;

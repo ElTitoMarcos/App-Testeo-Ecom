@@ -174,21 +174,16 @@ SCORING_DEFAULT_WEIGHTS: Dict[str, float] = {
 
 
 def get_weights() -> Dict[str, float]:
-    """Return the weighting factors for Winner Score variables.
+    """Return Winner Score weights normalised to sum to 1."""
 
-    The configuration may include a ``weights`` object mapping the ten Winner
-    Score variables to numeric values between 0 and 1. If weights are missing or
-    invalid, defaults are used and the result is normalised so that the sum of
-    all weights equals 1.
-    """
+    from .services import winner_score  # lazy import to avoid circular
 
-    cfg = load_config()
-    user_weights = cfg.get("weights", {})
+    stored = winner_score.load_winner_weights()
     weights: Dict[str, float] = {}
     total = 0.0
     for key, default in SCORING_DEFAULT_WEIGHTS.items():
         try:
-            val = float(user_weights.get(key, default))
+            val = float(stored.get(key, default))
             if val < 0:
                 val = 0.0
         except Exception:
@@ -196,42 +191,32 @@ def get_weights() -> Dict[str, float]:
         weights[key] = val
         total += val
     if total <= 0:
-        return SCORING_DEFAULT_WEIGHTS.copy()
+        total = sum(SCORING_DEFAULT_WEIGHTS.values())
+        return {k: v / total for k, v in SCORING_DEFAULT_WEIGHTS.items()}
     return {k: v / total for k, v in weights.items()}
 
 
 def set_weights(weights: Dict[str, float]) -> None:
-    """Persist Winner Score weights to configuration."""
+    """Persist Winner Score weights."""
 
-    cfg = load_config()
-    cfg["weights"] = weights
-    cfg["weightsVersion"] = int(cfg.get("weightsVersion", 0)) + 1
-    cfg["weightsUpdatedAt"] = datetime.utcnow().isoformat()
-    save_config(cfg)
+    from .services import winner_score  # lazy import
+
+    winner_score.set_winner_weights(weights)
 
 
 def update_weight(key: str, value: float) -> None:
     """Update a single Winner Score weight and persist immediately."""
 
-    from .services import winner_score  # lazy import to avoid circular
+    from .services import winner_score  # lazy import
 
-    norm_key = winner_score.normalize_weight_key(key)
-    cfg = load_config()
-    weights = cfg.get("weights", {})
-    try:
-        weights[norm_key] = float(value)
-    except Exception:
-        weights[norm_key] = value
-    cfg["weights"] = weights
-    cfg["weightsVersion"] = int(cfg.get("weightsVersion", 0)) + 1
-    cfg["weightsUpdatedAt"] = datetime.utcnow().isoformat()
-    save_config(cfg)
-    winner_score.invalidate_weights_cache()
+    winner_score.update_winner_weight(key, value)
 
 
 def get_weights_version() -> int:
-    cfg = load_config()
+    from .services import winner_score  # lazy import
+
+    data = winner_score.load_winner_weights_raw()
     try:
-        return int(cfg.get("weightsVersion", 0))
+        return int(data.get("version", 0))
     except Exception:
         return 0
