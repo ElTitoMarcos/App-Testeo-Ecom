@@ -5,6 +5,7 @@ import math
 import hashlib
 import logging
 import sqlite3
+from datetime import datetime
 from typing import Dict, Any, Iterable, Optional, Callable
 
 from ..utils.db import rget
@@ -272,6 +273,12 @@ NORMALIZERS: Dict[str, Callable[[float], float]] = {
 }
 
 
+def load_winner_weights() -> Dict[str, float]:
+    """Load Winner Score weights from persistent configuration."""
+
+    return config.get_weights()
+
+
 def compute_winner_score_v2(product_row: Any, weights: Dict[str, float]) -> Dict[str, Any]:
     """Compute Winner Score using available features only.
 
@@ -290,33 +297,39 @@ def compute_winner_score_v2(product_row: Any, weights: Dict[str, float]) -> Dict
         norm = NORMALIZERS[name](val)
         feats[name] = norm
 
-    used = len(feats)
-    missing = len(FEATURE_MAP) - used
+    present = list(feats.keys())
+    missing_fields = list(set(FEATURE_MAP.keys()) - set(present))
+    used = len(present)
+
     if used == 0:
         return {
-            "score": None,
-            "score_float": None,
+            "score": 0,
+            "score_float": 0.0,
             "used": 0,
             "missing": len(FEATURE_MAP),
             "missing_fields": missing_fields,
+            "present_fields": present,
+            "effective_weights": {},
             "fallback": True,
         }
 
-    weights_used = {k: weights.get(k, 0.0) for k in feats}
+    weights_used = {k: weights.get(k, 0.0) for k in present}
     total_w = sum(weights_used.values())
     if total_w <= 0:
-        weights_used = {k: 1.0 / used for k in feats}
+        weights_used = {k: 1.0 / used for k in present}
     else:
         weights_used = {k: v / total_w for k, v in weights_used.items()}
 
-    score_float = sum(feats[k] * weights_used.get(k, 0.0) for k in feats)
+    score_float = sum(feats[k] * weights_used.get(k, 0.0) for k in present)
     score_int = int(round(score_float * 100))
     return {
         "score": score_int,
         "score_float": score_float,
         "used": used,
-        "missing": missing,
+        "missing": len(FEATURE_MAP) - used,
         "missing_fields": missing_fields,
+        "present_fields": present,
+        "effective_weights": weights_used,
         "fallback": False,
     }
 
@@ -325,7 +338,7 @@ def generate_winner_scores(
     conn: sqlite3.Connection,
     product_ids: Optional[Iterable[Any]] = None,
     weights: Optional[Dict[str, float]] = None,
-) -> Dict[str, int]:
+    ) -> Dict[str, int | str]:
     """Recalculate and persist Winner Scores for the given products.
 
     Args:
@@ -335,11 +348,13 @@ def generate_winner_scores(
         weights: Optional weighting factors. If ``None``, weights are loaded
             fresh from configuration on each call.
 
-    Returns a dict with ``processed`` and ``updated`` counts.
+    Returns a dict with counts and weight metadata.
     """
 
     if weights is None:
-        weights = config.get_weights()
+        weights = load_winner_weights()
+
+    weights_version = config.get_weights_version()
 
     ids: Optional[set[int]] = None
     if product_ids:
@@ -353,26 +368,59 @@ def generate_winner_scores(
         rows = database.list_products(conn)
 
     processed = 0
-    updated = 0
+    updated_int = 0
     snapshot = hashlib.sha1(
         json.dumps(weights, sort_keys=True).encode("utf-8")
     ).hexdigest()[:8]
+    now = datetime.utcnow().isoformat()
     for row in rows:
         pid = row["id"]
         old_score = row["winner_score"]
         res = compute_winner_score_v2(row, weights)
-        sf = res.get("score_float")
-        if sf is None:
-            new_score = old_score
+        sf = res.get("score_float") or 0.0
+        present = set(res.get("present_fields", []))
+        missing = set(res.get("missing_fields", []))
+        eff_w = {k: round(v, 3) for k, v in res.get("effective_weights", {}).items()}
+
+        score_raw_0_100 = max(0.0, min(1.0, sf)) * 100.0
+        new_score = int(round(score_raw_0_100))
+
+        if new_score != old_score or row["winner_score_raw"] != score_raw_0_100:
+            conn.execute(
+                "UPDATE products SET winner_score = ?, winner_score_raw = ?, winner_score_updated_at = ? WHERE id = ?",
+                (new_score, score_raw_0_100, now, pid),
+            )
+            if new_score != old_score:
+                updated_int += 1
+
+        if not present:
+            logger.warning(
+                "Winner Score: product=%s score_int=%s score_raw=%.3f weights_snapshot=%s present=%s missing=%s effective_weights=%s no_features_present",
+                pid,
+                new_score,
+                score_raw_0_100,
+                snapshot,
+                present,
+                missing,
+                eff_w,
+            )
         else:
-            new_score = int(round(max(0.0, min(1.0, sf)) * 100))
-        if new_score != old_score:
-            conn.execute("UPDATE products SET winner_score = ? WHERE id = ?", (new_score, pid))
-            updated += 1
-        logger.info(
-            "Winner Score: product=%s score=%s weights_snapshot=%s", pid, new_score, snapshot
-        )
+            logger.info(
+                "Winner Score: product=%s score_int=%s score_raw=%.3f weights_snapshot=%s present=%s missing=%s effective_weights=%s",
+                pid,
+                new_score,
+                score_raw_0_100,
+                snapshot,
+                present,
+                missing,
+                eff_w,
+            )
         processed += 1
 
     conn.commit()
-    return {"processed": processed, "updated": updated}
+    return {
+        "processed": processed,
+        "updated": updated_int,
+        "weights_hash": snapshot,
+        "weights_version": weights_version,
+    }

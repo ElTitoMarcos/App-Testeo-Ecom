@@ -64,6 +64,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+DEBUG = bool(os.environ.get("DEBUG"))
+
 def ensure_db():
     try:
         conn = database.get_connection(DB_PATH)
@@ -688,6 +690,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             weights = cfg.get("weights", {})
             self._set_json()
             self.wfile.write(json.dumps(weights).encode("utf-8"))
+            return
+        if path == "/api/winner-score/explain" and DEBUG:
+            self.handle_winner_score_explain(parsed)
             return
         if path.startswith("/score/"):
             try:
@@ -2430,9 +2435,51 @@ class RequestHandler(BaseHTTPRequestHandler):
         self._set_json()
         self.wfile.write(
             json.dumps(
-                {"ok": True, "processed": result.get("processed", 0), "updated": result.get("updated", 0)}
+                {
+                    "ok": True,
+                    "processed": result.get("processed", 0),
+                    "updated": result.get("updated", 0),
+                    "weights_hash": result.get("weights_hash"),
+                    "weights_version": result.get("weights_version"),
+                }
             ).encode("utf-8")
         )
+
+    def handle_winner_score_explain(self, parsed):
+        """Return detailed Winner Score components for debugging."""
+
+        params = parse_qs(parsed.query)
+        ids_param = params.get("ids", [""])[0]
+        ids = [int(x) for x in ids_param.split(",") if x.strip()]
+
+        conn = ensure_db()
+        weights = winner_calc.load_winner_weights()
+
+        if ids:
+            placeholders = ",".join("?" for _ in ids)
+            cur = conn.execute(
+                f"SELECT * FROM products WHERE id IN ({placeholders})",
+                tuple(ids),
+            )
+            rows = cur.fetchall()
+        else:
+            rows = database.list_products(conn)
+
+        data: Dict[str, Any] = {}
+        for row in rows:
+            res = winner_calc.compute_winner_score_v2(row, weights)
+            sf = res.get("score_float") or 0.0
+            score_raw = max(0.0, min(1.0, sf)) * 100.0
+            data[row["id"]] = {
+                "present": res.get("present_fields", []),
+                "missing": res.get("missing_fields", []),
+                "effective_weights": {k: round(v, 3) for k, v in res.get("effective_weights", {}).items()},
+                "score_raw": score_raw,
+                "score_int": int(round(score_raw)),
+            }
+
+        self._set_json()
+        self.wfile.write(json.dumps(data).encode("utf-8"))
 
     def handle_create_list(self):
         """Create a new user defined list (group) of products."""
