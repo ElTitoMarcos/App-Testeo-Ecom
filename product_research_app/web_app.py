@@ -489,7 +489,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
         self.end_headers()
 
     def _set_html(self, status=200):
@@ -497,7 +497,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
         self.end_headers()
 
     def safe_write(self, func):
@@ -563,7 +563,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
         self.end_headers()
 
     def do_GET(self):
@@ -640,7 +640,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     extra_dict['Item Sold'] = extra_dict['units_sold']
                 if 'revenue' in extra_dict and 'Revenue($)' not in extra_dict:
                     extra_dict['Revenue($)'] = extra_dict['revenue']
-                score_value = rget(p, "winner_score", 0)
+                score_value = rget(p, "winner_score")
                 dr = rget(p, "date_range")
                 if dr is None:
                     dr = extra_dict.get("date_range")
@@ -736,7 +736,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     except Exception:
                         extra_dict = {}
                     score_dict = row_to_dict(score)
-                    score_value = rget(score_dict, "winner_score", 0)
+                    score_value = rget(score_dict, "winner_score")
                     breakdown_data = {}
                     if score_dict:
                         try:
@@ -1222,6 +1222,27 @@ class RequestHandler(BaseHTTPRequestHandler):
                     continue
             cfg['weights'] = weights_cfg
             config.save_config(cfg)
+            self._set_json()
+            self.wfile.write(json.dumps({"status": "ok"}).encode('utf-8'))
+            return
+        self.send_error(404)
+
+    def do_PATCH(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path == "/api/config/winner-weights":
+            length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(length).decode('utf-8')
+            try:
+                data = json.loads(body)
+                key = str(data.get("key"))
+                value = float(data.get("value"))
+            except Exception:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+                return
+            clean_key = key[:-7] if key.endswith("_weight") else key
+            config.update_weight(clean_key, value)
             self._set_json()
             self.wfile.write(json.dumps({"status": "ok"}).encode('utf-8'))
             return
@@ -1899,31 +1920,19 @@ class RequestHandler(BaseHTTPRequestHandler):
                     commit=False,
                 )
             conn_ws.commit()
-        pending = []
-        cost_msg = None
-        cost_est = None
         if inserted_ids and config.is_auto_fill_ia_on_import_enabled():
             cfg_cost = config.get_ai_cost_config()
-            res_ai = ai_columns.fill_ai_columns(
-                inserted_ids,
-                model=cfg_cost.get("model"),
-                batch_mode=len(inserted_ids) >= cfg_cost.get("useBatchWhenCountGte", 300),
-                cost_cap_usd=cfg_cost.get("costCapUSD"),
-            )
-            pending = res_ai.get("pending_ids", [])
-            cost_msg = res_ai.get("ui_cost_message")
-            cost_est = res_ai.get("cost_estimated_usd")
-            if res_ai.get("error"):
+            try:
+                ai_columns.fill_ai_columns(
+                    inserted_ids,
+                    model=cfg_cost.get("model"),
+                    batch_mode=len(inserted_ids) >= cfg_cost.get("useBatchWhenCountGte", 300),
+                    cost_cap_usd=cfg_cost.get("costCapUSD"),
+                )
+            except Exception:
                 logger.info("No se pudieron completar las columnas con IA: revisa la API.")
         self._set_json()
-        payload: Dict[str, Any] = {}
-        if cost_est is not None:
-            payload["cost_estimated_usd"] = cost_est
-        if cost_msg:
-            payload["ui_cost_message"] = cost_msg
-        if pending:
-            payload["pending_ids"] = pending
-        self._safe_write(json.dumps(payload).encode('utf-8'))
+        self._safe_write(json.dumps({"ok": True, "imported": len(inserted_ids)}).encode('utf-8'))
 
     def handle_evaluate_all(self):
         conn = ensure_db()
@@ -2417,9 +2426,10 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         logger.info("Winner Score generate: ids_length=%d", len(ids))
         id_list = [int(i) for i in ids if str(i).isdigit()]
-        received = len(id_list)
-
         conn = ensure_db()
+        if not id_list:
+            id_list = [row["id"] for row in database.list_products(conn)]
+        received = len(id_list)
         weights = config.get_weights()
         updated = 0
         skipped = 0

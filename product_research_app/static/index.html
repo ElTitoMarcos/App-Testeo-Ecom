@@ -278,32 +278,9 @@ async function pollImportStatus(id) {
     } else {
       localStorage.removeItem(IMPORT_TASK_LS_KEY);
       if (data.status === 'done') {
-        await fetchProducts();
-        toast.success(data.message || 'Winner Score actualizado tras importar');
-        const n = data.imported || data.rows_imported || 0;
-        const ws = data.winner_score_updated || 0;
-        toast.success(`Importación completada: ${n} filas nuevas. IDs desde 0 si era la primera importación.`);
-        if (ws) toast.success(`Winner Score actualizado en ${ws} productos`);
-        const counts = data.ai_counts || {};
-        const done = counts.n_procesados || 0;
-        const total = counts.n_para_ia || 0;
-        const skipped = counts.n_omitidos_por_valor_existente || 0;
-        if (total) {
-          toast.success(`IA aplicada a ${done}/${total}. ${skipped} omitidos (ya tenían valor).`);
-        }
-        if (data.ai_error) {
-          toast.info('No se pudieron completar las columnas con IA: revisa la API.');
-        }
+        await reloadTable();
         hideImportBanner();
-        if (data.pending_ids && data.pending_ids.length) {
-          toast.info('Quedan productos pendientes de IA', {
-            actionText: 'Reintentar IA ahora',
-            onAction: async () => {
-              await window.handleCompletarIA({ ids: data.pending_ids });
-              fetchProducts();
-            }
-          });
-        }
+        toast.success(`Importados ${data.imported || 0}`);
       } else {
         toast.error(data.error || 'Error en importación');
       }
@@ -484,21 +461,30 @@ function preprocessProducts(list){
 
 const metricDefs = window.winnerScore.metricDefs;
 const metricKeys = metricDefs.map(m=>m.key);
-const WEIGHT_KEY = 'winnerWeightsV2';
-const ORDER_KEY = 'winnerOrder';
 let weightValues = {};
 let weightOrder = [];
 
 function debounce(fn, ms=150){
   let t; return (...args)=>{ clearTimeout(t); t=setTimeout(()=>fn(...args), ms); };
 }
-const debouncedRecalc = debounce(() => recalculateWinnerScore(), 150);
 
 function defaultWeights(){ return { ...window.winnerScore.getDefaultWeights().lanzamiento }; }
 function defaultOrder(){ return metricDefs.map(m=>m.key); }
 
-function loadWeights(){ try{ weightValues = JSON.parse(localStorage.getItem(WEIGHT_KEY)||'{}'); } catch(e){ weightValues={}; } weightValues = { ...defaultWeights(), ...weightValues }; }
-function loadOrder(){ try{ weightOrder = JSON.parse(localStorage.getItem(ORDER_KEY)||'[]'); } catch(e){ weightOrder=[]; } if(!Array.isArray(weightOrder) || weightOrder.length !== metricDefs.length){ weightOrder = defaultOrder(); } }
+const saveFns = {};
+function saveWeightDebounced(key, value, statusEl){
+  if(!saveFns[key]){
+    saveFns[key] = debounce(async (val)=>{
+      try{
+        await fetchJson('/api/config/winner-weights', {method:'PATCH', body: JSON.stringify({key, value: Number(val)})});
+        if(statusEl){ statusEl.textContent='✓'; setTimeout(()=>statusEl.textContent='',1000); }
+      }catch(e){
+        if(statusEl){ statusEl.textContent='✗'; }
+      }
+    },300);
+  }
+  saveFns[key](value);
+}
 
 function renderWeights(){
   const list=document.getElementById('weightsList');
@@ -509,23 +495,23 @@ function renderWeights(){
     const li=document.createElement('li');
     li.className='metric-row';
     li.dataset.key=key;
-    li.innerHTML=`<span class="ws-handle">≡</span><span class="ws-name">${def.label}</span><div class="ws-slider-wrap"><input type="range" min="0" max="100" step="1" value="${weightValues[key]||0}" class="ws-slider"></div><span class="ws-value">${weightValues[key]||0}</span>`;
+    li.innerHTML=`<span class="ws-handle">≡</span><span class="ws-name">${def.label}</span><div class="ws-slider-wrap"><input type="range" min="0" max="100" step="1" value="${weightValues[key]||0}" class="ws-slider"></div><span class="ws-value">${weightValues[key]||0}</span><span class="ws-status"></span>`;
     const range=li.querySelector('.ws-slider');
     const val=li.querySelector('.ws-value');
-    range.addEventListener('input',()=>{ weightValues[key]=Number(range.value); val.textContent=range.value; saveState(); });
+    const status=li.querySelector('.ws-status');
+    range.addEventListener('input',()=>{ weightValues[key]=Number(range.value); val.textContent=range.value; saveWeightDebounced(key, range.value, status); });
     ['mousedown','touchstart'].forEach(ev=>{ range.addEventListener(ev,e=>{ e.stopPropagation(); }); });
     list.appendChild(li);
   });
-  Sortable.create(list,{ handle:'.ws-handle', animation:150, onEnd:()=>{ weightOrder=Array.from(list.children).map(li=>li.dataset.key); saveState(); }});
+  Sortable.create(list,{ handle:'.ws-handle', animation:150, onEnd:()=>{ weightOrder=Array.from(list.children).map(li=>li.dataset.key); }});
 }
 
-function saveState(){
-  localStorage.setItem(WEIGHT_KEY, JSON.stringify(weightValues));
-  localStorage.setItem(ORDER_KEY, JSON.stringify(weightOrder));
-  debouncedRecalc();
+function resetWeights(){
+  weightValues=defaultWeights();
+  weightOrder=defaultOrder();
+  renderWeights();
+  for(const k in weightValues){ saveWeightDebounced(k, weightValues[k]); }
 }
-
-function resetWeights(){ weightValues=defaultWeights(); weightOrder=defaultOrder(); saveState(); renderWeights(); }
 
 function stratifiedSample(list, n){
   const byCat = {};
@@ -596,8 +582,8 @@ async function adjustWeightsAI(){
       newWeights[k]=v;
     }
     weightValues=newWeights;
-    saveState();
     renderWeights();
+    for(const k in weightValues){ saveWeightDebounced(k, weightValues[k]); }
     toast.success('Pesos ajustados por IA');
   }catch(err){
     console.error(err);
@@ -605,37 +591,13 @@ async function adjustWeightsAI(){
   }
 }
 
-function initWeights(){ loadWeights(); loadOrder(); renderWeights(); document.getElementById('resetWeights').onclick=resetWeights; const aiBtn=document.getElementById('aiWeights'); if(aiBtn) aiBtn.onclick=adjustWeightsAI; }
-
-function recalculateWinnerScore(){
-  if(!Array.isArray(allProducts)) return;
-  let stored={};
-  try{ stored=JSON.parse(localStorage.getItem(WEIGHT_KEY)||'{}'); }catch(e){ stored={}; }
-  stored={ ...defaultWeights(), ...stored };
-  let sum=0;
-  metricKeys.forEach(k=>{ sum+=Number(stored[k])||0; });
-  if(sum<=0){
-    stored=defaultWeights();
-    sum=0; metricKeys.forEach(k=>{ sum+=Number(stored[k])||0; });
-  }
-  const normWeights={};
-  metricKeys.forEach(k=>{ normWeights[k]= sum>0 ? (Number(stored[k])||0)/sum : 0; });
-  weightValues=stored;
-  const ranges=window.winnerScore.computeRanges(allProducts);
-  allProducts.forEach(p=>{
-    let total=0; let score=0;
-    metricKeys.forEach(k=>{
-      const w=normWeights[k];
-      const v=window.winnerScore.normalizeMetric(k, p[k], ranges);
-      if(v!=null){ total+=w; score+=w*v; }
-    });
-    const raw = total>0 ? (score/total)*100 : 0;
-    p.winner_score = Math.max(0, Math.min(100, Math.round(raw)));
-  });
-  if(sortField==='winner_score'){
-    sortProducts();
-  }
-  renderTable();
+function initWeights(cfg){
+  weightValues = { ...defaultWeights(), ...(cfg.weights || {}) };
+  weightOrder = defaultOrder();
+  renderWeights();
+  document.getElementById('resetWeights').onclick=resetWeights;
+  const aiBtn=document.getElementById('aiWeights');
+  if(aiBtn) aiBtn.onclick=adjustWeightsAI;
 }
 
 async function loadConfig() {
@@ -665,7 +627,7 @@ async function loadConfig() {
     if (input) input.value = '';
     if (saveBtn) saveBtn.disabled = true;
   }
-  initWeights();
+  initWeights(cfg);
 }
 
 // Microinteraction progress bar
@@ -718,8 +680,10 @@ async function fetchProducts(preserve=true) {
   }
   updateMasterState();
   renderTable();
-  recalculateWinnerScore();
 }
+
+window.fetchProducts = fetchProducts;
+async function reloadTable(){ await fetchProducts(); }
 
 function renderTable() {
   const headerRow = document.getElementById('headerRow');
@@ -1062,23 +1026,14 @@ fileInputEl.onchange = async (ev) => {
   if (loading) loading.style.display = 'flex';
   try {
     const data = await fetchJson('/upload', {method:'POST', body: formData});
-    if (data.ui_cost_message) {
-      showImportBanner(data.ui_cost_message);
-    }
-    if(data.task_id){
+    if (data.task_id) {
       localStorage.setItem(IMPORT_TASK_LS_KEY, data.task_id);
       pollImportStatus(data.task_id);
-      toast.success('Importación iniciada');
-    } else if(data.error){
-      toast.error('Error: '+data.error);
-    } else {
-      if(data.ai_error){
-        toast.info('No se pudieron completar las columnas con IA: revisa la API.');
-      }
-      if(data.inserted){
-        fetchProducts();
-        toast.success(`Importados ${data.inserted}`);
-      }
+    } else if (data.ok) {
+      await reloadTable();
+      toast.success(`Importados ${data.imported || 0}`);
+    } else if (data.error) {
+      toast.error('Error: ' + data.error);
     }
   } catch(err){
     console.error(err);
@@ -1333,22 +1288,26 @@ document.getElementById('btnExport').onclick = async () => {
   } catch(err){ console.error(err); toast.error('Error al exportar'); }
 };
 
-// Generate Winner Score for selected products
+// Generate Winner Score for selected or all products
 document.getElementById('btnGenWinner').onclick = async () => {
   const ids = Array.from(selection, Number);
-  if(!ids.length){
-    toast.error('Selecciona al menos un producto');
-    return;
-  }
   const btn = document.getElementById('btnGenWinner');
+  const prev = btn.textContent;
   btn.disabled = true;
+  btn.textContent = 'Actualizando…';
   startProgress();
   try{
-    await winnerScore.generate(ids);
+    const res = await winnerScore.generate(ids);
+    toast.success(`Winner Score actualizado (${res.updated || 0})`);
+    if(!ids.length){
+      await reloadTable();
+    }
   }catch(err){
     console.error(err);
+    toast.error('No se pudo actualizar el Winner Score');
   } finally {
     btn.disabled = false;
+    btn.textContent = prev;
   }
 };
 

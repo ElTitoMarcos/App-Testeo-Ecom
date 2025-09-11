@@ -128,6 +128,51 @@ def test_scoring_v2_generate_cases(tmp_path, monkeypatch):
     assert resp2["updated"] == 0
     assert resp2["skipped"] == 1
 
+
+def test_scoring_v2_generate_all_when_no_ids(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(web_app, "ensure_db", lambda: conn)
+    pid_a = database.insert_product(
+        conn,
+        name="A",
+        description="",
+        category="",
+        price=None,
+        currency=None,
+        image_url="",
+        source="",
+        extra={"rating": 4.0},
+        product_id=1,
+    )
+    pid_b = database.insert_product(
+        conn,
+        name="B",
+        description="",
+        category="",
+        price=None,
+        currency=None,
+        image_url="",
+        source="",
+        extra={},
+        product_id=2,
+    )
+
+    body = json.dumps({})
+
+    class Dummy:
+        def __init__(self, body):
+            self.headers = {"Content-Length": str(len(body))}
+            self.rfile = io.BytesIO(body.encode("utf-8"))
+            self.wfile = io.BytesIO()
+
+        def _set_json(self, code=200):
+            self.status = code
+
+    handler = Dummy(body)
+    web_app.RequestHandler.handle_scoring_v2_generate(handler)
+    resp = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert resp["received"] == 2
+
 def test_products_endpoint_serializes_rows(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)
     monkeypatch.setattr(web_app, "ensure_db", lambda: conn)
@@ -143,6 +188,8 @@ def test_products_endpoint_serializes_rows(tmp_path, monkeypatch):
         extra={},
         product_id=1,
     )
+    conn.execute("UPDATE products SET winner_score=42 WHERE id=?", (pid,))
+    conn.commit()
 
     class Dummy:
         def __init__(self):
@@ -167,6 +214,30 @@ def test_products_endpoint_serializes_rows(tmp_path, monkeypatch):
     web_app.RequestHandler.do_GET(handler)
     resp = json.loads(handler.wfile.getvalue().decode("utf-8"))
     assert isinstance(resp, list) and resp and resp[0]["id"] == pid
+    assert resp[0]["winner_score"] == 42
+
+
+def test_patch_winner_weights_persists(tmp_path, monkeypatch):
+    setup_env(tmp_path, monkeypatch)
+
+    body = json.dumps({"key": "rating_weight", "value": 0.25})
+
+    class Dummy:
+        def __init__(self, body):
+            self.path = "/api/config/winner-weights"
+            self.headers = {"Content-Length": str(len(body))}
+            self.rfile = io.BytesIO(body.encode("utf-8"))
+            self.wfile = io.BytesIO()
+
+        def _set_json(self, code=200):
+            self.status = code
+
+    handler = Dummy(body)
+    web_app.RequestHandler.do_PATCH(handler)
+    resp = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert resp.get("status") == "ok"
+    cfg = config.load_config()
+    assert cfg.get("weights", {}).get("rating") == 0.25
 
 def test_get_endpoints_return_json(tmp_path, monkeypatch):
     setup_env(tmp_path, monkeypatch)
