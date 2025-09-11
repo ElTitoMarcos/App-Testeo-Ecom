@@ -48,7 +48,6 @@ def test_weights_persist(tmp_path, monkeypatch):
     w = config.get_weights()
     assert w['magnitud_deseo'] > w['nivel_consciencia_headroom']
 
-
 def test_row_to_dict_and_rget_sqlite_row():
     conn = sqlite3.connect(':memory:')
     conn.row_factory = sqlite3.Row

@@ -114,7 +114,6 @@ def test_generate_endpoint_updates_scores(tmp_path, monkeypatch):
     score = database.get_scores_for_product(conn, pid)[0]
     assert 0 <= score["winner_score"] <= 100
 
-
 def test_get_endpoints_return_json(tmp_path, monkeypatch):
     setup_env(tmp_path, monkeypatch)
     from http.server import HTTPServer
