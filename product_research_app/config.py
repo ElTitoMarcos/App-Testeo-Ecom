@@ -203,3 +203,16 @@ def set_weights(weights: Dict[str, float]) -> None:
     cfg = load_config()
     cfg["weights"] = weights
     save_config(cfg)
+
+
+def update_weight(key: str, value: float) -> None:
+    """Update a single Winner Score weight and persist immediately."""
+
+    cfg = load_config()
+    weights = cfg.get("weights", {})
+    try:
+        weights[key] = float(value)
+    except Exception:
+        weights[key] = value
+    cfg["weights"] = weights
+    save_config(cfg)
