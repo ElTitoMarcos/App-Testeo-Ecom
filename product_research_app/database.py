@@ -115,6 +115,27 @@ def initialize_database(conn: sqlite3.Connection) -> None:
     for col in metric_real_cols:
         if col not in cols:
             cur.execute(f"ALTER TABLE products ADD COLUMN {col} REAL")
+
+    # enrichment columns
+    enrichment_cols = {
+        "review_count": "INTEGER",
+        "review_count_estimated": "INTEGER",
+        "review_count_confidence": "REAL",
+        "image_count": "INTEGER",
+        "image_count_estimated": "INTEGER",
+        "image_count_confidence": "REAL",
+        "shipping_days_min": "INTEGER",
+        "shipping_days_max": "INTEGER",
+        "shipping_days_median": "INTEGER",
+        "shipping_days_estimated": "INTEGER",
+        "shipping_days_confidence": "REAL",
+        "profit_margin_pct": "REAL",
+        "profit_margin_estimated": "INTEGER",
+        "profit_margin_confidence": "REAL",
+    }
+    for col, typ in enrichment_cols.items():
+        if col not in cols:
+            cur.execute(f"ALTER TABLE products ADD COLUMN {col} {typ}")
     # drop obsolete columns if present
     for obsolete in [
         "facilidad_logistica",
@@ -282,6 +303,17 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         cur.execute("ALTER TABLE import_jobs ADD COLUMN winner_score_updated INTEGER DEFAULT 0")
     except Exception:
         pass
+
+    # cache for enrichment IA responses
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ia_cache_enrichment (
+            signature TEXT PRIMARY KEY,
+            result JSON,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
 
 
@@ -419,6 +451,35 @@ def get_product(conn: sqlite3.Connection, product_id: int) -> Optional[sqlite3.R
     return cur.fetchone()
 
 
+# -------- enrichment IA cache helpers --------
+
+
+def get_enrichment_cache(conn: sqlite3.Connection, signature: str) -> Optional[Dict[str, Any]]:
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT result, created_at FROM ia_cache_enrichment WHERE signature = ?",
+        (signature,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    try:
+        data = json.loads(row["result"])
+        data["created_at"] = row["created_at"]
+        return data
+    except Exception:
+        return None
+
+
+def set_enrichment_cache(conn: sqlite3.Connection, signature: str, result: Dict[str, Any]) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        "REPLACE INTO ia_cache_enrichment(signature, result, created_at) VALUES (?,?,?)",
+        (signature, json.dumps(result), datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+
+
 def update_product(
     conn: sqlite3.Connection,
     product_id: int,
@@ -455,6 +516,20 @@ def update_product(
         "facilidad_anuncio",
         "escalabilidad",
         "durabilidad_recurrencia",
+        "review_count",
+        "review_count_estimated",
+        "review_count_confidence",
+        "image_count",
+        "image_count_estimated",
+        "image_count_confidence",
+        "shipping_days_min",
+        "shipping_days_max",
+        "shipping_days_median",
+        "shipping_days_estimated",
+        "shipping_days_confidence",
+        "profit_margin_pct",
+        "profit_margin_estimated",
+        "profit_margin_confidence",
     }
     data = {k: v for k, v in fields.items() if k in allowed_cols}
     if not data:

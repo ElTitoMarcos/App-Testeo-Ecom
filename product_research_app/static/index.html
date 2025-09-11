@@ -182,6 +182,7 @@ body.dark pre { background:#2e315f; }
 <div id="legendPop" class="popover hidden">
   <div>• Fila roja: duplicado</div>
   <div>• 🔥 x1–x5: tendencia en el nombre</div>
+  <div>• 🔎 = valor estimado por IA (pasar ratón para ver confianza)</div>
 </div>
 <div id="columnsPanel" class="popover hidden"></div>
 
@@ -482,6 +483,10 @@ function preprocessProducts(list){
   dupMap.forEach(arr => { if (arr.length > 1) arr.forEach(it => it.isDuplicate = true); });
 }
 
+function hasAiEstimates(item){
+  return ['review_count','image_count','shipping_days','profit_margin'].some(f => item[`${f}_estimated`]);
+}
+
 const metricDefs = window.winnerV2.metricDefs;
 const metricKeys = metricDefs.map(m=>m.key);
 const WEIGHT_KEY = 'winnerWeightsV2';
@@ -760,6 +765,9 @@ function renderTable() {
     if (item.isDuplicate) {
       tr.classList.add('is-duplicate');
     }
+    if (hasAiEstimates(item)) {
+      tr.classList.add('ai-estimated-row');
+    }
     // Selection checkbox
     const tdSel = document.createElement('td');
     const cb = document.createElement('input');
@@ -924,6 +932,21 @@ function renderTable() {
         }
       } else {
         td.textContent = value || '';
+      }
+      const base = key.replace(/_(pct|median|min|max)$/,'');
+      let est = item[base + '_estimated'];
+      let conf = item[base + '_confidence'];
+      if(!est && item.extras){
+        est = item.extras[base + '_estimated'];
+        if(conf==null) conf = item.extras[base + '_confidence'];
+      }
+      if(est){
+        const ic = document.createElement('span');
+        ic.textContent = '🔎';
+        ic.className = 'ai-estimated-icon';
+        const c = typeof conf === 'number' ? conf : 0;
+        ic.title = `Estimado (confianza: ${c.toFixed(2)})`;
+        td.appendChild(ic);
       }
       tr.appendChild(td);
     });
@@ -1342,32 +1365,28 @@ document.getElementById('btnGenWinner').onclick = async () => {
   }
   const btn = document.getElementById('btnGenWinner');
   btn.disabled = true;
+  const orig = btn.innerHTML;
+  btn.classList.add('ec-btn-loading');
+  btn.innerHTML = '<span class="ec-spinner"></span>' + orig;
+  toast.info('Generando Winner Score… Esto puede tardar unos segundos');
   startProgress();
   try{
     const res = await fetchJson('/scoring/v2/generate', {method:'POST', body: JSON.stringify({ids})});
     await fetchProducts();
-    const updated = res.updated || 0;
-    const skipped = res.skipped || 0;
-    const withPartial = res.with_partial || 0;
-    const fallbackOnly = res.fallback_only || 0;
-    if(withPartial > 0){
-      toast.info(`Winner Score calculado con métricas parciales (${withPartial} productos)`);
+    let aiFields = res.ai_fields ?? res.ai_estimated ?? 0;
+    let aiCost = res.ai_cost ?? 0;
+    if(!aiFields && res.message){
+      const m1 = res.message.match(/estimaron (\d+) campos/); if(m1) aiFields = Number(m1[1]);
+      const m2 = res.message.match(/coste ~([0-9.]+)/); if(m2) aiCost = m2[1];
     }
-    if(fallbackOnly > 0){
-      toast.warn(`${fallbackOnly} productos sin datos suficientes (score=50)`);
-    }
-    if(updated === 0){
-      toast.info('No se actualizó ningún producto.');
-    } else if(skipped > 0){
-      toast.warn(`Winner Score actualizado en ${updated} productos, ${skipped} omitidos`);
-    } else {
-      toast.success(`Winner Score actualizado en ${updated} productos`);
-    }
+    toast.success(`Winner Score generado. Estimados con IA: ${aiFields} campos (~${aiCost}$).`);
   }catch(err){
     console.error(err);
     toast.error('No se pudo actualizar el Winner Score');
   } finally {
     btn.disabled = false;
+    btn.classList.remove('ec-btn-loading');
+    btn.innerHTML = orig;
   }
 };
 

@@ -41,6 +41,7 @@ from . import database
 from . import config
 from .services import ai_columns
 from .services import winner_v2 as winner_calc
+from .services import enrichment, winner_score
 from . import gpt
 from . import title_analyzer
 
@@ -487,22 +488,14 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             conn.commit()
         
         products_all = [dict(r) for r in database.list_products(conn)]
-        ranges = winner_calc.compute_ranges(products_all)
-        weights = config.get_scoring_v2_weights()
-        total_w = sum(weights.values())
-        if total_w <= 0:
-            logger.warning(
-                "Winner Score import: weight sum <= 0, using uniform weights",
-            )
-            n = len(weights) or 1
-            weights = {k: 1 / n for k in weights}
-        else:
-            weights = {k: v / total_w for k, v in weights.items()}
-        logger.info(
-            "Winner Score import: weights=%s sum=%s",
-            weights,
-            sum(weights.values()),
-        )
+        weights = config.get_winner_score_weights()
+        enrich_results = enrichment.enrich_missing_fields(products_all, weights)
+        res_by_id = {r.product_id: r for r in enrich_results}
+        for r in enrich_results:
+            if r.enriched_fields:
+                database.update_product(conn, r.product_id, **r.enriched_fields)
+        conn.commit()
+
         updated_scores = 0
         skipped_scores = 0
         for prod in products_all:
@@ -511,26 +504,23 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             if any((dict(sc).get("winner_score_v2_pct") or 0) > 0 for sc in existing):
                 skipped_scores += 1
                 continue
-            missing: list[str] = []
-            used: list[str] = []
-            pct_val = winner_calc.score_product(prod, weights, ranges, missing, used)
-            used_count = len(used)
-            missing_count = len(missing)
-            fallback = used_count == 0 or pct_val is None or (isinstance(pct_val, float) and math.isnan(pct_val))
-            if fallback:
-                pct = 50
-            else:
-                pct = max(0, min(100, round(pct_val * 100)))
-            if missing_count > 0:
-                level = logging.WARNING if fallback else logging.INFO
-                logger.log(
-                    level,
-                    "Winner Score: product=%s used=%d missing=%d fallback=%s",
-                    pid,
-                    used_count,
-                    missing_count,
-                    str(fallback).lower(),
-                )
+            res = res_by_id.get(pid)
+            if res:
+                prod.update(res.enriched_fields)
+            pct, used, missing, fallback = winner_score.score_product(prod, weights)
+            ai_calls = 1 if res and res.ai_used else 0
+            est_fields = res.estimated_fields if res else 0
+            logger.info(
+                "Winner Score: product=%s used=%d missing=%d missing_fields=%s fallback=%s score=%d ai_calls=%d estimated_fields=%d",
+                pid,
+                len(used),
+                len(missing),
+                missing,
+                str(fallback).lower(),
+                pct,
+                ai_calls,
+                est_fields,
+            )
             database.insert_score(
                 conn,
                 product_id=pid,

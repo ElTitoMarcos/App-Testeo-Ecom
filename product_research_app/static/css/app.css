@@ -159,6 +159,13 @@ body.dark .popover {
 .table tbody tr.selected { background: #cde8ff; }
 body.dark .table tbody tr.selected { background: #243150; }
 
+.table tbody tr.ai-estimated-row {
+  border-left: 2px solid var(--ai-estimated-accent, #708090);
+}
+.table tbody tr.ai-estimated-row.selected {
+  border-left-width: 3px;
+}
+
 .cell-date-range {
   white-space: pre-line;
   min-width: 20ch;
@@ -636,6 +643,13 @@ th.ec-col-competition,   td.ec-col-competition   { width: var(--ec-w-competition
 }
 @keyframes ecspin { to { transform: rotate(360deg); } }
 .ec-btn-loading{ pointer-events:none; }
+
+.ai-estimated-icon{
+  margin-left:4px;
+  font-size:0.85em;
+  opacity:0.8;
+  cursor:help;
+}
 
 /* Winner Score slider styles */
 .ws-handle{ cursor:grab; padding-inline:4px; }
