@@ -665,8 +665,6 @@ class RequestHandler(BaseHTTPRequestHandler):
             conn = ensure_db()
             rows = []
             for p in database.list_products(conn):
-                scores = database.get_scores_for_product(conn, p["id"])
-                score = scores[0] if scores else None
                 extra = p["extra"] if "extra" in p.keys() else {}
                 try:
                     extra_dict = json.loads(extra) if isinstance(extra, str) else (extra or {})
@@ -678,15 +676,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     extra_dict['Item Sold'] = extra_dict['units_sold']
                 if 'revenue' in extra_dict and 'Revenue($)' not in extra_dict:
                     extra_dict['Revenue($)'] = extra_dict['revenue']
-                score_dict = row_to_dict(score)
-                score_value = rget(score_dict, "winner_score", 0)
-                breakdown_data = {}
-                if score_dict:
-                    try:
-                        raw_breakdown = rget(score_dict, "winner_score_breakdown")
-                        breakdown_data = json.loads(raw_breakdown or "{}")
-                    except Exception:
-                        breakdown_data = {}
+                score_value = p.get("winner_score", 0)
                 dr = p["date_range"]
                 if dr is None:
                     dr = extra_dict.get("date_range")
@@ -709,8 +699,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "extras": extra_dict,
                 }
                 row["winner_score"] = score_value
-                if score_dict:
-                    row["winner_score_breakdown"] = breakdown_data
                 rows.append(row)
             self._set_json()
             self.wfile.write(json.dumps(rows).encode("utf-8"))
@@ -721,7 +709,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             key = cfg.get("api_key") or ""
             data = {
                 "model": cfg.get("model", "gpt-4o"),
-                "weights": cfg.get("weights", {}),
+                "weights": config.get_weights(),
                 "has_api_key": bool(key),
             }
             if key:
@@ -2059,7 +2047,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             cfg['model'] = data['model']
         if 'weights' in data and isinstance(data['weights'], dict):
             # update only known keys to avoid arbitrary injection
-            weights = cfg.get('weights', {})
+            weights = config.SCORING_DEFAULT_WEIGHTS.copy()
             for k, v in data['weights'].items():
                 try:
                     weights[k] = float(v)
@@ -2462,117 +2450,49 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
 
         logger.info("Winner Score generate: ids_length=%d", len(ids))
-        id_set = {int(i) for i in ids if str(i).isdigit()}
-        if not id_set:
-            logger.info("Winner Score generate: received_ids=0")
-            self._set_json(400)
-            self.wfile.write(json.dumps({"error": "no_selection"}).encode("utf-8"))
-            return
+        id_list = [int(i) for i in ids if str(i).isdigit()]
+        received = len(id_list)
 
         conn = ensure_db()
-        products_all = [dict(r) for r in database.list_products(conn)]
-        ranges = winner_calc.compute_ranges(products_all)
         weights = config.get_weights()
-        total_w = sum(weights.values())
-        if total_w <= 0:
-            logger.warning(
-                "Winner Score generate: weight sum <= 0, using uniform weights"
-            )
-            n = len(weights) or 1
-            weights = {k: 1 / n for k in weights}
-        else:
-            weights = {k: v / total_w for k, v in weights.items()}
-        logger.info(
-            "Winner Score generate: weights=%s sum=%s",
-            weights,
-            sum(weights.values()),
-        )
-        updated: Dict[str, int] = {}
+        updated = 0
         skipped = 0
-        details: list[dict[str, int | str]] = []
-        used_metrics: set[str] = set()
-        missing_metrics: set[str] = set()
-        with_partial = 0
-        fallback_only = 0
-        for prod in products_all:
-            pid = prod["id"]
-            if pid not in id_set:
-                continue
-            existing = database.get_scores_for_product(conn, pid)
-            if any((dict(sc).get("winner_score") or 0) > 0 for sc in existing):
+        details: list[dict[str, int | bool]] = []
+        for pid in id_list:
+            prod = database.get_product(conn, pid)
+            if not prod:
                 skipped += 1
-                details.append({"id": pid, "reason": "already_scored"})
+                details.append({"id": pid, "score": 50, "used": 0, "missing": 10, "fallback": True, "updated": 0})
                 continue
-            missing: list[str] = []
-            used: list[str] = []
-            pct_val = winner_calc.score_product(prod, weights, ranges, missing, used)
-            used_count = len(used)
-            missing_count = len(missing)
-            fallback = used_count == 0 or pct_val is None or (isinstance(pct_val, float) and math.isnan(pct_val))
-            reason: str | None = None
-            if fallback:
-                pct = 50
-                reason = "no_metrics"
-                fallback_only += 1
-            else:
-                pct = max(0, min(100, round(pct_val * 100)))
-                if missing_count > 0:
-                    with_partial += 1
-            used_metrics.update(used)
-            missing_metrics.update(missing)
-            if missing_count > 0:
-                level = logging.WARNING if fallback else logging.INFO
-                logger.log(
-                    level,
-                    "Winner Score: product=%s used=%d missing=%d fallback=%s",
-                    pid,
-                    used_count,
-                    missing_count,
-                    str(fallback).lower(),
-                )
-            database.insert_score(
-                conn,
-                product_id=pid,
-                model="winner_score",
-                total_score=0,
-                momentum=0,
-                saturation=0,
-                differentiation=0,
-                social_proof=0,
-                margin=0,
-                logistics=0,
-                summary="",
-                explanations={},
-                winner_score=pct,
-                commit=False,
+            res = winner_calc.compute_winner_score_v2(prod, weights)
+            cur = conn.execute(
+                "UPDATE products SET winner_score = ? WHERE id = ? AND winner_score <> ?",
+                (res["score"], pid, res["score"]),
             )
-            updated[str(pid)] = pct
-            if reason:
-                details.append({"id": pid, "reason": reason})
+            changed = 1 if cur.rowcount else 0
+            if changed:
+                updated += 1
             else:
-                details.append({"id": pid})
-
+                skipped += 1
+            logger.info(
+                "Winner Score: product=%s used=%d missing=%d fallback=%s",
+                pid,
+                res["used"],
+                res["missing"],
+                str(res["fallback"]).lower(),
+            )
+            details.append({
+                "id": pid,
+                "score": res["score"],
+                "used": res["used"],
+                "missing": res["missing"],
+                "fallback": res["fallback"],
+                "updated": changed,
+            })
         conn.commit()
-        logger.info(
-            "Winner Score generate: received_ids=%d updated=%d skipped=%d",
-            len(id_set),
-            len(updated),
-            skipped,
-        )
+        logger.info("Winner Score generate: received_ids=%d updated=%d skipped=%d", received, updated, skipped)
         self._set_json()
-        self.wfile.write(
-            json.dumps(
-                {
-                    "updated": len(updated),
-                    "skipped": skipped,
-                    "with_partial": with_partial,
-                    "fallback_only": fallback_only,
-                    "used_metrics": sorted(used_metrics),
-                    "missing_metrics": sorted(missing_metrics),
-                    "details": details,
-                }
-            ).encode("utf-8")
-        )
+        self.wfile.write(json.dumps({"success": True, "received": received, "updated": updated, "skipped": skipped, "details": details}).encode("utf-8"))
 
     def handle_create_list(self):
         """Create a new user defined list (group) of products."""
