@@ -2417,7 +2417,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         try:
             data = json.loads(body) if body else {}
             ids = data.get("product_ids") or data.get("ids") or []
-            if not isinstance(ids, list):
+            if ids and not isinstance(ids, list):
                 raise ValueError
         except Exception:
             self._set_json(400)
@@ -2425,73 +2425,14 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
 
         logger.info("Winner Score generate: ids_length=%d", len(ids))
-        id_list = [int(i) for i in ids if str(i).isdigit()]
         conn = ensure_db()
-        if not id_list:
-            id_list = [row["id"] for row in database.list_products(conn)]
-        received = len(id_list)
-        weights = config.get_weights()
-        updated = 0
-        skipped = 0
-        details: list[dict[str, Any]] = []
-        for pid in id_list:
-            prod = database.get_product(conn, pid)
-            if not prod:
-                skipped += 1
-                details.append({"id": pid, "score": None, "used": 0, "missing": len(winner_calc.FEATURE_MAP), "fallback": True, "updated": 0, "missing_fields": list(winner_calc.FEATURE_MAP.keys())})
-                continue
-            res = winner_calc.compute_winner_score_v2(prod, weights)
-            if res["score"] is None:
-                skipped += 1
-                logger.info(
-                    "Winner Score: product=%s used=%d missing=%d missing_fields=%s fallback=%s",
-                    pid,
-                    res["used"],
-                    res["missing"],
-                    res.get("missing_fields"),
-                    str(res.get("fallback")).lower(),
-                )
-                details.append({
-                    "id": pid,
-                    "score": None,
-                    "used": res["used"],
-                    "missing": res["missing"],
-                    "missing_fields": res.get("missing_fields"),
-                    "fallback": res["fallback"],
-                    "updated": 0,
-                })
-                continue
-            cur = conn.execute(
-                "UPDATE products SET winner_score = ? WHERE id = ? AND winner_score <> ?",
-                (res["score"], pid, res["score"]),
-            )
-            changed = 1 if cur.rowcount else 0
-            if changed:
-                updated += 1
-            else:
-                skipped += 1
-            logger.info(
-                "Winner Score: product=%s used=%d missing=%d missing_fields=%s fallback=%s score=%s",
-                pid,
-                res["used"],
-                res["missing"],
-                res.get("missing_fields"),
-                str(res["fallback"]).lower(),
-                res["score"],
-            )
-            details.append({
-                "id": pid,
-                "score": res["score"],
-                "used": res["used"],
-                "missing": res["missing"],
-                "missing_fields": res.get("missing_fields"),
-                "fallback": res["fallback"],
-                "updated": changed,
-            })
-        conn.commit()
-        logger.info("Winner Score generate: received_ids=%d updated=%d skipped=%d", received, updated, skipped)
+        result = winner_calc.generate_winner_scores(conn, product_ids=ids or None)
         self._set_json()
-        self.wfile.write(json.dumps({"success": True, "received": received, "updated": updated, "skipped": skipped, "details": details}).encode("utf-8"))
+        self.wfile.write(
+            json.dumps(
+                {"ok": True, "processed": result.get("processed", 0), "updated": result.get("updated", 0)}
+            ).encode("utf-8")
+        )
 
     def handle_create_list(self):
         """Create a new user defined list (group) of products."""
