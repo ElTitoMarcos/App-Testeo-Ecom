@@ -44,6 +44,8 @@ def test_insert_score_normalizes_to_int():
 def test_weights_persist(tmp_path, monkeypatch):
     cfg_file = tmp_path / 'config.json'
     monkeypatch.setattr(config, 'CONFIG_FILE', cfg_file)
+    from product_research_app.services import winner_score
+    monkeypatch.setattr(winner_score, 'WINNER_WEIGHTS_FILE', tmp_path / 'winner_weights.json')
     config.set_weights({'price': 2.0, 'rating': 1.0})
     w = config.get_weights()
     assert w['price'] > w['rating']

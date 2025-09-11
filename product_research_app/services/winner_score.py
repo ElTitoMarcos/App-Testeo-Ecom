@@ -4,8 +4,10 @@ import json
 import math
 import hashlib
 import logging
+import os
 import sqlite3
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, Any, Iterable, Optional, Callable
 
 from ..utils.db import rget
@@ -38,6 +40,9 @@ ALIASES = {
 WEIGHTS_CACHE: Dict[str, float] | None = None
 WEIGHTS_VERSION: int = 0
 
+WINNER_WEIGHTS_FILE = Path(__file__).resolve().parent / "winner_weights.json"
+DEFAULT_WEIGHTS = config.SCORING_DEFAULT_WEIGHTS.copy()
+
 
 def invalidate_weights_cache() -> None:
     global WEIGHTS_CACHE, WEIGHTS_VERSION
@@ -60,6 +65,98 @@ def normalize_weight_key(key: str) -> str:
     if k not in WEIGHT_KEYS:
         raise ValueError(f"Invalid weight key: {key}")
     return k
+
+
+def _save_weights_file(data: Dict[str, Any]) -> None:
+    tmp = WINNER_WEIGHTS_FILE.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    tmp.replace(WINNER_WEIGHTS_FILE)
+
+
+def load_winner_weights_raw() -> Dict[str, Any]:
+    """Return persisted weights with metadata.
+
+    If the JSON file does not exist, it is created once with
+    ``DEFAULT_WEIGHTS``. Existing data is never overwritten.
+    """
+
+    if WINNER_WEIGHTS_FILE.exists():
+        try:
+            with open(WINNER_WEIGHTS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and isinstance(data.get("weights"), dict):
+                return data
+        except Exception:
+            pass
+    data = {
+        "weights": DEFAULT_WEIGHTS.copy(),
+        "updated_at": datetime.utcnow().isoformat(),
+        "version": 1,
+    }
+    _save_weights_file(data)
+    return data
+
+
+def save_winner_weights_raw(data: Dict[str, Any]) -> None:
+    if "updated_at" not in data:
+        data["updated_at"] = datetime.utcnow().isoformat()
+    if "version" not in data:
+        data["version"] = 1
+    _save_weights_file(data)
+
+
+def load_winner_weights() -> Dict[str, float]:
+    """Load Winner Score weights as floats from persistent storage."""
+
+    global WEIGHTS_CACHE
+    if WEIGHTS_CACHE is not None:
+        return WEIGHTS_CACHE
+    raw = load_winner_weights_raw().get("weights", {})
+    weights: Dict[str, float] = {}
+    for key in WEIGHT_KEYS:
+        try:
+            weights[key] = float(raw.get(key, 0.0))
+        except Exception:
+            weights[key] = 0.0
+    WEIGHTS_CACHE = weights
+    return weights
+
+
+def update_winner_weight(key: str, value: float) -> None:
+    """Update a single weight in persistent storage."""
+
+    norm = normalize_weight_key(key)
+    data = load_winner_weights_raw()
+    weights = data.get("weights", {})
+    try:
+        weights[norm] = float(value)
+    except Exception:
+        weights[norm] = value
+    data["weights"] = weights
+    data["updated_at"] = datetime.utcnow().isoformat()
+    data["version"] = int(data.get("version", 0)) + 1
+    save_winner_weights_raw(data)
+    invalidate_weights_cache()
+
+
+def set_winner_weights(weights: Dict[str, float]) -> None:
+    """Replace or update multiple weights at once."""
+
+    data = load_winner_weights_raw()
+    stored = data.get("weights", {})
+    for k, v in weights.items():
+        try:
+            stored[normalize_weight_key(k)] = float(v)
+        except ValueError:
+            continue
+    data["weights"] = stored
+    data["updated_at"] = datetime.utcnow().isoformat()
+    data["version"] = int(data.get("version", 0)) + 1
+    save_winner_weights_raw(data)
+    invalidate_weights_cache()
 
 # Mapping tables for categorical metrics
 MAGNITUD_DESEO = {"low":0.33, "medium":0.66, "high":1.0}
@@ -309,25 +406,6 @@ NORMALIZERS: Dict[str, Callable[[float], float]] = {
     "desire": _norm_identity,
     "competition": _norm_identity,
 }
-
-
-def load_winner_weights() -> Dict[str, float]:
-    """Load Winner Score weights from persistent configuration.
-
-    The configuration is read from disk on each call to avoid stale caches.
-    Any missing metric receives a weight of ``0.0`` and all values are
-    coerced to ``float``.
-    """
-
-    cfg = config.load_config()
-    stored = cfg.get("weights", {})
-    weights: Dict[str, float] = {}
-    for key in WEIGHT_KEYS:
-        try:
-            weights[key] = float(stored.get(key, 0.0))
-        except Exception:
-            weights[key] = 0.0
-    return weights
 
 
 def compute_winner_score_v2(product_row: Any, weights: Dict[str, float]) -> Dict[str, Any]:
