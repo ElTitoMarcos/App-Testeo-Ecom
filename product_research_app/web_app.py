@@ -2439,8 +2439,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "processed": result.get("processed", 0),
                     "updated": result.get("updated", 0),
-                    "weights_hash": result.get("weights_hash"),
-                    "weights_version": result.get("weights_version"),
+                    "weights_all": result.get("weights_all"),
+                    "weights_eff": result.get("weights_eff"),
                 }
             ).encode("utf-8")
         )
