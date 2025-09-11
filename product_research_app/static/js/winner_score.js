@@ -114,29 +114,7 @@
 
   async function generate(ids){
     const payload = Array.isArray(ids) && ids.length ? {product_ids: ids} : {};
-    const res = await fetchJson('/api/winner-score/generate', {method:'POST', body: JSON.stringify(payload)});
-    if(res && Array.isArray(res.details)){
-      res.details.forEach(d=>{
-        const cb = document.querySelector(`input.rowCheck[data-id="${d.id}"]`);
-        if(cb){
-          const tr = cb.closest('tr');
-          const cell = tr ? tr.querySelector('td[data-key="winner_score"]') : null;
-          if(cell && typeof d.score==='number'){
-            const sc = Math.round(d.score);
-            cell.innerHTML = `<span class="${winnerScoreClass(sc)}">${sc.toLocaleString(undefined,{maximumFractionDigits:0})}</span>`;
-          }
-        }
-        if(window.allProducts){
-          const p = window.allProducts.find(p=>String(p.id)===String(d.id));
-          if(p) p.winner_score = d.score;
-        }
-        if(window.products){
-          const p = window.products.find(p=>String(p.id)===String(d.id));
-          if(p) p.winner_score = d.score;
-        }
-      });
-    }
-    return res;
+    return fetchJson('/api/winner-score/generate', {method:'POST', body: JSON.stringify(payload)});
   }
 
   global.winnerScore = {metricDefs, MAPS, normalizeMetric, computeRanges, scoreProduct, getDefaultWeights, generate};

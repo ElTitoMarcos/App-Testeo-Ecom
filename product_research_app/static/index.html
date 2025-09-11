@@ -280,7 +280,6 @@ async function pollImportStatus(id) {
       if (data.status === 'done') {
         await reloadTable();
         hideImportBanner();
-        toast.success(`Importados ${data.imported || 0}`);
       } else {
         toast.error(data.error || 'Error en importación');
       }
@@ -476,8 +475,8 @@ function saveWeightDebounced(key, value, statusEl){
   if(!saveFns[key]){
     saveFns[key] = debounce(async (val)=>{
       try{
-        await fetchJson('/api/config/winner-weights', {method:'PATCH', body: JSON.stringify({key, value: Number(val)})});
-        if(statusEl){ statusEl.textContent='✓'; setTimeout(()=>statusEl.textContent='',1000); }
+        await fetchJson('/api/config/winner-weights', {method:'PATCH', body: JSON.stringify({key, value: val})});
+        if(statusEl){ statusEl.textContent='Guardado ✓'; setTimeout(()=>statusEl.textContent='',1000); }
       }catch(e){
         if(statusEl){ statusEl.textContent='✗'; }
       }
@@ -495,11 +494,11 @@ function renderWeights(){
     const li=document.createElement('li');
     li.className='metric-row';
     li.dataset.key=key;
-    li.innerHTML=`<span class="ws-handle">≡</span><span class="ws-name">${def.label}</span><div class="ws-slider-wrap"><input type="range" min="0" max="100" step="1" value="${weightValues[key]||0}" class="ws-slider"></div><span class="ws-value">${weightValues[key]||0}</span><span class="ws-status"></span>`;
+    li.innerHTML=`<span class="ws-handle">≡</span><span class="ws-name">${def.label}</span><div class="ws-slider-wrap"><input type="range" name="${key}" min="0" max="100" step="1" value="${weightValues[key]||0}" class="ws-slider"></div><span class="ws-value">${weightValues[key]||0}</span><span class="ws-status"></span>`;
     const range=li.querySelector('.ws-slider');
     const val=li.querySelector('.ws-value');
     const status=li.querySelector('.ws-status');
-    range.addEventListener('input',()=>{ weightValues[key]=Number(range.value); val.textContent=range.value; saveWeightDebounced(key, range.value, status); });
+    range.addEventListener('input',e=>{ const k=e.target.name; const v=parseFloat(e.target.value); weightValues[k]=v; val.textContent=e.target.value; if(Number.isFinite(v)) saveWeightDebounced(k, v, status); });
     ['mousedown','touchstart'].forEach(ev=>{ range.addEventListener(ev,e=>{ e.stopPropagation(); }); });
     list.appendChild(li);
   });
@@ -1299,22 +1298,20 @@ document.getElementById('btnGenWinner').onclick = async () => {
   startProgress();
   try {
     const res = await winnerScore.generate(selectedIds);
-    if (res?.weights_hash) console.log('Recalc with weights', res.weights_hash);
+    if (res?.weights_all || res?.weights_eff) console.log('Recalc weights', res.weights_all, res.weights_eff);
     const processed = res?.processed || 0;
     const updated = res?.updated || 0;
     if (processed === 0) {
       toast.info('Nada que recalcular (0 seleccionados).');
+    } else if (updated > 0) {
+      toast.success(`Winner Score recalculado: ${updated}/${processed} cambiaron.`);
     } else {
-      if (updated > 0) {
-        toast.success(`Winner Score recalculado: ${updated}/${processed} cambiaron.`);
-      } else {
-        toast.info(`Recalculado ${processed} · el entero 0–100 no varió (redondeo).`);
-      }
-      if (selectedIds.length) {
-        await reloadRows(selectedIds);
-      } else {
-        await reloadTable();
-      }
+      toast.info(`Recalculado ${processed} · el entero 0–100 no varió (redondeo).`);
+    }
+    if (selectedIds.length) {
+      await reloadRows(selectedIds);
+    } else {
+      await reloadTable();
     }
   } catch (err) {
     console.error(err);
