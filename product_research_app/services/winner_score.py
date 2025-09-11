@@ -297,33 +297,39 @@ def compute_winner_score_v2(product_row: Any, weights: Dict[str, float]) -> Dict
         norm = NORMALIZERS[name](val)
         feats[name] = norm
 
-    used = len(feats)
-    missing = len(FEATURE_MAP) - used
+    present = list(feats.keys())
+    missing_fields = list(set(FEATURE_MAP.keys()) - set(present))
+    used = len(present)
+
     if used == 0:
         return {
-            "score": None,
-            "score_float": None,
+            "score": 0,
+            "score_float": 0.0,
             "used": 0,
             "missing": len(FEATURE_MAP),
             "missing_fields": missing_fields,
+            "present_fields": present,
+            "effective_weights": {},
             "fallback": True,
         }
 
-    weights_used = {k: weights.get(k, 0.0) for k in feats}
+    weights_used = {k: weights.get(k, 0.0) for k in present}
     total_w = sum(weights_used.values())
     if total_w <= 0:
-        weights_used = {k: 1.0 / used for k in feats}
+        weights_used = {k: 1.0 / used for k in present}
     else:
         weights_used = {k: v / total_w for k, v in weights_used.items()}
 
-    score_float = sum(feats[k] * weights_used.get(k, 0.0) for k in feats)
+    score_float = sum(feats[k] * weights_used.get(k, 0.0) for k in present)
     score_int = int(round(score_float * 100))
     return {
         "score": score_int,
         "score_float": score_float,
         "used": used,
-        "missing": missing,
+        "missing": len(FEATURE_MAP) - used,
         "missing_fields": missing_fields,
+        "present_fields": present,
+        "effective_weights": weights_used,
         "fallback": False,
     }
 
@@ -371,34 +377,44 @@ def generate_winner_scores(
         pid = row["id"]
         old_score = row["winner_score"]
         res = compute_winner_score_v2(row, weights)
-        sf = res.get("score_float")
-        present = set(FEATURE_MAP.keys()) - set(res.get("missing_fields", []))
-        if sf is None:
-            score_raw_0_100 = None
-            new_score = old_score
-        else:
-            score_raw_0_100 = max(0.0, min(1.0, sf)) * 100.0
-            new_score = int(round(score_raw_0_100))
-        if score_raw_0_100 is not None:
+        sf = res.get("score_float") or 0.0
+        present = set(res.get("present_fields", []))
+        missing = set(res.get("missing_fields", []))
+        eff_w = {k: round(v, 3) for k, v in res.get("effective_weights", {}).items()}
+
+        score_raw_0_100 = max(0.0, min(1.0, sf)) * 100.0
+        new_score = int(round(score_raw_0_100))
+
+        if new_score != old_score or row["winner_score_raw"] != score_raw_0_100:
+            conn.execute(
+                "UPDATE products SET winner_score = ?, winner_score_raw = ?, winner_score_updated_at = ? WHERE id = ?",
+                (new_score, score_raw_0_100, now, pid),
+            )
             if new_score != old_score:
-                conn.execute(
-                    "UPDATE products SET winner_score = ?, winner_score_raw = ?, winner_score_updated_at = ? WHERE id = ?",
-                    (new_score, score_raw_0_100, now, pid),
-                )
                 updated_int += 1
-            else:
-                conn.execute(
-                    "UPDATE products SET winner_score_raw = ?, winner_score_updated_at = ? WHERE id = ?",
-                    (score_raw_0_100, now, pid),
-                )
-        logger.info(
-            "Winner Score: product=%s score_int=%s score_raw=%s weights_snapshot=%s present=%s",
-            pid,
-            new_score,
-            f"{score_raw_0_100:.3f}" if score_raw_0_100 is not None else "nan",
-            snapshot,
-            present,
-        )
+
+        if not present:
+            logger.warning(
+                "Winner Score: product=%s score_int=%s score_raw=%.3f weights_snapshot=%s present=%s missing=%s effective_weights=%s no_features_present",
+                pid,
+                new_score,
+                score_raw_0_100,
+                snapshot,
+                present,
+                missing,
+                eff_w,
+            )
+        else:
+            logger.info(
+                "Winner Score: product=%s score_int=%s score_raw=%.3f weights_snapshot=%s present=%s missing=%s effective_weights=%s",
+                pid,
+                new_score,
+                score_raw_0_100,
+                snapshot,
+                present,
+                missing,
+                eff_w,
+            )
         processed += 1
 
     conn.commit()
