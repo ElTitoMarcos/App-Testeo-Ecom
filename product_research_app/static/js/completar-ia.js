@@ -21,14 +21,16 @@ function isEditing(pid, field) {
   if (!cb || cb.dataset.id !== String(pid)) return false;
   const td = active.closest('td[data-key]');
   if (!td) return false;
-  return td.dataset.key === field;
+  const key = td.dataset.key;
+  if (field === 'desire_magnitude') field = 'desireMagnitude';
+  return key === field;
 }
 
 function applyUpdates(product, updates) {
   const applied = {};
   const row = document.querySelector(`input.rowCheck[data-id="${product.id}"]`)?.closest('tr');
   const map = {
-    desire: 'td.ec-col-desire input',
+    desire: 'td.ec-col-desire textarea',
     desire_magnitude: 'td.ec-col-desire-mag select',
     awareness_level: 'td.ec-col-awareness select',
     competition_level: 'td.ec-col-competition select'
@@ -36,10 +38,11 @@ function applyUpdates(product, updates) {
   Object.keys(map).forEach(k => {
     const nv = updates[k];
     if (nv === undefined || isEditing(product.id, k)) return;
+    if ((nv === '' || nv === null) && product[k]) return;
     product[k] = nv;
     const el = row ? row.querySelector(map[k]) : null;
     if (el) {
-      if (el.tagName === 'INPUT') el.value = nv || '';
+      if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') el.value = nv || '';
       else el.value = nv || '';
     }
     applied[k] = nv;
