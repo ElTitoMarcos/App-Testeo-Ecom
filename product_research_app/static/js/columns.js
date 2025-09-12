@@ -1,5 +1,18 @@
 // Column visibility manager
 (function(){
+  const VIEW_SCHEMA_VERSION = 4;
+  const VIEW_KEY = 'productsViewState';
+  const VIEW_VER_KEY = 'productsViewStateVersion';
+  function ensureViewVersion(){
+    const ver = Number(localStorage.getItem(VIEW_VER_KEY) || '0');
+    if(ver !== VIEW_SCHEMA_VERSION){
+      localStorage.removeItem(VIEW_KEY);
+      localStorage.removeItem('columnsVisibility');
+      localStorage.setItem(VIEW_VER_KEY, String(VIEW_SCHEMA_VERSION));
+    }
+  }
+  ensureViewVersion();
+
   const btn = document.getElementById('btnColumns');
   const panel = document.getElementById('columnsPanel');
   if(!btn || !panel) return;
@@ -116,5 +129,6 @@
 
   // initial attempt (will populate once table is rendered)
   ensureColumnVisible('price');
+  ensureColumnVisible('desire');
   build();
 })();

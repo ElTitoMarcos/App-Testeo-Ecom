@@ -34,6 +34,13 @@ table {
   margin-top: 0;
 }
 
+.products-table thead th.th-center {
+  text-align: center;
+}
+.products-table thead th[data-field="price"] {
+  text-align: center;
+}
+
 .table-toolbar {
   position: sticky;
   top: var(--header-h, 60px);
@@ -401,6 +408,23 @@ body.dark .bottombar {
 .modal-overlay.open .modal {
   transform: scale(1);
   opacity: 1;
+}
+
+#configOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+#configOverlay.hidden { display: none; }
+#configOverlay .modal-panel {
+  background: #111;
+  border-radius: 12px;
+  max-width: 820px;
+  width: 92%;
 }
 .modal-header {
   display: flex;

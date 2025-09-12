@@ -163,7 +163,7 @@ body.dark pre { background:#2e315f; }
   </div>
 </div>
 
-  <table id="productTable">
+  <table id="productTable" class="products-table">
   <thead class="sticky-thead">
     <tr id="headerRow"></tr>
   </thead>
@@ -184,6 +184,10 @@ body.dark pre { background:#2e315f; }
   <div>• 🔥 x1–x5: tendencia en el nombre</div>
 </div>
 <div id="columnsPanel" class="popover hidden"></div>
+
+<div id="configOverlay" class="modal-overlay hidden">
+  <div class="modal-panel" role="dialog" aria-modal="true"></div>
+</div>
 
 <!-- Overlay for viewing images in larger size -->
 <div id="imgOverlay" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background: rgba(0,0,0,0.8); justify-content:center; align-items:center; z-index:1000;">
@@ -226,6 +230,7 @@ body.dark pre { background:#2e315f; }
 <script src="/static/js/toast.js"></script>
 <script src="/static/js/table.js"></script>
 <script src="/static/js/columns.js"></script>
+<script src="/static/js/config_modal.js"></script>
 <script type="module" src="/static/js/add-group.js"></script>
 <script type="module" src="/static/js/manage-groups.js"></script>
 <script src="/static/js/winner_score.js"></script>
@@ -399,24 +404,26 @@ function ecAutoFitColumns(gridRoot) {
   gridRoot.querySelectorAll('td.ec-col-competition select').forEach(el => el.style.width = (co - EC_LIMITS.competition.pad) + 'px');
 }
 const columns = [
-  { key: 'id', label: 'ID', type: 'number' },
-  { key: 'image_url', label: 'Imagen', type: 'image' },
-  { key: 'name', label: 'Nombre', type: 'string' },
-  { key: 'category', label: 'Categoría', type: 'string' },
-  { key: 'price', label: 'Price', type: 'number', width: 110, align: 'right', editable: false,
+  { key: 'id', field: 'id', label: 'ID', type: 'number' },
+  { key: 'image_url', field: 'image_url', label: 'Imagen', type: 'image' },
+  { key: 'name', field: 'name', label: 'Nombre', type: 'string' },
+  { key: 'category', field: 'category', label: 'Categoría', type: 'string' },
+  { key: 'price', field: 'price', label: 'Price', type: 'currency', width: 110, align: 'right', headerClass: 'th-center', editable: false,
     render: row => new Intl.NumberFormat('en-US', { style:'currency', currency:'USD', maximumFractionDigits: 2 }).format(row.price ?? 0) },
-  { key: 'Product Rating', label: 'Rating', type: 'number' },
-  { key: 'Item Sold', label: 'Unidades Vendidas', type: 'number' },
-  { key: 'Revenue($)', label: 'Ingresos', type: 'number' },
-  { key: 'Creator Conversion Ratio', label: 'Tasa Conversión', type: 'string' },
-  { key: 'Launch Date', label: 'Fecha Lanzamiento', type: 'string' },
-  { key: 'date_range', label: 'Rango Fechas', type: 'string', headerClass: 'cell-date-range', cellClass: 'cell-date-range' },
-  { key: 'desire', label: 'Desire', type: 'string', headerClass: 'ec-col ec-col-desire', cellClass: 'ec-col ec-col-desire', dataEcCol: 'desire' },
-  { key: 'desire_magnitude', label: 'Desire magnetitude', type: 'string', headerClass: 'ec-col ec-col-desire-mag', cellClass: 'ec-col ec-col-desire-mag', dataEcCol: 'desire_magnitude' },
-  { key: 'awareness_level', label: 'Awerness Level', type: 'string', headerClass: 'ec-col ec-col-awareness', cellClass: 'ec-col ec-col-awareness', dataEcCol: 'awareness_level' },
-  { key: 'competition_level', label: 'Competition level', type: 'string', headerClass: 'ec-col ec-col-competition', cellClass: 'ec-col ec-col-competition', dataEcCol: 'competition_level' },
-  { key: 'winner_score', label: 'Winner Score', type: 'number' },
+  { key: 'Product Rating', field: 'Product Rating', label: 'Rating', type: 'number' },
+  { key: 'Item Sold', field: 'Item Sold', label: 'Unidades Vendidas', type: 'number' },
+  { key: 'Revenue($)', field: 'Revenue($)', label: 'Ingresos', type: 'number' },
+  { key: 'Creator Conversion Ratio', field: 'Creator Conversion Ratio', label: 'Tasa Conversión', type: 'string' },
+  { key: 'Launch Date', field: 'Launch Date', label: 'Fecha Lanzamiento', type: 'string' },
+  { key: 'date_range', field: 'date_range', label: 'Rango Fechas', type: 'string', headerClass: 'cell-date-range', cellClass: 'cell-date-range' },
+  { key: 'desire', field: 'desire', label: 'Desire', type: 'number', align: 'center', visible: true, editable: false },
+  { key: 'desire_magnitude', field: 'desire_magnitude', label: 'Desire magnetitude', type: 'string', headerClass: 'ec-col ec-col-desire-mag', cellClass: 'ec-col ec-col-desire-mag', dataEcCol: 'desire_magnitude' },
+  { key: 'awareness_level', field: 'awareness_level', label: 'Awerness Level', type: 'string', headerClass: 'ec-col ec-col-awareness', cellClass: 'ec-col ec-col-awareness', dataEcCol: 'awareness_level' },
+  { key: 'competition_level', field: 'competition_level', label: 'Competition level', type: 'string', headerClass: 'ec-col ec-col-competition', cellClass: 'ec-col ec-col-competition', dataEcCol: 'competition_level' },
+  { key: 'winner_score', field: 'winner_score', label: 'Winner Score', type: 'number' },
 ];
+const col = columns.find(c => c.field === 'desire');
+if (col) col.visible = true;
 
 let trendingWords = [];
 
@@ -663,7 +670,6 @@ async function loadConfig() {
     if (input) input.value = '';
     if (saveBtn) saveBtn.disabled = true;
   }
-  await loadWeights();
 }
 
 // Microinteraction progress bar
@@ -740,6 +746,7 @@ function renderTable() {
       th.textContent = col.label;
       th.style.cursor = 'pointer';
       th.setAttribute('data-key', col.key);
+      th.setAttribute('data-field', col.field || col.key);
       if (col.headerClass) th.className = col.headerClass;
       if (col.dataEcCol) th.setAttribute('data-ec-col', col.dataEcCol);
       if (col.width) th.style.width = col.width + 'px';
@@ -783,6 +790,7 @@ function renderTable() {
       const td = document.createElement('td');
       const key = col.key;
       td.setAttribute('data-key', key);
+      td.setAttribute('data-field', col.field || key);
       if (col.cellClass) td.className = col.cellClass;
       if (col.dataEcCol) td.setAttribute('data-ec-col', col.dataEcCol);
       if (col.width) td.style.width = col.width + 'px';
@@ -858,17 +866,7 @@ function renderTable() {
           td.appendChild(btnCopy);
         }
       } else if (key === 'desire') {
-        const input = document.createElement('input');
-        input.type = 'text';
-        input.placeholder = '—';
-        input.value = value || '';
-        input.addEventListener('blur', async () => {
-          const val = input.value.trim() || null;
-          try { await fetchJson(`/products/${item.id}`, {method:'PUT', body: JSON.stringify({desire: val})}); } catch(e) {}
-          item.desire = val;
-          ecAutoFitColumns(gridRoot);
-        });
-        td.appendChild(input);
+        td.textContent = value != null ? value : '';
       } else if (key === 'desire_magnitude') {
         const select = document.createElement('select');
         ['', 'Low', 'Medium', 'High'].forEach(opt => {
@@ -1014,37 +1012,7 @@ window.onload = () => {
   }
 };
 // Toggle config panel
-document.getElementById('configBtn').onclick = async () => {
-  await loadWeights();
-  const cfg = document.getElementById('config');
-  const wcard = document.getElementById('weightsCard');
-  if(!cfg || !wcard || !window.modalManager) return;
-  const btn = document.getElementById('configBtn');
-  const modal = document.createElement('div');
-  modal.className = 'modal';
-  modal.setAttribute('role','dialog');
-  modal.setAttribute('aria-modal','true');
-  modal.innerHTML = '<header class="modal-header"><h3 id="configModalTitle">Configuración</h3><button type="button" class="modal-close" aria-label="Cerrar">✕</button></header><div class="modal-body"></div>';
-  modal.setAttribute('aria-labelledby','configModalTitle');
-  const body = modal.querySelector('.modal-body');
-  const cfgParent = cfg.parentElement;
-  const wParent = wcard.parentElement;
-  const cfgNext = cfg.nextSibling;
-  const wNext = wcard.nextSibling;
-  body.appendChild(cfg);
-  body.appendChild(wcard);
-  cfg.style.display = 'block';
-  wcard.style.display = 'block';
-  const handle = modalManager.open(modal, {returnFocus: btn, closeOnBackdrop:false, onClose: () => {
-    cfg.style.display = 'none';
-    wcard.style.display = 'none';
-    cfgParent.insertBefore(cfg, cfgNext);
-    wParent.insertBefore(wcard, wNext);
-  }});
-  modal.querySelector('.modal-close').addEventListener('click', () => handle.close());
-  const first = modal.querySelector('input,select,textarea,button');
-  if(first) first.focus();
-};
+// config modal handled in config_modal.js
 
 
 // Handle file upload: clicking the upload button opens file chooser

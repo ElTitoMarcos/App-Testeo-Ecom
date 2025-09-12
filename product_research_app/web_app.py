@@ -664,6 +664,21 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._set_json()
             self.wfile.write(json.dumps(rows).encode("utf-8"))
             return
+        if path == "/api/settings":
+            cfg = config.load_config()
+
+            def _i01(x):
+                try:
+                    return max(0, min(100, int(round(float(x)))))
+                except Exception:
+                    return 0
+
+            weights_raw_int = cfg.get("weights_raw_int") or cfg.get("weights") or {}
+            weights_raw_int = {k: _i01(v) for k, v in weights_raw_int.items()}
+            payload = {"weights_raw_int": weights_raw_int}
+            self._set_json()
+            self.wfile.write(json.dumps(payload).encode("utf-8"))
+            return
         if path == "/config":
             # return stored configuration (without exposing the API key)
             cfg = config.load_config()
@@ -1070,6 +1085,26 @@ class RequestHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path == "/api/settings":
+            length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(length).decode('utf-8')
+            try:
+                data = json.loads(body)
+                if not isinstance(data, dict):
+                    raise ValueError
+            except Exception:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+                return
+            cfg = config.load_config()
+            if isinstance(data.get("weights_raw_int"), dict):
+                cfg["weights_raw_int"] = data["weights_raw_int"]
+            if isinstance(data.get("weights"), dict):
+                cfg["weights"] = data["weights"]
+            config.save_config(cfg)
+            self._set_json()
+            self.wfile.write(json.dumps({"status": "ok"}).encode('utf-8'))
+            return
         if path == "/api/analyze/titles":
             self.handle_analyze_titles()
             return

@@ -41,6 +41,22 @@ def get_connection(db_path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
+
+    # === Ensure 'desire' column exists (idempotent) ===
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='products'"
+        )
+        if cur.fetchone():
+            cur.execute("PRAGMA table_info(products)")
+            _cols = {r[1] for r in cur.fetchall()}
+            if "desire" not in _cols:
+                cur.execute("ALTER TABLE products ADD COLUMN desire REAL")
+                conn.commit()
+    except Exception:
+        pass
+
     return conn
 
 
@@ -66,7 +82,7 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             image_url TEXT,
             source TEXT,
             import_date TEXT NOT NULL,
-            desire TEXT,
+            desire REAL,
             desire_magnitude TEXT,
             awareness_level TEXT,
             competition_level TEXT,
@@ -81,7 +97,7 @@ def initialize_database(conn: sqlite3.Connection) -> None:
     cur.execute("PRAGMA table_info(products)")
     cols = [row[1] for row in cur.fetchall()]
     if "desire" not in cols:
-        cur.execute("ALTER TABLE products ADD COLUMN desire TEXT")
+        cur.execute("ALTER TABLE products ADD COLUMN desire REAL")
     if "desire_magnitude" not in cols and "magnitud_deseo" in cols:
         cur.execute("ALTER TABLE products RENAME COLUMN magnitud_deseo TO desire_magnitude")
     elif "desire_magnitude" not in cols:
@@ -447,7 +463,15 @@ def list_products(conn: sqlite3.Connection) -> List[sqlite3.Row]:
     """Return all products in the database ordered by import date descending."""
     cur = conn.cursor()
     cur.execute(
-        "SELECT * FROM products ORDER BY import_date DESC"
+        """
+        SELECT
+            id, name, description, category, price, currency, image_url, source,
+            import_date, desire, desire_magnitude, awareness_level,
+            competition_level, date_range, extra, winner_score, winner_score_raw,
+            winner_score_updated_at
+        FROM products
+        ORDER BY import_date DESC
+        """
     )
     return cur.fetchall()
 
