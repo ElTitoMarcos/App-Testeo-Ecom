@@ -231,9 +231,10 @@ body.dark pre { background:#2e315f; }
 <script src="/static/js/winner_score.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
 <script type="module">
-import { fetchJson } from "/static/js/net.js";
+import { fetchJson, updateProductField } from "/static/js/net.js";
 import * as groupsService from "/static/js/groups-service.js";
 window.fetchJson = fetchJson;
+window.updateProductField = updateProductField;
 window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
 let importPollTimer = null;
@@ -448,21 +449,9 @@ function preprocessProducts(list){
   const dupMap = new Map();
   list.forEach(item => {
     item.trending = mapTrendingScore(item.trendingScore);
-    const desireSources = [
-      item.desire,
-      item.extras && item.extras.desire,
-      item.ai_desire,
-      item.ai_desire_label,
-      item.desire_magnitude
-    ];
-    let desireVal = '';
-    for (const src of desireSources) {
-      if (src !== undefined && src !== null && String(src).trim() !== '') {
-        desireVal = String(src);
-        break;
-      }
-    }
-    item.desire = desireVal;
+    item.desire = typeof item.desire === 'string'
+      ? item.desire.trim()
+      : (item.desire ?? '');
     if (item.extras && item.extras['duplicate_of']) {
       item.isDuplicate = true;
       return;
@@ -878,20 +867,35 @@ function renderTable() {
           td.appendChild(btnCopy);
         }
       } else if (key === 'desire') {
-        const input = document.createElement('input');
-        input.type = 'text';
-        input.placeholder = '—';
-        const fullVal = value || '';
-        input.value = fullVal;
-        input.title = fullVal;
+        const fullVal = typeof value === 'string' ? value : '';
         td.title = fullVal;
-        input.addEventListener('blur', async () => {
-          const val = input.value.trim() || null;
-          try { await fetchJson(`/products/${item.id}`, {method:'PUT', body: JSON.stringify({desire: val})}); } catch(e) {}
-          item.desire = val;
-          ecAutoFitColumns(gridRoot);
+        const textarea = document.createElement('textarea');
+        textarea.placeholder = '—';
+        textarea.value = fullVal;
+        textarea.rows = 2;
+        textarea.className = 'cell-textarea center';
+
+        const doSave = async (next) => {
+          const trimmed = (next || '').trim();
+          const prev = item.desire || '';
+          item.desire = trimmed;
+          try {
+            await updateProductField(item.id, { desire: trimmed });
+          } catch (e) {
+            item.desire = prev;
+            textarea.value = prev;
+            td.title = prev;
+          } finally {
+            ecAutoFitColumns(gridRoot);
+          }
+        };
+        const save = debounce(doSave, 500);
+        textarea.addEventListener('input', e => {
+          const v = e.target.value;
+          save(v);
         });
-        td.appendChild(input);
+        textarea.addEventListener('blur', () => doSave(textarea.value));
+        td.appendChild(textarea);
       } else if (key === 'desire_magnitude') {
         const select = document.createElement('select');
         ['', 'Low', 'Medium', 'High'].forEach(opt => {

@@ -595,12 +595,11 @@ button.loading::after {
 .ec-col { vertical-align: middle; }
 
 /* Inputs/selects compactos solo aquí */
-.ec-col-desire input,
+.ec-col-desire textarea,
 .ec-col-desire-mag select,
 .ec-col-awareness select,
 .ec-col-competition select {
   width: auto;               /* lo fijaremos por JS en px */
-  height: 30px;
   box-sizing: content-box;
   font-size: 13px;
   padding: 2px 8px;
@@ -616,13 +615,24 @@ button.loading::after {
 }
 
 /* Evitar desbordes solo aquí */
-.ec-col-desire > *,
 .ec-col-desire-mag > *,
 .ec-col-awareness > *,
 .ec-col-competition > * {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.cell-textarea {
+  width: 100%;
+  resize: vertical;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.center {
+  text-align: center;
 }
 
 /* Anchura de columna controlada por variables CSS (las pone JS) */

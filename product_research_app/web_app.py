@@ -679,14 +679,18 @@ class RequestHandler(BaseHTTPRequestHandler):
                 if dr is None:
                     dr = extra_dict.get("date_range")
                 price_val = rget(p, "price")
-                desire_val = _ensure_desire(p, extra_dict)
+                desire_val = rget(p, "desire")
+                if desire_val is None or str(desire_val).strip() == "":
+                    desire_val = _ensure_desire(p, extra_dict) or None
+                else:
+                    desire_val = str(desire_val)
                 row = {
                     "id": rget(p, "id"),
                     "name": rget(p, "name"),
                     "category": rget(p, "category"),
                     "price": price_val,
                     "image_url": rget(p, "image_url"),
-                    "desire": desire_val,
+                    "desire": desire_val if desire_val else None,
                     "desire_magnitude": rget(p, "desire_magnitude"),
                     "awareness_level": rget(p, "awareness_level"),
                     "competition_level": rget(p, "competition_level"),
@@ -1320,6 +1324,40 @@ class RequestHandler(BaseHTTPRequestHandler):
     def do_PATCH(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path.startswith("/api/products/") or path.startswith("/products/"):
+            try:
+                pid = int(path.split("/")[-1])
+            except Exception:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"error": "Invalid ID"}).encode('utf-8'))
+                return
+            length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(length).decode('utf-8')
+            try:
+                data = json.loads(body)
+                if not isinstance(data, dict):
+                    raise ValueError
+            except Exception:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+                return
+            desire_val = data.get("desire")
+            if desire_val is not None:
+                desire_val = str(desire_val).strip()[:1000]
+            conn = ensure_db()
+            database.update_product(conn, pid, desire=desire_val)
+            product = row_to_dict(database.get_product(conn, pid))
+            if product:
+                try:
+                    extra_dict = json.loads(rget(product, "extra") or "{}")
+                except Exception:
+                    extra_dict = {}
+                product["desire"] = product.get("desire") or None
+                self._set_json()
+                self.wfile.write(json.dumps(product).encode('utf-8'))
+            else:
+                self.send_error(404)
+            return
         if path == "/api/config/winner-weights":
             length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(length).decode('utf-8')
