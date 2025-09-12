@@ -15,6 +15,20 @@ from .. import config, database
 
 logger = logging.getLogger(__name__)
 
+# Keys used for weighting
+KEYS = [
+    "price",
+    "rating",
+    "units_sold",
+    "revenue",
+    "desire",
+    "competition",
+    "review_count",
+    "image_count",
+    "shipping_days",
+    "profit_margin",
+]
+
 # Winner Score weight keys and compatibility aliases
 WEIGHT_KEYS = [
     "price",
@@ -42,6 +56,19 @@ WEIGHTS_VERSION: int = 0
 
 WINNER_WEIGHTS_FILE = Path(__file__).resolve().parent / "winner_weights.json"
 DEFAULT_WEIGHTS = config.SCORING_DEFAULT_WEIGHTS.copy()
+
+
+def effective_weights(settings: Dict[str, Any] | None) -> Dict[str, float]:
+    """Return normalised weight mapping from settings dict."""
+
+    raw = (settings or {}).get("weights_raw_int") or (settings or {}).get("weights") or {}
+    raw_int = {
+        k: max(0, min(100, int(round(raw.get(k, 0))))) for k in KEYS
+    }
+    total = sum(raw_int.values())
+    if total <= 0:
+        return {k: 1.0 / len(KEYS) for k in KEYS}
+    return {k: raw_int[k] / float(total) for k in KEYS}
 
 
 def invalidate_weights_cache() -> None:
@@ -486,7 +513,10 @@ def generate_winner_scores(
     """
 
     if weights is None:
-        weights = load_winner_weights()
+        cfg = config.load_config()
+        if not cfg.get("weights_raw_int") and not cfg.get("weights"):
+            cfg["weights"] = load_winner_weights()
+        weights = effective_weights(cfg)
 
     weights_hash_all = hashlib.sha1(
         json.dumps(weights, sort_keys=True).encode("utf-8")

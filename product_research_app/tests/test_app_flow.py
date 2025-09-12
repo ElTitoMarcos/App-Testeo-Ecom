@@ -194,6 +194,7 @@ def test_products_endpoint_serializes_rows(tmp_path, monkeypatch):
         currency=None,
         image_url="",
         source="",
+        desire="High",
         extra={},
         product_id=1,
     )
@@ -224,6 +225,47 @@ def test_products_endpoint_serializes_rows(tmp_path, monkeypatch):
     resp = json.loads(handler.wfile.getvalue().decode("utf-8"))
     assert isinstance(resp, list) and resp and resp[0]["id"] == pid
     assert resp[0]["winner_score"] == 42
+    assert resp[0]["desire"] == "High"
+
+
+def test_api_settings_weights_raw_int(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(web_app, "ensure_db", lambda: conn)
+
+    class Getter:
+        def __init__(self):
+            self.path = "/api/settings"
+            self.headers = {}
+            self.wfile = io.BytesIO()
+
+        def _set_json(self, code=200):
+            self.status = code
+
+    g = Getter()
+    web_app.RequestHandler.do_GET(g)
+    resp = json.loads(g.wfile.getvalue().decode("utf-8"))
+    assert "weights_raw_int" in resp
+
+    body = json.dumps({"weights_raw_int": {"price": 10.7, "rating": "80"}})
+
+    class Poster:
+        def __init__(self, body):
+            self.path = "/api/settings"
+            self.headers = {"Content-Length": str(len(body))}
+            self.rfile = io.BytesIO(body.encode("utf-8"))
+            self.wfile = io.BytesIO()
+
+        def _set_json(self, code=200):
+            self.status = code
+
+    p = Poster(body)
+    web_app.RequestHandler.do_POST(p)
+
+    g2 = Getter()
+    web_app.RequestHandler.do_GET(g2)
+    resp2 = json.loads(g2.wfile.getvalue().decode("utf-8"))
+    assert resp2["weights_raw_int"].get("price") == 11
+    assert resp2["weights_raw_int"].get("rating") == 80
 
 
 def test_patch_winner_weights_persists(tmp_path, monkeypatch):
