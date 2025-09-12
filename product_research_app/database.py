@@ -23,6 +23,40 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
+# Explicit list of columns commonly selected for products
+PRODUCT_COLUMNS = [
+    "id",
+    "name",
+    "description",
+    "category",
+    "price",
+    "currency",
+    "image_url",
+    "source",
+    "import_date",
+    "desire",
+    "desire_magnitude",
+    "awareness_level",
+    "competition_level",
+    "date_range",
+    "extra",
+    "winner_score_raw",
+    "winner_score",
+    "winner_score_updated_at",
+    "ai_columns_completed_at",
+    "magnitud_deseo",
+    "nivel_consciencia_headroom",
+    "competition_level_invertido",
+    "facilidad_anuncio",
+    "escalabilidad",
+    "durabilidad_recurrencia",
+    "evidencia_demanda",
+    "tasa_conversion",
+    "ventas_por_dia",
+    "recencia_lanzamiento",
+]
+
+
 def get_connection(db_path: Path) -> sqlite3.Connection:
     """Return a SQLite connection to the specified database file.
 
@@ -446,9 +480,8 @@ def insert_product(
 def list_products(conn: sqlite3.Connection) -> List[sqlite3.Row]:
     """Return all products in the database ordered by import date descending."""
     cur = conn.cursor()
-    cur.execute(
-        "SELECT * FROM products ORDER BY import_date DESC"
-    )
+    cols = ", ".join(PRODUCT_COLUMNS)
+    cur.execute(f"SELECT {cols} FROM products ORDER BY import_date DESC")
     return cur.fetchall()
 
 

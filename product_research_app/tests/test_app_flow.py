@@ -229,7 +229,7 @@ def test_products_endpoint_serializes_rows(tmp_path, monkeypatch):
 def test_patch_winner_weights_persists(tmp_path, monkeypatch):
     setup_env(tmp_path, monkeypatch)
 
-    body = json.dumps({"key": "rating_weight", "value": 0.25})
+    body = json.dumps({"key": "rating_weight", "value": 25})
 
     class Dummy:
         def __init__(self, body):
@@ -247,7 +247,7 @@ def test_patch_winner_weights_persists(tmp_path, monkeypatch):
     assert resp.get("status") == "ok"
     from product_research_app.services import winner_score
     data = winner_score.load_winner_weights_raw()
-    assert data.get("weights", {}).get("rating") == 0.25
+    assert data.get("weights_raw_int", {}).get("rating") == 25
 
 def test_get_endpoints_return_json(tmp_path, monkeypatch):
     setup_env(tmp_path, monkeypatch)
@@ -310,16 +310,16 @@ def test_weight_changes_persist_without_score_reset(tmp_path, monkeypatch):
         resp = json.loads(h.wfile.getvalue().decode("utf-8"))
         assert resp.get("status") == "ok"
 
-    patch_weight("rating_weight", 0.2)
-    patch_weight("price_weight", 0.3)
-    patch_weight("units_sold_weight", 0.5)
+    patch_weight("rating_weight", 20)
+    patch_weight("price_weight", 30)
+    patch_weight("units_sold_weight", 50)
     from product_research_app.services import winner_score
 
     data = winner_score.load_winner_weights_raw()
-    weights = data.get("weights", {})
-    assert weights.get("rating") == 0.2
-    assert weights.get("price") == 0.3
-    assert weights.get("units_sold") == 0.5
+    weights = data.get("weights_raw_int", {})
+    assert weights.get("rating") == 20
+    assert weights.get("price") == 30
+    assert weights.get("units_sold") == 50
     prod = database.get_product(conn, pid)
     assert prod["winner_score"] == 55
 
@@ -429,7 +429,7 @@ def test_weights_hash_changes_after_patch(tmp_path, monkeypatch):
     eff1 = resp1["weights_eff"]
     ver1 = config.get_weights_version()
 
-    body_patch = json.dumps({"key": "rating_weight", "value": 0.2})
+    body_patch = json.dumps({"key": "rating_weight", "value": 20})
 
     class Patcher:
         def __init__(self, body):
@@ -547,7 +547,7 @@ def test_weights_eff_stable_when_touching_missing_metric(tmp_path, monkeypatch):
     hash_eff1 = resp1["weights_eff"]
     assert resp1["diag"]["sum_filtered"] == 0.0
 
-    body_patch = json.dumps({"key": "orders", "value": 2.0})
+    body_patch = json.dumps({"key": "orders", "value": 2})
     class Patcher:
         def __init__(self, body):
             self.path = "/api/config/winner-weights"
