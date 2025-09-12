@@ -199,8 +199,11 @@ body.dark .table tbody tr.selected { background: #243150; }
   gap: 4px;
 }
 
-th.price-header {
-  text-align: center !important;
+th.price-col,
+td.price-col {
+  text-align: center;
+  white-space: nowrap;
+  width: 1%;
 }
 
 #config .api-row .api-input-row {
