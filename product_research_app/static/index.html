@@ -448,21 +448,6 @@ function preprocessProducts(list){
   const dupMap = new Map();
   list.forEach(item => {
     item.trending = mapTrendingScore(item.trendingScore);
-    const desireSources = [
-      item.desire,
-      item.extras && item.extras.desire,
-      item.ai_desire,
-      item.ai_desire_label,
-      item.desire_magnitude
-    ];
-    let desireVal = '';
-    for (const src of desireSources) {
-      if (src !== undefined && src !== null && String(src).trim() !== '') {
-        desireVal = String(src);
-        break;
-      }
-    }
-    item.desire = desireVal;
     if (item.extras && item.extras['duplicate_of']) {
       item.isDuplicate = true;
       return;
@@ -880,9 +865,9 @@ function renderTable() {
       } else if (key === 'desire') {
         const input = document.createElement('input');
         input.type = 'text';
-        input.placeholder = '—';
-        const fullVal = value || '';
+        const fullVal = value ?? '';
         input.value = fullVal;
+        if (!fullVal) input.placeholder = '—';
         input.title = fullVal;
         td.title = fullVal;
         input.addEventListener('blur', async () => {

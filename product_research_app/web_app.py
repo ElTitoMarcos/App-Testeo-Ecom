@@ -679,7 +679,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 if dr is None:
                     dr = extra_dict.get("date_range")
                 price_val = rget(p, "price")
-                desire_val = _ensure_desire(p, extra_dict)
+                desire_val = rget(p, "desire")
                 row = {
                     "id": rget(p, "id"),
                     "name": rget(p, "name"),
@@ -780,7 +780,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     except Exception:
                         extra_dict = {}
                     p_dict = row_to_dict(p)
-                    desire_val = _ensure_desire(p_dict, extra_dict)
+                    desire_val = rget(p_dict, "desire")
                     score_dict = row_to_dict(score)
                     score_value = rget(score_dict, "winner_score")
                     breakdown_data = {}
@@ -1245,7 +1245,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 extra_dict = json.loads(rget(product, "extra") or "{}")
             except Exception:
                 extra_dict = {}
-            product["desire"] = _ensure_desire(product, extra_dict)
+            product["desire"] = rget(product, "desire")
             self._set_json()
             self.wfile.write(json.dumps(product).encode('utf-8'))
             return
@@ -1286,7 +1286,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     extra_dict = json.loads(rget(product, "extra") or "{}")
                 except Exception:
                     extra_dict = {}
-                product["desire"] = _ensure_desire(product, extra_dict)
+                product["desire"] = rget(product, "desire")
                 self._set_json()
                 self.wfile.write(json.dumps(product).encode('utf-8'))
             else:
