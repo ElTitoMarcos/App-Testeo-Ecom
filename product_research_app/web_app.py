@@ -102,25 +102,39 @@ def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> str:
         ("product.ai_desire_label", rget(product, "ai_desire_label")),
         ("product.desire_magnitude", rget(product, "desire_magnitude")),
     ]
+
     desire_val = ""
-    source_used = None
+    source_raw = None
     for name, val in sources:
         if val not in (None, ""):
             desire_val = str(val)
-            source_used = name
+            source_raw = name
             break
+
+    # Collapse the raw source to either "product.desire" or "loaded" so that
+    # callers can easily check whether the value originated from the stored
+    # column or was loaded from auxiliary fields.
+    if source_raw == "product.desire":
+        source_log = "product.desire"
+    elif source_raw is None:
+        source_log = "none"
+    else:
+        source_log = "loaded"
+
+    desire_len = len(desire_val)
     if desire_val == "":
         logger.info(
-            "desire_missing=true sources_checked=%s product=%s",
-            [s for s, _ in sources],
+            "product=%s desire_len=%s source=%s desire_missing=true",
             rget(product, "id"),
+            desire_len,
+            source_log,
         )
     else:
         logger.info(
-            "product=%s desire=%s source=%s",
+            "product=%s desire_len=%s source=%s",
             rget(product, "id"),
-            desire_val,
-            source_used,
+            desire_len,
+            source_log,
         )
     return desire_val
 
