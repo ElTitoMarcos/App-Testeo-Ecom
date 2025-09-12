@@ -91,13 +91,16 @@ def ensure_db():
 def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> str:
     """Return desire value from known sources.
 
-    Precedence: product.desire -> extras.desire -> product.ai_desire ->
-    product.ai_desire_label -> product.desire_magnitude.  Normalizes to
-    string and logs when no value is found."""
+    Precedence: product.desire -> extras.desire -> extras.ai_desire ->
+    extras.ai_desire_label -> product.ai_desire -> product.ai_desire_label ->
+    product.desire_magnitude.  Normalizes to string and logs when no
+    value is found."""
 
     sources = [
         ("product.desire", rget(product, "desire")),
         ("extras.desire", rget(extras, "desire")),
+        ("extras.ai_desire", rget(extras, "ai_desire")),
+        ("extras.ai_desire_label", rget(extras, "ai_desire_label")),
         ("product.ai_desire", rget(product, "ai_desire")),
         ("product.ai_desire_label", rget(product, "ai_desire_label")),
         ("product.desire_magnitude", rget(product, "desire_magnitude")),
@@ -680,6 +683,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                     dr = extra_dict.get("date_range")
                 price_val = rget(p, "price")
                 desire_val = _ensure_desire(p, extra_dict)
+                if desire_val and not extra_dict.get("desire"):
+                    extra_dict["desire"] = desire_val
                 row = {
                     "id": rget(p, "id"),
                     "name": rget(p, "name"),
@@ -687,6 +692,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "price": price_val,
                     "image_url": rget(p, "image_url"),
                     "desire": desire_val,
+                    "ai_desire": extra_dict.get("ai_desire"),
+                    "ai_desire_label": extra_dict.get("ai_desire_label"),
                     "desire_magnitude": rget(p, "desire_magnitude"),
                     "awareness_level": rget(p, "awareness_level"),
                     "competition_level": rget(p, "competition_level"),
@@ -781,6 +788,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                         extra_dict = {}
                     p_dict = row_to_dict(p)
                     desire_val = _ensure_desire(p_dict, extra_dict)
+                    if desire_val and not extra_dict.get("desire"):
+                        extra_dict["desire"] = desire_val
                     score_dict = row_to_dict(score)
                     score_value = rget(score_dict, "winner_score")
                     breakdown_data = {}
@@ -797,6 +806,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                         "price": p["price"],
                         "image_url": p["image_url"],
                         "desire": desire_val,
+                        "ai_desire": extra_dict.get("ai_desire"),
+                        "ai_desire_label": extra_dict.get("ai_desire_label"),
                         "desire_magnitude": rget(p_dict, "desire_magnitude"),
                         "extras": extra_dict,
                     }
