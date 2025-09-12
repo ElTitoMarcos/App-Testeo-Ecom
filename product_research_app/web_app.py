@@ -91,13 +91,16 @@ def ensure_db():
 def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> str:
     """Return desire value from known sources.
 
-    Precedence: product.desire -> extras.desire -> product.ai_desire ->
-    product.ai_desire_label -> product.desire_magnitude.  Normalizes to
-    string and logs when no value is found."""
+    Precedence: product.desire -> extras.desire -> extras.ai_desire ->
+    extras.ai_desire_label -> product.ai_desire -> product.ai_desire_label ->
+    product.desire_magnitude.  Normalizes to string and logs when no
+    value is found."""
 
     sources = [
         ("product.desire", rget(product, "desire")),
         ("extras.desire", rget(extras, "desire")),
+        ("extras.ai_desire", rget(extras, "ai_desire")),
+        ("extras.ai_desire_label", rget(extras, "ai_desire_label")),
         ("product.ai_desire", rget(product, "ai_desire")),
         ("product.ai_desire_label", rget(product, "ai_desire_label")),
         ("product.desire_magnitude", rget(product, "desire_magnitude")),
@@ -687,6 +690,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "price": price_val,
                     "image_url": rget(p, "image_url"),
                     "desire": desire_val,
+                    "ai_desire": extra_dict.get("ai_desire"),
+                    "ai_desire_label": extra_dict.get("ai_desire_label"),
                     "desire_magnitude": rget(p, "desire_magnitude"),
                     "awareness_level": rget(p, "awareness_level"),
                     "competition_level": rget(p, "competition_level"),
