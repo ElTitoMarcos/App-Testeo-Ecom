@@ -523,6 +523,7 @@ def generate_winner_scores(
             json.dumps(res.get("effective_weights", {}), sort_keys=True).encode("utf-8")
         ).hexdigest()[:8]
         weights_hash_eff = eff_hash
+        eff_w_int = {k: int(round(v * 100)) for k, v in res.get("effective_weights", {}).items()}
 
         if debug and diag_present is None:
             diag_present = present
@@ -543,7 +544,8 @@ def generate_winner_scores(
 
         if not present:
             logger.warning(
-                "Winner Score: product=%s score_int=%s score_raw=%.3f weights_all=%s weights_eff=%s present=%s missing=%s effective_weights=%s no_features_present",
+                "Winner Score: product=%s score_int=%s score_raw=%.3f weights_all=%s weights_eff=%s present=%s missing=%s "
+                "effective_weights=%s weights_effective_int=%s no_features_present",
                 pid,
                 new_score,
                 score_raw_0_100,
@@ -552,10 +554,12 @@ def generate_winner_scores(
                 present,
                 missing,
                 eff_w,
+                eff_w_int,
             )
         else:
             logger.info(
-                "Winner Score: product=%s score_int=%s score_raw=%.3f weights_all=%s weights_eff=%s present=%s missing=%s effective_weights=%s",
+                "Winner Score: product=%s score_int=%s score_raw=%.3f weights_all=%s weights_eff=%s present=%s missing=%s "
+                "effective_weights=%s weights_effective_int=%s",
                 pid,
                 new_score,
                 score_raw_0_100,
@@ -564,6 +568,7 @@ def generate_winner_scores(
                 present,
                 missing,
                 eff_w,
+                eff_w_int,
             )
         processed += 1
 
