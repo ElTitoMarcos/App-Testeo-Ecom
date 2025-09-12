@@ -238,7 +238,7 @@ def test_desire_serialization_and_logging(tmp_path, monkeypatch):
         currency=None,
         image_url="",
         source="",
-        desire="Top",
+        desire=55,
         extra={},
         product_id=1,
     )
@@ -251,7 +251,7 @@ def test_desire_serialization_and_logging(tmp_path, monkeypatch):
         currency=None,
         image_url="",
         source="",
-        extra={"desire": "Extra"},
+        extra={"desire": 10},
         product_id=2,
     )
     pid3 = database.insert_product(
@@ -292,11 +292,11 @@ def test_desire_serialization_and_logging(tmp_path, monkeypatch):
     p1 = next(p for p in resp if p["id"] == pid1)
     p2 = next(p for p in resp if p["id"] == pid2)
     p3 = next(p for p in resp if p["id"] == pid3)
-    assert p1["desire"] == "Top"
+    assert p1["desire"] == 55
     assert isinstance(p1["price"], (int, float))
-    assert p2["desire"] == "Extra"
-    assert p2["extras"].get("desire") == "Extra"
-    assert p3["desire"] == ""
+    assert p2["desire"] == 10
+    assert p2["extras"].get("desire") == 10
+    assert p3["desire"] is None
     log_text = web_app.LOG_PATH.read_text()
     assert f"desire_missing=true" in log_text and f"product={pid3}" in log_text
 
@@ -305,7 +305,7 @@ def test_desire_serialization_and_logging(tmp_path, monkeypatch):
     handler_list = Dummy(f"/list/{lid}")
     web_app.RequestHandler.do_GET(handler_list)
     resp_list = json.loads(handler_list.wfile.getvalue().decode("utf-8"))
-    assert resp_list and resp_list[0]["desire"] == "Top"
+    assert resp_list and resp_list[0]["desire"] == 55
 
 
 def test_patch_winner_weights_persists(tmp_path, monkeypatch):

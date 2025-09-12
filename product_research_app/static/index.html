@@ -231,9 +231,10 @@ body.dark pre { background:#2e315f; }
 <script src="/static/js/winner_score.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
 <script type="module">
-import { fetchJson } from "/static/js/net.js";
+import { fetchJson, updateProductField } from "/static/js/net.js";
 import * as groupsService from "/static/js/groups-service.js";
 window.fetchJson = fetchJson;
+window.updateProductField = updateProductField;
 window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
 let importPollTimer = null;
@@ -412,7 +413,7 @@ const columns = [
   { key: 'Creator Conversion Ratio', label: 'Tasa Conversión', type: 'string' },
   { key: 'Launch Date', label: 'Fecha Lanzamiento', type: 'string' },
   { key: 'date_range', label: 'Rango Fechas', type: 'string', headerClass: 'cell-date-range', cellClass: 'cell-date-range' },
-  { key: 'desire', label: 'Desire', type: 'string', headerClass: 'ec-col ec-col-desire', cellClass: 'ec-col ec-col-desire', dataEcCol: 'desire' },
+  { key: 'desire', label: 'Desire', type: 'number', align: 'center', headerClass: 'ec-col ec-col-desire', cellClass: 'ec-col ec-col-desire', dataEcCol: 'desire' },
   { key: 'desire_magnitude', label: 'Desire magnetitude', type: 'string', headerClass: 'ec-col ec-col-desire-mag', cellClass: 'ec-col ec-col-desire-mag', dataEcCol: 'desire_magnitude' },
   { key: 'awareness_level', label: 'Awerness Level', type: 'string', headerClass: 'ec-col ec-col-awareness', cellClass: 'ec-col ec-col-awareness', dataEcCol: 'awareness_level' },
   { key: 'competition_level', label: 'Competition level', type: 'string', headerClass: 'ec-col ec-col-competition', cellClass: 'ec-col ec-col-competition', dataEcCol: 'competition_level' },
@@ -455,11 +456,14 @@ function preprocessProducts(list){
       item.ai_desire_label,
       item.desire_magnitude
     ];
-    let desireVal = '';
+    let desireVal = null;
     for (const src of desireSources) {
       if (src !== undefined && src !== null && String(src).trim() !== '') {
-        desireVal = String(src);
-        break;
+        const n = Math.round(Number(src));
+        if (Number.isFinite(n)) {
+          desireVal = Math.max(0, Math.min(100, n));
+          break;
+        }
       }
     }
     item.desire = desireVal;
@@ -879,17 +883,68 @@ function renderTable() {
         }
       } else if (key === 'desire') {
         const input = document.createElement('input');
-        input.type = 'text';
+        input.type = 'number';
+        input.min = '0';
+        input.max = '100';
+        input.step = '1';
         input.placeholder = '—';
-        const fullVal = value || '';
-        input.value = fullVal;
-        input.title = fullVal;
-        td.title = fullVal;
-        input.addEventListener('blur', async () => {
-          const val = input.value.trim() || null;
-          try { await fetchJson(`/products/${item.id}`, {method:'PUT', body: JSON.stringify({desire: val})}); } catch(e) {}
+        input.value = value ?? '';
+        td.title = value ?? '';
+        let original = value ?? null;
+        let timer = null;
+        let saving = false;
+        const normalize = v => {
+          if (v === '' || v === null) return null;
+          let n = Math.round(Number(v));
+          if (!Number.isFinite(n)) return null;
+          if (n < 0) n = 0;
+          if (n > 100) n = 100;
+          return n;
+        };
+        const commit = async val => {
+          if (saving || val === original) return;
+          saving = true;
+          input.disabled = true;
+          const prev = original;
           item.desire = val;
-          ecAutoFitColumns(gridRoot);
+          try {
+            await updateProductField(item.id, { desire: val });
+            original = val;
+            input.value = val == null ? '' : val;
+            toast.success('Guardado', { duration: 1000 });
+          } catch (e) {
+            item.desire = prev;
+            input.value = prev == null ? '' : prev;
+            toast.error('No se pudo guardar Desire');
+          } finally {
+            saving = false;
+            input.disabled = false;
+            ecAutoFitColumns(gridRoot);
+          }
+        };
+        const schedule = () => {
+          if (timer) clearTimeout(timer);
+          timer = setTimeout(() => commit(normalize(input.value)), 500);
+        };
+        input.addEventListener('input', () => {
+          const norm = normalize(input.value);
+          item.desire = norm;
+          schedule();
+        });
+        input.addEventListener('blur', () => {
+          if (timer) clearTimeout(timer);
+          commit(normalize(input.value));
+        });
+        input.addEventListener('keydown', e => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            input.blur();
+          } else if (e.key === 'Escape') {
+            if (saving) return;
+            if (timer) clearTimeout(timer);
+            item.desire = original;
+            input.value = original == null ? '' : original;
+          }
         });
         td.appendChild(input);
       } else if (key === 'desire_magnitude') {

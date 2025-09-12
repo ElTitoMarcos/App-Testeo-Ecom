@@ -36,7 +36,7 @@ import time
 import sqlite3
 import math
 import hashlib
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from . import database
 from . import config
@@ -88,12 +88,12 @@ def ensure_db():
     return conn
 
 
-def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> str:
-    """Return desire value from known sources.
+def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> Optional[int]:
+    """Return numeric desire value from known sources.
 
     Precedence: product.desire -> extras.desire -> product.ai_desire ->
-    product.ai_desire_label -> product.desire_magnitude.  Normalizes to
-    string and logs when no value is found."""
+    product.ai_desire_label -> product.desire_magnitude. Values are
+    rounded and clamped to 0..100. Logs when no value is found."""
 
     sources = [
         ("product.desire", rget(product, "desire")),
@@ -102,14 +102,18 @@ def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> str:
         ("product.ai_desire_label", rget(product, "ai_desire_label")),
         ("product.desire_magnitude", rget(product, "desire_magnitude")),
     ]
-    desire_val = ""
+    desire_val: Optional[int] = None
     source_used = None
     for name, val in sources:
         if val not in (None, ""):
-            desire_val = str(val)
+            try:
+                n = int(round(float(val)))
+            except Exception:
+                continue
+            desire_val = max(0, min(100, n))
             source_used = name
             break
-    if desire_val == "":
+    if desire_val is None:
         logger.info(
             "desire_missing=true sources_checked=%s product=%s",
             [s for s, _ in sources],
@@ -1278,8 +1282,22 @@ class RequestHandler(BaseHTTPRequestHandler):
                     data.get("source"),
                 )
                 data.pop("price", None)
+            if "desire" in data:
+                val = data["desire"]
+                if val in (None, ""):
+                    data["desire"] = None
+                else:
+                    try:
+                        val = int(round(float(val)))
+                    except Exception:
+                        self._set_json(400)
+                        self.wfile.write(json.dumps({"error": "Invalid desire"}).encode('utf-8'))
+                        return
+                    data["desire"] = max(0, min(100, val))
             conn = ensure_db()
             database.update_product(conn, pid, **data)
+            if "desire" in data:
+                logger.info("product=%s desire=%s", pid, data.get("desire"))
             product = row_to_dict(database.get_product(conn, pid))
             if product:
                 try:
@@ -1320,6 +1338,54 @@ class RequestHandler(BaseHTTPRequestHandler):
     def do_PATCH(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path.startswith("/products/") or path.startswith("/api/products/"):
+            try:
+                pid = int(path.split("/")[-1])
+            except Exception:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"error": "Invalid ID"}).encode('utf-8'))
+                return
+            length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(length).decode('utf-8')
+            try:
+                data = json.loads(body)
+                if not isinstance(data, dict):
+                    raise ValueError
+            except Exception:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+                return
+            if "desire" not in data:
+                self._set_json()
+                self.wfile.write(json.dumps({"status": "ignored"}).encode('utf-8'))
+                return
+            val = data.get("desire")
+            if val in (None, ""):
+                norm = None
+            else:
+                try:
+                    norm = int(round(float(val)))
+                except Exception:
+                    self._set_json(400)
+                    self.wfile.write(json.dumps({"error": "Invalid desire"}).encode('utf-8'))
+                    return
+                norm = max(0, min(100, norm))
+            conn = ensure_db()
+            database.update_product(conn, pid, desire=norm)
+            logger.info("product=%s desire=%s", pid, norm)
+            product = row_to_dict(database.get_product(conn, pid))
+            if product:
+                try:
+                    extra_dict = json.loads(rget(product, "extra") or "{}")
+                except Exception:
+                    extra_dict = {}
+                product["desire"] = _ensure_desire(product, extra_dict)
+                self._set_json()
+                self.wfile.write(json.dumps(product).encode('utf-8'))
+                return
+            self._set_json(404)
+            self.wfile.write(json.dumps({"error": "Not found"}).encode('utf-8'))
+            return
         if path == "/api/config/winner-weights":
             length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(length).decode('utf-8')
@@ -1546,7 +1612,15 @@ class RequestHandler(BaseHTTPRequestHandler):
                     currency = (row.get(curr_col) or '').strip() if curr_col else None
                     image_url = (row.get(img_col) or '').strip() if img_col else None
                     desire = (row.get(desire_col) or '').strip() if desire_col else None
-                    desire = desire or None
+                    if desire not in (None, ''):
+                        try:
+                            desire = int(round(float(desire)))
+                        except Exception:
+                            desire = None
+                        else:
+                            desire = max(0, min(100, desire))
+                    else:
+                        desire = None
                     desire_mag = (row.get(desire_mag_col) or '').strip() if desire_mag_col else None
                     desire_mag = desire_mag or None
                     awareness = (row.get(awareness_col) or '').strip() if awareness_col else None
@@ -1642,6 +1716,15 @@ class RequestHandler(BaseHTTPRequestHandler):
                         currency = item.get(currency_key) if currency_key else None
                         image_url = item.get(image_key) if image_key else None
                         desire = item.get("desire") or item.get("desire_text")
+                        if desire not in (None, ""):
+                            try:
+                                desire = int(round(float(desire)))
+                            except Exception:
+                                desire = None
+                            else:
+                                desire = max(0, min(100, desire))
+                        else:
+                            desire = None
                         desire_mag = item.get("desire_magnitude") or item.get("magnitud_deseo")
                         awareness = item.get("awareness_level") or item.get("nivel_consciencia")
                         competition = item.get("competition_level") or item.get("saturacion_mercado")
@@ -1824,6 +1907,15 @@ class RequestHandler(BaseHTTPRequestHandler):
                         currency = item.get(currency_key) if currency_key else None
                         image_url = item.get(image_key) if image_key else None
                         desire = item.get("desire") or item.get("desire_text")
+                        if desire not in (None, ""):
+                            try:
+                                desire = int(round(float(desire)))
+                            except Exception:
+                                desire = None
+                            else:
+                                desire = max(0, min(100, desire))
+                        else:
+                            desire = None
                         desire_mag = item.get("desire_magnitude") or item.get("magnitud_deseo")
                         awareness = item.get("awareness_level") or item.get("nivel_consciencia")
                         competition = item.get("competition_level") or item.get("saturacion_mercado")

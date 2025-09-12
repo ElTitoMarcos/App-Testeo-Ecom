@@ -605,6 +605,7 @@ button.loading::after {
   font-size: 13px;
   padding: 2px 8px;
   margin: 0;
+  text-align: center;
 }
 
 /* Centrado visual en los select */

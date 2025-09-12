@@ -32,3 +32,7 @@ export async function fetchJson(url, opts, timeoutMs = 25000) {
     clearTimeout(id);
   }
 }
+
+export function updateProductField(id, payload) {
+  return fetchJson(`/products/${id}`, { method: 'PATCH', body: JSON.stringify(payload) });
+}

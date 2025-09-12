@@ -369,8 +369,13 @@ def insert_product(
     """
     cur = conn.cursor()
     import_date = datetime.utcnow().isoformat()
-    if desire is not None and len(desire) > 180:
-        desire = desire[:180]
+    if desire is not None:
+        try:
+            desire = int(round(float(desire)))
+        except Exception:
+            desire = None
+        if desire is not None:
+            desire = max(0, min(100, desire))
     allowed_tri = {"Low", "Medium", "High"}
     if desire_magnitude not in allowed_tri:
         desire_magnitude = None
@@ -502,8 +507,17 @@ def update_product(
     data = {k: v for k, v in fields.items() if k in allowed_cols}
     if not data:
         return
-    if "desire" in data and data["desire"] and len(data["desire"]) > 180:
-        data["desire"] = data["desire"][:180]
+    if "desire" in data:
+        val = data["desire"]
+        if val in (None, ""):
+            data["desire"] = None
+        else:
+            try:
+                val = int(round(float(val)))
+            except Exception:
+                data.pop("desire", None)
+            else:
+                data["desire"] = max(0, min(100, val))
     tri_vals = {"Low", "Medium", "High"}
     if "desire_magnitude" in data and data["desire_magnitude"] not in tri_vals:
         data["desire_magnitude"] = None
