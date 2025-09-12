@@ -43,7 +43,6 @@ from . import config
 from .services import ai_columns
 from .services import winner_score as winner_calc
 from . import gpt
-from .gpt import _compute_baselines
 from . import title_analyzer
 from .utils.db import row_to_dict, rget
 
@@ -89,21 +88,40 @@ def ensure_db():
     return conn
 
 
-def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> Any:
-    """Return desire value, computing baseline if missing.
+def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> str:
+    """Return desire value from known sources.
 
-    Logs whether the value was loaded from DB or computed."""
-    desire_val = rget(product, "desire")
-    source = "loaded"
-    if not desire_val:
-        try:
-            merged = {**product, **(extras or {})}
-            desire_val, _ = _compute_baselines(merged)
-            source = "computed"
-        except Exception:
-            desire_val = None
-            source = "computed"
-    logger.info("product=%s desire=%s source=%s", rget(product, "id"), desire_val, source)
+    Precedence: product.desire -> extras.desire -> product.ai_desire ->
+    product.ai_desire_label -> product.desire_magnitude.  Normalizes to
+    string and logs when no value is found."""
+
+    sources = [
+        ("product.desire", rget(product, "desire")),
+        ("extras.desire", rget(extras, "desire")),
+        ("product.ai_desire", rget(product, "ai_desire")),
+        ("product.ai_desire_label", rget(product, "ai_desire_label")),
+        ("product.desire_magnitude", rget(product, "desire_magnitude")),
+    ]
+    desire_val = ""
+    source_used = None
+    for name, val in sources:
+        if val not in (None, ""):
+            desire_val = str(val)
+            source_used = name
+            break
+    if desire_val == "":
+        logger.info(
+            "desire_missing=true sources_checked=%s product=%s",
+            [s for s, _ in sources],
+            rget(product, "id"),
+        )
+    else:
+        logger.info(
+            "product=%s desire=%s source=%s",
+            rget(product, "id"),
+            desire_val,
+            source_used,
+        )
     return desire_val
 
 
@@ -761,6 +779,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                         extra_dict = json.loads(extra) if isinstance(extra, str) else (extra or {})
                     except Exception:
                         extra_dict = {}
+                    p_dict = row_to_dict(p)
+                    desire_val = _ensure_desire(p_dict, extra_dict)
                     score_dict = row_to_dict(score)
                     score_value = rget(score_dict, "winner_score")
                     breakdown_data = {}
@@ -776,6 +796,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                         "category": p["category"],
                         "price": p["price"],
                         "image_url": p["image_url"],
+                        "desire": desire_val,
+                        "desire_magnitude": rget(p_dict, "desire_magnitude"),
                         "extras": extra_dict,
                     }
                     row["winner_score"] = score_value

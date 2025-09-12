@@ -226,6 +226,88 @@ def test_products_endpoint_serializes_rows(tmp_path, monkeypatch):
     assert resp[0]["winner_score"] == 42
 
 
+def test_desire_serialization_and_logging(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(web_app, "ensure_db", lambda: conn)
+    pid1 = database.insert_product(
+        conn,
+        name="P1",
+        description="",
+        category="",
+        price=1.0,
+        currency=None,
+        image_url="",
+        source="",
+        desire="Top",
+        extra={},
+        product_id=1,
+    )
+    pid2 = database.insert_product(
+        conn,
+        name="P2",
+        description="",
+        category="",
+        price=2.0,
+        currency=None,
+        image_url="",
+        source="",
+        extra={"desire": "Extra"},
+        product_id=2,
+    )
+    pid3 = database.insert_product(
+        conn,
+        name="P3",
+        description="",
+        category="",
+        price=3.0,
+        currency=None,
+        image_url="",
+        source="",
+        extra={},
+        product_id=3,
+    )
+
+    class Dummy:
+        def __init__(self, path):
+            self.path = path
+            self.headers = {}
+            self.wfile = io.BytesIO()
+
+        def _set_json(self, code=200):
+            self.status = code
+
+        def send_error(self, code, msg=None):
+            raise AssertionError(f"error {code}")
+
+        def safe_write(self, func):
+            try:
+                func()
+                return True
+            except Exception:
+                return False
+
+    handler = Dummy("/products")
+    web_app.RequestHandler.do_GET(handler)
+    resp = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    p1 = next(p for p in resp if p["id"] == pid1)
+    p2 = next(p for p in resp if p["id"] == pid2)
+    p3 = next(p for p in resp if p["id"] == pid3)
+    assert p1["desire"] == "Top"
+    assert isinstance(p1["price"], (int, float))
+    assert p2["desire"] == "Extra"
+    assert p2["extras"].get("desire") == "Extra"
+    assert p3["desire"] == ""
+    log_text = web_app.LOG_PATH.read_text()
+    assert f"desire_missing=true" in log_text and f"product={pid3}" in log_text
+
+    lid = database.create_list(conn, "L")
+    database.add_product_to_list(conn, lid, pid1)
+    handler_list = Dummy(f"/list/{lid}")
+    web_app.RequestHandler.do_GET(handler_list)
+    resp_list = json.loads(handler_list.wfile.getvalue().decode("utf-8"))
+    assert resp_list and resp_list[0]["desire"] == "Top"
+
+
 def test_patch_winner_weights_persists(tmp_path, monkeypatch):
     setup_env(tmp_path, monkeypatch)
 
