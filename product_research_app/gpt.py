@@ -29,7 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from . import database
+from . import database, config
 
 logger = logging.getLogger(__name__)
 
@@ -902,13 +902,60 @@ def evaluate_winner_score(
         OpenAIError: If the API call fails or returns invalid content.
     """
 
+    metrics = product.get("metrics") or {}
+    required = [
+        "price",
+        "rating",
+        "units_sold",
+        "revenue",
+        "desire",
+        "competition",
+        "profit_margin",
+        "review_count",
+        "image_count",
+        "shipping_days",
+    ]
+    missing = [k for k in required if metrics.get(k) is None]
+    if missing:
+        logger.warning("Winner Score missing_fields=%s", missing)
+    metrics_filtered = {k: metrics.get(k) for k in required if metrics.get(k) is not None}
+    product = product.copy()
+    product["metrics"] = metrics_filtered
+
     prompt = build_winner_score_prompt(product)
+    image_url = (product.get("image_url") or "").strip()
+    include_image = True
+    reason = ""
+    cost_est = 0.0
+    if image_url:
+        include_image = config.include_image_in_ai()
+        if not include_image:
+            reason = "config"
+        else:
+            token_est = 85
+            cost_est = token_est / 1000.0 * 0.002
+            if cost_est > config.get_ai_image_cost_max_usd():
+                include_image = False
+                reason = "cost"
+    if image_url and not include_image:
+        logger.info("include_image=false reason=%s", reason)
+    elif image_url and include_image:
+        logger.info("include_image=true est_cost=%.4f", cost_est)
+
+    if image_url and include_image:
+        user_content = [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": image_url}},
+        ]
+    else:
+        user_content = prompt
+
     messages = [
         {
             "role": "system",
             "content": "Eres un asistente que responde únicamente con JSON válido.",
         },
-        {"role": "user", "content": prompt},
+        {"role": "user", "content": user_content},
     ]
     resp_json = call_openai_chat(api_key, model, messages)
     try:

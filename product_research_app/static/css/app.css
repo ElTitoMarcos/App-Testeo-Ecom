@@ -199,6 +199,10 @@ body.dark .table tbody tr.selected { background: #243150; }
   gap: 4px;
 }
 
+th.price-header {
+  text-align: center !important;
+}
+
 #config .api-row .api-input-row {
   display: flex;
   gap: 4px;

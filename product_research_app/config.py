@@ -35,6 +35,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "min_medium_pct": 0.05,
         "min_high_pct": 0.05,
     },
+    "includeImageInAI": True,
+    "aiImageCostMaxUSD": 0.02,
     "weightsVersion": 0,
     "weightsUpdatedAt": 0,
 }
@@ -157,6 +159,22 @@ def is_auto_fill_ia_on_import_enabled() -> bool:
         return bool(cfg.get("autoFillIAOnImport", True))
     except Exception:
         return True
+
+
+def include_image_in_ai() -> bool:
+    cfg = load_config()
+    try:
+        return bool(cfg.get("includeImageInAI", True))
+    except Exception:
+        return True
+
+
+def get_ai_image_cost_max_usd() -> float:
+    cfg = load_config()
+    try:
+        return float(cfg.get("aiImageCostMaxUSD", 0.02))
+    except Exception:
+        return 0.02
 
 
 SCORING_DEFAULT_WEIGHTS: Dict[str, float] = {

@@ -116,5 +116,6 @@
 
   // initial attempt (will populate once table is rendered)
   ensureColumnVisible('price');
+  ensureColumnVisible('desire');
   build();
 })();
