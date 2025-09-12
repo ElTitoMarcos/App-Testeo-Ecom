@@ -125,6 +125,49 @@ def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> str:
     return desire_val
 
 
+def _serialize_product(p_row: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a product dictionary ready for JSON serialization.
+
+    Ensures ``desire`` is always present and extras are parsed consistently so
+    any endpoint using this helper exposes the field just like in PR #221.
+    """
+
+    p = row_to_dict(p_row)
+    extra = rget(p, "extra") or {}
+    try:
+        extra_dict = json.loads(extra) if isinstance(extra, str) else extra
+    except Exception:
+        extra_dict = {}
+    desire_val = _ensure_desire(p, extra_dict)
+    dr = rget(p, "date_range") or extra_dict.get("date_range") or ""
+    price_val = rget(p, "price")
+    row: Dict[str, Any] = {
+        "id": rget(p, "id"),
+        "name": rget(p, "name"),
+        "category": rget(p, "category"),
+        "price": price_val,
+        "image_url": rget(p, "image_url"),
+        "desire": desire_val,
+        "desire_magnitude": rget(p, "desire_magnitude"),
+        "awareness_level": rget(p, "awareness_level"),
+        "competition_level": rget(p, "competition_level"),
+        "rating": extra_dict.get("rating"),
+        "units_sold": extra_dict.get("units_sold"),
+        "revenue": extra_dict.get("revenue"),
+        "conversion_rate": extra_dict.get("conversion_rate"),
+        "launch_date": extra_dict.get("launch_date"),
+        "date_range": dr,
+        "extras": extra_dict,
+    }
+    if price_val is not None:
+        try:
+            row["price_display"] = round(float(price_val), 2)
+        except Exception:
+            row["price_display"] = price_val
+    row["winner_score"] = rget(p, "winner_score")
+    return row
+
+
 def parse_xlsx(binary: bytes):
     """Parse a minimal XLSX file into a list of dictionaries."""
     import zipfile
@@ -660,51 +703,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path in ("/products", "/api/products"):
             # Return a list of products including extra metadata for UI display
             conn = ensure_db()
-            rows = []
-            for p_row in database.list_products(conn):
-                p = row_to_dict(p_row)
-                extra = rget(p, "extra", {})
-                try:
-                    extra_dict = json.loads(extra) if isinstance(extra, str) else (extra or {})
-                except Exception:
-                    extra_dict = {}
-                if 'rating' in extra_dict and 'Product Rating' not in extra_dict:
-                    extra_dict['Product Rating'] = extra_dict['rating']
-                if 'units_sold' in extra_dict and 'Item Sold' not in extra_dict:
-                    extra_dict['Item Sold'] = extra_dict['units_sold']
-                if 'revenue' in extra_dict and 'Revenue($)' not in extra_dict:
-                    extra_dict['Revenue($)'] = extra_dict['revenue']
-                score_value = rget(p, "winner_score")
-                dr = rget(p, "date_range")
-                if dr is None:
-                    dr = extra_dict.get("date_range")
-                price_val = rget(p, "price")
-                desire_val = _ensure_desire(p, extra_dict)
-                row = {
-                    "id": rget(p, "id"),
-                    "name": rget(p, "name"),
-                    "category": rget(p, "category"),
-                    "price": price_val,
-                    "image_url": rget(p, "image_url"),
-                    "desire": desire_val,
-                    "desire_magnitude": rget(p, "desire_magnitude"),
-                    "awareness_level": rget(p, "awareness_level"),
-                    "competition_level": rget(p, "competition_level"),
-                    "rating": extra_dict.get("rating"),
-                    "units_sold": extra_dict.get("units_sold"),
-                    "revenue": extra_dict.get("revenue"),
-                    "conversion_rate": extra_dict.get("conversion_rate"),
-                    "launch_date": extra_dict.get("launch_date"),
-                    "date_range": dr or "",
-                    "extras": extra_dict,
-                }
-                if price_val is not None:
-                    try:
-                        row["price_display"] = round(float(price_val), 2)
-                    except Exception:
-                        row["price_display"] = price_val
-                row["winner_score"] = score_value
-                rows.append(row)
+            rows = [_serialize_product(p_row) for p_row in database.list_products(conn)]
             self._set_json()
             self.wfile.write(json.dumps(rows).encode("utf-8"))
             return
@@ -772,37 +771,17 @@ class RequestHandler(BaseHTTPRequestHandler):
                 prods = database.get_products_in_list(conn, lid)
                 rows = []
                 for p in prods:
+                    row = _serialize_product(p)
                     scores = database.get_scores_for_product(conn, p["id"])
                     score = scores[0] if scores else None
-                    extra = p["extra"] if "extra" in p.keys() else {}
-                    try:
-                        extra_dict = json.loads(extra) if isinstance(extra, str) else (extra or {})
-                    except Exception:
-                        extra_dict = {}
-                    p_dict = row_to_dict(p)
-                    desire_val = _ensure_desire(p_dict, extra_dict)
-                    score_dict = row_to_dict(score)
-                    score_value = rget(score_dict, "winner_score")
-                    breakdown_data = {}
-                    if score_dict:
+                    if score:
+                        score_dict = row_to_dict(score)
+                        row["winner_score"] = rget(score_dict, "winner_score")
                         try:
                             raw_breakdown = rget(score_dict, "winner_score_breakdown")
-                            breakdown_data = json.loads(raw_breakdown or "{}")
+                            row["winner_score_breakdown"] = json.loads(raw_breakdown or "{}")
                         except Exception:
-                            breakdown_data = {}
-                    row = {
-                        "id": p["id"],
-                        "name": p["name"],
-                        "category": p["category"],
-                        "price": p["price"],
-                        "image_url": p["image_url"],
-                        "desire": desire_val,
-                        "desire_magnitude": rget(p_dict, "desire_magnitude"),
-                        "extras": extra_dict,
-                    }
-                    row["winner_score"] = score_value
-                    if score_dict:
-                        row["winner_score_breakdown"] = breakdown_data
+                            pass
                     rows.append(row)
                 self._set_json()
                 self.wfile.write(json.dumps(rows).encode("utf-8"))
@@ -1280,15 +1259,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                 data.pop("price", None)
             conn = ensure_db()
             database.update_product(conn, pid, **data)
-            product = row_to_dict(database.get_product(conn, pid))
-            if product:
-                try:
-                    extra_dict = json.loads(rget(product, "extra") or "{}")
-                except Exception:
-                    extra_dict = {}
-                product["desire"] = _ensure_desire(product, extra_dict)
+            product_row = database.get_product(conn, pid)
+            if product_row:
+                row = _serialize_product(product_row)
                 self._set_json()
-                self.wfile.write(json.dumps(product).encode('utf-8'))
+                self.wfile.write(json.dumps(row).encode('utf-8'))
             else:
                 self.send_error(404)
             return
