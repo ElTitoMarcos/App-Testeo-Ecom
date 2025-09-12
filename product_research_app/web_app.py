@@ -103,23 +103,25 @@ def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> str:
         ("product.desire_magnitude", rget(product, "desire_magnitude")),
     ]
     desire_val = ""
-    source_used = None
+    source_used = "none"
     for name, val in sources:
         if val not in (None, ""):
             desire_val = str(val)
             source_used = name
             break
+    desire_len = len(desire_val)
     if desire_val == "":
         logger.info(
-            "desire_missing=true sources_checked=%s product=%s",
-            [s for s, _ in sources],
+            "product=%s desire_len=%d desire_source=%s desire_missing=true",
             rget(product, "id"),
+            desire_len,
+            source_used,
         )
     else:
         logger.info(
-            "product=%s desire=%s source=%s",
+            "product=%s desire_len=%d desire_source=%s",
             rget(product, "id"),
-            desire_val,
+            desire_len,
             source_used,
         )
     return desire_val
