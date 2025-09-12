@@ -25,6 +25,7 @@ import os
 import io
 import re
 import logging
+import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
@@ -42,6 +43,7 @@ from . import config
 from .services import ai_columns
 from .services import winner_score as winner_calc
 from . import gpt
+from .gpt import _compute_baselines
 from . import title_analyzer
 from .utils.db import row_to_dict, rget
 
@@ -85,6 +87,24 @@ def ensure_db():
         pass
     logger.info("Database ready at %s", DB_PATH)
     return conn
+
+
+def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> Any:
+    """Return desire value, computing baseline if missing.
+
+    Logs whether the value was loaded from DB or computed."""
+    desire_val = rget(product, "desire")
+    source = "loaded"
+    if not desire_val:
+        try:
+            merged = {**product, **(extras or {})}
+            desire_val, _ = _compute_baselines(merged)
+            source = "computed"
+        except Exception:
+            desire_val = None
+            source = "computed"
+    logger.info("product=%s desire=%s source=%s", rget(product, "id"), desire_val, source)
+    return desire_val
 
 
 def parse_xlsx(binary: bytes):
@@ -557,16 +577,21 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._set_json()
             self.wfile.write(json.dumps({"path": str(LOG_PATH)}).encode("utf-8"))
             return
+        if path == "/api/auth/has-key":
+            has_key = bool(config.get_api_key())
+            self._set_json()
+            self.wfile.write(json.dumps({"ok": True, "has_key": has_key}).encode("utf-8"))
+            return
         if path == "/api/config/winner-weights":
             from .services import winner_score
 
             data = winner_score.load_winner_weights_raw()
             weights = {k: float(v) for k, v in data.get("weights", {}).items()}
-            weights_rounded = {k: round(float(v), 3) for k, v in weights.items()}
+            weights_int = {k: int(round(v)) for k, v in weights.items()}
+            logger.info("weights_effective_int=%s", weights_int)
             resp = {
-                "weights": weights,
+                "weights": weights_int,
                 "updated_at": data.get("updated_at"),
-                "weights_rounded": weights_rounded,
             }
             self._set_json()
             self.wfile.write(json.dumps(resp).encode("utf-8"))
@@ -636,13 +661,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                 if dr is None:
                     dr = extra_dict.get("date_range")
                 price_val = rget(p, "price")
+                desire_val = _ensure_desire(p, extra_dict)
                 row = {
                     "id": rget(p, "id"),
                     "name": rget(p, "name"),
                     "category": rget(p, "category"),
                     "price": price_val,
                     "image_url": rget(p, "image_url"),
-                    "desire": rget(p, "desire"),
+                    "desire": desire_val,
                     "desire_magnitude": rget(p, "desire_magnitude"),
                     "awareness_level": rget(p, "awareness_level"),
                     "competition_level": rget(p, "competition_level"),
@@ -1073,6 +1099,38 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/api/analyze/titles":
             self.handle_analyze_titles()
             return
+        if path == "/api/auth/set-key":
+            length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(length).decode('utf-8')
+            try:
+                data = json.loads(body)
+                key = str(data.get("api_key", "")).strip()
+            except Exception:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"ok": False, "has_key": False, "error": "invalid_json"}).encode('utf-8'))
+                return
+            if not key:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"ok": False, "has_key": False, "error": "empty_api_key"}).encode('utf-8'))
+                return
+            try:
+                resp = requests.get(
+                    "https://api.openai.com/v1/models",
+                    headers={"Authorization": f"Bearer {key}"},
+                    timeout=15,
+                )
+                if resp.status_code != 200:
+                    raise ValueError(resp.text)
+            except Exception as exc:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"ok": False, "has_key": False, "error": str(exc)}).encode('utf-8'))
+                return
+            cfg = config.load_config()
+            cfg["api_key"] = key
+            config.save_config(cfg)
+            self._set_json()
+            self.wfile.write(json.dumps({"ok": True, "has_key": True}).encode('utf-8'))
+            return
         if path == "/upload":
             self.handle_upload()
             return
@@ -1161,6 +1219,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                 extra=data.get("extras"),
             )
             product = row_to_dict(database.get_product(conn, pid))
+            try:
+                extra_dict = json.loads(rget(product, "extra") or "{}")
+            except Exception:
+                extra_dict = {}
+            product["desire"] = _ensure_desire(product, extra_dict)
             self._set_json()
             self.wfile.write(json.dumps(product).encode('utf-8'))
             return
@@ -1197,6 +1260,11 @@ class RequestHandler(BaseHTTPRequestHandler):
             database.update_product(conn, pid, **data)
             product = row_to_dict(database.get_product(conn, pid))
             if product:
+                try:
+                    extra_dict = json.loads(rget(product, "extra") or "{}")
+                except Exception:
+                    extra_dict = {}
+                product["desire"] = _ensure_desire(product, extra_dict)
                 self._set_json()
                 self.wfile.write(json.dumps(product).encode('utf-8'))
             else:
