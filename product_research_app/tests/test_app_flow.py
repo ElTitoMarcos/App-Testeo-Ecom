@@ -298,7 +298,11 @@ def test_desire_serialization_and_logging(tmp_path, monkeypatch):
     assert p2["extras"].get("desire") == "Extra"
     assert p3["desire"] == ""
     log_text = web_app.LOG_PATH.read_text()
-    assert f"desire_missing=true" in log_text and f"product={pid3}" in log_text
+    assert f"product={pid1} desire_len=3 desire_source=product.desire" in log_text
+    assert f"product={pid2} desire_len=5 desire_source=extras.desire" in log_text
+    assert (
+        f"product={pid3} desire_len=0 desire_source=none desire_missing=true" in log_text
+    )
 
     lid = database.create_list(conn, "L")
     database.add_product_to_list(conn, lid, pid1)
