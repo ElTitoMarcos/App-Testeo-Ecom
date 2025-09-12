@@ -679,7 +679,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                 if dr is None:
                     dr = extra_dict.get("date_range")
                 price_val = rget(p, "price")
-                desire_val = _ensure_desire(p, extra_dict)
+                desire_db = rget(p, "desire")
+                if desire_db in (None, ""):
+                    _ensure_desire(p, extra_dict)
+                desire_val = desire_db or None
                 row = {
                     "id": rget(p, "id"),
                     "name": rget(p, "name"),
@@ -780,7 +783,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                     except Exception:
                         extra_dict = {}
                     p_dict = row_to_dict(p)
-                    desire_val = _ensure_desire(p_dict, extra_dict)
+                    desire_db = rget(p_dict, "desire")
+                    if desire_db in (None, ""):
+                        _ensure_desire(p_dict, extra_dict)
+                    desire_val = desire_db or None
                     score_dict = row_to_dict(score)
                     score_value = rget(score_dict, "winner_score")
                     breakdown_data = {}
@@ -1245,7 +1251,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                 extra_dict = json.loads(rget(product, "extra") or "{}")
             except Exception:
                 extra_dict = {}
-            product["desire"] = _ensure_desire(product, extra_dict)
+            desire_db = rget(product, "desire")
+            if desire_db in (None, ""):
+                _ensure_desire(product, extra_dict)
+            product["desire"] = desire_db or None
             self._set_json()
             self.wfile.write(json.dumps(product).encode('utf-8'))
             return
@@ -1286,7 +1295,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                     extra_dict = json.loads(rget(product, "extra") or "{}")
                 except Exception:
                     extra_dict = {}
-                product["desire"] = _ensure_desire(product, extra_dict)
+                desire_db = rget(product, "desire")
+                if desire_db in (None, ""):
+                    _ensure_desire(product, extra_dict)
+                product["desire"] = desire_db or None
                 self._set_json()
                 self.wfile.write(json.dumps(product).encode('utf-8'))
             else:
@@ -1320,6 +1332,48 @@ class RequestHandler(BaseHTTPRequestHandler):
     def do_PATCH(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path.startswith("/api/products/"):
+            try:
+                pid = int(path.split("/")[-1])
+            except Exception:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"error": "Invalid ID"}).encode('utf-8'))
+                return
+            length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(length).decode('utf-8')
+            try:
+                data = json.loads(body)
+                if not isinstance(data, dict):
+                    raise ValueError
+            except Exception:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+                return
+            if "desire" not in data:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"error": "Missing desire"}).encode('utf-8'))
+                return
+            desire_val = str(data.get("desire") or "").strip()[:1000]
+            if desire_val == "":
+                desire_val = None
+            conn = ensure_db()
+            database.update_product(conn, pid, desire=desire_val)
+            product = row_to_dict(database.get_product(conn, pid))
+            if product:
+                try:
+                    extra_dict = json.loads(rget(product, "extra") or "{}")
+                except Exception:
+                    extra_dict = {}
+                desire_db = rget(product, "desire")
+                if desire_db in (None, ""):
+                    _ensure_desire(product, extra_dict)
+                product["desire"] = desire_db or None
+                self._set_json()
+                self.wfile.write(json.dumps(product).encode('utf-8'))
+            else:
+                self._set_json(404)
+                self.wfile.write(json.dumps({"error": "Not found"}).encode('utf-8'))
+            return
         if path == "/api/config/winner-weights":
             length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(length).decode('utf-8')
