@@ -32,3 +32,13 @@ export async function fetchJson(url, opts, timeoutMs = 25000) {
     clearTimeout(id);
   }
 }
+
+export async function updateProductDesire(id, desire, original = '') {
+  const norm = (desire || '').trim();
+  const prev = (original || '').trim();
+  if (norm === prev) return;
+  return fetchJson(`/api/products/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ desire: norm })
+  });
+}
