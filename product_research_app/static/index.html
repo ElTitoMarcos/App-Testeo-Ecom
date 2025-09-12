@@ -403,7 +403,7 @@ const columns = [
   { key: 'image_url', label: 'Imagen', type: 'image' },
   { key: 'name', label: 'Nombre', type: 'string' },
   { key: 'category', label: 'Categoría', type: 'string' },
-  { key: 'price', label: 'Price', type: 'number', width: 110, align: 'right', editable: false,
+  { key: 'price', label: 'Price', type: 'number', width: 110, align: 'right', editable: false, headerClass:'price-header',
     render: row => new Intl.NumberFormat('en-US', { style:'currency', currency:'USD', maximumFractionDigits: 2 }).format(row.price ?? 0) },
   { key: 'Product Rating', label: 'Rating', type: 'number' },
   { key: 'Item Sold', label: 'Unidades Vendidas', type: 'number' },
@@ -504,13 +504,12 @@ function showSavedTick(key){
   if(el){ el.textContent='✓'; setTimeout(()=>{ el.textContent=''; },1000); }
 }
 
-function updateSliderLabel(el, val) {
-  const num = Number(val);
-  const shown = Number.isFinite(num) ? num.toFixed(3) : '0.000';
-  el.nextElementSibling?.querySelector('.weight-value')?.replaceChildren(document.createTextNode(shown));
+function updateSliderLabel(el) {
+  const num = Math.round(Number(el.value) || 0);
+  el.nextElementSibling?.querySelector('.weight-value')?.replaceChildren(document.createTextNode(String(num)));
 }
 
-function renderWeights(rounded){
+function renderWeights(){
   const list=document.getElementById('weightsList');
   if(!list) return;
   list.innerHTML='';
@@ -519,17 +518,18 @@ function renderWeights(rounded){
     const li=document.createElement('li');
     li.className='metric-row';
     li.dataset.key=key;
-    li.innerHTML=`<span class="ws-handle">≡</span><span class="ws-name">${def.label}</span><div class="ws-slider-wrap"><input type="range" name="${key}" min="0" max="100" step="0.001" value="${weightValues[key]||0}" class="ws-slider"><span class="ws-value"><span class="weight-value"></span></span></div><span class="ws-status"></span>`;
+    li.innerHTML=`<span class="ws-handle">≡</span><span class="ws-name">${def.label}</span><div class="ws-slider-wrap"><input type="range" name="${key}" min="0" max="100" step="1" value="${Math.round(weightValues[key]||0)}" class="ws-slider"><span class="ws-value"><span class="weight-value"></span></span></div><span class="ws-status"></span>`;
     const range=li.querySelector('.ws-slider');
     range.addEventListener('input',e=>{
       const k=normalizeKey(e.target.name);
-      const v=parseFloat(e.target.value);
+      const v=Math.round(parseFloat(e.target.value));
+      e.target.value = v;
       weightValues[k]=v;
-      updateSliderLabel(range, range.value);
+      updateSliderLabel(range);
       if(Number.isFinite(v)) saveWeightDebounced(k, v);
     });
     ['mousedown','touchstart'].forEach(ev=>{ range.addEventListener(ev,e=>{ e.stopPropagation(); }); });
-    updateSliderLabel(range, rounded?.[key] ?? weightValues[key]);
+    updateSliderLabel(range);
     list.appendChild(li);
   });
   Sortable.create(list,{ handle:'.ws-handle', animation:150, onEnd:()=>{ weightOrder=Array.from(list.children).map(li=>li.dataset.key); }});
@@ -608,7 +608,7 @@ async function adjustWeightsAI(){
       let v=Number(obj[k]);
       if(isNaN(v)) v=Number(weightValues[k])||0;
       if(v<0) v=0; if(v>100) v=100;
-      newWeights[k]=v;
+      newWeights[k]=Math.round(v);
     }
     weightValues=newWeights;
     renderWeights();
@@ -624,10 +624,11 @@ async function adjustWeightsAI(){
 async function loadWeights(){
   try{
     const res = await fetch('/api/config/winner-weights');
-    const { weights, weights_rounded } = await res.json();
-    weightValues = { ...weights };
+    const { weights } = await res.json();
+    weightValues = {};
+    for(const k in weights){ weightValues[k] = Math.round(weights[k]); }
     weightOrder = defaultOrder();
-    renderWeights(weights_rounded);
+    renderWeights();
     document.getElementById('resetWeights').onclick = resetWeights;
     const aiBtn=document.getElementById('aiWeights');
     if(aiBtn) aiBtn.onclick=adjustWeightsAI;
@@ -695,6 +696,9 @@ function isTrending(name) {
 async function fetchProducts(preserve=true) {
   const prevSel = new Set(selection);
   const data = await fetchJson('/products');
+  if(data.length && data[0].desire !== undefined && window.ensureColumnVisible){
+    ensureColumnVisible('desire');
+  }
   allProducts = data;
   preprocessProducts(allProducts);
   allProducts.sort((a,b)=> (Number(a.id)||0) - (Number(b.id)||0));
@@ -1004,9 +1008,10 @@ function sortBy(field, type) {
 }
 
 document.getElementById('refreshBtn').onclick = fetchProducts;
-window.onload = () => {
-  loadConfig();
-  fetchProducts();
+window.onload = async () => {
+  await ensureApiKey();
+  await loadConfig();
+  await fetchProducts();
   const tid = localStorage.getItem(IMPORT_TASK_LS_KEY);
   if(tid){
     toast.info('Reanudando IA post-import desde el último punto guardado…');
@@ -1035,7 +1040,7 @@ document.getElementById('configBtn').onclick = async () => {
   body.appendChild(wcard);
   cfg.style.display = 'block';
   wcard.style.display = 'block';
-  const handle = modalManager.open(modal, {returnFocus: btn, closeOnBackdrop:false, onClose: () => {
+  const handle = modalManager.open(modal, {returnFocus: btn, closeOnBackdrop:true, onClose: () => {
     cfg.style.display = 'none';
     wcard.style.display = 'none';
     cfgParent.insertBefore(cfg, cfgNext);
@@ -1181,18 +1186,57 @@ function parseDate(value) {
 }
 
 
-// toggle API key visibility
-document.getElementById('toggleApiKey').onclick = () => {
-  const row = document.querySelector('#config .api-row');
-  if (row) row.style.display = 'flex';
-  document.getElementById('toggleApiKey').style.display = 'none';
-  const input = document.getElementById('apiKey');
-  if (input) {
-    input.focus();
-    input.select();
+async function postApiKey(value){
+  const resp = await fetch('/api/auth/set-key', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({api_key:value})
+  });
+  let data = {};
+  try{ data = await resp.json(); } catch{}
+  if(resp.ok && data.ok){
+    savedApiKeyHash = await sha256(value);
+    savedApiKeyLength = value.length;
+    return {ok:true};
   }
-  const saveBtn = document.getElementById('saveApiKey');
-  if (saveBtn) saveBtn.disabled = true;
+  return {ok:false, error:data.error||'Error'};
+}
+
+async function showApiKeyModal(){
+  return new Promise(res=>{
+    const modal=document.createElement('div');
+    modal.className='modal';
+    modal.setAttribute('role','dialog');
+    modal.setAttribute('aria-modal','true');
+    modal.innerHTML='<header class="modal-header"><h3>API Key requerida</h3></header><div class="modal-body"><input type="password" id="modalApiKey" placeholder="API Key"><div class="api-error" style="color:red"></div><button id="modalSaveApiKey">Guardar y Verificar</button></div>';
+    const handle=modalManager.open(modal,{closeOnBackdrop:false});
+    const input=modal.querySelector('#modalApiKey');
+    const errEl=modal.querySelector('.api-error');
+    modal.querySelector('#modalSaveApiKey').onclick=async()=>{
+      const val=input.value.trim();
+      if(!val){ toast.error('La API Key no puede estar vacía'); return; }
+      const r=await postApiKey(val);
+      if(r.ok){ handle.close(); res(true); }
+      else{ errEl.textContent=r.error||'Error'; }
+    };
+    input.focus();
+  });
+}
+
+async function ensureApiKey(){
+  try{
+    let resp=await fetch('/api/auth/has-key');
+    let data=await resp.json();
+    while(!data.has_key){
+      await showApiKeyModal();
+      resp=await fetch('/api/auth/has-key');
+      data=await resp.json();
+    }
+  }catch(err){ console.error('Error checking API key',err); }
+}
+
+document.getElementById('toggleApiKey').onclick = () => {
+  showApiKeyModal();
 };
 
 const apiKeyInput = document.getElementById('apiKey');
@@ -1209,38 +1253,14 @@ apiKeyInput.addEventListener('input', async () => {
 });
 
 saveApiKeyBtn.addEventListener('click', async () => {
-  let value = apiKeyInput.value.trim();
-  if (!value) {
-    toast.error('La API Key no puede estar vacía');
-    return;
-  }
-  if (value.startsWith('sk-') && value.length < 40) {
-    toast.info('La API Key parece incompleta');
-  }
-  try {
-    const resp = await fetch('/setconfig', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ api_key: value })
-    });
-    if (!resp.ok) {
-      let msg = 'No se pudo guardar la API Key';
-      try { const err = await resp.json(); if (err.error) msg += `: ${err.error}`; } catch {}
-      toast.error(msg);
-      return;
-    }
-    toast.success('API Key guardada');
-    savedApiKeyHash = await sha256(value);
-    savedApiKeyLength = value.length;
-    const masked = '•'.repeat(Math.max(savedApiKeyLength - 4, 0)) + value.slice(-4);
-    apiKeyInput.value = masked;
-    saveApiKeyBtn.disabled = true;
-    const row = document.querySelector('#config .api-row');
-    if (row) row.style.display = 'none';
-    document.getElementById('toggleApiKey').style.display = 'inline-flex';
-  } catch (err) {
-    toast.error('No se pudo guardar la API Key');
-  }
+  const value = apiKeyInput.value.trim();
+  if (!value) { toast.error('La API Key no puede estar vacía'); return; }
+  const r = await postApiKey(value);
+  if(!r.ok){ toast.error('No se pudo guardar la API Key'); return; }
+  toast.success('API Key guardada');
+  const masked = '•'.repeat(Math.max(savedApiKeyLength - 4, 0)) + value.slice(-4);
+  apiKeyInput.value = masked;
+  saveApiKeyBtn.disabled = true;
 });
 
 // Show overlay with larger image
@@ -1334,7 +1354,17 @@ function setLoading(btn, s){ if(s){ btn.dataset.prev=btn.textContent; btn.textCo
 // Generate Winner Score for selected or all products
 document.getElementById('btnGenWinner').onclick = () => {
   const ids = getSelectedProductIds();
+  const rows = ids.length ? allProducts.filter(p=>ids.includes(Number(p.id))) : products;
+  const payloadProducts = rows.map(p=>{
+    const metrics={};
+    metricKeys.forEach(k=>{ if(p[k]!==undefined) metrics[k]=p[k]; });
+    return {id:p.id, metrics};
+  });
+  if(payloadProducts.some(p=>Object.keys(p.metrics).length<metricKeys.length)){
+    toast.info('Algunos productos tienen métricas faltantes');
+  }
   const body = ids.length ? {product_ids: ids} : {};
+  body.products = payloadProducts;
   const btn = document.getElementById('btnGenWinner');
   btn.disabled = true; setLoading(btn, true);
   fetch('/api/winner-score/generate?debug=1', {
