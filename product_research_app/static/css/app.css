@@ -595,17 +595,18 @@ button.loading::after {
 .ec-col { vertical-align: middle; }
 
 /* Inputs/selects compactos solo aquí */
-.ec-col-desire input,
+.ec-col-desire textarea,
 .ec-col-desire-mag select,
 .ec-col-awareness select,
 .ec-col-competition select {
   width: auto;               /* lo fijaremos por JS en px */
-  height: 30px;
   box-sizing: content-box;
   font-size: 13px;
   padding: 2px 8px;
   margin: 0;
+  height: 30px;
 }
+.ec-col-desire textarea { height: auto; }
 
 /* Centrado visual en los select */
 .ec-col-desire-mag select,
@@ -615,8 +616,7 @@ button.loading::after {
   text-align-last: center;
 }
 
-/* Evitar desbordes solo aquí */
-.ec-col-desire > *,
+/* Evitar desbordes solo en selects */
 .ec-col-desire-mag > *,
 .ec-col-awareness > *,
 .ec-col-competition > * {
@@ -655,4 +655,7 @@ body.dark .ws-slider{ accent-color:#7a53d6; }
 .ws-slider::-webkit-slider-thumb{ width:20px; height:20px; border-radius:50%; cursor:pointer; }
 .ws-slider::-moz-range-thumb{ width:20px; height:20px; border-radius:50%; cursor:pointer; }
 .ws-value{ width:40px; text-align:right; }
+
+.cell-textarea{width:100%;resize:vertical;white-space:pre-wrap;word-break:break-word;}
+.center{text-align:center;}
 

@@ -294,9 +294,9 @@ def test_desire_serialization_and_logging(tmp_path, monkeypatch):
     p3 = next(p for p in resp if p["id"] == pid3)
     assert p1["desire"] == "Top"
     assert isinstance(p1["price"], (int, float))
-    assert p2["desire"] == "Extra"
+    assert p2["desire"] is None
     assert p2["extras"].get("desire") == "Extra"
-    assert p3["desire"] == ""
+    assert p3["desire"] is None
     log_text = web_app.LOG_PATH.read_text()
     assert f"desire_missing=true" in log_text and f"product={pid3}" in log_text
 
@@ -330,6 +330,44 @@ def test_patch_winner_weights_persists(tmp_path, monkeypatch):
     from product_research_app.services import winner_score
     data = winner_score.load_winner_weights_raw()
     assert data.get("weights", {}).get("rating") == 0.25
+
+
+def test_patch_product_desire(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(web_app, "ensure_db", lambda: conn)
+    pid = database.insert_product(
+        conn,
+        name="P",
+        description="",
+        category="",
+        price=1.0,
+        currency=None,
+        image_url="",
+        source="",
+        desire="Old",
+        extra={},
+    )
+    body = json.dumps({"desire": " New "})
+
+    class Dummy:
+        def __init__(self, body):
+            self.path = f"/api/products/{pid}"
+            self.headers = {"Content-Length": str(len(body))}
+            self.rfile = io.BytesIO(body.encode("utf-8"))
+            self.wfile = io.BytesIO()
+
+        def _set_json(self, code=200):
+            self.status = code
+
+        def send_error(self, code, msg=None):
+            raise AssertionError(f"error {code}")
+
+    handler = Dummy(body)
+    web_app.RequestHandler.do_PATCH(handler)
+    resp = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert resp["desire"] == "New"
+    prod = row_to_dict(database.get_product(conn, pid))
+    assert prod["desire"] == "New"
 
 def test_get_endpoints_return_json(tmp_path, monkeypatch):
     setup_env(tmp_path, monkeypatch)

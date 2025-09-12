@@ -231,8 +231,9 @@ body.dark pre { background:#2e315f; }
 <script src="/static/js/winner_score.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
 <script type="module">
-import { fetchJson } from "/static/js/net.js";
+import * as api from "/static/js/net.js";
 import * as groupsService from "/static/js/groups-service.js";
+const { fetchJson } = api;
 window.fetchJson = fetchJson;
 window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
@@ -245,6 +246,8 @@ function formatPrice(n) {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 })
     .format(Number.isFinite(num) ? num : 0);
 }
+
+const hasText = v => typeof v === 'string' ? v.trim().length > 0 : v != null;
 
 function showImportBanner(msg) {
   const b = document.getElementById('importBanner');
@@ -356,7 +359,7 @@ function ecAutoFitColumns(gridRoot) {
 
   const rows = gridRoot.querySelectorAll('tr');
   rows.forEach(tr => {
-    const tdDesire   = tr.querySelector('td.ec-col-desire input');
+    const tdDesire   = tr.querySelector('td.ec-col-desire textarea');
     const tdMag      = tr.querySelector('td.ec-col-desire-mag select');
     const tdAware    = tr.querySelector('td.ec-col-awareness select');
     const tdComp     = tr.querySelector('td.ec-col-competition select');
@@ -393,7 +396,7 @@ function ecAutoFitColumns(gridRoot) {
   gridRoot.style.setProperty('--ec-w-awareness',     aw + 'px');
   gridRoot.style.setProperty('--ec-w-competition',   co + 'px');
 
-  gridRoot.querySelectorAll('td.ec-col-desire input').forEach(el => el.style.width = (d - EC_LIMITS.desire.pad) + 'px');
+  gridRoot.querySelectorAll('td.ec-col-desire textarea').forEach(el => el.style.width = (d - EC_LIMITS.desire.pad) + 'px');
   gridRoot.querySelectorAll('td.ec-col-desire-mag select').forEach(el => el.style.width = (dm - EC_LIMITS.desire_mag.pad) + 'px');
   gridRoot.querySelectorAll('td.ec-col-awareness select').forEach(el => el.style.width = (aw - EC_LIMITS.awareness.pad) + 'px');
   gridRoot.querySelectorAll('td.ec-col-competition select').forEach(el => el.style.width = (co - EC_LIMITS.competition.pad) + 'px');
@@ -412,8 +415,8 @@ const columns = [
   { key: 'Creator Conversion Ratio', label: 'Tasa Conversión', type: 'string' },
   { key: 'Launch Date', label: 'Fecha Lanzamiento', type: 'string' },
   { key: 'date_range', label: 'Rango Fechas', type: 'string', headerClass: 'cell-date-range', cellClass: 'cell-date-range' },
-  { key: 'desire', label: 'Desire', type: 'string', headerClass: 'ec-col ec-col-desire', cellClass: 'ec-col ec-col-desire', dataEcCol: 'desire' },
-  { key: 'desire_magnitude', label: 'Desire magnetitude', type: 'string', headerClass: 'ec-col ec-col-desire-mag', cellClass: 'ec-col ec-col-desire-mag', dataEcCol: 'desire_magnitude' },
+  { key: 'desire', label: 'Desire', type: 'string', headerClass: 'ec-col ec-col-desire', cellClass: 'ec-col ec-col-desire', dataEcCol: 'desire', align: 'center', width: 360 },
+  { key: 'desireMagnitude', label: 'Desire magnitude', type: 'string', headerClass: 'ec-col ec-col-desire-mag', cellClass: 'ec-col ec-col-desire-mag', dataEcCol: 'desire_magnitude', align: 'center' },
   { key: 'awareness_level', label: 'Awerness Level', type: 'string', headerClass: 'ec-col ec-col-awareness', cellClass: 'ec-col ec-col-awareness', dataEcCol: 'awareness_level' },
   { key: 'competition_level', label: 'Competition level', type: 'string', headerClass: 'ec-col ec-col-competition', cellClass: 'ec-col ec-col-competition', dataEcCol: 'competition_level' },
   { key: 'winner_score', label: 'Winner Score', type: 'number' },
@@ -448,21 +451,9 @@ function preprocessProducts(list){
   const dupMap = new Map();
   list.forEach(item => {
     item.trending = mapTrendingScore(item.trendingScore);
-    const desireSources = [
-      item.desire,
-      item.extras && item.extras.desire,
-      item.ai_desire,
-      item.ai_desire_label,
-      item.desire_magnitude
-    ];
-    let desireVal = '';
-    for (const src of desireSources) {
-      if (src !== undefined && src !== null && String(src).trim() !== '') {
-        desireVal = String(src);
-        break;
-      }
-    }
-    item.desire = desireVal;
+    item.desire = typeof item.desire === 'string'
+      ? item.desire.trim()
+      : (item.desire ?? '');
     if (item.extras && item.extras['duplicate_of']) {
       item.isDuplicate = true;
       return;
@@ -495,7 +486,19 @@ let weightValues = {};
 let weightOrder = [];
 
 function debounce(fn, ms=150){
-  let t; return (...args)=>{ clearTimeout(t); t=setTimeout(()=>fn(...args), ms); };
+  let t, lastArgs;
+  function wrapped(...args){
+    lastArgs = args;
+    clearTimeout(t);
+    t = setTimeout(()=>fn(...lastArgs), ms);
+  }
+  wrapped.flush = () => {
+    if(t){
+      clearTimeout(t);
+      fn(...lastArgs);
+    }
+  };
+  return wrapped;
 }
 
 function defaultWeights(){ const o={}; WEIGHT_KEYS.forEach(k=>o[k]=0); return o; }
@@ -816,7 +819,11 @@ function renderTable() {
           const j = item.winner_score_breakdown.justifications[key];
           if (j) td.title = 'Justificación: ' + j;
         }
-      } else if (['id','name','category','price','image_url','winner_score','desire','desire_magnitude','awareness_level','competition_level','date_range'].includes(key)) {
+      } else if (key === 'desire') {
+        value = typeof item.desire === 'string' ? item.desire.trim() : (item.desire ?? '');
+      } else if (key === 'desireMagnitude') {
+        value = item.desire_magnitude;
+      } else if (['id','name','category','price','image_url','winner_score','awareness_level','competition_level','date_range'].includes(key)) {
         value = item[key];
       } else {
         value = item.extras ? item.extras[key] : '';
@@ -878,21 +885,37 @@ function renderTable() {
           td.appendChild(btnCopy);
         }
       } else if (key === 'desire') {
-        const input = document.createElement('input');
-        input.type = 'text';
-        input.placeholder = '—';
-        const fullVal = value || '';
-        input.value = fullVal;
-        input.title = fullVal;
-        td.title = fullVal;
-        input.addEventListener('blur', async () => {
-          const val = input.value.trim() || null;
-          try { await fetchJson(`/products/${item.id}`, {method:'PUT', body: JSON.stringify({desire: val})}); } catch(e) {}
-          item.desire = val;
-          ecAutoFitColumns(gridRoot);
+        const initial = value || '';
+        let localVal = initial;
+        const ta = document.createElement('textarea');
+        ta.placeholder = '—';
+        ta.rows = 2;
+        ta.className = 'cell-textarea center';
+        ta.value = initial;
+        ta.title = initial;
+        td.title = initial;
+        const save = debounce(async next => {
+          const trimmed = (next || '').trim();
+          const prev = item.desire || '';
+          item.desire = trimmed;
+          td.title = trimmed;
+          try {
+            await api.updateProductField(item.id, { desire: trimmed });
+            ecAutoFitColumns(gridRoot);
+          } catch (e) {
+            item.desire = prev;
+            ta.value = prev;
+            td.title = prev;
+            toast.error('No se pudo guardar Desire');
+          }
+        }, 500);
+        ta.addEventListener('input', e => {
+          localVal = e.target.value;
+          save(localVal);
         });
-        td.appendChild(input);
-      } else if (key === 'desire_magnitude') {
+        ta.addEventListener('blur', () => save.flush && save.flush());
+        td.appendChild(ta);
+      } else if (key === 'desireMagnitude') {
         const select = document.createElement('select');
         ['', 'Low', 'Medium', 'High'].forEach(opt => {
           const o = document.createElement('option');
@@ -937,7 +960,7 @@ function renderTable() {
           item.competition_level = val;
         });
         td.appendChild(select);
-      } else if (col.type === 'number' && value !== null && value !== undefined && value !== '') {
+      } else if (col.type === 'number' && hasText(value)) {
         let num = parseFloat(String(value).replace(/[^0-9.-]+/g, ''));
         if (isNaN(num)) {
           td.textContent = '';
@@ -949,7 +972,7 @@ function renderTable() {
           }
         }
       } else {
-        td.textContent = value || '';
+        td.textContent = hasText(value) ? value : '—';
       }
       tr.appendChild(td);
     });
@@ -988,9 +1011,9 @@ function sortProducts(){
   const type = sortType;
   products.sort((a,b)=>{
     let va; let vb;
-    if (field === 'id' || field === 'name' || field === 'category' || field === 'price' || field === 'image_url' || field === 'winner_score' || field === 'desire' || field === 'desire_magnitude' || field === 'awareness_level' || field === 'competition_level') {
-      va = a[field];
-      vb = b[field];
+    if (field === 'id' || field === 'name' || field === 'category' || field === 'price' || field === 'image_url' || field === 'winner_score' || field === 'desire' || field === 'desireMagnitude' || field === 'awareness_level' || field === 'competition_level') {
+      va = field === 'desireMagnitude' ? a.desire_magnitude : a[field];
+      vb = field === 'desireMagnitude' ? b.desire_magnitude : b[field];
     } else if (metricKeys.includes(field)) {
       va = a.winner_score_breakdown && a.winner_score_breakdown.scores ? a.winner_score_breakdown.scores[field] : undefined;
       vb = b.winner_score_breakdown && b.winner_score_breakdown.scores ? b.winner_score_breakdown.scores[field] : undefined;
