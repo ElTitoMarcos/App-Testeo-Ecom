@@ -165,6 +165,14 @@ body.dark .table tbody tr.selected { background: #243150; }
   max-width: 24ch;
 }
 
+.cell-desire {
+  opacity: 1;
+  color: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* Spacing for configuration panel */
 #config {
   display: flex;
