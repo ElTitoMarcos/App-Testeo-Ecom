@@ -70,6 +70,12 @@ def ensure_db():
     try:
         conn = database.get_connection(DB_PATH)
         database.initialize_database(conn)
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(products)")
+        cols = {r[1] for r in cur.fetchall()}
+        if "desire" not in cols:
+            cur.execute("ALTER TABLE products ADD COLUMN desire REAL")
+            conn.commit()
     except Exception:
         logger.exception("Database initialization failed")
         raise
@@ -561,10 +567,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             from .services import winner_score
 
             data = winner_score.load_winner_weights_raw()
-            weights = {k: float(v) for k, v in data.get("weights", {}).items()}
-            weights_rounded = {k: round(float(v), 3) for k, v in weights.items()}
+            raw_int = data.get("weights_raw_int") or data.get("weights") or {}
+            weights = winner_score.effective_weights(data)
+            weights_rounded = {k: round(v, 3) for k, v in weights.items()}
             resp = {
                 "weights": weights,
+                "weights_raw_int": {k: int(raw_int.get(k, 0)) for k in winner_score.WEIGHT_KEYS},
                 "updated_at": data.get("updated_at"),
                 "weights_rounded": weights_rounded,
             }
@@ -682,9 +690,17 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/settings/winner-score":
             cfg = config.load_config()
-            weights = cfg.get("weights", {})
+
+            def to_int0_100(x):
+                try:
+                    return max(0, min(100, int(round(float(x)))))
+                except Exception:
+                    return 0
+
+            stored = cfg.get("weights_raw_int") or cfg.get("weights") or {}
+            weights_raw_int = {k: to_int0_100(v) for k, v in stored.items()}
             self._set_json()
-            self.wfile.write(json.dumps(weights).encode("utf-8"))
+            self.wfile.write(json.dumps({"weights_raw_int": weights_raw_int}).encode("utf-8"))
             return
         if path == "/api/winner-score/explain" and DEBUG:
             self.handle_winner_score_explain(parsed)
@@ -1214,14 +1230,17 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
                 return
             cfg = config.load_config()
-            weights_cfg = cfg.get('weights', {})
-            for k, v in data.items():
+            raw_in = data.get('weights_raw_int') if isinstance(data.get('weights_raw_int'), dict) else {}
+            weights_cfg = {}
+            for k, v in raw_in.items():
                 try:
-                    weights_cfg[k] = float(v)
+                    weights_cfg[k] = int(round(float(v)))
                 except Exception:
                     continue
-            cfg['weights'] = weights_cfg
+            cfg['weights_raw_int'] = {k: max(0, min(100, int(v))) for k, v in weights_cfg.items()}
             config.save_config(cfg)
+            if cfg['weights_raw_int']:
+                config.set_weights(cfg['weights_raw_int'])
             self._set_json()
             self.wfile.write(json.dumps({"status": "ok"}).encode('utf-8'))
             return
@@ -1236,7 +1255,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             try:
                 data = json.loads(body)
                 key = str(data.get("key"))
-                value = float(data.get("value"))
+                value = data.get("value")
             except Exception:
                 self._set_json(400)
                 self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))

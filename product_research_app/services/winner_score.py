@@ -25,9 +25,12 @@ WEIGHT_KEYS = [
     "competition",
     "review_count",
     "image_count",
-    "profit_margin",
     "shipping_days",
+    "profit_margin",
 ]
+
+# duplicate list required by spec
+KEYS = WEIGHT_KEYS
 
 ALIASES = {
     "unitsSold": "units_sold",
@@ -79,20 +82,20 @@ def _save_weights_file(data: Dict[str, Any]) -> None:
 def load_winner_weights_raw() -> Dict[str, Any]:
     """Return persisted weights with metadata.
 
-    If the JSON file does not exist, it is created once with
-    ``DEFAULT_WEIGHTS``. Existing data is never overwritten.
+    Supports legacy ``weights`` floats as well as the new
+    ``weights_raw_int`` dictionary with integer values 0‑100.
     """
 
     if WINNER_WEIGHTS_FILE.exists():
         try:
             with open(WINNER_WEIGHTS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            if isinstance(data, dict) and isinstance(data.get("weights"), dict):
+            if isinstance(data, dict):
                 return data
         except Exception:
             pass
     data = {
-        "weights": DEFAULT_WEIGHTS.copy(),
+        "weights_raw_int": {k: 100 for k in WEIGHT_KEYS},
         "updated_at": datetime.utcnow().isoformat(),
         "version": 1,
     }
@@ -107,6 +110,16 @@ def save_winner_weights_raw(data: Dict[str, Any]) -> None:
         data["version"] = 1
     _save_weights_file(data)
 
+def effective_weights(settings: Dict[str, Any] | None) -> Dict[str, float]:
+    """Normalise integer weights into fractions summing to 1."""
+
+    raw = (settings or {}).get("weights_raw_int") or (settings or {}).get("weights") or {}
+    raw_int = {k: max(0, min(100, int(round(raw.get(k, 0))))) for k in KEYS}
+    total = sum(raw_int.values())
+    if total <= 0:
+        return {k: 1.0 / len(KEYS) for k in KEYS}
+    return {k: raw_int[k] / float(total) for k in KEYS}
+
 
 def load_winner_weights() -> Dict[str, float]:
     """Load Winner Score weights as floats from persistent storage."""
@@ -114,13 +127,8 @@ def load_winner_weights() -> Dict[str, float]:
     global WEIGHTS_CACHE
     if WEIGHTS_CACHE is not None:
         return WEIGHTS_CACHE
-    raw = load_winner_weights_raw().get("weights", {})
-    weights: Dict[str, float] = {}
-    for key in WEIGHT_KEYS:
-        try:
-            weights[key] = float(raw.get(key, 0.0))
-        except Exception:
-            weights[key] = 0.0
+    raw = load_winner_weights_raw()
+    weights = effective_weights(raw)
     WEIGHTS_CACHE = weights
     return weights
 
@@ -130,12 +138,13 @@ def update_winner_weight(key: str, value: float) -> None:
 
     norm = normalize_weight_key(key)
     data = load_winner_weights_raw()
-    weights = data.get("weights", {})
+    raw = data.get("weights_raw_int") or {}
     try:
-        weights[norm] = float(value)
+        raw_val = int(round(float(value)))
     except Exception:
-        weights[norm] = value
-    data["weights"] = weights
+        raw_val = 0
+    raw[norm] = max(0, min(100, raw_val))
+    data["weights_raw_int"] = raw
     data["updated_at"] = datetime.utcnow().isoformat()
     data["version"] = int(data.get("version", 0)) + 1
     save_winner_weights_raw(data)
@@ -146,13 +155,13 @@ def set_winner_weights(weights: Dict[str, float]) -> None:
     """Replace or update multiple weights at once."""
 
     data = load_winner_weights_raw()
-    stored = data.get("weights", {})
+    stored = data.get("weights_raw_int") or {}
     for k, v in weights.items():
         try:
-            stored[normalize_weight_key(k)] = float(v)
+            stored[normalize_weight_key(k)] = max(0, min(100, int(round(float(v)))))
         except ValueError:
             continue
-    data["weights"] = stored
+    data["weights_raw_int"] = stored
     data["updated_at"] = datetime.utcnow().isoformat()
     data["version"] = int(data.get("version", 0)) + 1
     save_winner_weights_raw(data)

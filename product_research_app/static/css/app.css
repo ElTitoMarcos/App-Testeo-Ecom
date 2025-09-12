@@ -649,3 +649,9 @@ body.dark .ws-slider{ accent-color:#7a53d6; }
 .ws-slider::-moz-range-thumb{ width:20px; height:20px; border-radius:50%; cursor:pointer; }
 .ws-value{ width:40px; text-align:right; }
 
+.products-table thead th.th-center { text-align: center; }
+
+.modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; z-index:1000; }
+.modal-overlay.hidden { display:none; }
+.modal-panel { background:#111; border-radius:12px; max-width:820px; width:92%; }
+

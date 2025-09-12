@@ -80,30 +80,34 @@ body.dark pre { background:#2e315f; }
   </div>
 </div>
 <div id="importBanner" style="display:none; padding:8px; text-align:center;"></div>
-<div id="config" style="display:none;">
-  <div class="config-controls">
-    <label for="modelSelect">Modelo</label>
-    <select id="modelSelect">
-      <option value="gpt-4o">GPT-4o</option>
-      <option value="gpt-4">GPT-4</option>
-      <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
-    </select>
-    <button id="toggleApiKey" type="button" style="display:none;">Cambiar API Key</button>
-  </div>
-  <div class="api-row">
-    <label for="apiKey">API Key</label>
-    <div class="api-input-row">
-      <input type="password" id="apiKey" />
-      <button id="saveApiKey" disabled aria-label="Guardar API Key" title="Guardar API Key">Guardar API Key</button>
+<div id="configOverlay" class="modal-overlay hidden">
+  <div class="modal-panel" role="dialog" aria-modal="true">
+    <div id="config">
+      <div class="config-controls">
+        <label for="modelSelect">Modelo</label>
+        <select id="modelSelect">
+          <option value="gpt-4o">GPT-4o</option>
+          <option value="gpt-4">GPT-4</option>
+          <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
+        </select>
+        <button id="toggleApiKey" type="button" style="display:none;">Cambiar API Key</button>
+      </div>
+      <div class="api-row">
+        <label for="apiKey">API Key</label>
+        <div class="api-input-row">
+          <input type="password" id="apiKey" />
+          <button id="saveApiKey" disabled aria-label="Guardar API Key" title="Guardar API Key">Guardar API Key</button>
+        </div>
+      </div>
     </div>
-  </div>
-</div>
-<div id="weightsCard" class="card" style="display:none;">
-  <strong>Ponderaciones Winner Score</strong>
-  <ul id="weightsList" style="list-style:none; margin-top:8px; padding:0;"></ul>
-  <div style="margin-top:10px; display:flex; flex-wrap:wrap; gap:6px;">
-    <button id="resetWeights">Reset</button>
-    <button id="aiWeights">Ajustar pesos con IA</button>
+    <div id="weightsCard" class="card">
+      <strong>Ponderaciones Winner Score</strong>
+      <ul id="weightsList" style="list-style:none; margin-top:8px; padding:0;"></ul>
+      <div style="margin-top:10px; display:flex; flex-wrap:wrap; gap:6px;">
+        <button id="resetWeights">Reset</button>
+        <button id="aiWeights">Ajustar pesos con IA</button>
+      </div>
+    </div>
   </div>
 </div>
 <div id="custom" style="display:none;">
@@ -163,7 +167,7 @@ body.dark pre { background:#2e315f; }
   </div>
 </div>
 
-  <table id="productTable">
+  <table id="productTable" class="products-table">
   <thead class="sticky-thead">
     <tr id="headerRow"></tr>
   </thead>
@@ -403,7 +407,7 @@ const columns = [
   { key: 'image_url', label: 'Imagen', type: 'image' },
   { key: 'name', label: 'Nombre', type: 'string' },
   { key: 'category', label: 'Categoría', type: 'string' },
-  { key: 'price', label: 'Price', type: 'number', width: 110, align: 'right', editable: false,
+  { key: 'price', label: 'Price', type: 'number', width: 110, align: 'right', headerClass: 'th-center', editable: false,
     render: row => new Intl.NumberFormat('en-US', { style:'currency', currency:'USD', maximumFractionDigits: 2 }).format(row.price ?? 0) },
   { key: 'Product Rating', label: 'Rating', type: 'number' },
   { key: 'Item Sold', label: 'Unidades Vendidas', type: 'number' },
@@ -411,7 +415,7 @@ const columns = [
   { key: 'Creator Conversion Ratio', label: 'Tasa Conversión', type: 'string' },
   { key: 'Launch Date', label: 'Fecha Lanzamiento', type: 'string' },
   { key: 'date_range', label: 'Rango Fechas', type: 'string', headerClass: 'cell-date-range', cellClass: 'cell-date-range' },
-  { key: 'desire', label: 'Desire', type: 'string', headerClass: 'ec-col ec-col-desire', cellClass: 'ec-col ec-col-desire', dataEcCol: 'desire' },
+  { key: 'desire', label: 'Desire', type: 'number', align: 'center', editable: false },
   { key: 'desire_magnitude', label: 'Desire magnetitude', type: 'string', headerClass: 'ec-col ec-col-desire-mag', cellClass: 'ec-col ec-col-desire-mag', dataEcCol: 'desire_magnitude' },
   { key: 'awareness_level', label: 'Awerness Level', type: 'string', headerClass: 'ec-col ec-col-awareness', cellClass: 'ec-col ec-col-awareness', dataEcCol: 'awareness_level' },
   { key: 'competition_level', label: 'Competition level', type: 'string', headerClass: 'ec-col ec-col-competition', cellClass: 'ec-col ec-col-competition', dataEcCol: 'competition_level' },
@@ -477,40 +481,11 @@ const metricDefs = [
 const metricKeys = metricDefs.map(m=>m.key);
 let weightValues = {};
 let weightOrder = [];
-
-function debounce(fn, ms=150){
-  let t; return (...args)=>{ clearTimeout(t); t=setTimeout(()=>fn(...args), ms); };
-}
-
+function clampInt(v){ const n = Math.round(Number(v)||0); return Math.max(0, Math.min(100, n)); }
 function defaultWeights(){ const o={}; WEIGHT_KEYS.forEach(k=>o[k]=0); return o; }
 function defaultOrder(){ return [...WEIGHT_KEYS]; }
 
-const saveFns = {};
-function saveWeightDebounced(key, value){
-  if(!saveFns[key]){
-    saveFns[key] = debounce(val=>{
-      fetch('/api/config/winner-weights', {
-        method:'PATCH',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ key, value: val })
-      }).then(()=> showSavedTick(key));
-    },300);
-  }
-  saveFns[key](value);
-}
-
-function showSavedTick(key){
-  const el = document.querySelector(`#weightsList li[data-key="${key}"] .ws-status`);
-  if(el){ el.textContent='✓'; setTimeout(()=>{ el.textContent=''; },1000); }
-}
-
-function updateSliderLabel(el, val) {
-  const num = Number(val);
-  const shown = Number.isFinite(num) ? num.toFixed(3) : '0.000';
-  el.nextElementSibling?.querySelector('.weight-value')?.replaceChildren(document.createTextNode(shown));
-}
-
-function renderWeights(rounded){
+function renderWeights(){
   const list=document.getElementById('weightsList');
   if(!list) return;
   list.innerHTML='';
@@ -519,27 +494,53 @@ function renderWeights(rounded){
     const li=document.createElement('li');
     li.className='metric-row';
     li.dataset.key=key;
-    li.innerHTML=`<span class="ws-handle">≡</span><span class="ws-name">${def.label}</span><div class="ws-slider-wrap"><input type="range" name="${key}" min="0" max="100" step="0.001" value="${weightValues[key]||0}" class="ws-slider"><span class="ws-value"><span class="weight-value"></span></span></div><span class="ws-status"></span>`;
-    const range=li.querySelector('.ws-slider');
-    range.addEventListener('input',e=>{
-      const k=normalizeKey(e.target.name);
-      const v=parseFloat(e.target.value);
-      weightValues[k]=v;
-      updateSliderLabel(range, range.value);
-      if(Number.isFinite(v)) saveWeightDebounced(k, v);
-    });
-    ['mousedown','touchstart'].forEach(ev=>{ range.addEventListener(ev,e=>{ e.stopPropagation(); }); });
-    updateSliderLabel(range, rounded?.[key] ?? weightValues[key]);
+    li.innerHTML=`<span class="ws-handle">≡</span><span class="ws-name">${def.label}</span><div class="ws-slider-wrap"><input type="range" min="0" max="100" step="1" value="${weightValues[key]||0}" class="ws-slider"><input type="number" min="0" max="100" step="1" value="${weightValues[key]||0}" class="ws-number"></div><span class="ws-status"></span>`;
+    const slider=li.querySelector('.ws-slider');
+    const number=li.querySelector('.ws-number');
+    function sync(v){ v=clampInt(v); slider.value=v; number.value=v; weightValues[key]=v; saveWeightsDebounced(); }
+    slider.addEventListener('input',()=>sync(slider.value));
+    number.addEventListener('input',()=>sync(number.value));
     list.appendChild(li);
   });
   Sortable.create(list,{ handle:'.ws-handle', animation:150, onEnd:()=>{ weightOrder=Array.from(list.children).map(li=>li.dataset.key); }});
+}
+
+function collectWeightsAsInts(){
+  const obj={};
+  for(const k of WEIGHT_KEYS){ obj[k]=clampInt(weightValues[k]||0); }
+  return obj;
+}
+
+function setSliderAndNumber(k,v){
+  const li=document.querySelector(`#weightsList li[data-key="${k}"]`);
+  if(li){
+    const s=li.querySelector('.ws-slider');
+    const n=li.querySelector('.ws-number');
+    if(s) s.value=v;
+    if(n) n.value=v;
+  }
+}
+
+let saveTimer;
+function saveWeightsDebounced(){
+  clearTimeout(saveTimer);
+  saveTimer=setTimeout(async()=>{
+    const weights_raw_int = collectWeightsAsInts();
+    try{
+      await fetch('/api/settings', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ weights_raw_int })
+      });
+    }catch(err){ console.error('Error saving weights', err); }
+  },300);
 }
 
 function resetWeights(){
   weightValues=defaultWeights();
   weightOrder=defaultOrder();
   renderWeights();
-  for(const k in weightValues){ saveWeightDebounced(k, weightValues[k]); }
+  saveWeightsDebounced();
 }
 
 function stratifiedSample(list, n){
@@ -612,7 +613,7 @@ async function adjustWeightsAI(){
     }
     weightValues=newWeights;
     renderWeights();
-    for(const k in weightValues){ saveWeightDebounced(k, weightValues[k]); }
+    saveWeightsDebounced();
     toast.success('Pesos ajustados por IA');
   }catch(err){
     console.error(err);
@@ -623,11 +624,13 @@ async function adjustWeightsAI(){
 
 async function loadWeights(){
   try{
-    const res = await fetch('/api/config/winner-weights');
-    const { weights, weights_rounded } = await res.json();
-    weightValues = { ...weights };
+    const res = await fetch('/api/settings');
+    const data = await res.json();
+    const w = data.weights_raw_int || data.weights || {};
+    weightValues = {};
     weightOrder = defaultOrder();
-    renderWeights(weights_rounded);
+    renderWeights();
+    for(const k in w){ const v=clampInt(w[k]); weightValues[k]=v; setSliderAndNumber(k,v); }
     document.getElementById('resetWeights').onclick = resetWeights;
     const aiBtn=document.getElementById('aiWeights');
     if(aiBtn) aiBtn.onclick=adjustWeightsAI;
@@ -1013,38 +1016,18 @@ window.onload = () => {
     pollImportStatus(tid);
   }
 };
-// Toggle config panel
+const overlay = document.getElementById('configOverlay');
+function closeConfig(){ overlay.classList.add('hidden'); }
 document.getElementById('configBtn').onclick = async () => {
   await loadWeights();
-  const cfg = document.getElementById('config');
-  const wcard = document.getElementById('weightsCard');
-  if(!cfg || !wcard || !window.modalManager) return;
-  const btn = document.getElementById('configBtn');
-  const modal = document.createElement('div');
-  modal.className = 'modal';
-  modal.setAttribute('role','dialog');
-  modal.setAttribute('aria-modal','true');
-  modal.innerHTML = '<header class="modal-header"><h3 id="configModalTitle">Configuración</h3><button type="button" class="modal-close" aria-label="Cerrar">✕</button></header><div class="modal-body"></div>';
-  modal.setAttribute('aria-labelledby','configModalTitle');
-  const body = modal.querySelector('.modal-body');
-  const cfgParent = cfg.parentElement;
-  const wParent = wcard.parentElement;
-  const cfgNext = cfg.nextSibling;
-  const wNext = wcard.nextSibling;
-  body.appendChild(cfg);
-  body.appendChild(wcard);
-  cfg.style.display = 'block';
-  wcard.style.display = 'block';
-  const handle = modalManager.open(modal, {returnFocus: btn, closeOnBackdrop:false, onClose: () => {
-    cfg.style.display = 'none';
-    wcard.style.display = 'none';
-    cfgParent.insertBefore(cfg, cfgNext);
-    wParent.insertBefore(wcard, wNext);
-  }});
-  modal.querySelector('.modal-close').addEventListener('click', () => handle.close());
-  const first = modal.querySelector('input,select,textarea,button');
-  if(first) first.focus();
+  overlay.classList.remove('hidden');
 };
+overlay.addEventListener('click', (e) => {
+  if (e.target === overlay) closeConfig();
+});
+document.addEventListener('keydown', (e) => {
+  if (!overlay.classList.contains('hidden') && e.key === 'Escape') closeConfig();
+});
 
 
 // Handle file upload: clicking the upload button opens file chooser
