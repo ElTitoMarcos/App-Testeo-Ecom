@@ -607,6 +607,10 @@ button.loading::after {
   margin: 0;
 }
 
+.ec-col-desire input {
+  color: inherit;
+}
+
 /* Centrado visual en los select */
 .ec-col-desire-mag select,
 .ec-col-awareness select,

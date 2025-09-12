@@ -448,21 +448,22 @@ function preprocessProducts(list){
   const dupMap = new Map();
   list.forEach(item => {
     item.trending = mapTrendingScore(item.trendingScore);
-    const desireSources = [
-      item.desire,
-      item.extras && item.extras.desire,
-      item.ai_desire,
-      item.ai_desire_label,
-      item.desire_magnitude
-    ];
-    let desireVal = '';
-    for (const src of desireSources) {
-      if (src !== undefined && src !== null && String(src).trim() !== '') {
-        desireVal = String(src);
-        break;
+    let desireVal = item.desire;
+    if (!desireVal || String(desireVal).trim() === '') {
+      const sources = [
+        item.extras && item.extras.desire,
+        item.ai_desire,
+        item.ai_desire_label,
+        item.desire_magnitude
+      ];
+      for (const src of sources) {
+        if (src !== undefined && src !== null && String(src).trim() !== '') {
+          desireVal = String(src);
+          break;
+        }
       }
     }
-    item.desire = desireVal;
+    item.desire = String(desireVal || '');
     if (item.extras && item.extras['duplicate_of']) {
       item.isDuplicate = true;
       return;
@@ -880,15 +881,25 @@ function renderTable() {
       } else if (key === 'desire') {
         const input = document.createElement('input');
         input.type = 'text';
-        input.placeholder = '—';
-        const fullVal = value || '';
+        const fullVal = typeof value === 'string' ? value : '';
         input.value = fullVal;
+        input.placeholder = fullVal ? '' : '—';
         input.title = fullVal;
         td.title = fullVal;
+        input.style.color = 'inherit';
+        input.addEventListener('input', () => {
+          item.desire = input.value;
+          if (item.extras) item.extras.desire = input.value;
+          input.placeholder = input.value ? '' : '—';
+        });
         input.addEventListener('blur', async () => {
-          const val = input.value.trim() || null;
-          try { await fetchJson(`/products/${item.id}`, {method:'PUT', body: JSON.stringify({desire: val})}); } catch(e) {}
+          const val = input.value.trim();
+          try { await fetchJson(`/products/${item.id}`, {method:'PUT', body: JSON.stringify({desire: val || null})}); } catch(e) {}
           item.desire = val;
+          if (item.extras) item.extras.desire = val;
+          td.title = val;
+          input.title = val;
+          input.placeholder = val ? '' : '—';
           ecAutoFitColumns(gridRoot);
         });
         td.appendChild(input);
