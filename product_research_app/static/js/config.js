@@ -250,18 +250,34 @@ async function adjustWeightsAI(){
 async function openConfigModal(){
   try{
     const res = await fetch('/api/config/winner-weights');
-    const weights = await res.json();
-    const base = {};
-    WEIGHT_FIELDS.forEach(f=>{ base[f.key] = { ...f, weight:50 }; });
-    factors = WEIGHT_KEYS.map(k => ({
-      ...base[k],
-      weight: weights[k] !== undefined ? Math.round(weights[k]) : 50
-    }));
+    const data = await res.json();
+
+    // El backend devuelve { weights, order, effective:{int:...} }
+    const weights = (data && data.weights) ? data.weights : {};
+    const order   = (data && Array.isArray(data.order) && data.order.length)
+      ? data.order
+      : (typeof WEIGHT_KEYS !== 'undefined' ? WEIGHT_KEYS : Object.keys(weights));
+
+    // WEIGHT_FIELDS existe en este módulo; lo indexamos por key
+    const byKey = Object.fromEntries((WEIGHT_FIELDS || []).map(f => [f.key, f]));
+    const orderedKeys = (order && order.length) ? order : Object.keys(byKey);
+
+    // Construimos factors respetando el orden persistido y aplicando los pesos guardados (fallback 50)
+    window.factors = orderedKeys
+      .filter(k => byKey[k]) // ignora claves desconocidas
+      .map(k => ({
+        ...byKey[k],
+        weight: (weights[k] !== undefined && !isNaN(weights[k])) ? Math.round(Number(weights[k])) : 50
+      }));
+
     renderFactors();
-    const resetBtn=document.getElementById('btnReset');
-    if(resetBtn) resetBtn.onclick=resetWeights;
-    const aiBtn=document.getElementById('btnAiWeights');
-    if(aiBtn) aiBtn.onclick=adjustWeightsAI;
+
+    const resetBtn = document.getElementById('btnReset');
+    if (resetBtn) resetBtn.onclick = resetWeights;
+
+    const aiBtn = document.getElementById('btnAiWeights');
+    if (aiBtn) aiBtn.onclick = adjustWeightsAI;
+
   }catch(err){
     console.error('Error loading weights', err);
   }
