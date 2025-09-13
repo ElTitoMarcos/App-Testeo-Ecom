@@ -40,10 +40,10 @@ export async function updateProductField(id, data, timeoutMs = 25000) {
   }, timeoutMs);
 }
 
-export async function updateSettings(data, timeoutMs = 25000) {
-  return fetchJson('/api/config/winner-weights', {
+export async function patch(url, data, timeoutMs = 25000) {
+  return fetchJson(url, {
     method: 'PATCH',
-    body: JSON.stringify({ weights: data.winner_weights, order: data.winner_order }),
+    body: JSON.stringify(data),
   }, timeoutMs);
 }
 
