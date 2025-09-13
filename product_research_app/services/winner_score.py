@@ -4,10 +4,8 @@ import json
 import math
 import hashlib
 import logging
-import os
 import sqlite3
 from datetime import datetime, date
-from pathlib import Path
 from typing import Dict, Any, Iterable, Optional, Callable
 
 from ..utils.db import rget
@@ -95,8 +93,6 @@ def prepare_oldness_bounds(rows: Iterable[Any]) -> None:
 WEIGHTS_CACHE: Dict[str, float] | None = None
 WEIGHTS_VERSION: int = 0
 
-WINNER_WEIGHTS_FILE = Path(__file__).resolve().parent / "winner_weights.json"
-
 
 def sanitize_weights(weights: dict | None) -> dict:
     w = (weights or {}).copy()
@@ -130,45 +126,21 @@ def normalize_weight_key(key: str) -> str:
     return k
 
 
-def _save_weights_file(data: Dict[str, Any]) -> None:
-    tmp = WINNER_WEIGHTS_FILE.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    tmp.replace(WINNER_WEIGHTS_FILE)
-
-
 def load_winner_weights_raw() -> Dict[str, Any]:
-    """Return persisted weights with metadata.
+    """Fetch raw weights from persistent storage."""
 
-    If the JSON file does not exist, it is created once with
-    ``DEFAULT_WEIGHTS``. Existing data is never overwritten.
-    """
+    from .config import get_winner_weights
 
-    if WINNER_WEIGHTS_FILE.exists():
-        try:
-            with open(WINNER_WEIGHTS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict) and isinstance(data.get("weights"), dict):
-                return data
-        except Exception:
-            pass
-    data = {
-        "weights": DEFAULT_WEIGHTS.copy(),
-        "updated_at": datetime.utcnow().isoformat(),
-        "version": 1,
+    return {
+        "weights": get_winner_weights(),
+        "version": WEIGHTS_VERSION,
     }
-    _save_weights_file(data)
-    return data
 
 
 def save_winner_weights_raw(data: Dict[str, Any]) -> None:
-    if "updated_at" not in data:
-        data["updated_at"] = datetime.utcnow().isoformat()
-    if "version" not in data:
-        data["version"] = 1
-    _save_weights_file(data)
+    from .config import set_winner_weights
+
+    set_winner_weights(data.get("weights", {}))
 
 
 def load_winner_weights() -> Dict[str, float]:
@@ -192,29 +164,34 @@ def update_winner_weight(key: str, value: float) -> None:
     data = load_winner_weights_raw()
     weights = data.get("weights", {})
     try:
-        weights[norm] = float(value)
+        v = float(value)
+        if v <= 1:
+            v *= 100.0
+        weights[norm] = int(max(0, min(100, v)))
     except Exception:
-        weights[norm] = value
-    data["weights"] = weights
-    data["updated_at"] = datetime.utcnow().isoformat()
-    data["version"] = int(data.get("version", 0)) + 1
-    save_winner_weights_raw(data)
+        return
+    save_winner_weights_raw({"weights": weights})
     invalidate_weights_cache()
 
 
 def set_winner_weights(weights: Dict[str, float]) -> None:
     """Replace or update multiple weights at once."""
-    data = load_winner_weights_raw()
-    cleaned: Dict[str, float] = {}
+    cleaned: Dict[str, int] = {}
     for k, v in weights.items():
         try:
-            cleaned[normalize_weight_key(k)] = float(v)
+            norm = normalize_weight_key(k)
         except ValueError:
             continue
-    data["weights"] = sanitize_weights(cleaned)
-    data["updated_at"] = datetime.utcnow().isoformat()
-    data["version"] = int(data.get("version", 0)) + 1
-    save_winner_weights_raw(data)
+        try:
+            val = float(v)
+            if val <= 1:
+                val *= 100.0
+            cleaned[norm] = int(max(0, min(100, val)))
+        except Exception:
+            continue
+    if not cleaned:
+        return
+    save_winner_weights_raw({"weights": cleaned})
     invalidate_weights_cache()
 
 # Mapping tables for categorical metrics
