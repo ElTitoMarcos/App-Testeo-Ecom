@@ -32,7 +32,9 @@ function defaultFactors(){
   return WEIGHT_FIELDS.map(f => ({ ...f, weight:50 }));
 }
 let saveTimer=null;
+let suspendAutosave=false;
 function markDirty(){
+  if(suspendAutosave) return;
   clearTimeout(saveTimer);
   saveTimer=setTimeout(saveSettings,700);
 }
@@ -272,21 +274,24 @@ async function adjustWeightsAI(){
 
 async function openConfigModal(){
   try{
+    suspendAutosave = true;
     const res = await fetch('/api/config/winner-weights');
     const data = await res.json(); // backend: { weights, order, effective? }  (o legado: mapa plano)
 
-    // Soporta ambas formas (nueva y legacy)
-    const weights = (data && data.weights) ? data.weights : (data || {});
-    const order   = (data && Array.isArray(data.order) && data.order.length)
+    const weights = (data && (data.weights || data.winner_weights))
+      ? (data.weights || data.winner_weights)
+      : (data || {});
+    const order = (data && Array.isArray(data.order) && data.order.length)
       ? data.order
-      : (typeof WEIGHT_KEYS !== 'undefined' ? WEIGHT_KEYS : Object.keys(weights));
+      : (data && Array.isArray(data.winner_order) && data.winner_order.length)
+        ? data.winner_order
+        : (typeof WEIGHT_KEYS !== 'undefined' ? WEIGHT_KEYS : Object.keys(weights));
 
-    // Construcción de factors respetando orden y pesos persistidos
     const fieldList = (typeof WEIGHT_FIELDS !== 'undefined' && Array.isArray(WEIGHT_FIELDS)) ? WEIGHT_FIELDS : [];
     const byKey = Object.fromEntries(fieldList.map(f => [f.key, f]));
 
     window.factors = order
-      .filter(k => byKey[k]) // ignora claves desconocidas
+      .filter(k => byKey[k])
       .map(k => ({
         ...byKey[k],
         weight: (weights[k] !== undefined && !isNaN(weights[k]))
@@ -296,7 +301,6 @@ async function openConfigModal(){
 
     renderFactors();
 
-    // Wire de botones (no dupliques si ya existe)
     const resetBtn = document.getElementById('btnReset');
     if (resetBtn) resetBtn.onclick = resetWeights;
     const aiBtn = document.getElementById('btnAiWeights');
@@ -305,6 +309,8 @@ async function openConfigModal(){
     console.debug('openConfigModal -> weights/order aplicados:', { weights, order });
   }catch(err){
     console.error('Error loading weights', err);
+  } finally {
+    suspendAutosave = false;
   }
 }
 

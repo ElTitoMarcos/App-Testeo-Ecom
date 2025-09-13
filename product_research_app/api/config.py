@@ -6,6 +6,7 @@ from product_research_app.services.winner_score import (
     load_settings,
     save_settings,
 )
+from product_research_app.services.config import compute_effective_int
 
 
 def _coerce_weights(raw: dict | None) -> dict[str, int]:
@@ -29,7 +30,18 @@ def _merge_winner_weights(current: dict | None, incoming: dict | None) -> dict:
 @app.route("/api/config/winner-weights", methods=["GET"])
 def api_get_winner_weights():
     settings = load_settings()
-    resp = jsonify(settings.get("winner_weights") or {})
+    weights = settings.get("winner_weights") or {}
+    order = settings.get("winner_order") or list(weights.keys())
+    eff_int = compute_effective_int(weights, order)
+    resp = jsonify(
+        {
+            "winner_weights": weights,
+            "winner_order": order,
+            "weights": weights,
+            "order": order,
+            "effective": {"int": eff_int},
+        }
+    )
     resp.headers["Cache-Control"] = "no-store"
     return resp, 200
 
@@ -38,7 +50,11 @@ def api_get_winner_weights():
 @app.route("/api/config/winner-weights", methods=["PATCH"])
 def api_patch_winner_weights():
     payload = request.get_json(force=True) or {}
-    incoming = _coerce_weights(payload.get("winner_weights") or payload)
+    incoming = _coerce_weights(
+        payload.get("winner_weights")
+        or payload.get("weights")
+        or payload
+    )
 
     settings = load_settings()
     current = _coerce_weights(settings.get("winner_weights"))
@@ -48,7 +64,16 @@ def api_patch_winner_weights():
 
     settings["winner_weights"] = _merge_winner_weights(current, incoming)
 
-    order = settings.get("winner_order") or list(settings["winner_weights"].keys())
+    order_in = (
+        payload.get("winner_order")
+        or payload.get("order")
+        or settings.get("winner_order")
+        or list(settings["winner_weights"].keys())
+    )
+    order = [k for k in order_in if k in settings["winner_weights"]]
+    for k in settings["winner_weights"].keys():
+        if k not in order:
+            order.append(k)
     if "awareness" not in order:
         order.append("awareness")
     settings["winner_order"] = order
@@ -67,6 +92,8 @@ def api_patch_winner_weights():
             "updated": updated,
             "winner_weights": settings["winner_weights"],
             "winner_order": order,
+            "weights": settings["winner_weights"],
+            "order": order,
         }
     )
     resp.headers["Cache-Control"] = "no-store"
