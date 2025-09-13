@@ -105,7 +105,7 @@ body.dark pre { background:#2e315f; }
   <strong>Ponderaciones Winner Score</strong>
   <div class="legend">ℹ️ Arrastra para reordenar. Más arriba = mayor prioridad. El número (0–100) es el peso.</div>
   <ul id="weightsList" class="weights-list"></ul>
-  <div class="weights-footer">
+  <div class="config-footer">
     <button id="resetWeights">Reset</button>
     <button id="saveWeights">Guardar</button>
     <button id="aiWeights">Ajustar pesos con IA</button>
@@ -530,34 +530,31 @@ function defaultFactors(){
   return WEIGHT_FIELDS.map(f=>({ ...f, weight:50 }));
 }
 
-function toWeightMap(){ const o={}; factors.forEach(f=>o[f.key]=f.weight); return o; }
-function toOrder(){ return factors.map(f=>f.key); }
+function clampWeight(v){ return Math.max(0, Math.min(100, Math.round(v))); }
+let saveTimer=null, dirty=false;
+function enableSaveButton(){ const b=document.getElementById('saveWeights'); if(b) b.disabled=false; }
+function disableSaveButton(){ const b=document.getElementById('saveWeights'); if(b) b.disabled=true; }
+function markDirty(){ dirty=true; enableSaveButton(); clearTimeout(saveTimer); saveTimer=setTimeout(saveIfDirty,700); }
+function clearDirty(){ dirty=false; disableSaveButton(); clearTimeout(saveTimer); }
+async function saveIfDirty(){ if(!dirty) return; await saveSettings(); }
 
 function renderFactors(){
   const list=document.getElementById('weightsList');
   if(!list) return;
   list.innerHTML='';
-  const n=factors.length;
-  const sumRanks=n*(n+1)/2;
   factors.forEach((f,idx)=>{
     const priority=idx+1;
-    const priorityWeight=n-idx;
-    const priorityFactor=priorityWeight/(sumRanks/n);
-    const effective=Math.round(f.weight*priorityFactor);
     const li=document.createElement('li');
     li.className='weight-card';
     li.dataset.key=f.key;
-    li.innerHTML=`<div class="priority-badge">#${priority}</div><div class="content"><label for="weight-${f.key}">${f.label}</label><input id="weight-${f.key}" class="weight-range" type="range" min="0" max="100" step="1" value="${f.weight}"><div class="slider-extremes"><span class="extreme-left">${EXTREMES[f.key].left}</span><span class="extreme-right">${EXTREMES[f.key].right}</span></div><div class="meta"><span class="weight-badge">peso: ${f.weight}/100</span><span class="effective-badge">efectivo: ${effective}</span></div></div><div class="drag-handle" aria-hidden>≡</div>`;
+    li.innerHTML=`<div class="priority-badge">#${priority}</div><div class="content"><label for="weight-${f.key}" class="label">${f.label}</label><input id="weight-${f.key}" class="weight-range" type="range" min="0" max="100" step="1" value="${f.weight}"><div class="slider-extremes scale"><span class="extreme-left">${EXTREMES[f.key].left}</span><span class="extreme-right">${EXTREMES[f.key].right}</span></div><span class="weight-badge">peso: ${f.weight}/100</span></div><div class="drag-handle" aria-hidden>≡</div>`;
     const range=li.querySelector('.weight-range');
     range.addEventListener('input',e=>{
-      const v=Math.round(parseFloat(e.target.value));
+      const v=parseInt(e.target.value,10);
       e.target.value=v;
       f.weight=v;
-      const priorityWeight2=n-idx;
-      const priorityFactor2=priorityWeight2/(sumRanks/n);
-      const eff=Math.round(f.weight*priorityFactor2);
       li.querySelector('.weight-badge').textContent=`peso: ${f.weight}/100`;
-      li.querySelector('.effective-badge').textContent=`efectivo: ${eff}`;
+      markDirty();
     });
     list.appendChild(li);
   });
@@ -565,27 +562,32 @@ function renderFactors(){
     const orderKeys=Array.from(list.children).map(li=>li.dataset.key);
     factors.sort((a,b)=>orderKeys.indexOf(a.key)-orderKeys.indexOf(b.key));
     renderFactors();
+    markDirty();
   }});
 }
 
 function resetWeights(){
   factors=defaultFactors();
   renderFactors();
+  markDirty();
 }
 
-async function saveWeights(){
+async function saveSettings(){
+  const payload = {
+    winner_weights: Object.fromEntries(factors.map(x=>[x.key, clampWeight(x.weight)])),
+    winner_order: factors.map(x=>x.key)
+  };
   try{
-    await fetch('/api/config/winner-weights',{
-      method:'PATCH',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({ weights: toWeightMap(), order: toOrder() })
-    });
+    await api.updateSettings(payload);
     toast.success('Pesos y prioridades guardados');
+    clearDirty();
   }catch(err){
     console.error('Error saving weights',err);
     toast.error('No se pudo guardar');
   }
 }
+
+async function saveWeights(){ await saveSettings(); }
 
 function stratifiedSample(list, n){
   const byCat = {};
@@ -676,6 +678,7 @@ async function adjustWeightsAI(){
     }
     factors=factors.map(f=>({ ...f, weight:newWeights[f.key] ?? f.weight }));
     renderFactors();
+    markDirty();
     toast.success('Pesos ajustados por IA');
   }catch(err){
     console.error(err);
@@ -694,6 +697,7 @@ async function loadWeights(){
     WEIGHT_FIELDS.forEach(f=>{ base[f.key] = { ...f, weight:50 }; });
     factors = order.filter(k=>base[k]).map(k=>({ ...base[k], weight: weights[k] !== undefined ? Math.round(weights[k]) : 50 }));
     renderFactors();
+    clearDirty();
     const resetBtn=document.getElementById('resetWeights');
     if(resetBtn) resetBtn.onclick=resetWeights;
     const aiBtn=document.getElementById('aiWeights');
@@ -1122,7 +1126,7 @@ document.getElementById('configBtn').onclick = async () => {
   if(!cfg || !wcard || !window.modalManager) return;
   const btn = document.getElementById('configBtn');
   const modal = document.createElement('div');
-  modal.className = 'modal';
+  modal.className = 'modal config-modal';
   modal.setAttribute('role','dialog');
   modal.setAttribute('aria-modal','true');
   modal.innerHTML = '<header class="modal-header"><h3 id="configModalTitle">Configuración</h3><button type="button" class="modal-close" aria-label="Cerrar">✕</button></header><div class="modal-body"></div>';

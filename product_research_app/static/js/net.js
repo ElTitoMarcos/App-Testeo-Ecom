@@ -39,3 +39,10 @@ export async function updateProductField(id, data, timeoutMs = 25000) {
     body: JSON.stringify(data),
   }, timeoutMs);
 }
+
+export async function updateSettings(data, timeoutMs = 25000) {
+  return fetchJson('/api/config/winner-weights', {
+    method: 'PATCH',
+    body: JSON.stringify({ weights: data.winner_weights, order: data.winner_order }),
+  }, timeoutMs);
+}
