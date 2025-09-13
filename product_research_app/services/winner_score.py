@@ -6,7 +6,6 @@ import hashlib
 import logging
 import sqlite3
 import unicodedata
-import threading
 from datetime import datetime, date
 from typing import Dict, Any, Iterable, Optional, Callable
 
@@ -56,28 +55,19 @@ def _norm_awareness(s: str) -> str:
     return (s or "").strip().lower()
 
 
-def _awareness_label(prod) -> str:
-    if isinstance(prod, str):
-        s = prod
-    else:
-        s = getattr(prod, "awareness_type", None)
-        if s is None and isinstance(prod, dict):
-            s = prod.get("awareness_type")
-        if not s:
-            s = getattr(prod, "awareness_level", None)
-            if s is None and isinstance(prod, dict):
-                s = prod.get("awareness_level")
-    if s:
-        s = unicodedata.normalize("NFKD", str(s))
-        s = "".join(ch for ch in s if not unicodedata.combining(ch))
-    return _norm_awareness(s)
-
-
 def awareness_stage_index_from_product(prod) -> int | None:
-    label = _awareness_label(prod)
+    label = getattr(prod, "awareness_type", None)
+    if label is None and isinstance(prod, dict):
+        label = prod.get("awareness_type")
+    if label is None:
+        label = getattr(prod, "awareness_level", None)
+        if label is None and isinstance(prod, dict):
+            label = prod.get("awareness_level")
     if not label:
         return None
-    return AWARE_INDEX.get(label, 2)  # fallback: solution aware (2)
+    label = unicodedata.normalize("NFKD", str(label))
+    label = "".join(ch for ch in label if not unicodedata.combining(ch))
+    return AWARE_INDEX.get(_norm_awareness(label), 2)  # fallback: solution
 
 
 def awareness_pref_segment_from_weight(w: int) -> int:
@@ -91,23 +81,29 @@ def awareness_priority_order_from_weight(w: int) -> list[int]:
     return sorted(range(5), key=lambda i: (abs(w - AWARE_CENTERS[i]), i))
 
 
+def awareness_closeness(w_slider_0_100: int, stage_idx: int) -> float:
+    w = max(0, min(100, int(round(float(w_slider_0_100)))))
+    dist = abs(w - AWARE_CENTERS[stage_idx])  # máx 80 (10↔90)
+    return max(0.0, 1.0 - (dist / 80.0))  # 1.0..0.0
+
+
 def awareness_closeness_from_weight(w: int, stage_idx: int) -> float:
-    """Escala lineal 1.0 (si centro coincide) → 0.0 (centro opuesto)."""
-    w = max(0, min(100, int(round(float(w)))))
-    dist = abs(w - AWARE_CENTERS[stage_idx])           # máx 80
-    return max(0.0, 1.0 - (dist / 80.0))               # 1.0..0.0
+    """Backward-compatible alias."""
+    return awareness_closeness(w, stage_idx)
 
 
-def awareness_feature_value(prod, w_slider: int) -> float:
+def awareness_feature_value(prod, w_slider_0_100: int) -> float:
     """Valor [0..1] para el producto según cercanía del slider al centro de su stage."""
     stage_idx = awareness_stage_index_from_product(prod)
     if stage_idx is None:
         return None
-    closeness = awareness_closeness_from_weight(w_slider, stage_idx)
-    order_labels = [AWARE_STAGES[i] for i in awareness_priority_order_from_weight(w_slider)]
+    closeness = awareness_closeness(w_slider_0_100, stage_idx)
+    order_labels = [
+        AWARE_STAGES[i] for i in awareness_priority_order_from_weight(w_slider_0_100)
+    ]
     logger.info(
         "awareness_slider=%s centers=%s order=%s value_prod=%s closeness=%.3f",
-        w_slider,
+        w_slider_0_100,
         AWARE_CENTERS,
         order_labels,
         AWARE_STAGES[stage_idx],
@@ -185,7 +181,6 @@ def prepare_oldness_bounds(rows: Iterable[Any]) -> None:
 WEIGHTS_CACHE: Dict[str, float] | None = None
 ORDER_CACHE: list[str] | None = None
 WEIGHTS_VERSION: int = 0
-_RECOMPUTE_TIMER: threading.Timer | None = None
 
 
 def compute_effective_weights(weights: dict[str, int | float], order: list[str]) -> dict[str, float]:
@@ -740,31 +735,13 @@ def generate_winner_scores(
     return result
 
 
-def recompute_scores_for_all_products(async_ok: bool = True) -> int:
-    """Recalculate Winner Scores for all products.
-
-    If ``async_ok`` is True, the recomputation is debounced using a background
-    timer of one second. Multiple calls within that interval will reset the
-    timer so the computation runs only once.
-    """
-
-    def _job() -> int:
-        conn = database.get_connection(CONFIG_DB_PATH)
-        try:
-            res = generate_winner_scores(conn)
-            updated = int(res.get("updated", 0))
-            logger.info("recompute_scores_for_all_products updated=%s", updated)
-            return updated
-        finally:
-            conn.close()
-
-    global _RECOMPUTE_TIMER
-    if async_ok:
-        if _RECOMPUTE_TIMER is not None:
-            _RECOMPUTE_TIMER.cancel()
-        _RECOMPUTE_TIMER = threading.Timer(1.0, _job)
-        _RECOMPUTE_TIMER.daemon = True
-        _RECOMPUTE_TIMER.start()
-        return 0
-    else:
-        return _job()
+def recompute_scores_for_all_products(scope: str = "all") -> int:
+    """Recalcula y persiste el score 0..100 de todos los productos."""
+    conn = database.get_connection(CONFIG_DB_PATH)
+    try:
+        res = generate_winner_scores(conn)
+        updated = int(res.get("updated", 0))
+        logger.info("winner_score recompute updated=%s", updated)
+        return updated
+    finally:
+        conn.close()
