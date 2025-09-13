@@ -1,4 +1,4 @@
-from flask import request, jsonify
+from flask import request, jsonify, current_app
 from . import app
 
 from product_research_app.services.config import (
@@ -7,6 +7,7 @@ from product_research_app.services.config import (
     update_winner_settings,
     compute_effective_int,
 )
+from product_research_app.services.winner_score import recompute_scores_for_all_products
 
 
 # GET /api/config/winner-weights
@@ -30,6 +31,10 @@ def api_patch_winner_weights():
     raw_in = data.get("winner_weights") or data.get("weights") or {}
     order_in = data.get("winner_order") or data.get("order")
     saved_weights, saved_order = update_winner_settings(raw_in, order_in)
+    try:
+        recompute_scores_for_all_products(async_ok=True)
+    except Exception as e:
+        current_app.logger.warning(f"winner-score recompute deferred: {e}")
     app.logger.info(
         "settings_saved winner_weights=%s winner_order_len=%s",
         len(saved_weights),

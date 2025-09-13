@@ -116,3 +116,18 @@ def test_recommend_winner_weights_includes_awareness(monkeypatch):
     weights = res["weights"]
     assert set(weights) == {"price", "awareness"}
     assert math.isclose(sum(weights.values()), 1.0)
+
+
+def test_awareness_priority_and_closeness():
+    order = ws.awareness_priority_order_from_weight(44)
+    assert order == [2, 1, 3, 0, 4]
+    prod = {"awareness_level": "solution aware"}
+    val = ws.awareness_feature_value(prod, 44)
+    idx = ws.awareness_stage_index_from_product(prod)
+    expected = ws.awareness_closeness_from_weight(44, idx)
+    assert math.isclose(val, expected)
+
+
+def test_compute_effective_weights_includes_awareness():
+    eff = ws.compute_effective_weights({"awareness": 10}, [])
+    assert "awareness" in eff and eff["awareness"] > 0
