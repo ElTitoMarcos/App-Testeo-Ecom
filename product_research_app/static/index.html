@@ -238,7 +238,7 @@ import * as api from "/static/js/net.js";
 import * as groupsService from "/static/js/groups-service.js";
 const { fetchJson } = api;
 const metricKeys = window.metricKeys;
-const loadWeights = window.loadWeights;
+const openConfigModal = window.openConfigModal;
 const saveIfDirty = window.saveIfDirty;
 window.fetchJson = fetchJson;
 window.groupsService = groupsService;
@@ -528,7 +528,6 @@ async function loadConfig() {
     if (input) input.value = '';
     if (saveBtn) saveBtn.disabled = true;
   }
-  await loadWeights();
 }
 
 // Microinteraction progress bar
@@ -912,7 +911,7 @@ window.onload = async () => {
 };
 // Toggle config panel
 document.getElementById('configBtn').onclick = async () => {
-  await loadWeights();
+  await openConfigModal();
   const cfg = document.getElementById('config');
   const wcard = document.getElementById('weightsCard');
   const footer = document.getElementById('weightsFooter');

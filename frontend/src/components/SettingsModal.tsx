@@ -35,7 +35,7 @@ export default function SettingsModal() {
       .then((r) => r.json())
       .then((d) => {
         if (!alive) return;
-        const raw = d && d.weights ? d.weights : DEFAULTS_50;
+        const raw = d && typeof d === "object" ? d : {};
         setWeights({ ...DEFAULTS_50, ...raw });
         loadedRef.current = true;
       })
@@ -54,7 +54,7 @@ export default function SettingsModal() {
       fetch("/api/config/winner-weights", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ weights: next }),
+        body: JSON.stringify({ winner_weights: next }),
         keepalive: true,
       }).catch(() => {});
     };
@@ -63,7 +63,7 @@ export default function SettingsModal() {
       send();
     } else {
       if (saveDebounced.current) clearTimeout(saveDebounced.current);
-      saveDebounced.current = setTimeout(send, 300);
+      saveDebounced.current = setTimeout(send, 700);
     }
   }
 

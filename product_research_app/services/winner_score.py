@@ -64,17 +64,19 @@ def _norm_awareness(s: str) -> str:
     return (s or "").strip().lower()
 
 
-def awareness_stage_index_from_product(prod) -> int | None:
-    label = getattr(prod, "awareness_type", None)
-    if label is None and isinstance(prod, dict):
-        label = prod.get("awareness_type")
-    if label is None:
-        label = getattr(prod, "awareness_level", None)
-        if label is None and isinstance(prod, dict):
-            label = prod.get("awareness_level")
-    if not label:
-        return None
-    label = unicodedata.normalize("NFKD", str(label))
+def awareness_stage_index_from_product(prod) -> int:
+    cand = None
+    extras = _get_extras(prod)
+    for attr in ("awareness_type", "awareness_level", "awareness", "awarenessLabel"):
+        cand = rget(prod, attr)
+        if cand is None:
+            cand = extras.get(attr)
+        if cand is not None:
+            break
+    if isinstance(cand, (int, float)):
+        i = int(round(float(cand)))
+        return min(4, max(0, i))
+    label = unicodedata.normalize("NFKD", str(cand))
     label = "".join(ch for ch in label if not unicodedata.combining(ch))
     return AWARE_INDEX.get(_norm_awareness(label), 2)
 
@@ -101,19 +103,16 @@ def awareness_closeness_from_weight(w: int, stage_idx: int) -> float:
     return awareness_closeness(w, stage_idx)
 
 
-def awareness_feature_value(prod, w_slider_0_100: int) -> float | None:
+def awareness_feature_value(prod, w_slider_0_100: int) -> float:
     stage_idx = awareness_stage_index_from_product(prod)
-    if stage_idx is None:
-        return None
     return awareness_closeness(w_slider_0_100, stage_idx)
 
 
 def build_features(prod, settings):
     feats: Dict[str, float] = {}
     w_aw = (settings.get("winner_weights") or {}).get("awareness", 50)
-    val = awareness_feature_value(prod, w_aw)
-    if val is not None:
-        feats["awareness"] = val
+    stage_idx = awareness_stage_index_from_product(prod)
+    feats["awareness"] = awareness_closeness(w_aw, stage_idx)
     return feats
 
 
@@ -550,9 +549,7 @@ def compute_winner_score_v2(
         raw_vals[name] = val
 
     w_aw = user_weights.get("awareness", 50)
-    aw_val = awareness_feature_value(product_row, w_aw)
-    if aw_val is not None:
-        raw_vals["awareness"] = aw_val
+    raw_vals["awareness"] = awareness_feature_value(product_row, w_aw)
 
     present = list(raw_vals.keys())
     missing_fields = [f for f in ALLOWED_FIELDS if f not in present]

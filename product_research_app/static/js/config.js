@@ -240,16 +240,16 @@ async function adjustWeightsAI(){
   }
 }
 
-async function loadWeights(){
+async function openConfigModal(){
   try{
     const res = await fetch('/api/config/winner-weights');
-    const data = await res.json();
-    const weights = data.winner_weights || {};
-    const order = Array.isArray(data.winner_order) && data.winner_order.length ? data.winner_order.slice() : WEIGHT_KEYS.slice();
-    if(!order.includes('awareness')) order.push('awareness');
+    const weights = await res.json();
     const base = {};
     WEIGHT_FIELDS.forEach(f=>{ base[f.key] = { ...f, weight:50 }; });
-    factors = order.filter(k=>base[k]).map(k=>({ ...base[k], weight: weights[k] !== undefined ? Math.round(weights[k]) : 50 }));
+    factors = WEIGHT_KEYS.map(k => ({
+      ...base[k],
+      weight: weights[k] !== undefined ? Math.round(weights[k]) : 50
+    }));
     renderFactors();
     const resetBtn=document.getElementById('btnReset');
     if(resetBtn) resetBtn.onclick=resetWeights;
@@ -260,7 +260,8 @@ async function loadWeights(){
   }
 }
 
-window.loadWeights = loadWeights;
+window.openConfigModal = openConfigModal;
+window.loadWeights = openConfigModal; // alias for legacy calls
 window.resetWeights = resetWeights;
 window.adjustWeightsAI = adjustWeightsAI;
 window.markDirty = markDirty;
