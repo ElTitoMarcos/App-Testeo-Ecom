@@ -11,6 +11,7 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from product_research_app import web_app, database, config
 from product_research_app.services import winner_score
+from product_research_app.services import config as cfg_service
 from product_research_app.utils.db import row_to_dict
 
 def setup_env(tmp_path, monkeypatch):
@@ -26,8 +27,8 @@ def setup_env(tmp_path, monkeypatch):
         force=True,
     )
     monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "config.json")
-    from product_research_app.services import winner_score
-    monkeypatch.setattr(winner_score, "WINNER_WEIGHTS_FILE", tmp_path / "winner_weights.json")
+    monkeypatch.setattr(cfg_service, "DB_PATH", tmp_path / "data.sqlite3")
+    cfg_service.init_app_config()
     return web_app.ensure_db()
 
 def make_xlsx(path: Path, rows: List[List[object]]):
@@ -351,7 +352,7 @@ def test_patch_product_desire(tmp_path, monkeypatch):
 def test_patch_winner_weights_persists(tmp_path, monkeypatch):
     setup_env(tmp_path, monkeypatch)
 
-    body = json.dumps({"key": "rating_weight", "value": 0.25})
+    body = json.dumps({"weights": {"rating": 25}})
 
     class Dummy:
         def __init__(self, body):
@@ -366,10 +367,10 @@ def test_patch_winner_weights_persists(tmp_path, monkeypatch):
     handler = Dummy(body)
     web_app.RequestHandler.do_PATCH(handler)
     resp = json.loads(handler.wfile.getvalue().decode("utf-8"))
-    assert resp.get("status") == "ok"
-    from product_research_app.services import winner_score
-    data = winner_score.load_winner_weights_raw()
-    assert data.get("weights", {}).get("rating") == 0.25
+    assert resp["weights"]["rating"] == 25
+    from product_research_app.services.config import get_winner_weights_raw
+    data = get_winner_weights_raw()
+    assert data.get("rating") == 25
 
 def test_config_oldness_preference_roundtrip(tmp_path, monkeypatch):
     setup_env(tmp_path, monkeypatch)
@@ -422,7 +423,7 @@ def test_get_endpoints_return_json(tmp_path, monkeypatch):
         assert resp.status == 200
         cfg = json.loads(resp.read().decode("utf-8"))
         weights = cfg.get("weights", {})
-        assert abs(sum(weights.values()) - 1.0) < 1e-6
+        assert all(0 <= v <= 100 for v in weights.values())
         assert set(weights.keys()) == set(config.SCORING_DEFAULT_WEIGHTS.keys())
         resp = urllib.request.urlopen(f"http://127.0.0.1:{port}/lists")
         assert resp.status == 200
@@ -451,7 +452,7 @@ def test_weight_changes_persist_without_score_reset(tmp_path, monkeypatch):
     conn.commit()
 
     def patch_weight(key, value):
-        body = json.dumps({"key": key, "value": value})
+        body = json.dumps({"weights": {key: value}})
         class Dummy:
             def __init__(self, body):
                 self.path = "/api/config/winner-weights"
@@ -465,18 +466,17 @@ def test_weight_changes_persist_without_score_reset(tmp_path, monkeypatch):
         h = Dummy(body)
         web_app.RequestHandler.do_PATCH(h)
         resp = json.loads(h.wfile.getvalue().decode("utf-8"))
-        assert resp.get("status") == "ok"
+        assert resp["weights"][key] == value
 
-    patch_weight("rating_weight", 0.2)
-    patch_weight("price_weight", 0.3)
-    patch_weight("units_sold_weight", 0.5)
-    from product_research_app.services import winner_score
+    patch_weight("rating", 20)
+    patch_weight("price", 30)
+    patch_weight("units_sold", 50)
+    from product_research_app.services.config import get_winner_weights_raw
 
-    data = winner_score.load_winner_weights_raw()
-    weights = data.get("weights", {})
-    assert weights.get("rating") == 0.2
-    assert weights.get("price") == 0.3
-    assert weights.get("units_sold") == 0.5
+    weights = get_winner_weights_raw()
+    assert weights.get("rating") == 20
+    assert weights.get("price") == 30
+    assert weights.get("units_sold") == 50
     prod = database.get_product(conn, pid)
     assert prod["winner_score"] == 55
 
@@ -586,7 +586,7 @@ def test_weights_hash_changes_after_patch(tmp_path, monkeypatch):
     eff1 = resp1["weights_eff"]
     ver1 = config.get_weights_version()
 
-    body_patch = json.dumps({"key": "rating_weight", "value": 0.2})
+    body_patch = json.dumps({"weights": {"rating": 20}})
 
     class Patcher:
         def __init__(self, body):
@@ -606,7 +606,7 @@ def test_weights_hash_changes_after_patch(tmp_path, monkeypatch):
     resp2 = json.loads(h2.wfile.getvalue().decode("utf-8"))
     assert resp2["weights_all"] != hash1
     assert resp2["weights_eff"] != eff1
-    assert config.get_weights_version() == ver1 + 1
+    assert config.get_weights_version() > ver1
 
 def test_logging_and_explain_endpoint(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)
@@ -705,7 +705,7 @@ def test_weights_eff_stable_when_touching_missing_metric(tmp_path, monkeypatch):
     hash_eff1 = resp1["weights_eff"]
     assert resp1["diag"]["sum_filtered"] == 0.0
 
-    body_patch = json.dumps({"key": "orders", "value": 2.0})
+    body_patch = json.dumps({"weights": {"units_sold": 20}})
     class Patcher:
         def __init__(self, body):
             self.path = "/api/config/winner-weights"

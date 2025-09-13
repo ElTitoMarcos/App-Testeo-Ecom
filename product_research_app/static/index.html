@@ -539,7 +539,7 @@ function saveWeightDebounced(key, value){
       fetch('/api/config/winner-weights', {
         method:'PATCH',
         headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ key, value: val })
+        body: JSON.stringify({ weights: { [key]: val } })
       });
     },300);
   }

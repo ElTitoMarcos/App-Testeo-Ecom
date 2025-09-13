@@ -601,16 +601,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"ok": True, "has_key": has_key}).encode("utf-8"))
             return
         if path == "/api/config/winner-weights":
-            from .services import winner_score
+            from .services.config import get_winner_weights_raw, compute_effective_int
 
-            data = winner_score.load_winner_weights_raw()
-            weights = winner_score.sanitize_weights(data.get("weights"))
-            weights_int = {k: int(round(v * 100)) for k, v in weights.items()}
-            logger.info("weights_effective_int=%s", weights_int)
-            resp = {
-                "weights": weights_int,
-                "updated_at": data.get("updated_at"),
-            }
+            raw = get_winner_weights_raw()
+            eff_int = compute_effective_int(raw)
+            logger.info("weights_effective_int=%s", eff_int)
+            resp = {"weights": raw, "effective": {"int": eff_int}}
             self._set_json()
             self.wfile.write(json.dumps(resp).encode("utf-8"))
             return
@@ -1364,23 +1360,22 @@ class RequestHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(length).decode('utf-8')
             try:
-                data = json.loads(body)
-                key = str(data.get("key"))
-                value = float(data.get("value"))
+                data = json.loads(body or "{}")
+                raw_in = data.get("weights") or {}
+                if not isinstance(raw_in, dict):
+                    raise ValueError
             except Exception:
                 self._set_json(400)
                 self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
                 return
-            try:
-                from .services import winner_score
+            from .services.config import set_winner_weights_raw, compute_effective_int
+            from .services import winner_score
 
-                winner_score.update_winner_weight(key, value)
-            except ValueError as exc:
-                self._set_json(400)
-                self.wfile.write(json.dumps({"error": str(exc)}).encode('utf-8'))
-                return
+            saved = set_winner_weights_raw(raw_in)
+            winner_score.invalidate_weights_cache()
+            resp = {"weights": saved, "effective": {"int": compute_effective_int(saved)}}
             self._set_json()
-            self.wfile.write(json.dumps({"status": "ok"}).encode('utf-8'))
+            self.wfile.write(json.dumps(resp).encode('utf-8'))
             return
         self.send_error(404)
 
