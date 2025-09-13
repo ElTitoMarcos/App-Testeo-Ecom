@@ -529,7 +529,7 @@ function debounce(fn, ms=150){
   let t; return (...args)=>{ clearTimeout(t); t=setTimeout(()=>fn(...args), ms); };
 }
 
-function defaultWeights(){ const o={}; WEIGHT_KEYS.forEach(k=>o[k]=1); return o; }
+function defaultWeights(){ const o={}; WEIGHT_KEYS.forEach(k=>o[k]=50); return o; }
 function defaultOrder(){ return [...WEIGHT_KEYS]; }
 
 const saveFns = {};
