@@ -39,6 +39,7 @@ def _clamp_int01(x, lo=0, hi=100):
 
 
 def get_winner_weights_raw() -> dict:
+    init_app_config()
     with _conn() as cx:
         row = cx.execute("SELECT json_value FROM app_config WHERE key=?", (KEY_WEIGHTS_RAW,)).fetchone()
         if not row:
