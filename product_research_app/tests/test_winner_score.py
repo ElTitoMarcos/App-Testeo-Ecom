@@ -91,3 +91,15 @@ def test_order_affects_score():
     res_price_first = ws.compute_winner_score_v2(prod, weights, order=["price", "rating"])
     res_rating_first = ws.compute_winner_score_v2(prod, weights, order=["rating", "price"])
     assert res_price_first["score"] != res_rating_first["score"]
+
+
+def test_awareness_weight_impacts_score():
+    ws.prepare_oldness_bounds([])
+    prod_low = {"awareness_level": "unaware"}
+    prod_high = {"awareness_level": "most aware"}
+    hi = ws.compute_winner_score_v2(prod_high, {"awareness": 100})
+    lo = ws.compute_winner_score_v2(prod_low, {"awareness": 100})
+    assert hi["score"] > lo["score"]
+    hi0 = ws.compute_winner_score_v2(prod_high, {"awareness": 0})
+    lo0 = ws.compute_winner_score_v2(prod_low, {"awareness": 0})
+    assert hi0["score"] == lo0["score"]

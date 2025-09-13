@@ -9,6 +9,7 @@ const FIELDS = [
   { key: "desire", label: "Desire" },
   { key: "competition", label: "Competition" },
   { key: "oldness", label: "Oldness" },
+  { key: "awareness", label: "Awareness" },
 ];
 
 const DEFAULTS_50 = {
@@ -19,6 +20,7 @@ const DEFAULTS_50 = {
   desire: 50,
   competition: 50,
   oldness: 50,
+  awareness: 50,
 };
 
 export default function SettingsModal() {
