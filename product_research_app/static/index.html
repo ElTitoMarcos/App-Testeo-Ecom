@@ -475,8 +475,8 @@ function preprocessProducts(list){
   dupMap.forEach(arr => { if (arr.length > 1) arr.forEach(it => it.isDuplicate = true); });
 }
 
-const WEIGHT_KEYS = ['price','rating','units_sold','revenue','desire','competition','review_count','image_count','profit_margin','shipping_days'];
-const ALIASES = { unitsSold:'units_sold', orders:'units_sold', reviews:'review_count', imgs:'image_count', ship_days:'shipping_days' };
+const WEIGHT_KEYS = ['price','rating','units_sold','revenue','desire','competition','review_count'];
+const ALIASES = { unitsSold:'units_sold', orders:'units_sold', reviews:'review_count' };
 function normalizeKey(k){ return ALIASES[k] || k; }
 const metricDefs = [
   {key:'price',label:'Price'},
@@ -485,10 +485,7 @@ const metricDefs = [
   {key:'revenue',label:'Revenue'},
   {key:'desire',label:'Desire'},
   {key:'competition',label:'Competition'},
-  {key:'review_count',label:'Review Count'},
-  {key:'image_count',label:'Image Count'},
-  {key:'profit_margin',label:'Profit Margin'},
-  {key:'shipping_days',label:'Shipping Days'}
+  {key:'review_count',label:'Review Count'}
 ];
 const metricKeys = metricDefs.map(m=>m.key);
 let weightValues = {};

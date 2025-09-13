@@ -183,9 +183,6 @@ SCORING_DEFAULT_WEIGHTS: Dict[str, float] = {
     "units_sold": 1.0,
     "revenue": 1.0,
     "review_count": 1.0,
-    "image_count": 1.0,
-    "shipping_days": 1.0,
-    "profit_margin": 1.0,
     "desire": 1.0,
     "competition": 1.0,
 }
@@ -196,22 +193,7 @@ def get_weights() -> Dict[str, float]:
 
     from .services import winner_score  # lazy import to avoid circular
 
-    stored = winner_score.load_winner_weights()
-    weights: Dict[str, float] = {}
-    total = 0.0
-    for key, default in SCORING_DEFAULT_WEIGHTS.items():
-        try:
-            val = float(stored.get(key, default))
-            if val < 0:
-                val = 0.0
-        except Exception:
-            val = default
-        weights[key] = val
-        total += val
-    if total <= 0:
-        total = sum(SCORING_DEFAULT_WEIGHTS.values())
-        return {k: v / total for k, v in SCORING_DEFAULT_WEIGHTS.items()}
-    return {k: v / total for k, v in weights.items()}
+    return winner_score.load_winner_weights()
 
 
 def set_weights(weights: Dict[str, float]) -> None:
@@ -219,7 +201,7 @@ def set_weights(weights: Dict[str, float]) -> None:
 
     from .services import winner_score  # lazy import
 
-    winner_score.set_winner_weights(weights)
+    winner_score.set_winner_weights(winner_score.sanitize_weights(weights))
 
 
 def update_weight(key: str, value: float) -> None:
