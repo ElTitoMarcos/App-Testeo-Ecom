@@ -190,34 +190,48 @@ SCORING_DEFAULT_WEIGHTS: Dict[str, float] = {
 
 
 def get_weights() -> Dict[str, float]:
-    """Return Winner Score weights normalised to sum to 1."""
+    """Return Winner Score weights as raw integers (0-100)."""
 
-    from .services import winner_score  # lazy import to avoid circular
+    from .services.config import get_winner_weights_raw  # lazy import
 
-    return winner_score.load_winner_weights()
+    return get_winner_weights_raw()
 
 
 def set_weights(weights: Dict[str, float]) -> None:
-    """Persist Winner Score weights."""
+    """Persist Winner Score weights (RAW)."""
 
+    from .services.config import set_winner_weights_raw  # lazy import
     from .services import winner_score  # lazy import
 
-    winner_score.set_winner_weights(winner_score.sanitize_weights(weights))
+    set_winner_weights_raw(weights)
+    winner_score.invalidate_weights_cache()
 
 
 def update_weight(key: str, value: float) -> None:
     """Update a single Winner Score weight and persist immediately."""
 
+    from .services.config import set_winner_weights_raw, ALLOWED_FIELDS  # lazy import
     from .services import winner_score  # lazy import
 
-    winner_score.update_winner_weight(key, value)
+    k = str(key or "").strip()
+    if k.endswith("_weight"):
+        k = k[:-7]
+    if k not in ALLOWED_FIELDS:
+        raise ValueError(f"Invalid weight key: {key}")
+    set_winner_weights_raw({k: value})
+    winner_score.invalidate_weights_cache()
 
 
 def get_weights_version() -> int:
-    from .services import winner_score  # lazy import
+    from .services.config import _conn, KEY_WEIGHTS_RAW  # lazy import
 
-    data = winner_score.load_winner_weights_raw()
-    try:
-        return int(data.get("version", 0))
-    except Exception:
-        return 0
+    with _conn() as cx:
+        row = cx.execute(
+            "SELECT updated_at FROM app_config WHERE key=?", (KEY_WEIGHTS_RAW,)
+        ).fetchone()
+        if row and row[0]:
+            try:
+                return int(row[0])
+            except Exception:
+                return 0
+    return 0

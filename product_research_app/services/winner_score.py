@@ -4,14 +4,13 @@ import json
 import math
 import hashlib
 import logging
-import os
 import sqlite3
 from datetime import datetime, date
-from pathlib import Path
 from typing import Dict, Any, Iterable, Optional, Callable
 
 from ..utils.db import rget
 from .. import database
+from .config import get_winner_weights_raw, set_winner_weights_raw
 
 logger = logging.getLogger(__name__)
 
@@ -95,9 +94,6 @@ def prepare_oldness_bounds(rows: Iterable[Any]) -> None:
 WEIGHTS_CACHE: Dict[str, float] | None = None
 WEIGHTS_VERSION: int = 0
 
-WINNER_WEIGHTS_FILE = Path(__file__).resolve().parent / "winner_weights.json"
-
-
 def sanitize_weights(weights: dict | None) -> dict:
     w = (weights or {}).copy()
     w = {k: float(v) for k, v in w.items() if k in ALLOWED_FIELDS}
@@ -130,91 +126,46 @@ def normalize_weight_key(key: str) -> str:
     return k
 
 
-def _save_weights_file(data: Dict[str, Any]) -> None:
-    tmp = WINNER_WEIGHTS_FILE.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    tmp.replace(WINNER_WEIGHTS_FILE)
-
-
 def load_winner_weights_raw() -> Dict[str, Any]:
-    """Return persisted weights with metadata.
+    """Return persisted weights with minimal metadata."""
 
-    If the JSON file does not exist, it is created once with
-    ``DEFAULT_WEIGHTS``. Existing data is never overwritten.
-    """
-
-    if WINNER_WEIGHTS_FILE.exists():
-        try:
-            with open(WINNER_WEIGHTS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict) and isinstance(data.get("weights"), dict):
-                return data
-        except Exception:
-            pass
-    data = {
-        "weights": DEFAULT_WEIGHTS.copy(),
-        "updated_at": datetime.utcnow().isoformat(),
-        "version": 1,
-    }
-    _save_weights_file(data)
-    return data
+    return {"weights": get_winner_weights_raw()}
 
 
 def save_winner_weights_raw(data: Dict[str, Any]) -> None:
-    if "updated_at" not in data:
-        data["updated_at"] = datetime.utcnow().isoformat()
-    if "version" not in data:
-        data["version"] = 1
-    _save_weights_file(data)
+    set_winner_weights_raw(data.get("weights", {}))
+    invalidate_weights_cache()
 
 
 def load_winner_weights() -> Dict[str, float]:
-    """Load Winner Score weights as floats from persistent storage."""
+    """Load Winner Score weights (RAW integers)."""
 
     global WEIGHTS_CACHE
     if WEIGHTS_CACHE is not None:
         return WEIGHTS_CACHE
-    raw = load_winner_weights_raw().get("weights", {})
-    weights = sanitize_weights(raw)
+    weights = get_winner_weights_raw()
     WEIGHTS_CACHE = weights
     return weights
 
 
 def update_winner_weight(key: str, value: float) -> None:
     """Update a single weight in persistent storage."""
-    try:
-        norm = normalize_weight_key(key)
-    except ValueError:
-        return
-    data = load_winner_weights_raw()
-    weights = data.get("weights", {})
-    try:
-        weights[norm] = float(value)
-    except Exception:
-        weights[norm] = value
-    data["weights"] = weights
-    data["updated_at"] = datetime.utcnow().isoformat()
-    data["version"] = int(data.get("version", 0)) + 1
-    save_winner_weights_raw(data)
+
+    norm = normalize_weight_key(key)
+    set_winner_weights_raw({norm: value})
     invalidate_weights_cache()
 
 
 def set_winner_weights(weights: Dict[str, float]) -> None:
     """Replace or update multiple weights at once."""
-    data = load_winner_weights_raw()
+
     cleaned: Dict[str, float] = {}
     for k, v in weights.items():
         try:
             cleaned[normalize_weight_key(k)] = float(v)
         except ValueError:
             continue
-    data["weights"] = sanitize_weights(cleaned)
-    data["updated_at"] = datetime.utcnow().isoformat()
-    data["version"] = int(data.get("version", 0)) + 1
-    save_winner_weights_raw(data)
+    set_winner_weights_raw(cleaned)
     invalidate_weights_cache()
 
 # Mapping tables for categorical metrics
