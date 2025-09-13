@@ -39,7 +39,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "aiImageCostMaxUSD": 0.02,
     "weightsVersion": 0,
     "weightsUpdatedAt": 0,
-    "oldness_preference": "newer",
+    "oldness_preference_pct": 50,
 }
 
 
@@ -73,6 +73,11 @@ def load_config() -> Dict[str, Any]:
             changed = True
     if "weights_v2" in data:
         data.pop("weights_v2", None)
+        changed = True
+    if "oldness_preference_pct" not in data and "oldness_preference" in data:
+        val = str(data.get("oldness_preference") or "newer").lower()
+        data["oldness_preference_pct"] = 100 if val == "older" else 0
+        data.pop("oldness_preference", None)
         changed = True
     if _merge_defaults(data, DEFAULT_CONFIG):
         changed = True

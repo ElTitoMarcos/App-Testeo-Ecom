@@ -443,16 +443,32 @@ def _norm_revenue(v: float) -> float:
     return clamp(math.log1p(v) / math.log1p(1_000_000.0))
 
 
+def get_oldness_pref(cfg: dict) -> float:
+    """Return oldness preference as 0..1 float.
+
+    0.0 means the user prefers recent products, 1.0 prefers older products.
+    Handles legacy ``oldness_preference`` ("older"/"newer") for
+    backwards compatibility.
+    """
+
+    if "oldness_preference_pct" in cfg:
+        try:
+            return max(0.0, min(1.0, float(cfg["oldness_preference_pct"]) / 100.0))
+        except Exception:
+            return 0.5
+    val = (cfg.get("oldness_preference") or "newer").lower()
+    return 1.0 if val == "older" else 0.0
+
+
 def _norm_oldness(v: float) -> float:
     vmin, vmax = OLDNESS_MIN, OLDNESS_MAX
     if vmax == vmin:
-        n = 0.0
+        n_old = 0.0
     else:
-        n = (v - vmin) / (vmax - vmin)
-    pref = config.load_config().get("oldness_preference", "newer")
-    if pref == "newer":
-        n = 1.0 - n
-    return clamp(n)
+        n_old = (v - vmin) / (vmax - vmin)
+    pref = get_oldness_pref(config.load_config())
+    n_effective = pref * n_old + (1 - pref) * (1.0 - n_old)
+    return clamp(n_effective)
 
 def _norm_identity(v: float) -> float:
     return clamp(v)

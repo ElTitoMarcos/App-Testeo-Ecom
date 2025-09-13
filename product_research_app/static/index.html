@@ -105,15 +105,12 @@ body.dark pre { background:#2e315f; }
   <strong>Ponderaciones Winner Score</strong>
   <ul id="weightsList" style="list-style:none; margin-top:8px; padding:0;"></ul>
   <label class="field-label">Preferencia de Oldness</label>
-  <div class="segmented">
-    <label>
-      <input type="radio" name="oldness_preference" value="newer">
-      Prefiero recientes
-    </label>
-    <label>
-      <input type="radio" name="oldness_preference" value="older">
-      Prefiero antiguos
-    </label>
+  <div class="slider-row">
+    <input type="range" id="oldnessPref" min="0" max="100" step="1" value="50" />
+    <div class="slider-extremes">
+      <span>Más reciente</span>
+      <span>Más antiguo</span>
+    </div>
   </div>
   <div style="margin-top:10px; display:flex; flex-wrap:wrap; gap:6px;">
     <button id="resetWeights">Reset</button>
@@ -518,6 +515,15 @@ const WEIGHT_FIELDS = [
   { key: 'competition',  label: 'Competition' },
   { key: 'oldness',      label: 'Oldness (antigüedad)' }
 ];
+const EXTREMES = {
+  price:       { left: 'Más barato',        right: 'Más caro' },
+  rating:      { left: 'Peor rating',       right: 'Mejor rating' },
+  units_sold:  { left: 'Menos ventas',      right: 'Más ventas' },
+  revenue:     { left: 'Menores ingresos',  right: 'Mayores ingresos' },
+  desire:      { left: 'Menor deseo',       right: 'Mayor deseo' },
+  competition: { left: 'Menor competencia', right: 'Mayor competencia' },
+  oldness:     { left: 'Más reciente',      right: 'Más antiguo' },
+};
 const WEIGHT_KEYS = WEIGHT_FIELDS.map(f=>f.key);
 const ALIASES = { unitsSold:'units_sold', orders:'units_sold' };
 function normalizeKey(k){ return ALIASES[k] || k; }
@@ -525,7 +531,7 @@ const metricDefs = WEIGHT_FIELDS;
 const metricKeys = WEIGHT_KEYS;
 let weightValues = {};
 let weightOrder = [];
-let userConfig = { oldness_preference: 'newer' };
+let userConfig = { oldness_preference_pct: 50 };
 
 function debounce(fn, ms=150){
   let t; return (...args)=>{ clearTimeout(t); t=setTimeout(()=>fn(...args), ms); };
@@ -567,7 +573,7 @@ function renderWeights(){
     const li=document.createElement('li');
     li.className='metric-row';
     li.dataset.key=key;
-    li.innerHTML=`<span class="ws-handle">≡</span><span class="ws-name">${def.label}</span><div class="ws-slider-wrap"><input type="range" name="${key}" min="0" max="100" step="1" value="${Math.round(weightValues[key]||0)}" class="ws-slider"><span class="ws-value"><span class="weight-value"></span></span></div><span class="ws-status"></span>`;
+    li.innerHTML=`<span class="ws-handle">≡</span><span class="ws-name">${def.label}</span><div class="ws-slider-wrap"><div class="slider-row"><input type="range" name="${key}" min="0" max="100" step="1" value="${Math.round(weightValues[key]||0)}" class="ws-slider"><span class="ws-value"><span class="weight-value"></span></span><div class="slider-extremes"><span class="extreme-left">${EXTREMES[key].left}</span><span class="extreme-right">${EXTREMES[key].right}</span></div></div></div><span class="ws-status"></span>`;
     const range=li.querySelector('.ws-slider');
     range.addEventListener('input',e=>{
       const k=normalizeKey(e.target.name);
@@ -589,6 +595,12 @@ function resetWeights(){
   weightOrder=defaultOrder();
   renderWeights();
   for(const k in weightValues){ saveWeightDebounced(k, weightValues[k]); }
+  const prefRange=document.getElementById('oldnessPref');
+  if(prefRange){
+    prefRange.value=50;
+    userConfig.oldness_preference_pct=50;
+    fetch('/setconfig',{method:'POST',headers:{'Content-Type':'application/json'},body: JSON.stringify({ oldness_preference_pct: 50 })});
+  }
 }
 
 function stratifiedSample(list, n){
@@ -731,20 +743,24 @@ async function loadConfig() {
     if (input) input.value = '';
     if (saveBtn) saveBtn.disabled = true;
   }
-  userConfig.oldness_preference = cfg.oldness_preference || 'newer';
-  const prefEls = document.querySelectorAll('input[name="oldness_preference"]');
-  prefEls.forEach(el => {
-    el.checked = el.value === userConfig.oldness_preference;
-    el.addEventListener('change', e => {
-      const val = e.target.value;
-      userConfig.oldness_preference = val;
+  userConfig.oldness_preference_pct = Number(cfg.oldness_preference_pct ?? 50);
+  const prefRange = document.getElementById('oldnessPref');
+  if (prefRange) {
+    const update = val => {
       fetch('/setconfig', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ oldness_preference: val })
+        body: JSON.stringify({ oldness_preference_pct: val })
       });
+    };
+    prefRange.value = userConfig.oldness_preference_pct;
+    prefRange.addEventListener('input', e => {
+      const val = Math.round(Number(e.target.value) || 0);
+      userConfig.oldness_preference_pct = val;
+      prefRange.value = val;
+      update(val);
     });
-  });
+  }
   await loadWeights();
 }
 
