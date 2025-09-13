@@ -679,7 +679,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                 if dr is None:
                     dr = extra_dict.get("date_range")
                 price_val = rget(p, "price")
-                desire_val = _ensure_desire(p, extra_dict)
+                desire_db = rget(p, "desire")
+                if desire_db in (None, ""):
+                    desire_db = _ensure_desire(p, extra_dict)
+                desire_val = (desire_db or "").strip() or None
                 row = {
                     "id": rget(p, "id"),
                     "name": rget(p, "name"),
@@ -1286,7 +1289,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                     extra_dict = json.loads(rget(product, "extra") or "{}")
                 except Exception:
                     extra_dict = {}
-                product["desire"] = _ensure_desire(product, extra_dict)
+                desire_db = rget(product, "desire")
+                if desire_db in (None, ""):
+                    desire_db = _ensure_desire(product, extra_dict)
+                product["desire"] = (desire_db or "").strip() or None
                 self._set_json()
                 self.wfile.write(json.dumps(product).encode('utf-8'))
             else:
