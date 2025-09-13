@@ -394,7 +394,6 @@ function ecAutoFitColumns(gridRoot) {
   gridRoot.style.setProperty('--ec-w-awareness',     aw + 'px');
   gridRoot.style.setProperty('--ec-w-competition',   co + 'px');
 
-  gridRoot.querySelectorAll('td.ec-col-desire input').forEach(el => el.style.width = (d - EC_LIMITS.desire.pad) + 'px');
   gridRoot.querySelectorAll('td.ec-col-desire-mag select').forEach(el => el.style.width = (dm - EC_LIMITS.desire_mag.pad) + 'px');
   gridRoot.querySelectorAll('td.ec-col-awareness select').forEach(el => el.style.width = (aw - EC_LIMITS.awareness.pad) + 'px');
   gridRoot.querySelectorAll('td.ec-col-competition select').forEach(el => el.style.width = (co - EC_LIMITS.competition.pad) + 'px');
@@ -413,7 +412,7 @@ const columns = [
   { key: 'Creator Conversion Ratio', label: 'Tasa Conversión', type: 'string' },
   { key: 'Launch Date', label: 'Fecha Lanzamiento', type: 'string' },
   { key: 'date_range', label: 'Rango Fechas', type: 'string', headerClass: 'cell-date-range', cellClass: 'cell-date-range' },
-  { key: 'desire', label: 'Desire', type: 'string', headerClass: 'ec-col ec-col-desire', cellClass: 'ec-col ec-col-desire', dataEcCol: 'desire' },
+  { key: 'desire', label: 'Desire', type: 'string', headerClass: 'ec-col ec-col-desire col-desire', cellClass: 'ec-col ec-col-desire col-desire', dataEcCol: 'desire' },
   { key: 'desire_magnitude', label: 'Desire magnetitude', type: 'string', headerClass: 'ec-col ec-col-desire-mag', cellClass: 'ec-col ec-col-desire-mag', dataEcCol: 'desire_magnitude' },
   { key: 'awareness_level', label: 'Awerness Level', type: 'string', headerClass: 'ec-col ec-col-awareness', cellClass: 'ec-col ec-col-awareness', dataEcCol: 'awareness_level' },
   { key: 'competition_level', label: 'Competition level', type: 'string', headerClass: 'ec-col ec-col-competition', cellClass: 'ec-col ec-col-competition', dataEcCol: 'competition_level' },
@@ -884,20 +883,40 @@ function renderTable() {
           td.appendChild(btnCopy);
         }
       } else if (key === 'desire') {
-        const input = document.createElement('input');
-        input.type = 'text';
-        input.placeholder = '—';
-        const fullVal = value || '';
-        input.value = fullVal;
-        input.title = fullVal;
-        td.title = fullVal;
-        input.addEventListener('blur', async () => {
-          const val = input.value.trim() || null;
-          try { await api.updateProductField(item.id, { desire: val }); } catch(e) {}
-          item.desire = val;
-          ecAutoFitColumns(gridRoot);
-        });
-        td.appendChild(input);
+        let current = value || '';
+        td.title = current;
+        const render = () => {
+          td.innerHTML = '';
+          const wrap = document.createElement('div');
+          wrap.className = 'desire-wrap';
+          wrap.textContent = current;
+          td.appendChild(wrap);
+          wrap.addEventListener('click', () => {
+            if (td.querySelector('textarea')) return;
+            const ta = document.createElement('textarea');
+            ta.className = 'desire-editor';
+            ta.rows = 4;
+            ta.value = current;
+            td.innerHTML = '';
+            td.appendChild(ta);
+            ta.focus();
+            ta.addEventListener('blur', async () => {
+              const val = ta.value.trim() || null;
+              try {
+                await fetch(`/api/products/${item.id}`, {
+                  method: 'PATCH',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ desire: val })
+                });
+              } catch (e) {}
+              item.desire = val;
+              current = val || '';
+              render();
+              ecAutoFitColumns(gridRoot);
+            });
+          });
+        };
+        render();
       } else if (key === 'desire_magnitude') {
         const select = document.createElement('select');
         ['', 'Low', 'Medium', 'High'].forEach(opt => {

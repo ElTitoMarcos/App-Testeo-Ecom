@@ -595,7 +595,6 @@ button.loading::after {
 .ec-col { vertical-align: middle; }
 
 /* Inputs/selects compactos solo aquí */
-.ec-col-desire input,
 .ec-col-desire-mag select,
 .ec-col-awareness select,
 .ec-col-competition select {
@@ -616,7 +615,6 @@ button.loading::after {
 }
 
 /* Evitar desbordes solo aquí */
-.ec-col-desire > *,
 .ec-col-desire-mag > *,
 .ec-col-awareness > *,
 .ec-col-competition > * {
@@ -655,4 +653,20 @@ body.dark .ws-slider{ accent-color:#7a53d6; }
 .ws-slider::-webkit-slider-thumb{ width:20px; height:20px; border-radius:50%; cursor:pointer; }
 .ws-slider::-moz-range-thumb{ width:20px; height:20px; border-radius:50%; cursor:pointer; }
 .ws-value{ width:40px; text-align:right; }
+
+/* Cabecera y celdas de la columna Desire */
+th.col-desire, td.col-desire { width: 360px; max-width: 360px; }
+/* Contenido multi-línea sin corte */
+.desire-wrap {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.25;
+}
+/* Editor multi-línea para Desire */
+.desire-editor {
+  width: 100%;
+  min-height: 6.5rem;
+  resize: vertical;
+}
 
