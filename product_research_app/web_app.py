@@ -611,7 +611,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             order = get_winner_order_raw()
             eff_int = compute_effective_int(raw, order)
             logger.info("weights_effective_int=%s order=%s", eff_int, order)
-            resp = {"weights": raw, "order": order, "effective": {"int": eff_int}}
+            resp = {**raw, "weights": raw, "order": order, "effective": {"int": eff_int}}
             self._set_json()
             self.wfile.write(json.dumps(resp).encode("utf-8"))
             return
@@ -1366,8 +1366,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(length).decode('utf-8')
             try:
                 data = json.loads(body or "{}")
-                raw_in = data.get("weights") or {}
-                if not isinstance(raw_in, dict):
+                if not isinstance(data, dict):
                     raise ValueError
             except Exception:
                 self._set_json(400)
@@ -1376,21 +1375,28 @@ class RequestHandler(BaseHTTPRequestHandler):
             from .services.config import (
                 set_winner_weights_raw,
                 set_winner_order_raw,
+                get_winner_order_raw,
                 compute_effective_int,
+                ALLOWED_FIELDS,
             )
             from .services import winner_score
 
-            saved = set_winner_weights_raw(raw_in)
+            payload_map = (
+                data.get("winner_weights")
+                or data.get("weights")
+                or {k: v for k, v in data.items() if k in ALLOWED_FIELDS}
+            )
+            saved = set_winner_weights_raw(payload_map)
             order_in = data.get("order") if isinstance(data, dict) else None
-            if order_in is None:
-                order_in = list(saved.keys())
-            saved_order = set_winner_order_raw(order_in)
+            if isinstance(order_in, list):
+                order = [k for k in order_in if k in saved]
+            else:
+                order = get_winner_order_raw()
+            if "awareness" not in order:
+                order.append("awareness")
+            saved_order = set_winner_order_raw(order)
             winner_score.invalidate_weights_cache()
-            resp = {
-                "weights": saved,
-                "order": saved_order,
-                "effective": {"int": compute_effective_int(saved, saved_order)},
-            }
+            resp = {**saved, "weights": saved, "order": saved_order, "effective": {"int": compute_effective_int(saved, saved_order)}}
             self._set_json()
             self.wfile.write(json.dumps(resp).encode('utf-8'))
             return

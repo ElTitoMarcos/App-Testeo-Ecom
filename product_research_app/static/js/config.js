@@ -32,6 +32,7 @@ function defaultFactors(){
   return WEIGHT_FIELDS.map(f => ({ ...f, weight:50 }));
 }
 let saveTimer=null;
+let isInitialRender = true;
 function markDirty(){
   clearTimeout(saveTimer);
   saveTimer=setTimeout(saveSettings,700);
@@ -81,7 +82,7 @@ function renderFactors(){
       updateAw(f.weight);
       slider.addEventListener('input', e => {
         updateAw(e.target.value);
-        markDirty();
+        if(!isInitialRender) markDirty();
       });
     } else {
       li.innerHTML = `<div class="priority-badge">#${priority}</div><div class="content"><label for="weight-${f.key}" class="label">${f.label}</label><input id="weight-${f.key}" class="weight-range" type="range" min="0" max="100" step="1" value="${f.weight}"><div class="slider-extremes scale"><span class="extreme-left">${EXTREMES[f.key].left}</span><span class="extreme-right">${EXTREMES[f.key].right}</span></div><span class="weight-badge">peso: ${f.weight}/100</span></div><div class="drag-handle" aria-hidden>≡</div>`;
@@ -91,7 +92,7 @@ function renderFactors(){
         f.weight = v;
         range.value = v;
         li.querySelector('.weight-badge').textContent = `peso: ${f.weight}/100`;
-        markDirty();
+        if(!isInitialRender) markDirty();
       });
     }
     list.appendChild(li);
@@ -100,8 +101,9 @@ function renderFactors(){
     const orderKeys = Array.from(list.children).map(li=>li.dataset.key);
     factors.sort((a,b)=>orderKeys.indexOf(a.key)-orderKeys.indexOf(b.key));
     renderFactors();
-    markDirty();
+    if(!isInitialRender) markDirty();
   }});
+  isInitialRender = false;
 }
 
 function resetWeights(){
@@ -127,7 +129,6 @@ async function saveSettings(){
     if (typeof reloadProductsLight === 'function') reloadProductsLight();
     else if (typeof reloadProducts === 'function') reloadProducts();
   }catch(err){
-    console.warn('saveSettings failed', err);
     if (typeof toast !== 'undefined' && toast.error) toast.error('No se pudo guardar la configuración');
   }
 }
@@ -262,7 +263,6 @@ async function adjustWeightsAI(){
       toast.success(`Pesos ajustados por IA (${method}) con ${data_sample.length} muestras`);
     }
   }catch(err){
-    console.error(err);
     if (typeof toast !== 'undefined' && toast.error){
       toast.error('No se pudo ajustar por IA. Revisa tu API Key o inténtalo más tarde.');
     }
@@ -272,6 +272,7 @@ async function adjustWeightsAI(){
 
 async function openConfigModal(){
   try{
+    isInitialRender = true;
     const res = await fetch('/api/config/winner-weights');
     const data = await res.json(); // backend: { weights, order, effective? }  (o legado: mapa plano)
 
@@ -304,7 +305,7 @@ async function openConfigModal(){
 
     console.debug('openConfigModal -> weights/order aplicados:', { weights, order });
   }catch(err){
-    console.error('Error loading weights', err);
+    /* silencioso */
   }
 }
 

@@ -6,6 +6,10 @@ from product_research_app.services.winner_score import (
     load_settings,
     save_settings,
 )
+from product_research_app.services.config import (
+    ALLOWED_FIELDS,
+    compute_effective_int,
+)
 
 
 def _coerce_weights(raw: dict | None) -> dict[str, int]:
@@ -25,11 +29,24 @@ def _merge_winner_weights(current: dict | None, incoming: dict | None) -> dict:
     return cur
 
 
+"""Endpoints for winner weight configuration.
+
+These routes must maintain backwards compatibility with older clients that
+expect a flat mapping of weight keys, while newer UIs may send or receive a
+``{"weights": {...}, "order": [...]}`` structure.  The GET endpoint therefore
+returns both the legacy flat map and the richer wrapper.  The PATCH endpoint
+accepts any of the shapes described above.
+"""
+
+
 # GET /api/config/winner-weights
 @app.route("/api/config/winner-weights", methods=["GET"])
 def api_get_winner_weights():
     settings = load_settings()
-    resp = jsonify(settings.get("winner_weights") or {})
+    weights = _coerce_weights(settings.get("winner_weights"))
+    order = settings.get("winner_order") or list(weights.keys())
+    eff = compute_effective_int(weights, order)
+    resp = jsonify({**weights, "weights": weights, "order": order, "effective": {"int": eff}})
     resp.headers["Cache-Control"] = "no-store"
     return resp, 200
 
@@ -37,18 +54,25 @@ def api_get_winner_weights():
 # PATCH /api/config/winner-weights
 @app.route("/api/config/winner-weights", methods=["PATCH"])
 def api_patch_winner_weights():
-    payload = request.get_json(force=True) or {}
-    incoming = _coerce_weights(payload.get("winner_weights") or payload)
+    body = request.get_json(force=True) or {}
+    payload_map = (
+        body.get("winner_weights")
+        or body.get("weights")
+        or {k: v for k, v in body.items() if k in ALLOWED_FIELDS}
+    )
+    incoming = _coerce_weights(payload_map)
 
     settings = load_settings()
     current = _coerce_weights(settings.get("winner_weights"))
-
     if "awareness" not in incoming and "awareness" not in current:
         incoming["awareness"] = 50
-
     settings["winner_weights"] = _merge_winner_weights(current, incoming)
 
-    order = settings.get("winner_order") or list(settings["winner_weights"].keys())
+    order_in = body.get("order")
+    if isinstance(order_in, list):
+        order = [k for k in order_in if k in ALLOWED_FIELDS]
+    else:
+        order = settings.get("winner_order") or list(settings["winner_weights"].keys())
     if "awareness" not in order:
         order.append("awareness")
     settings["winner_order"] = order
@@ -61,13 +85,6 @@ def api_patch_winner_weights():
     except Exception as e:
         current_app.logger.warning("recompute on save failed: %s", e)
 
-    resp = jsonify(
-        {
-            "ok": True,
-            "updated": updated,
-            "winner_weights": settings["winner_weights"],
-            "winner_order": order,
-        }
-    )
+    resp = jsonify({"ok": True, "winner_weights": settings["winner_weights"], "winner_order": order, "updated": updated})
     resp.headers["Cache-Control"] = "no-store"
     return resp, 200
