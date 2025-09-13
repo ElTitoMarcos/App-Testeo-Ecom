@@ -223,16 +223,8 @@ def update_weight(key: str, value: float) -> None:
 
 
 def get_weights_version() -> int:
-    from .services.config import _conn, KEY_WEIGHTS_RAW, init_app_config  # lazy import
-
-    init_app_config()
-    with _conn() as cx:
-        row = cx.execute(
-            "SELECT updated_at FROM app_config WHERE key=?", (KEY_WEIGHTS_RAW,)
-        ).fetchone()
-        if row and row[0]:
-            try:
-                return int(row[0])
-            except Exception:
-                return 0
-    return 0
+    cfg = load_config()
+    try:
+        return int(cfg.get("weightsUpdatedAt", 0))
+    except Exception:
+        return 0
