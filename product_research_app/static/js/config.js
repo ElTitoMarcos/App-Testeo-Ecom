@@ -112,11 +112,11 @@ function resetWeights(){
 
 async function saveSettings(){
   const payload = {
-    // usar "weights" (no "winner_weights") y persistir el orden visible
+    // Backend espera "weights" (0–100 enteros) y también "order"
     weights: Object.fromEntries(
-      factors.map(f => [f.key, Math.max(0, Math.min(100, Math.round(Number(f.weight))))])
+      (window.factors || []).map(f => [f.key, Math.max(0, Math.min(100, Math.round(Number(f.weight))))])
     ),
-    order: factors.map(f => f.key)
+    order: (window.factors || []).map(f => f.key)
   };
   try{
     await fetch('/api/config/winner-weights', {
@@ -166,12 +166,12 @@ function stratifiedSample(list, n){
 }
 
 async function adjustWeightsAI(){
-  const num = v => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+  const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
   const stratifiedSampleBy = (arr, key, n) => {
     if (!Array.isArray(arr) || arr.length <= n) return (arr || []).slice();
     const sorted = [...arr].sort((a,b) => num(b[key]) - num(a[key]));
     const out = [];
-    for (let i=0; i<n; i++){
+    for (let i = 0; i < n; i++){
       const idx = Math.floor(i * (sorted.length - 1) / Math.max(1,(n - 1)));
       out.push(sorted[idx]);
     }
@@ -182,7 +182,7 @@ async function adjustWeightsAI(){
     const products = Array.isArray(window.allProducts) ? window.allProducts : [];
     if (!products.length){ if (typeof toast !== 'undefined') toast.info('No hay productos cargados'); return; }
 
-    // Construir dataset con las 8 features del Winner Score
+    // Dataset con las 8 features del Winner Score
     const rows = products.map(p => {
       const ratingRaw = p.rating ?? (p.extras && p.extras.rating);
       const unitsRaw  = p.units_sold ?? (p.extras && (p.extras['Item Sold'] || p.extras['Orders']));
@@ -199,11 +199,11 @@ async function adjustWeightsAI(){
       };
     });
 
-    // Target: revenue si >=50% lo tiene; si no, units_sold
+    // Target: revenue si >=50% de filas lo tienen; si no, units_sold
     const revCount = rows.filter(r => r.revenue > 0).length;
     const targetName = (revCount >= Math.ceil(rows.length * 0.5)) ? 'revenue' : 'units_sold';
 
-    // Enviar el mayor número posible en una sola llamada (controlado por presupuesto)
+    // Enviar el mayor número posible en una sola llamada (cap por coste)
     const cfg = (window.userConfig && window.userConfig.aiCost) ? window.userConfig.aiCost : { costCapUSD: 0.25, estTokensPerItemIn: 300, estTokensPerItemOut: 80 };
     const estTokPerItem = (num(cfg.estTokensPerItemIn) + num(cfg.estTokensPerItemOut)) || 380;
     const pricePerK = 0.002; // estimación conservadora
@@ -219,7 +219,7 @@ async function adjustWeightsAI(){
     ];
     const payload = { features, target: targetName, data_sample };
 
-    // 1 intento: GPT; fallback estadístico si falla
+    // Endpoint correcto: GPT con fallback estadístico
     let res = await fetch('/scoring/v2/auto-weights-gpt', {
       method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
     });
@@ -233,7 +233,7 @@ async function adjustWeightsAI(){
     const out = await res.json(); // { weights:{k:0..1|0..100}, method?... }
     const returned = (out && out.weights) ? out.weights : {};
 
-    // Normalizar a 0..100 enteros y ordenar por importancia
+    // Normaliza a 0..100 y ordena por importancia
     const intWeights = {};
     for (const k of features){
       let v = num(returned[k]);
@@ -243,14 +243,14 @@ async function adjustWeightsAI(){
     }
     const newOrder = [...features].sort((a,b) => (intWeights[b]||0) - (intWeights[a]||0));
 
-    // Aplicar en UI
+    // Aplica en UI (reordena y actualiza sliders)
     if (Array.isArray(window.factors) && window.factors.length){
       const byKey = Object.fromEntries(window.factors.map(f => [f.key, f]));
       window.factors = newOrder.filter(k => byKey[k]).map(k => ({ ...byKey[k], weight: intWeights[k] ?? byKey[k].weight }));
       if (typeof renderFactors === 'function') renderFactors();
     }
 
-    // Guardar {weights, order} y recargar desde servidor para reflejar lo persistido
+    // Persiste {weights, order} y recarga la modal para mostrar lo guardado
     await fetch('/api/config/winner-weights', {
       method:'PATCH', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ weights: intWeights, order: newOrder })
@@ -273,15 +273,15 @@ async function adjustWeightsAI(){
 async function openConfigModal(){
   try{
     const res = await fetch('/api/config/winner-weights');
-    const data = await res.json(); // backend: { weights, order, effective? }  (o legado: mapa plano)
+    const data = await res.json(); // backend: { weights, order, effective? } | legacy: mapa plano
 
-    // Soporta ambas formas (nueva y legacy)
+    // Soporta forma nueva y legacy
     const weights = (data && data.weights) ? data.weights : (data || {});
     const order   = (data && Array.isArray(data.order) && data.order.length)
       ? data.order
       : (typeof WEIGHT_KEYS !== 'undefined' ? WEIGHT_KEYS : Object.keys(weights));
 
-    // Construcción de factors respetando orden y pesos persistidos
+    // Construcción de factors en ORDEN guardado + pesos persistidos
     const fieldList = (typeof WEIGHT_FIELDS !== 'undefined' && Array.isArray(WEIGHT_FIELDS)) ? WEIGHT_FIELDS : [];
     const byKey = Object.fromEntries(fieldList.map(f => [f.key, f]));
 
