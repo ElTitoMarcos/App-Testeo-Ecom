@@ -170,82 +170,108 @@ function stratifiedSample(list, n){
 }
 
 async function adjustWeightsAI(){
+  // Helpers locales para robustez (no toques computeOldnessDays ni awarenessValue)
+  const num = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  };
+  const stratifiedSampleBy = (arr, key, n) => {
+    if (!Array.isArray(arr) || arr.length <= n) return (arr || []).slice();
+    const sorted = [...arr].sort((a,b) => num(b[key]) - num(a[key]));
+    const out = [];
+    for (let i = 0; i < n; i++){
+      const idx = Math.floor(i * (sorted.length - 1) / Math.max(1,(n - 1)));
+      out.push(sorted[idx]);
+    }
+    return out;
+  };
+
   try{
-    let sample=stratifiedSample(allProducts||[],30);
-    let payload=sample.map(p=>({
-      price:p.price,
-      rating:p.rating || (p.extras&&p.extras.rating),
-      units_sold:p.units_sold||(p.extras&&p.extras['Item Sold'])||0,
-      revenue:p.revenue||(p.extras&&p.extras['Revenue($)'])||0,
-      desire:p.desire_magnitude,
-      competition:p.competition_level,
-      oldness:computeOldnessDays(p),
-      awareness: awarenessValue(p)
-    }));
-    let tokenEstimate=JSON.stringify(payload).length/4;
-    const maxTokens=0.30/0.002*1000;
-    while(tokenEstimate>maxTokens && sample.length>1){
-      const ratio=maxTokens/tokenEstimate;
-      const newN=Math.max(1,Math.floor(sample.length*ratio));
-      sample=stratifiedSample(allProducts||[],newN);
-      payload=sample.map(p=>({
-        price:p.price,
-        rating:p.rating || (p.extras&&p.extras.rating),
-        units_sold:p.units_sold||(p.extras&&p.extras['Item Sold'])||0,
-        revenue:p.revenue||(p.extras&&p.extras['Revenue($)'])||0,
-        desire:p.desire_magnitude,
-        competition:p.competition_level,
-        oldness:computeOldnessDays(p),
-        awareness: awarenessValue(p)
-      }));
-      tokenEstimate=JSON.stringify(payload).length/4;
-    }
-    const cost=tokenEstimate/1000*0.002;
-    toast.info(`Analizando ${sample.length} productos (~$${cost.toFixed(2)})`);
-    const instruction='Devuelve SOLO un JSON plano con pesos 0-100 para estas 8 claves exactas, sin texto adicional:\n["price","rating","units_sold","revenue","desire","competition","oldness","awareness"]';
-    const prompt=`Basado en estos productos ${JSON.stringify(payload)}\n${instruction}`;
-    let res=await fetch('/custom_gpt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,response_format:{type:'json_object'}})});
-    if(!res.ok){
-      toast.error('No se pudo ajustar por IA. Revisa tu API Key o inténtalo más tarde.');
+    const products = Array.isArray(window.allProducts) ? window.allProducts : [];
+    if (!products.length){
+      if (typeof toast !== 'undefined') toast.info('No hay productos cargados');
       return;
     }
-    const data=await res.json();
-    let raw=data.response||'';
-    console.debug('IA raw:', raw);
-    let obj;
-    if(typeof raw==='string'){
-      try{ obj=JSON.parse(raw); }
-      catch(e){
-        const m=raw.match(/\{[\s\S]*\}/);
-        if(m){ try{ obj=JSON.parse(m[0]); } catch(e2){} }
-      }
-    }else if(typeof raw==='object'){
-      obj=raw;
+
+    // Construimos dataset con las 8 features del Winner Score
+    const rows = products.map(p => {
+      const ratingRaw = p.rating ?? (p.extras && p.extras.rating);
+      const unitsRaw  = p.units_sold ?? (p.extras && p.extras['Item Sold']);
+      const revRaw    = p.revenue ?? (p.extras && p.extras['Revenue($)']);
+      return {
+        price:       num(p.price),
+        rating:      num(ratingRaw),
+        units_sold:  num(unitsRaw),
+        revenue:     num(revRaw),
+        desire:      num(p.desire_magnitude),
+        competition: num(p.competition_level),
+        oldness:     num(typeof computeOldnessDays === 'function' ? computeOldnessDays(p) : 0),
+        awareness:   num(typeof awarenessValue === 'function' ? awarenessValue(p) : 0),
+      };
+    });
+
+    // Target: preferimos 'revenue' si está presente en ≥50% de filas, si no 'units_sold'
+    const revCount = rows.filter(r => r.revenue > 0).length;
+    const targetName = (revCount >= Math.ceil(rows.length * 0.5)) ? 'revenue' : 'units_sold';
+
+    // data_sample: el backend espera un campo 'target' numérico en cada fila
+    let data_sample = rows.map(r => ({ ...r, target: num(r[targetName]) }));
+
+    // Para controlar coste: si hay muchísimos, muestrear de forma estratificada por el target
+    const MAX = 150; // puedes subirlo si te compensa el coste
+    if (data_sample.length > MAX){
+      data_sample = stratifiedSampleBy(data_sample, targetName, MAX);
     }
-    console.debug('IA parsed:', obj);
-    if(!obj || typeof obj!=='object'){
-      toast.error('No se pudo ajustar por IA. Revisa tu API Key o inténtalo más tarde.');
-      return;
+
+    // Payload para el endpoint GPT (features -> las 8 claves del score)
+    const features = (typeof metricKeys !== 'undefined' && metricKeys.length) ? metricKeys : [
+      'price','rating','units_sold','revenue','desire','competition','oldness','awareness'
+    ];
+    const payload = { features, target: targetName, data_sample };
+
+    // 1º intento: GPT
+    let res = await fetch('/scoring/v2/auto-weights-gpt', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
+    });
+
+    // Fallback: correlación estadística si GPT falla
+    if (!res.ok){
+      res = await fetch('/scoring/v2/auto-weights-stat', {
+        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
+      });
     }
-    const newWeights={};
-    for(const k of metricKeys){
-      let v=Number(obj[k]);
-      if(isNaN(v)){
-        const current=factors.find(f=>f.key===k);
-        v=current?current.weight:0;
-      }
-      if(v<0) v=0; if(v>100) v=100;
-      newWeights[k]=Math.round(v);
+    if (!res.ok) throw new Error('Auto-weights request failed');
+
+    const data = await res.json(); // { weights: {k:0..1}, method:'gpt'|'stat' }
+    const returned = data && data.weights ? data.weights : {};
+    const newWeights = {};
+    features.forEach(k => {
+      let v = num(returned[k]);
+      // Si viene 0..1, escalar a 0..100
+      if (v > 0 && v <= 1) v = v * 100;
+      if (v < 0) v = 0; if (v > 100) v = 100;
+      newWeights[k] = Math.round(v);
+    });
+
+    // Aplicar en UI y persistir
+    if (Array.isArray(window.factors) && window.factors.length){
+      window.factors = window.factors.map(f => ({ ...f, weight: newWeights[f.key] ?? f.weight }));
+      if (typeof renderFactors === 'function') renderFactors();
     }
-    factors=factors.map(f=>({ ...f, weight:newWeights[f.key] ?? f.weight }));
-    renderFactors();
-    markDirty();
-    toast.success('Pesos ajustados por IA');
+    if (typeof saveSettings === 'function') await saveSettings();
+
+    if (typeof toast !== 'undefined' && toast.success){
+      const method = (data && data.method) ? data.method : 'auto';
+      toast.success(`Pesos ajustados por IA (${method})`);
+    }
   }catch(err){
     console.error(err);
-    toast.error('No se pudo ajustar por IA. Revisa tu API Key o inténtalo más tarde.');
+    if (typeof toast !== 'undefined' && toast.error){
+      toast.error('No se pudo ajustar por IA. Revisa tu API Key o inténtalo más tarde.');
+    }
   }
 }
+
 
 async function openConfigModal(){
   try{
