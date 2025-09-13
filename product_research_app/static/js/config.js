@@ -28,12 +28,23 @@ const metricKeys = WEIGHT_KEYS;
 let factors = [];
 let userConfig = {};
 
+// Awareness slider helpers
+const STAGE_LABELS = ['Unaware','Problem aware','Solution aware','Product aware','Most aware'];
+function activeSegmentIndexFromWeight(w){ return Math.min(4, Math.floor(Math.max(0, Math.min(100, w)) / 20)); }
+function markAwarenessActiveSegment(w){
+  const idx = activeSegmentIndexFromWeight(w);
+  document.querySelectorAll('.awareness-scale .seg').forEach((el,i)=>{
+    el.classList.toggle('active', i === idx);
+  });
+}
+
 function defaultFactors(){
   return WEIGHT_FIELDS.map(f => ({ ...f, weight:50 }));
 }
 
 function clampWeight(v){ return Math.max(0, Math.min(100, Math.round(v))); }
 let saveTimer=null, dirty=false;
+let recomputeTimer=null;
 function markDirty(){ dirty=true; clearTimeout(saveTimer); saveTimer=setTimeout(saveIfDirty,700); }
 function clearDirty(){ dirty=false; clearTimeout(saveTimer); }
 async function saveIfDirty(){ if(!dirty) return; await saveSettings(); dirty=false; }
@@ -47,15 +58,53 @@ function renderFactors(){
     const li = document.createElement('li');
     li.className = 'weight-card';
     li.dataset.key = f.key;
-    li.innerHTML = `<div class="priority-badge">#${priority}</div><div class="content"><label for="weight-${f.key}" class="label">${f.label}</label><input id="weight-${f.key}" class="weight-range" type="range" min="0" max="100" step="1" value="${f.weight}"><div class="slider-extremes scale"><span class="extreme-left">${EXTREMES[f.key].left}</span><span class="extreme-right">${EXTREMES[f.key].right}</span></div><span class="weight-badge">peso: ${f.weight}/100</span></div><div class="drag-handle" aria-hidden>≡</div>`;
-    const range = li.querySelector('.weight-range');
-    range.addEventListener('input', e => {
-      const v = parseInt(e.target.value,10);
-      e.target.value = v;
-      f.weight = v;
-      li.querySelector('.weight-badge').textContent = `peso: ${f.weight}/100`;
-      markDirty();
-    });
+    if(f.key === 'awareness'){
+      li.innerHTML = `<div class="priority-badge">#${priority}</div><div class="content"><div class="label">Awareness</div>
+
+    <input id="awarenessSlider" class="weight-slider segmented" type="range" min="0" max="100" step="1" list="awarenessTicks" />
+    <datalist id="awarenessTicks">
+      <option value="0"></option>
+      <option value="20"></option>
+      <option value="40"></option>
+      <option value="60"></option>
+      <option value="80"></option>
+      <option value="100"></option>
+    </datalist>
+
+    <div class="awareness-scale">
+      <div class="seg">Unaware</div>
+      <div class="seg">Problem aware</div>
+      <div class="seg">Solution aware</div>
+      <div class="seg">Product aware</div>
+      <div class="seg">Most aware</div>
+    </div>
+
+    <div class="meta"><span class="weight-badge">peso: <span id="awarenessWeight"></span>/100</span></div>
+  </div>
+  <div class="drag-handle" title="Arrastra para reordenar">≡</div>`;
+      const slider = li.querySelector('#awarenessSlider');
+      const weightEl = li.querySelector('#awarenessWeight');
+      slider.value = f.weight;
+      weightEl.textContent = f.weight;
+      markAwarenessActiveSegment(f.weight);
+      slider.addEventListener('input', e => {
+        const v = parseInt(e.target.value,10);
+        f.weight = v;
+        weightEl.textContent = v;
+        markAwarenessActiveSegment(v);
+        markDirty();
+      });
+    } else {
+      li.innerHTML = `<div class="priority-badge">#${priority}</div><div class="content"><label for="weight-${f.key}" class="label">${f.label}</label><input id="weight-${f.key}" class="weight-range" type="range" min="0" max="100" step="1" value="${f.weight}"><div class="slider-extremes scale"><span class="extreme-left">${EXTREMES[f.key].left}</span><span class="extreme-right">${EXTREMES[f.key].right}</span></div><span class="weight-badge">peso: ${f.weight}/100</span></div><div class="drag-handle" aria-hidden>≡</div>`;
+      const range = li.querySelector('.weight-range');
+      range.addEventListener('input', e => {
+        const v = parseInt(e.target.value,10);
+        e.target.value = v;
+        f.weight = v;
+        li.querySelector('.weight-badge').textContent = `peso: ${f.weight}/100`;
+        markDirty();
+      });
+    }
     list.appendChild(li);
   });
   Sortable.create(list,{ handle:'.drag-handle', animation:150, onEnd:()=>{
@@ -79,10 +128,22 @@ async function saveSettings(){
   };
   try{
     await api.updateSettings(payload);
+    scheduleRecompute();
     clearDirty();
   }catch(err){
     console.error('Error saving weights',err);
   }
+}
+
+function scheduleRecompute(){
+  clearTimeout(recomputeTimer);
+  recomputeTimer = setTimeout(async ()=>{
+    try{
+      await api.fetchJson('/api/winner-score/recompute', { method:'POST', body: JSON.stringify({ scope: 'all' }) });
+    }catch(e){
+      console.warn('recompute failed', e);
+    }
+  },800);
 }
 
 const AWARE_MAP = {
