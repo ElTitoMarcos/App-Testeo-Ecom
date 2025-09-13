@@ -17,8 +17,17 @@ from .config import (
     get_winner_order_raw,
     DB_PATH as CONFIG_DB_PATH,
 )
+from ..config import load_config, save_config
 
 logger = logging.getLogger(__name__)
+
+
+def load_settings() -> Dict[str, Any]:
+    return load_config()
+
+
+def save_settings(settings: Dict[str, Any]) -> None:
+    save_config(settings)
 
 # Winner Score allowed fields and compatibility aliases
 ALLOWED_FIELDS = (
@@ -67,7 +76,7 @@ def awareness_stage_index_from_product(prod) -> int | None:
         return None
     label = unicodedata.normalize("NFKD", str(label))
     label = "".join(ch for ch in label if not unicodedata.combining(ch))
-    return AWARE_INDEX.get(_norm_awareness(label), 2)  # fallback: solution
+    return AWARE_INDEX.get(_norm_awareness(label), 2)
 
 
 def awareness_pref_segment_from_weight(w: int) -> int:
@@ -92,29 +101,16 @@ def awareness_closeness_from_weight(w: int, stage_idx: int) -> float:
     return awareness_closeness(w, stage_idx)
 
 
-def awareness_feature_value(prod, w_slider_0_100: int) -> float:
-    """Valor [0..1] para el producto según cercanía del slider al centro de su stage."""
+def awareness_feature_value(prod, w_slider_0_100: int) -> float | None:
     stage_idx = awareness_stage_index_from_product(prod)
     if stage_idx is None:
         return None
-    closeness = awareness_closeness(w_slider_0_100, stage_idx)
-    order_labels = [
-        AWARE_STAGES[i] for i in awareness_priority_order_from_weight(w_slider_0_100)
-    ]
-    logger.info(
-        "awareness_slider=%s centers=%s order=%s value_prod=%s closeness=%.3f",
-        w_slider_0_100,
-        AWARE_CENTERS,
-        order_labels,
-        AWARE_STAGES[stage_idx],
-        closeness,
-    )
-    return closeness
+    return awareness_closeness(w_slider_0_100, stage_idx)
 
 
 def build_features(prod, settings):
     feats: Dict[str, float] = {}
-    w_aw = settings.get("winner_weights", {}).get("awareness", 50)
+    w_aw = (settings.get("winner_weights") or {}).get("awareness", 50)
     val = awareness_feature_value(prod, w_aw)
     if val is not None:
         feats["awareness"] = val
