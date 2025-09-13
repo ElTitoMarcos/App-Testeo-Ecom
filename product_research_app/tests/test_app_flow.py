@@ -371,7 +371,7 @@ def test_patch_winner_weights_persists(tmp_path, monkeypatch):
     data = winner_score.load_winner_weights_raw()
     assert data.get("weights", {}).get("rating") == 0.25
 
-def test_config_oldness_preference_roundtrip(tmp_path, monkeypatch):
+def test_config_oldness_preference_pct_roundtrip(tmp_path, monkeypatch):
     setup_env(tmp_path, monkeypatch)
 
     class DummyGet:
@@ -387,9 +387,9 @@ def test_config_oldness_preference_roundtrip(tmp_path, monkeypatch):
     g = DummyGet()
     web_app.RequestHandler.do_GET(g)
     resp = json.loads(g.wfile.getvalue().decode("utf-8"))
-    assert resp.get("oldness_preference") == "newer"
+    assert resp.get("oldness_preference_pct") == 0
 
-    body = json.dumps({"oldness_preference": "older"})
+    body = json.dumps({"oldness_preference_pct": 100})
 
     class DummyPost:
         def __init__(self, body):
@@ -404,7 +404,46 @@ def test_config_oldness_preference_roundtrip(tmp_path, monkeypatch):
     p = DummyPost(body)
     web_app.RequestHandler.handle_setconfig(p)
     assert p.status == 200
-    assert config.load_config().get("oldness_preference") == "older"
+    assert config.load_config().get("oldness_preference_pct") == 100
+
+    # legacy field still accepted
+    body2 = json.dumps({"oldness_preference": "newer"})
+    p2 = DummyPost(body2)
+    web_app.RequestHandler.handle_setconfig(p2)
+    assert config.load_config().get("oldness_preference_pct") == 0
+
+
+def test_oldness_preference_pct_affects_score(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(web_app, "ensure_db", lambda: conn)
+
+    pid = database.insert_product(
+        conn,
+        name="O",
+        description="",
+        category="",
+        price=None,
+        currency=None,
+        image_url="",
+        source="",
+        extra={"date_range": "2020-01-01~2020-02-01"},
+        product_id=1,
+    )
+
+    row = database.get_product(conn, pid)
+    winner_score.prepare_oldness_bounds([row])
+    weights = {k: 1.0 for k in winner_score.ALLOWED_FIELDS}
+
+    cfg = config.load_config()
+    cfg["oldness_preference_pct"] = 0
+    config.save_config(cfg)
+    score_new = winner_score.compute_winner_score_v2(row, weights)["score"]
+
+    cfg["oldness_preference_pct"] = 100
+    config.save_config(cfg)
+    score_old = winner_score.compute_winner_score_v2(row, weights)["score"]
+
+    assert score_new != score_old
 
 def test_get_endpoints_return_json(tmp_path, monkeypatch):
     setup_env(tmp_path, monkeypatch)
