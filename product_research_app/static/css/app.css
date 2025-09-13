@@ -642,24 +642,20 @@ th.ec-col-competition,   td.ec-col-competition   { width: var(--ec-w-competition
 @keyframes ecspin { to { transform: rotate(360deg); } }
 .ec-btn-loading{ pointer-events:none; }
 
-/* ====== Rejilla por fila: mismo layout y anchos fijos ====== */
+/* Fila con 3 columnas: ≡ | barra (1fr) | valor fijo */
 #weightsCard{ overflow-x:hidden; }
 .weight-row {
   display: grid;
-  grid-template-columns: 24px 0px minmax(0, 1fr) 36px;
+  grid-template-columns: 24px minmax(0, 1fr) 40px; /* barra ocupa todo */
   align-items: center;
-  gap: 10px;
-  margin-bottom: 14px;
+  gap: 12px;
+  margin-bottom: 16px;
+  width: 100%;
 }
 
-/* Drag y valor a la derecha iguales en todas */
+/* Icono drag y valor a la derecha consistentes */
 .weight-drag { text-align: center; opacity: .9; cursor: grab; }
-.weight-value { text-align: right; width: 36px; }
-
-/* ====== Columna label: ocupa espacio pero no se ve ====== */
-.weight-label-placeholder {
-  display: none;
-}
+.weight-value { text-align: right; }
 
 /* Oldness preference section removed */
 .oldness-pref, .oldnessRadios, .oldness-section {
@@ -668,10 +664,12 @@ th.ec-col-competition,   td.ec-col-competition   { width: var(--ec-w-competition
   padding: 0;
 }
 
-/* ====== Barra 100% del área y extremos alineados ====== */
-.weight-slider { display: flex; flex-direction: column; }
+/* La barra debe ocupar 100% sí o sí */
+.weight-slider { display: flex; flex-direction: column; width: 100%; }
 .weight-range {
-  width: 100%;
+  display: block;
+  width: 100% !important;
+  max-width: none !important;
   box-sizing: border-box;
   height: 4px;
   cursor: pointer;
@@ -681,7 +679,7 @@ body.dark .weight-range{ accent-color:#7a53d6; }
 .weight-range::-webkit-slider-thumb{ width:20px; height:20px; border-radius:50%; cursor:pointer; }
 .weight-range::-moz-range-thumb{ width:20px; height:20px; border-radius:50%; cursor:pointer; }
 
-/* Extremos ocupan exactamente el ancho de la barra */
+/* Etiquetas en los extremos de la barra */
 .slider-extremes {
   display: flex;
   justify-content: space-between;
@@ -691,6 +689,9 @@ body.dark .weight-range{ accent-color:#7a53d6; }
   margin-top: 4px;
 }
 .slider-extremes span { white-space: nowrap; }
+
+/* Por si alguna regla anterior limitaba el ancho del input range */
+input[type="range"].weight-range { width: 100% !important; }
 
 /* Cabecera y celdas de la columna Desire */
 th.col-desire, td.col-desire { width: 360px; max-width: 360px; }

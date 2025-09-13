@@ -560,7 +560,7 @@ function renderWeights(){
     const li=document.createElement('li');
     li.className='weight-row';
     li.dataset.key=key;
-    li.innerHTML=`<div class="weight-drag" aria-hidden>≡</div><div class="weight-label-placeholder">${def.label}</div><div class="weight-slider"><input class="weight-range" type="range" name="${key}" min="0" max="100" step="1" value="${Math.round(weightValues[key]||0)}"/><div class="slider-extremes"><span class="extreme-left">${EXTREMES[key].left}</span><span class="extreme-right">${EXTREMES[key].right}</span></div></div><div class="weight-value">${Math.round(weightValues[key]||0)}</div>`;
+    li.innerHTML=`<div class="weight-drag" aria-hidden>≡</div><div class="weight-slider"><input class="weight-range" type="range" name="${key}" min="0" max="100" step="1" value="${Math.round(weightValues[key]||0)}"/><div class="slider-extremes"><span class="extreme-left">${EXTREMES[key].left}</span><span class="extreme-right">${EXTREMES[key].right}</span></div></div><div class="weight-value">${Math.round(weightValues[key]||0)}</div>`;
     const range=li.querySelector('.weight-range');
     range.addEventListener('input',e=>{
       const k=normalizeKey(e.target.name);
