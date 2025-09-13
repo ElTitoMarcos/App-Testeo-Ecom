@@ -103,9 +103,11 @@ body.dark pre { background:#2e315f; }
 </div>
 <div id="weightsCard" class="card" style="display:none;">
   <strong>Ponderaciones Winner Score</strong>
-  <ul id="weightsList" style="list-style:none; margin-top:8px; padding:0;"></ul>
-  <div style="margin-top:10px; display:flex; flex-wrap:wrap; gap:6px;">
+  <div class="legend">ℹ️ Arrastra para reordenar. Más arriba = mayor prioridad. El número (0–100) es el peso.</div>
+  <ul id="weightsList" class="weights-list"></ul>
+  <div class="weights-footer">
     <button id="resetWeights">Reset</button>
+    <button id="saveWeights">Guardar</button>
     <button id="aiWeights">Ajustar pesos con IA</button>
   </div>
 </div>
@@ -521,66 +523,68 @@ const ALIASES = { unitsSold:'units_sold', orders:'units_sold' };
 function normalizeKey(k){ return ALIASES[k] || k; }
 const metricDefs = WEIGHT_FIELDS;
 const metricKeys = WEIGHT_KEYS;
-let weightValues = {};
-let weightOrder = [];
+let factors = [];
 let userConfig = {};
 
-function debounce(fn, ms=150){
-  let t; return (...args)=>{ clearTimeout(t); t=setTimeout(()=>fn(...args), ms); };
+function defaultFactors(){
+  return WEIGHT_FIELDS.map(f=>({ ...f, weight:50 }));
 }
 
-function defaultWeights(){ const o={}; WEIGHT_KEYS.forEach(k=>o[k]=50); return o; }
-function defaultOrder(){ return [...WEIGHT_KEYS]; }
+function toWeightMap(){ const o={}; factors.forEach(f=>o[f.key]=f.weight); return o; }
+function toOrder(){ return factors.map(f=>f.key); }
 
-const saveFns = {};
-function saveWeightDebounced(key, value){
-  if(!saveFns[key]){
-    saveFns[key] = debounce(val=>{
-      fetch('/api/config/winner-weights', {
-        method:'PATCH',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ weights: { [key]: val } })
-      });
-    },300);
-  }
-  saveFns[key](value);
-}
-
-function updateSliderLabel(el) {
-  const num = Math.round(Number(el.value) || 0);
-  el.closest('.weight-row')?.querySelector('.weight-value')?.replaceChildren(document.createTextNode(String(num)));
-}
-
-function renderWeights(){
+function renderFactors(){
   const list=document.getElementById('weightsList');
   if(!list) return;
   list.innerHTML='';
-  weightOrder.forEach(key=>{
-    const def=metricDefs.find(m=>m.key===key);
+  const n=factors.length;
+  const sumRanks=n*(n+1)/2;
+  factors.forEach((f,idx)=>{
+    const priority=idx+1;
+    const priorityWeight=n-idx;
+    const priorityFactor=priorityWeight/(sumRanks/n);
+    const effective=Math.round(f.weight*priorityFactor);
     const li=document.createElement('li');
-    li.className='weight-row';
-    li.dataset.key=key;
-    li.innerHTML=`<div class="weight-drag" aria-hidden>≡</div><div class="weight-slider"><input class="weight-range" type="range" name="${key}" min="0" max="100" step="1" value="${Math.round(weightValues[key]||0)}"/><div class="slider-extremes"><span class="extreme-left">${EXTREMES[key].left}</span><span class="extreme-right">${EXTREMES[key].right}</span></div></div><div class="weight-value">${Math.round(weightValues[key]||0)}</div>`;
+    li.className='weight-card';
+    li.dataset.key=f.key;
+    li.innerHTML=`<div class="priority-badge">#${priority}</div><div class="content"><label for="weight-${f.key}">${f.label}</label><input id="weight-${f.key}" class="weight-range" type="range" min="0" max="100" step="1" value="${f.weight}"><div class="slider-extremes"><span class="extreme-left">${EXTREMES[f.key].left}</span><span class="extreme-right">${EXTREMES[f.key].right}</span></div><div class="meta"><span class="weight-badge">peso: ${f.weight}/100</span><span class="effective-badge">efectivo: ${effective}</span></div></div><div class="drag-handle" aria-hidden>≡</div>`;
     const range=li.querySelector('.weight-range');
     range.addEventListener('input',e=>{
-      const k=normalizeKey(e.target.name);
       const v=Math.round(parseFloat(e.target.value));
-      e.target.value = v;
-      weightValues[k]=v;
-      updateSliderLabel(range);
-      if(Number.isFinite(v)) saveWeightDebounced(k, v);
+      e.target.value=v;
+      f.weight=v;
+      const priorityWeight2=n-idx;
+      const priorityFactor2=priorityWeight2/(sumRanks/n);
+      const eff=Math.round(f.weight*priorityFactor2);
+      li.querySelector('.weight-badge').textContent=`peso: ${f.weight}/100`;
+      li.querySelector('.effective-badge').textContent=`efectivo: ${eff}`;
     });
-    ['mousedown','touchstart'].forEach(ev=>{ range.addEventListener(ev,e=>{ e.stopPropagation(); }); });
     list.appendChild(li);
   });
-  Sortable.create(list,{ handle:'.weight-drag', animation:150, onEnd:()=>{ weightOrder=Array.from(list.children).map(li=>li.dataset.key); }});
+  Sortable.create(list,{ handle:'.drag-handle', animation:150, onEnd:()=>{
+    const orderKeys=Array.from(list.children).map(li=>li.dataset.key);
+    factors.sort((a,b)=>orderKeys.indexOf(a.key)-orderKeys.indexOf(b.key));
+    renderFactors();
+  }});
 }
 
 function resetWeights(){
-  weightValues=defaultWeights();
-  weightOrder=defaultOrder();
-  renderWeights();
-  for(const k in weightValues){ saveWeightDebounced(k, weightValues[k]); }
+  factors=defaultFactors();
+  renderFactors();
+}
+
+async function saveWeights(){
+  try{
+    await fetch('/api/config/winner-weights',{
+      method:'PATCH',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({ weights: toWeightMap(), order: toOrder() })
+    });
+    toast.success('Pesos y prioridades guardados');
+  }catch(err){
+    console.error('Error saving weights',err);
+    toast.error('No se pudo guardar');
+  }
 }
 
 function stratifiedSample(list, n){
@@ -663,13 +667,15 @@ async function adjustWeightsAI(){
     const newWeights={};
     for(const k of metricKeys){
       let v=Number(obj[k]);
-      if(isNaN(v)) v=Number(weightValues[k])||0;
+      if(isNaN(v)){
+        const current=factors.find(f=>f.key===k);
+        v=current?current.weight:0;
+      }
       if(v<0) v=0; if(v>100) v=100;
       newWeights[k]=Math.round(v);
     }
-    weightValues=newWeights;
-    renderWeights();
-    for(const k in weightValues){ saveWeightDebounced(k, weightValues[k]); }
+    factors=factors.map(f=>({ ...f, weight:newWeights[f.key] ?? f.weight }));
+    renderFactors();
     toast.success('Pesos ajustados por IA');
   }catch(err){
     console.error(err);
@@ -681,16 +687,19 @@ async function adjustWeightsAI(){
 async function loadWeights(){
   try{
     const res = await fetch('/api/config/winner-weights');
-    const { weights } = await res.json();
-    weightValues = defaultWeights();
-    for(const k in weights){
-      if(metricKeys.includes(k)) weightValues[k] = Math.round(weights[k]);
-    }
-    weightOrder = defaultOrder();
-    renderWeights();
-    document.getElementById('resetWeights').onclick = resetWeights;
+    const data = await res.json();
+    const weights = data.weights || {};
+    const order = Array.isArray(data.order) && data.order.length ? data.order : WEIGHT_KEYS;
+    const base = {};
+    WEIGHT_FIELDS.forEach(f=>{ base[f.key] = { ...f, weight:50 }; });
+    factors = order.filter(k=>base[k]).map(k=>({ ...base[k], weight: weights[k] !== undefined ? Math.round(weights[k]) : 50 }));
+    renderFactors();
+    const resetBtn=document.getElementById('resetWeights');
+    if(resetBtn) resetBtn.onclick=resetWeights;
     const aiBtn=document.getElementById('aiWeights');
     if(aiBtn) aiBtn.onclick=adjustWeightsAI;
+    const saveBtn=document.getElementById('saveWeights');
+    if(saveBtn) saveBtn.onclick=saveWeights;
   }catch(err){
     console.error('Error loading weights', err);
   }

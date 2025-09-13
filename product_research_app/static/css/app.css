@@ -693,6 +693,88 @@ body.dark .weight-range{ accent-color:#7a53d6; }
 /* Por si alguna regla anterior limitaba el ancho del input range */
 input[type="range"].weight-range { width: 100% !important; }
 
+.legend {
+  margin-top: 8px;
+  font-size: 14px;
+  opacity: .85;
+}
+
+.weights-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.weight-card {
+  display: grid;
+  grid-template-columns: 40px 1fr 24px;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 12px;
+}
+.weight-card:nth-child(odd) { background: rgba(0,0,0,0.03); }
+body.dark .weight-card:nth-child(odd) { background: rgba(255,255,255,0.03); }
+
+.priority-badge {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: #7a53d6;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+}
+
+.drag-handle {
+  cursor: grab;
+  text-align: center;
+  user-select: none;
+  opacity: .7;
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.weight-badge,
+.effective-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid #0077cc;
+  background: #e0f0ff;
+  color: #0077cc;
+}
+body.dark .weight-badge,
+body.dark .effective-badge {
+  border: 1px solid #34456B;
+  background: #1F2A44;
+  color: #E5EAF5;
+}
+
+.weights-footer {
+  position: sticky;
+  bottom: -16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 12px;
+  margin-top: 12px;
+  background: inherit;
+  box-shadow: 0 -2px 4px rgba(0,0,0,0.2);
+}
+
 /* Cabecera y celdas de la columna Desire */
 th.col-desire, td.col-desire { width: 360px; max-width: 360px; }
 /* Contenido multi-línea sin corte */
