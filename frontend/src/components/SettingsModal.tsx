@@ -73,7 +73,9 @@ export default function SettingsModal() {
   };
 
   const onReset = () => {
-    const next = { ...DEFAULTS_50 };
+    const next: Record<string, number> = Object.fromEntries(
+      Object.keys(weights || {}).map((k) => [k, 50])
+    );
     setWeights(next);
     patchWeights(next, true);
   };
