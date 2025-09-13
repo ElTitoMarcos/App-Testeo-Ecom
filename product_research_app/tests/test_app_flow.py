@@ -308,6 +308,45 @@ def test_desire_serialization_and_logging(tmp_path, monkeypatch):
     assert resp_list and resp_list[0]["desire"] == "Top"
 
 
+def test_patch_product_desire(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(web_app, "ensure_db", lambda: conn)
+    pid = database.insert_product(
+        conn,
+        name="P1",
+        description="",
+        category="",
+        price=1.0,
+        currency=None,
+        image_url="",
+        source="",
+        desire="old",
+    )
+    body = json.dumps({"desire": "nuevo texto", "unknown": "x"})
+
+    class Dummy:
+        def __init__(self, path, body):
+            self.path = path
+            self.headers = {"Content-Length": str(len(body))}
+            self.rfile = io.BytesIO(body.encode("utf-8"))
+            self.wfile = io.BytesIO()
+
+        def _set_json(self, code=200):
+            self.status = code
+
+    handler = Dummy(f"/api/products/{pid}", body)
+    web_app.RequestHandler.do_PATCH(handler)
+    resp = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert handler.status == 200
+    assert resp["desire"] == "nuevo texto"
+    assert database.get_product(conn, pid)["desire"] == "nuevo texto"
+
+    handler_nf = Dummy("/api/products/9999", body)
+    web_app.RequestHandler.do_PATCH(handler_nf)
+    assert handler_nf.status == 404
+    log_text = web_app.LOG_PATH.read_text()
+    assert "PATCH not found product_id=9999" in log_text
+
 def test_patch_winner_weights_persists(tmp_path, monkeypatch):
     setup_env(tmp_path, monkeypatch)
 
