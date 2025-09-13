@@ -6,6 +6,8 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 from product_research_app import config, database
 from product_research_app.utils.db import row_to_dict, rget
+from product_research_app.services import winner_score as ws
+from datetime import date, timedelta
 
 def test_insert_score_normalizes_to_int():
     conn = sqlite3.connect(':memory:')
@@ -60,3 +62,22 @@ def test_row_to_dict_and_rget_sqlite_row():
     assert d == {"id": 1, "name": "x"}
     assert rget(row, "name") == "x"
     assert rget(row, "missing", 7) == 7
+
+
+def test_oldness_weight_direction():
+    today = date.today()
+    prod_old = {"first_seen": (today - timedelta(days=200)).isoformat()}
+    prod_new = {"first_seen": (today - timedelta(days=10)).isoformat()}
+    ws.prepare_oldness_bounds([prod_old, prod_new])
+
+    res_old = ws.compute_winner_score_v2(prod_old, {"oldness": 100})
+    res_new = ws.compute_winner_score_v2(prod_new, {"oldness": 100})
+    assert res_old["score"] > res_new["score"]
+
+    res_old_rev = ws.compute_winner_score_v2(prod_old, {"oldness": 0})
+    res_new_rev = ws.compute_winner_score_v2(prod_new, {"oldness": 0})
+    assert res_new_rev["score"] > res_old_rev["score"]
+
+    res_old_neu = ws.compute_winner_score_v2(prod_old, {"oldness": 50})
+    res_new_neu = ws.compute_winner_score_v2(prod_new, {"oldness": 50})
+    assert res_old_neu["score"] == res_new_neu["score"] == 0

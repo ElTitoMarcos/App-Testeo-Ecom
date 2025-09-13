@@ -5,14 +5,13 @@ import math
 import hashlib
 import logging
 import os
-import re
 import sqlite3
 from datetime import datetime, date
 from pathlib import Path
 from typing import Dict, Any, Iterable, Optional, Callable
 
 from ..utils.db import rget
-from .. import database, config
+from .. import database
 
 logger = logging.getLogger(__name__)
 
@@ -35,39 +34,38 @@ ALIASES = {
     "orders": "units_sold",
 }
 
-DATE_RANGE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})\s*~\s*(\d{4}-\d{2}-\d{2})")
+
+def _minmax_norm(pop, v):
+    vals = [x for x in pop if x is not None]
+    if not vals:
+        return 0.0
+    vmin, vmax = min(vals), max(vals)
+    if vmax == vmin:
+        return 0.5  # neutro si todos son iguales
+    return (v - vmin) / (vmax - vmin)
 
 
-def parse_date_range(s: str | None):
+def _parse_date(s):
     if not s:
-        return None, None
-    m = DATE_RANGE_RE.search(str(s))
-    if not m:
-        return None, None
-    try:
-        d1 = datetime.strptime(m.group(1), "%Y-%m-%d").date()
-        d2 = datetime.strptime(m.group(2), "%Y-%m-%d").date()
-        return min(d1, d2), max(d1, d2)
-    except Exception:
-        return None, None
-
-
-def compute_oldness_days(product: dict) -> int | None:
-    start, _end = parse_date_range(product.get("date_range") or product.get("Date Range"))
-    if start is None:
-        for key in ("first_seen", "created_at", "createdAt"):
-            v = product.get(key)
-            if v:
-                try:
-                    start = datetime.strptime(str(v)[:10], "%Y-%m-%d").date()
-                    break
-                except Exception:
-                    pass
-    if start is None:
         return None
-    today = date.today()
-    delta = (today - start).days
-    return max(0, delta)
+    try:
+        return datetime.strptime(str(s)[:10], "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def _oldness_days(product: dict) -> int | None:
+    dr = (product.get("date_range") or product.get("Date Range") or "").strip()
+    start = None
+    if "~" in dr:
+        left = dr.split("~", 1)[0].strip()
+        start = _parse_date(left)
+    if start is None:
+        for k in ("first_seen", "created_at", "createdAt"):
+            start = _parse_date(product.get(k))
+            if start:
+                break
+    return None if start is None else max(0, (date.today() - start).days)
 
 
 OLDNESS_MIN = 0.0
@@ -84,7 +82,7 @@ def prepare_oldness_bounds(rows: Iterable[Any]) -> None:
             data = {}
         extras = _get_extras(row)
         data.update(extras)
-        val = compute_oldness_days(data)
+        val = _oldness_days(data)
         if val is not None:
             vals.append(val)
     if vals:
@@ -408,7 +406,7 @@ def _feat_oldness(product_row: Any, extras: Dict[str, Any]) -> Optional[float]:
     except Exception:
         pass
     data.update(extras)
-    val = compute_oldness_days(data)
+    val = _oldness_days(data)
     if val is None:
         return None
     return float(val)
@@ -444,18 +442,20 @@ def _norm_revenue(v: float) -> float:
 
 
 def _norm_oldness(v: float) -> float:
-    vmin, vmax = OLDNESS_MIN, OLDNESS_MAX
-    if vmax == vmin:
-        n = 0.0
-    else:
-        n = (v - vmin) / (vmax - vmin)
-    pref = config.load_config().get("oldness_preference", "newer")
-    if pref == "newer":
-        n = 1.0 - n
-    return clamp(n)
+    return clamp(_minmax_norm([OLDNESS_MIN, OLDNESS_MAX], v))
 
 def _norm_identity(v: float) -> float:
     return clamp(v)
+
+
+def _oldness_pref_and_weight(cfg_weights: dict[str, float]) -> tuple[float, float]:
+    # Entrada UI 0..100 (la misma barra que ves en el modal)
+    v = float(cfg_weights.get("oldness", 50))
+    # Intensidad 0..1 (50 => 0, 0/100 => 1)
+    intensity = abs(v - 50.0) / 50.0
+    # Dirección: -1 recientes, +1 antiguos (50 => 0)
+    direction = (v - 50.0) / 50.0
+    return direction, intensity
 
 
 NORMALIZERS: Dict[str, Callable[[float], float]] = {
@@ -469,64 +469,54 @@ NORMALIZERS: Dict[str, Callable[[float], float]] = {
 }
 
 
-def compute_winner_score_v2(product_row: Any, weights: Dict[str, float]) -> Dict[str, Any]:
-    """Compute Winner Score using available features only.
-
-    Returns a dict with keys ``score`` (or ``None``), ``used``, ``missing``,
-    ``missing_fields`` and ``fallback``.
-    """
+def compute_winner_score_v2(product_row: Any, user_weights: Dict[str, float]) -> Dict[str, Any]:
+    """Compute Winner Score using available features only."""
 
     extras = _get_extras(product_row)
-    feats: Dict[str, float] = {}
+    raw_vals: Dict[str, float] = {}
     for name, getter in FEATURE_MAP.items():
         val = getter(product_row, extras)
         if val is None or (isinstance(val, float) and math.isnan(val)):
             continue
-        norm = NORMALIZERS[name](val)
-        feats[name] = norm
+        raw_vals[name] = val
 
-    present = list(feats.keys())
+    present = list(raw_vals.keys())
     missing_fields = [f for f in ALLOWED_FIELDS if f not in present]
-    used = len(present)
 
-    effective_weights = sanitize_weights(weights)
+    dir_old, w_old_intensity = _oldness_pref_and_weight(user_weights)
 
-    if used == 0:
-        return {
-            "score": 0,
-            "score_float": 0.0,
-            "used": 0,
-            "missing": len(ALLOWED_FIELDS),
-            "missing_fields": missing_fields,
-            "present_fields": present,
-            "effective_weights": effective_weights,
-            "sum_filtered": 0.0,
-            "fallback": True,
-        }
+    norms: Dict[str, float] = {}
+    for k, v in raw_vals.items():
+        n = NORMALIZERS[k](v)
+        if k == "oldness" and dir_old < 0:
+            n = 1.0 - n
+        norms[k] = n
 
-    filtered = {k: effective_weights.get(k, 0.0) for k in present}
-    sum_filtered = sum(max(0.0, v) for v in filtered.values())
-    if sum_filtered > 0:
-        weights_used = {k: max(0.0, filtered.get(k, 0.0)) / sum_filtered for k in present}
-        fallback = False
-    else:
-        weights_used = {k: 1.0 / used for k in present}
-        fallback = True
+    eff_weights: Dict[str, float] = {}
+    for k in norms.keys():
+        if k == "oldness":
+            eff_weights[k] = w_old_intensity
+        else:
+            eff_weights[k] = max(0.0, float(user_weights.get(k, 0))) / 100.0
 
-    eff_all = {k: weights_used.get(k, 0.0) for k in ALLOWED_FIELDS}
+    sum_filtered = sum(eff_weights.values())
+    s = sum_filtered or 1.0
+    eff_weights = {k: v / s for k, v in eff_weights.items()}
 
-    score_float = sum(feats[k] * weights_used.get(k, 0.0) for k in present)
+    score_float = sum(eff_weights[k] * norms[k] for k in norms)
     score_int = int(round(score_float * 100))
+
+    eff_all = {k: eff_weights.get(k, 0.0) for k in ALLOWED_FIELDS}
     return {
         "score": score_int,
         "score_float": score_float,
-        "used": used,
-        "missing": len(ALLOWED_FIELDS) - used,
+        "used": len(present),
+        "missing": len(ALLOWED_FIELDS) - len(present),
         "missing_fields": missing_fields,
         "present_fields": present,
         "effective_weights": eff_all,
         "sum_filtered": sum_filtered,
-        "fallback": fallback,
+        "fallback": sum_filtered == 0,
     }
 
 
@@ -550,6 +540,10 @@ def generate_winner_scores(
 
     if weights is None:
         weights = load_winner_weights()
+
+    dir_old, w_old_intensity = _oldness_pref_and_weight(weights)
+    oldness_ui = float(weights.get("oldness", 50))
+    dir_old_label = "+1" if dir_old >= 0 else "-1"
 
     weights_hash_all = hashlib.sha1(
         json.dumps(weights, sort_keys=True).encode("utf-8")
@@ -610,7 +604,7 @@ def generate_winner_scores(
         if not present:
             logger.warning(
                 "Winner Score: product=%s score_int=%s score_raw=%.3f weights_all=%s weights_eff=%s present=%s missing=%s "
-                "effective_weights=%s weights_effective_int=%s no_features_present",
+                "effective_weights=%s weights_effective_int=%s oldness_dir=%s oldness_intensity=%.3f oldness_ui=%.1f no_features_present",
                 pid,
                 new_score,
                 score_raw_0_100,
@@ -620,11 +614,14 @@ def generate_winner_scores(
                 missing,
                 eff_w,
                 eff_w_int,
+                dir_old_label,
+                w_old_intensity,
+                oldness_ui,
             )
         else:
             logger.info(
                 "Winner Score: product=%s score_int=%s score_raw=%.3f weights_all=%s weights_eff=%s present=%s missing=%s "
-                "effective_weights=%s weights_effective_int=%s",
+                "effective_weights=%s weights_effective_int=%s oldness_dir=%s oldness_intensity=%.3f oldness_ui=%.1f",
                 pid,
                 new_score,
                 score_raw_0_100,
@@ -634,6 +631,9 @@ def generate_winner_scores(
                 missing,
                 eff_w,
                 eff_w_int,
+                dir_old_label,
+                w_old_intensity,
+                oldness_ui,
             )
         processed += 1
 
