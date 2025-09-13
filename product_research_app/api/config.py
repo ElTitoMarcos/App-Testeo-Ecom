@@ -32,9 +32,9 @@ def api_patch_winner_weights():
     order_in = data.get("winner_order") or data.get("order")
     saved_weights, saved_order = update_winner_settings(raw_in, order_in)
     try:
-        recompute_scores_for_all_products(async_ok=True)
+        recompute_scores_for_all_products(scope="all")
     except Exception as e:
-        current_app.logger.warning(f"winner-score recompute deferred: {e}")
+        current_app.logger.warning(f"recompute on settings change failed: {e}")
     app.logger.info(
         "settings_saved winner_weights=%s winner_order_len=%s",
         len(saved_weights),
