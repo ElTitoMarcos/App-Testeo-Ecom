@@ -5,6 +5,7 @@ import math
 import hashlib
 import logging
 import sqlite3
+import unicodedata
 from datetime import datetime, date
 from typing import Dict, Any, Iterable, Optional, Callable
 
@@ -27,6 +28,7 @@ ALLOWED_FIELDS = (
     "desire",
     "competition",
     "oldness",
+    "awareness",
 )
 DEFAULT_WEIGHTS = {k: 1.0 for k in ALLOWED_FIELDS}
 
@@ -36,6 +38,28 @@ ALIASES = {
     "unitsSold": "units_sold",
     "orders": "units_sold",
 }
+
+AWARE_MAP = {
+    "unaware": 0.0,
+    "problem aware": 0.25,
+    "solution aware": 0.5,
+    "product aware": 0.75,
+    "most aware": 1.0,
+}
+
+def awareness_value(prod) -> float:
+    if isinstance(prod, str):
+        s = prod
+    else:
+        s = getattr(prod, "awareness_type", "") or getattr(prod, "awareness_level", "")
+        if not s and isinstance(prod, dict):
+            s = prod.get("awareness_type") or prod.get("awareness_level")
+    s = (s or "").strip().lower()
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = s.replace("-", " ").replace("_", " ")
+    s = " ".join(s.split())
+    return AWARE_MAP.get(s, 0.5)
 
 
 def _minmax_norm(pop, v):
@@ -380,6 +404,15 @@ def _feat_competition(product_row: Any, extras: Dict[str, Any]) -> Optional[floa
     return None
 
 
+def _feat_awareness(product_row: Any, extras: Dict[str, Any]) -> Optional[float]:
+    lab = rget(product_row, "awareness_type") or rget(product_row, "awareness_level")
+    if lab is None:
+        lab = extras.get("awareness_type") or extras.get("awareness_level")
+    if isinstance(lab, str):
+        return awareness_value(lab)
+    return None
+
+
 def _feat_oldness(product_row: Any, extras: Dict[str, Any]) -> Optional[float]:
     data: Dict[str, Any] = {}
     try:
@@ -403,6 +436,7 @@ FEATURE_MAP: Dict[str, FeatureGetter] = {
     "desire": _feat_desire,
     "competition": _feat_competition,
     "oldness": lambda p, e: _feat_oldness(p, e),
+    "awareness": _feat_awareness,
 }
 
 
@@ -447,6 +481,7 @@ NORMALIZERS: Dict[str, Callable[[float], float]] = {
     "desire": _norm_identity,
     "competition": _norm_identity,
     "oldness": _norm_oldness,
+    "awareness": _norm_identity,
 }
 
 

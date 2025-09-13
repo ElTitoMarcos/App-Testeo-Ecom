@@ -4,7 +4,16 @@ from typing import Dict, List, Tuple
 
 from ..config import load_config, save_config
 
-ALLOWED_FIELDS = ("price", "rating", "units_sold", "revenue", "desire", "competition", "oldness")
+ALLOWED_FIELDS = (
+    "price",
+    "rating",
+    "units_sold",
+    "revenue",
+    "desire",
+    "competition",
+    "oldness",
+    "awareness",
+)
 DEFAULT_WEIGHTS_RAW: Dict[str, int] = {k: 50 for k in ALLOWED_FIELDS}
 DEFAULT_ORDER: List[str] = list(ALLOWED_FIELDS)
 
@@ -33,12 +42,23 @@ def _normalize_order(order, weights: Dict[str, int]) -> List[str]:
 def init_app_config() -> None:
     cfg = load_config()
     changed = False
-    if "winner_weights" not in cfg:
+    weights = cfg.get("winner_weights")
+    if not isinstance(weights, dict):
         cfg["winner_weights"] = DEFAULT_WEIGHTS_RAW.copy()
         changed = True
-    if "winner_order" not in cfg:
+    else:
+        for k, v in DEFAULT_WEIGHTS_RAW.items():
+            if k not in weights:
+                weights[k] = v
+                changed = True
+    order = cfg.get("winner_order")
+    if not isinstance(order, list):
         cfg["winner_order"] = DEFAULT_ORDER.copy()
         changed = True
+    else:
+        if "awareness" not in order:
+            order.append("awareness")
+            changed = True
     if "weightsUpdatedAt" not in cfg:
         cfg["weightsUpdatedAt"] = int(time.time())
         changed = True
@@ -52,6 +72,8 @@ def _load() -> Tuple[Dict[str, int], List[str]]:
     if not isinstance(weights, dict) or not weights:
         weights = DEFAULT_WEIGHTS_RAW.copy()
     weights = _coerce_weights(weights)
+    for k, v in DEFAULT_WEIGHTS_RAW.items():
+        weights.setdefault(k, v)
     order = _normalize_order(cfg.get("winner_order"), weights)
     return weights, order
 
@@ -62,10 +84,14 @@ def update_winner_settings(weights_in=None, order_in=None) -> Tuple[Dict[str, in
     weights = cfg.get("winner_weights", DEFAULT_WEIGHTS_RAW.copy())
     order = cfg.get("winner_order", DEFAULT_ORDER.copy())
     weights = _coerce_weights(weights)
+    for k, v in DEFAULT_WEIGHTS_RAW.items():
+        weights.setdefault(k, v)
     order = _normalize_order(order, weights)
     if weights_in is not None:
         wi = _coerce_weights(weights_in)
         weights.update(wi)
+        for k, v in DEFAULT_WEIGHTS_RAW.items():
+            weights.setdefault(k, v)
     if order_in is not None:
         order = _normalize_order(order_in, weights)
     cfg["winner_weights"] = weights
