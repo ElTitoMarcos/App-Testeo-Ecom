@@ -82,3 +82,12 @@ def test_oldness_weight_direction():
     res_old_neu = ws.compute_winner_score_v2(prod_old, {"oldness": 50})
     res_new_neu = ws.compute_winner_score_v2(prod_new, {"oldness": 50})
     assert res_old_neu["score"] == res_new_neu["score"] == 0
+
+
+def test_order_affects_score():
+    prod = {"price": 10.0, "rating": 5.0}
+    ws.prepare_oldness_bounds([])
+    weights = {"price": 50, "rating": 50}
+    res_price_first = ws.compute_winner_score_v2(prod, weights, order=["price", "rating"])
+    res_rating_first = ws.compute_winner_score_v2(prod, weights, order=["rating", "price"])
+    assert res_price_first["score"] != res_rating_first["score"]

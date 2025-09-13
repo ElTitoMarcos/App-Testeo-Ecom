@@ -601,12 +601,17 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"ok": True, "has_key": has_key}).encode("utf-8"))
             return
         if path == "/api/config/winner-weights":
-            from .services.config import get_winner_weights_raw, compute_effective_int
+            from .services.config import (
+                get_winner_weights_raw,
+                get_winner_order_raw,
+                compute_effective_int,
+            )
 
             raw = get_winner_weights_raw()
-            eff_int = compute_effective_int(raw)
-            logger.info("weights_effective_int=%s", eff_int)
-            resp = {"weights": raw, "effective": {"int": eff_int}}
+            order = get_winner_order_raw()
+            eff_int = compute_effective_int(raw, order)
+            logger.info("weights_effective_int=%s order=%s", eff_int, order)
+            resp = {"weights": raw, "order": order, "effective": {"int": eff_int}}
             self._set_json()
             self.wfile.write(json.dumps(resp).encode("utf-8"))
             return
@@ -1368,12 +1373,24 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._set_json(400)
                 self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
                 return
-            from .services.config import set_winner_weights_raw, compute_effective_int
+            from .services.config import (
+                set_winner_weights_raw,
+                set_winner_order_raw,
+                compute_effective_int,
+            )
             from .services import winner_score
 
             saved = set_winner_weights_raw(raw_in)
+            order_in = data.get("order") if isinstance(data, dict) else None
+            if order_in is None:
+                order_in = list(saved.keys())
+            saved_order = set_winner_order_raw(order_in)
             winner_score.invalidate_weights_cache()
-            resp = {"weights": saved, "effective": {"int": compute_effective_int(saved)}}
+            resp = {
+                "weights": saved,
+                "order": saved_order,
+                "effective": {"int": compute_effective_int(saved, saved_order)},
+            }
             self._set_json()
             self.wfile.write(json.dumps(resp).encode('utf-8'))
             return

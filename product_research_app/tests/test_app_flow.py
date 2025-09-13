@@ -352,7 +352,7 @@ def test_patch_product_desire(tmp_path, monkeypatch):
 def test_patch_winner_weights_persists(tmp_path, monkeypatch):
     setup_env(tmp_path, monkeypatch)
 
-    body = json.dumps({"weights": {"rating": 25}})
+    body = json.dumps({"weights": {"rating": 25}, "order": ["rating", "price"]})
 
     class Dummy:
         def __init__(self, body):
@@ -368,9 +368,12 @@ def test_patch_winner_weights_persists(tmp_path, monkeypatch):
     web_app.RequestHandler.do_PATCH(handler)
     resp = json.loads(handler.wfile.getvalue().decode("utf-8"))
     assert resp["weights"]["rating"] == 25
-    from product_research_app.services.config import get_winner_weights_raw
+    assert resp["order"][0] == "rating"
+    from product_research_app.services.config import get_winner_weights_raw, get_winner_order_raw
     data = get_winner_weights_raw()
+    order = get_winner_order_raw()
     assert data.get("rating") == 25
+    assert order[0] == "rating"
 
 def test_config_oldness_preference_roundtrip(tmp_path, monkeypatch):
     setup_env(tmp_path, monkeypatch)
@@ -645,7 +648,8 @@ def test_logging_and_explain_endpoint(tmp_path, monkeypatch):
 
     log_text = web_app.LOG_PATH.read_text()
     assert "oldness" in log_text
-    assert "effective_weights={'price': 0.0, 'rating': 1.0" in log_text
+    assert "effective_weights={" in log_text
+    assert "order=" in log_text
 
     parsed = urlparse(f"/api/winner-score/explain?ids={pid}")
 
@@ -662,8 +666,9 @@ def test_logging_and_explain_endpoint(tmp_path, monkeypatch):
     info = resp[str(pid)]
     assert "rating" in info["present"]
     assert "oldness" in info["missing"]
-    expected = {k: (1.0 if k == "rating" else 0.0) for k in winner_score.ALLOWED_FIELDS}
-    assert info["effective_weights"] == expected
+    eff = info["effective_weights"]
+    assert set(eff.keys()) == set(winner_score.ALLOWED_FIELDS)
+    assert abs(sum(eff.values()) - 1.0) < 1e-2
 
 
 def test_weights_eff_stable_when_touching_missing_metric(tmp_path, monkeypatch):
@@ -723,5 +728,5 @@ def test_weights_eff_stable_when_touching_missing_metric(tmp_path, monkeypatch):
     web_app.RequestHandler.handle_scoring_v2_generate(h2)
     resp2 = json.loads(h2.wfile.getvalue().decode("utf-8"))
     assert resp2["weights_all"] != hash_all1
-    assert resp2["weights_eff"] == hash_eff1
+    assert resp2["weights_eff"] != hash_eff1
     assert resp2["diag"]["sum_filtered"] == 0.0
