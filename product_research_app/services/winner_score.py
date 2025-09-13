@@ -6,6 +6,7 @@ import hashlib
 import logging
 import sqlite3
 import unicodedata
+import threading
 from datetime import datetime, date
 from typing import Dict, Any, Iterable, Optional, Callable
 
@@ -15,6 +16,7 @@ from .config import (
     get_winner_weights_raw,
     set_winner_weights_raw,
     get_winner_order_raw,
+    DB_PATH as CONFIG_DB_PATH,
 )
 
 logger = logging.getLogger(__name__)
@@ -39,27 +41,88 @@ ALIASES = {
     "orders": "units_sold",
 }
 
-AWARE_MAP = {
-    "unaware": 0.0,
-    "problem aware": 0.25,
-    "solution aware": 0.5,
-    "product aware": 0.75,
-    "most aware": 1.0,
-}
+AWARE_STAGES = [
+    "unaware",
+    "problem aware",
+    "solution aware",
+    "product aware",
+    "most aware",
+]
+AWARE_INDEX = {name: i for i, name in enumerate(AWARE_STAGES)}
+AWARE_CENTERS = [10, 30, 50, 70, 90]  # centros de cada tramo (0-19, 20-39, ...)
 
-def awareness_value(prod) -> float:
+
+def _norm_awareness(s: str) -> str:
+    return (s or "").strip().lower()
+
+
+def _awareness_label(prod) -> str:
     if isinstance(prod, str):
         s = prod
     else:
-        s = getattr(prod, "awareness_type", "") or getattr(prod, "awareness_level", "")
-        if not s and isinstance(prod, dict):
-            s = prod.get("awareness_type") or prod.get("awareness_level")
-    s = (s or "").strip().lower()
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(ch for ch in s if not unicodedata.combining(ch))
-    s = s.replace("-", " ").replace("_", " ")
-    s = " ".join(s.split())
-    return AWARE_MAP.get(s, 0.5)
+        s = getattr(prod, "awareness_type", None)
+        if s is None and isinstance(prod, dict):
+            s = prod.get("awareness_type")
+        if not s:
+            s = getattr(prod, "awareness_level", None)
+            if s is None and isinstance(prod, dict):
+                s = prod.get("awareness_level")
+    if s:
+        s = unicodedata.normalize("NFKD", str(s))
+        s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return _norm_awareness(s)
+
+
+def awareness_stage_index_from_product(prod) -> int | None:
+    label = _awareness_label(prod)
+    if not label:
+        return None
+    return AWARE_INDEX.get(label, 2)  # fallback: solution aware (2)
+
+
+def awareness_pref_segment_from_weight(w: int) -> int:
+    w = max(0, min(100, int(round(float(w)))))
+    return min(4, w // 20)  # 0..4
+
+
+def awareness_priority_order_from_weight(w: int) -> list[int]:
+    """Ordena 0..4 por cercanía del valor w a los centros [10,30,50,70,90]. Ties: prioriza el menor índice."""
+    w = max(0, min(100, int(round(float(w)))))
+    return sorted(range(5), key=lambda i: (abs(w - AWARE_CENTERS[i]), i))
+
+
+def awareness_closeness_from_weight(w: int, stage_idx: int) -> float:
+    """Escala lineal 1.0 (si centro coincide) → 0.0 (centro opuesto)."""
+    w = max(0, min(100, int(round(float(w)))))
+    dist = abs(w - AWARE_CENTERS[stage_idx])           # máx 80
+    return max(0.0, 1.0 - (dist / 80.0))               # 1.0..0.0
+
+
+def awareness_feature_value(prod, w_slider: int) -> float:
+    """Valor [0..1] para el producto según cercanía del slider al centro de su stage."""
+    stage_idx = awareness_stage_index_from_product(prod)
+    if stage_idx is None:
+        return None
+    closeness = awareness_closeness_from_weight(w_slider, stage_idx)
+    order_labels = [AWARE_STAGES[i] for i in awareness_priority_order_from_weight(w_slider)]
+    logger.info(
+        "awareness_slider=%s centers=%s order=%s value_prod=%s closeness=%.3f",
+        w_slider,
+        AWARE_CENTERS,
+        order_labels,
+        AWARE_STAGES[stage_idx],
+        closeness,
+    )
+    return closeness
+
+
+def build_features(prod, settings):
+    feats: Dict[str, float] = {}
+    w_aw = settings.get("winner_weights", {}).get("awareness", 50)
+    val = awareness_feature_value(prod, w_aw)
+    if val is not None:
+        feats["awareness"] = val
+    return feats
 
 
 def _minmax_norm(pop, v):
@@ -122,9 +185,13 @@ def prepare_oldness_bounds(rows: Iterable[Any]) -> None:
 WEIGHTS_CACHE: Dict[str, float] | None = None
 ORDER_CACHE: list[str] | None = None
 WEIGHTS_VERSION: int = 0
+_RECOMPUTE_TIMER: threading.Timer | None = None
 
 
 def compute_effective_weights(weights: dict[str, int | float], order: list[str]) -> dict[str, float]:
+    order = list(order)
+    if "awareness" in weights and "awareness" not in order:
+        order.append("awareness")
     n = len(order)
     if n == 0:
         return {}
@@ -404,15 +471,6 @@ def _feat_competition(product_row: Any, extras: Dict[str, Any]) -> Optional[floa
     return None
 
 
-def _feat_awareness(product_row: Any, extras: Dict[str, Any]) -> Optional[float]:
-    lab = rget(product_row, "awareness_type") or rget(product_row, "awareness_level")
-    if lab is None:
-        lab = extras.get("awareness_type") or extras.get("awareness_level")
-    if isinstance(lab, str):
-        return awareness_value(lab)
-    return None
-
-
 def _feat_oldness(product_row: Any, extras: Dict[str, Any]) -> Optional[float]:
     data: Dict[str, Any] = {}
     try:
@@ -436,7 +494,9 @@ FEATURE_MAP: Dict[str, FeatureGetter] = {
     "desire": _feat_desire,
     "competition": _feat_competition,
     "oldness": lambda p, e: _feat_oldness(p, e),
-    "awareness": _feat_awareness,
+    "awareness": lambda p, e: (
+        float(idx) if (idx := awareness_stage_index_from_product(p)) is not None else None
+    ),
 }
 
 
@@ -497,6 +557,11 @@ def compute_winner_score_v2(
         if val is None or (isinstance(val, float) and math.isnan(val)):
             continue
         raw_vals[name] = val
+
+    w_aw = user_weights.get("awareness", 50)
+    aw_val = awareness_feature_value(product_row, w_aw)
+    if aw_val is not None:
+        raw_vals["awareness"] = aw_val
 
     present = list(raw_vals.keys())
     missing_fields = [f for f in ALLOWED_FIELDS if f not in present]
@@ -673,3 +738,33 @@ def generate_winner_scores(
             "effective_weights": diag_eff,
         }
     return result
+
+
+def recompute_scores_for_all_products(async_ok: bool = True) -> int:
+    """Recalculate Winner Scores for all products.
+
+    If ``async_ok`` is True, the recomputation is debounced using a background
+    timer of one second. Multiple calls within that interval will reset the
+    timer so the computation runs only once.
+    """
+
+    def _job() -> int:
+        conn = database.get_connection(CONFIG_DB_PATH)
+        try:
+            res = generate_winner_scores(conn)
+            updated = int(res.get("updated", 0))
+            logger.info("recompute_scores_for_all_products updated=%s", updated)
+            return updated
+        finally:
+            conn.close()
+
+    global _RECOMPUTE_TIMER
+    if async_ok:
+        if _RECOMPUTE_TIMER is not None:
+            _RECOMPUTE_TIMER.cancel()
+        _RECOMPUTE_TIMER = threading.Timer(1.0, _job)
+        _RECOMPUTE_TIMER.daemon = True
+        _RECOMPUTE_TIMER.start()
+        return 0
+    else:
+        return _job()
