@@ -551,20 +551,15 @@ function saveWeightDebounced(key, value){
         method:'PATCH',
         headers:{'Content-Type':'application/json'},
         body: JSON.stringify({ key, value: val })
-      }).then(()=> showSavedTick(key));
+      });
     },300);
   }
   saveFns[key](value);
 }
 
-function showSavedTick(key){
-  const el = document.querySelector(`#weightsList li[data-key="${key}"] .ws-status`);
-  if(el){ el.textContent='✓'; setTimeout(()=>{ el.textContent=''; },1000); }
-}
-
 function updateSliderLabel(el) {
   const num = Math.round(Number(el.value) || 0);
-  el.closest('.ws-slider-wrap')?.querySelector('.weight-value')?.replaceChildren(document.createTextNode(String(num)));
+  el.closest('.weight-row')?.querySelector('.weight-value')?.replaceChildren(document.createTextNode(String(num)));
 }
 
 function renderWeights(){
@@ -574,10 +569,10 @@ function renderWeights(){
   weightOrder.forEach(key=>{
     const def=metricDefs.find(m=>m.key===key);
     const li=document.createElement('li');
-    li.className='metric-row';
+    li.className='weight-row';
     li.dataset.key=key;
-    li.innerHTML=`<span class="ws-handle">≡</span><span class="ws-name sr-only">${def.label}</span><div class="ws-slider-wrap"><div class="weight-slider"><input type="range" name="${key}" min="0" max="100" step="1" value="${Math.round(weightValues[key]||0)}" class="ws-slider"><div class="slider-extremes"><span class="extreme-left">${EXTREMES[key].left}</span><span class="extreme-right">${EXTREMES[key].right}</span></div></div><span class="ws-value"><span class="weight-value"></span></span></div><span class="ws-status"></span>`;
-    const range=li.querySelector('.ws-slider');
+    li.innerHTML=`<div class="weight-drag" aria-hidden>≡</div><div class="weight-label-placeholder">${def.label}</div><div class="weight-slider"><input class="weight-range" type="range" name="${key}" min="0" max="100" step="1" value="${Math.round(weightValues[key]||0)}"/><div class="slider-extremes"><span class="extreme-left">${EXTREMES[key].left}</span><span class="extreme-right">${EXTREMES[key].right}</span></div></div><div class="weight-value">${Math.round(weightValues[key]||0)}</div>`;
+    const range=li.querySelector('.weight-range');
     range.addEventListener('input',e=>{
       const k=normalizeKey(e.target.name);
       const v=Math.round(parseFloat(e.target.value));
@@ -587,10 +582,9 @@ function renderWeights(){
       if(Number.isFinite(v)) saveWeightDebounced(k, v);
     });
     ['mousedown','touchstart'].forEach(ev=>{ range.addEventListener(ev,e=>{ e.stopPropagation(); }); });
-    updateSliderLabel(range);
     list.appendChild(li);
   });
-  Sortable.create(list,{ handle:'.ws-handle', animation:150, onEnd:()=>{ weightOrder=Array.from(list.children).map(li=>li.dataset.key); }});
+  Sortable.create(list,{ handle:'.weight-drag', animation:150, onEnd:()=>{ weightOrder=Array.from(list.children).map(li=>li.dataset.key); }});
 }
 
 function resetWeights(){

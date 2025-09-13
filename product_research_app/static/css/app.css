@@ -642,51 +642,48 @@ th.ec-col-competition,   td.ec-col-competition   { width: var(--ec-w-competition
 @keyframes ecspin { to { transform: rotate(360deg); } }
 .ec-btn-loading{ pointer-events:none; }
 
-/* Winner Score slider styles */
-.ws-handle{ cursor:grab; padding-inline:4px; }
+/* ====== Rejilla por fila: mismo layout y anchos fijos ====== */
 #weightsCard{ overflow-x:hidden; }
-.metric-row{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-.ws-name{ flex:0 0 140px; }
-.ws-slider-wrap{ display:flex; align-items:center; flex:1 1 200px; gap:8px; min-width:0; }
-.ws-slider{ flex:1; width:100%; padding:4px 8px; height:12px; cursor:pointer; accent-color:#0077cc; }
-body.dark .ws-slider{ accent-color:#7a53d6; }
-.ws-slider::-webkit-slider-thumb{ width:20px; height:20px; border-radius:50%; cursor:pointer; }
-.ws-slider::-moz-range-thumb{ width:20px; height:20px; border-radius:50%; cursor:pointer; }
-.ws-value{ width:40px; text-align:right; }
-
-/* Oculta visualmente, mantiene el espacio en el DOM para accesibilidad */
-.sr-only {
-  position: absolute !important;
-  width: 1px !important;
-  height: 1px !important;
-  padding: 0 !important;
-  margin: -1px !important;
-  overflow: hidden !important;
-  clip: rect(0, 0, 0, 0) !important;
-  white-space: nowrap !important;
-  border: 0 !important;
+.weight-row {
+  display: grid;
+  grid-template-columns: 24px var(--label-col-w, 170px) minmax(0, 1fr) 36px;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
 }
 
-/* Contenedor de extremos justo bajo la barra, sin alterar su ancho */
+/* Drag y valor a la derecha iguales en todas */
+.weight-drag { text-align: center; opacity: .9; cursor: grab; }
+.weight-value { text-align: right; width: 36px; }
+
+/* ====== Columna label: ocupa espacio pero no se ve ====== */
+.weight-label-placeholder {
+  visibility: hidden;
+}
+
+/* ====== Barra 100% del área y extremos alineados ====== */
+.weight-slider { display: flex; flex-direction: column; }
+.weight-range {
+  width: 100%;
+  box-sizing: border-box;
+  height: 4px;
+  cursor: pointer;
+  accent-color: #0077cc;
+}
+body.dark .weight-range{ accent-color:#7a53d6; }
+.weight-range::-webkit-slider-thumb{ width:20px; height:20px; border-radius:50%; cursor:pointer; }
+.weight-range::-moz-range-thumb{ width:20px; height:20px; border-radius:50%; cursor:pointer; }
+
+/* Extremos ocupan exactamente el ancho de la barra */
 .slider-extremes {
   display: flex;
   justify-content: space-between;
   font-size: 12px;
   line-height: 1.2;
-  opacity: 0.85;
+  opacity: .85;
   margin-top: 4px;
 }
-
-/* Asegura que el ancho de extremos = ancho de la barra */
-.weight-slider {
-  display: flex;
-  flex-direction: column;
-}
-
-/* (Opcional) Evita que el texto de extremos salte de línea y rompa el ancho */
-.slider-extremes span {
-  white-space: nowrap;
-}
+.slider-extremes span { white-space: nowrap; }
 
 /* Cabecera y celdas de la columna Desire */
 th.col-desire, td.col-desire { width: 360px; max-width: 360px; }
