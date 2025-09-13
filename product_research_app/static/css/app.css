@@ -761,24 +761,27 @@ body.dark .weight-card:nth-child(odd) { background: rgba(255,255,255,0.03); }
 .weight-card .meta{ margin-top:4px; }
 
 /* Awareness segmented slider */
-.segmented-range{ position:relative; }
-.segmented-range .segments{
-  position:absolute; inset:0 0 -18px 0;
-  display:grid; grid-template-columns:repeat(5,1fr);
+.segmented-range{ position:relative; margin:10px 0 6px; }
+input[type="range"].seg-awareness{ width:100%; display:block; margin:0; }
+.segmented-range .ticks{
   pointer-events:none;
+  position:absolute; top:50%; left:0; right:0; height:0;
+  transform: translateY(-50%);
 }
-.segmented-range .segments .seg{
-  position:relative; text-align:center; font-size:12px; opacity:.9; padding-top:4px;
+.segmented-range .ticks i{
+  position:absolute; top:-8px; width:1px; height:16px;
+  background: rgba(255,255,255,.28);
 }
-.segmented-range .segments .seg + .seg::before{
-  content:''; position:absolute; left:0; top:6px; bottom:22px; width:1px;
-  background: rgba(255,255,255,.25);
+.awareness-labels{
+  display:grid; grid-template-columns:repeat(5,1fr);
+  gap:0; margin-top:6px; font-size:12px; opacity:.95;
+  text-align:center;
 }
-.segmented-range .segments .seg::after{
-  content:''; position:absolute; left:0; right:0; top:6px; height:2px;
-  background: rgba(255,255,255,.12);
+.awareness-labels span{ padding-top:2px; }
+.awareness-labels span.active{
+  background: rgba(124,93,255,.12);
+  border-radius:6px;
 }
-input[type="range"].seg-awareness{ width:100%; margin:14px 0 22px 0; }
 
 
 .weight-badge {

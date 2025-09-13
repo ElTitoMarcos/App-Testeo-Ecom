@@ -28,8 +28,6 @@ const metricKeys = WEIGHT_KEYS;
 let factors = [];
 let userConfig = {};
 
-const STAGE_LABELS = ['Unaware','Problem aware','Solution aware','Product aware','Most aware'];
-
 function defaultFactors(){
   return WEIGHT_FIELDS.map(f => ({ ...f, weight:50 }));
 }
@@ -53,9 +51,17 @@ function renderFactors(){
 
     <div class="segmented-range">
       <input id="awarenessSlider" class="weight-slider seg-awareness" type="range" min="0" max="100" step="1" />
-      <div class="segments" aria-hidden="true">
-        ${STAGE_LABELS.map(l=>`<div class="seg"><span>${l}</span></div>`).join('')}
+      <div class="ticks" aria-hidden="true">
+        <i style="left:20%"></i><i style="left:40%"></i><i style="left:60%"></i><i style="left:80%"></i>
       </div>
+    </div>
+
+    <div class="awareness-labels">
+      <span>Unaware</span>
+      <span>Problem aware</span>
+      <span>Solution aware</span>
+      <span>Product aware</span>
+      <span>Most aware</span>
     </div>
 
     <div class="meta"><span class="weight-badge">peso: <span id="awarenessWeight"></span>/100</span></div>
@@ -63,15 +69,17 @@ function renderFactors(){
   <div class="drag-handle" title="Arrastra para reordenar">≡</div>`;
       const slider = li.querySelector('#awarenessSlider');
       const weightEl = li.querySelector('#awarenessWeight');
-      slider.value = f.weight;
-      weightEl.textContent = f.weight;
-      slider.addEventListener('input', e => {
-        const v = Math.max(0, Math.min(100, parseInt(e.target.value,10)));
-        slider.value = v;
-        f.weight = v;
-        weightEl.textContent = v;
-        markDirty();
-      });
+      const segs = Array.from(li.querySelectorAll('.awareness-labels span'));
+      function setAw(v){
+        const val = Math.max(0, Math.min(100, parseInt(v,10) || 0));
+        f.weight = val;
+        slider.value = val;
+        weightEl.textContent = val;
+        const idx = Math.min(4, Math.floor(val/20));
+        segs.forEach((el,i)=>el.classList.toggle('active', i===idx));
+      }
+      setAw(f.weight);
+      slider.addEventListener('input', e => { setAw(e.target.value); markDirty(); });
     } else {
       li.innerHTML = `<div class="priority-badge">#${priority}</div><div class="content"><label for="weight-${f.key}" class="label">${f.label}</label><input id="weight-${f.key}" class="weight-range" type="range" min="0" max="100" step="1" value="${f.weight}"><div class="slider-extremes scale"><span class="extreme-left">${EXTREMES[f.key].left}</span><span class="extreme-right">${EXTREMES[f.key].right}</span></div><span class="weight-badge">peso: ${f.weight}/100</span></div><div class="drag-handle" aria-hidden>≡</div>`;
       const range = li.querySelector('.weight-range');
