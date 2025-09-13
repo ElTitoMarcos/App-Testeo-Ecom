@@ -504,7 +504,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, OPTIONS")
         self.end_headers()
 
     def _set_html(self, status=200):
@@ -512,7 +512,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, OPTIONS")
         self.end_headers()
 
     def safe_write(self, func):
@@ -578,7 +578,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, OPTIONS")
         self.end_headers()
 
     def do_GET(self):
@@ -599,6 +599,11 @@ class RequestHandler(BaseHTTPRequestHandler):
             has_key = bool(config.get_api_key())
             self._set_json()
             self.wfile.write(json.dumps({"ok": True, "has_key": has_key}).encode("utf-8"))
+            return
+        if path == "/api/config/weights":
+            from .services.config import get_winner_weights
+            self._set_json()
+            self.wfile.write(json.dumps({"weights": get_winner_weights()}).encode("utf-8"))
             return
         if path == "/api/config/winner-weights":
             from .services import winner_score
@@ -1258,6 +1263,22 @@ class RequestHandler(BaseHTTPRequestHandler):
     def do_PUT(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path == "/api/config/weights":
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length).decode("utf-8") if length else ""
+            try:
+                data = json.loads(body or "{}")
+                if not isinstance(data, dict):
+                    raise ValueError
+            except Exception:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode("utf-8"))
+                return
+            from .services.config import set_winner_weights
+            saved = set_winner_weights(data.get("weights", {}))
+            self._set_json()
+            self.wfile.write(json.dumps({"weights": saved}).encode("utf-8"))
+            return
         if path.startswith("/products/"):
             try:
                 pid = int(path.split("/")[-1])
@@ -2770,6 +2791,8 @@ class RequestHandler(BaseHTTPRequestHandler):
 
 def run(host: str = '127.0.0.1', port: int = 8000):
     ensure_db()
+    from .services.config import init_app_config
+    init_app_config()
     resume_incomplete_imports()
     httpd = HTTPServer((host, port), RequestHandler)
     print(f"Servidor iniciado en http://{host}:{port}")
