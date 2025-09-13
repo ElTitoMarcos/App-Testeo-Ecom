@@ -910,7 +910,7 @@ def evaluate_winner_score(
         "revenue",
         "desire",
         "competition",
-        "review_count",
+        "oldness",
     ]
     missing = [k for k in required if metrics.get(k) is None]
     if missing:

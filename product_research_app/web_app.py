@@ -719,6 +719,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 "model": cfg.get("model", "gpt-4o"),
                 "weights": config.get_weights(),
                 "has_api_key": bool(key),
+                "oldness_preference": cfg.get("oldness_preference", "newer"),
             }
             if key:
                 data["api_key_last4"] = key[-4:]
@@ -2159,6 +2160,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             cfg['weights'] = winner_calc.sanitize_weights(data['weights'])
         if 'autoFillIAOnImport' in data:
             cfg['autoFillIAOnImport'] = bool(data['autoFillIAOnImport'])
+        if 'oldness_preference' in data:
+            pref = str(data.get('oldness_preference', '')).strip().lower()
+            if pref in ("older", "newer"):
+                cfg['oldness_preference'] = pref
         config.save_config(cfg)
         self._set_json()
         self.wfile.write(json.dumps({"status": "ok"}).encode('utf-8'))
@@ -2589,6 +2594,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             rows = cur.fetchall()
         else:
             rows = database.list_products(conn)
+
+        winner_calc.prepare_oldness_bounds(rows)
 
         data: Dict[str, Any] = {}
         for row in rows:

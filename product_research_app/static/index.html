@@ -43,6 +43,9 @@ body.dark details summary { color:#80b3ff; }
 pre { white-space:pre-wrap; background:#f5f7ff; padding:8px; border-radius:4px; }
 body.dark pre { background:#2e315f; }
 /* Weight slider styling */
+.field-label { display:block; margin-top:10px; font-weight:600; }
+.segmented { display:flex; gap:8px; margin-top:4px; }
+.segmented label { display:flex; align-items:center; gap:4px; }
 </style>
 </head>
 <body class="dark">
@@ -101,6 +104,17 @@ body.dark pre { background:#2e315f; }
 <div id="weightsCard" class="card" style="display:none;">
   <strong>Ponderaciones Winner Score</strong>
   <ul id="weightsList" style="list-style:none; margin-top:8px; padding:0;"></ul>
+  <label class="field-label">Preferencia de Oldness</label>
+  <div class="segmented">
+    <label>
+      <input type="radio" name="oldness_preference" value="newer">
+      Prefiero recientes
+    </label>
+    <label>
+      <input type="radio" name="oldness_preference" value="older">
+      Prefiero antiguos
+    </label>
+  </div>
   <div style="margin-top:10px; display:flex; flex-wrap:wrap; gap:6px;">
     <button id="resetWeights">Reset</button>
     <button id="aiWeights">Ajustar pesos con IA</button>
@@ -475,6 +489,26 @@ function preprocessProducts(list){
   dupMap.forEach(arr => { if (arr.length > 1) arr.forEach(it => it.isDuplicate = true); });
 }
 
+function computeOldnessDays(p){
+  const dr = p.date_range || p['Date Range'];
+  let start=null;
+  if(typeof dr==='string'){
+    const m=dr.match(/(\d{4}-\d{2}-\d{2})\s*~\s*(\d{4}-\d{2}-\d{2})/);
+    if(m) start=new Date(m[1]);
+  }
+  if(!start){
+    const keys=['first_seen','created_at','createdAt'];
+    for(const k of keys){
+      const v=p[k];
+      if(v){ try{ start=new Date(String(v).slice(0,10)); break; }catch(e){} }
+    }
+  }
+  if(!start) return 0;
+  const today=new Date();
+  const diff=Math.floor((today-start)/(1000*60*60*24));
+  return diff>0?diff:0;
+}
+
 const WEIGHT_FIELDS = [
   { key: 'price',        label: 'Price' },
   { key: 'rating',       label: 'Rating' },
@@ -482,15 +516,16 @@ const WEIGHT_FIELDS = [
   { key: 'revenue',      label: 'Revenue' },
   { key: 'desire',       label: 'Desire' },
   { key: 'competition',  label: 'Competition' },
-  { key: 'review_count', label: 'Review Count' }
+  { key: 'oldness',      label: 'Oldness (antigüedad)' }
 ];
 const WEIGHT_KEYS = WEIGHT_FIELDS.map(f=>f.key);
-const ALIASES = { unitsSold:'units_sold', orders:'units_sold', reviews:'review_count' };
+const ALIASES = { unitsSold:'units_sold', orders:'units_sold' };
 function normalizeKey(k){ return ALIASES[k] || k; }
 const metricDefs = WEIGHT_FIELDS;
 const metricKeys = WEIGHT_KEYS;
 let weightValues = {};
 let weightOrder = [];
+let userConfig = { oldness_preference: 'newer' };
 
 function debounce(fn, ms=150){
   let t; return (...args)=>{ clearTimeout(t); t=setTimeout(()=>fn(...args), ms); };
@@ -587,7 +622,7 @@ async function adjustWeightsAI(){
       revenue:p.revenue||(p.extras&&p.extras['Revenue($)'])||0,
       desire:p.desire_magnitude,
       competition:p.competition_level,
-      review_count:p.review_count||(p.extras&&p.extras.reviews)||0
+      oldness:computeOldnessDays(p)
     }));
     let tokenEstimate=JSON.stringify(payload).length/4;
     const maxTokens=0.30/0.002*1000;
@@ -602,13 +637,13 @@ async function adjustWeightsAI(){
         revenue:p.revenue||(p.extras&&p.extras['Revenue($)'])||0,
         desire:p.desire_magnitude,
         competition:p.competition_level,
-        review_count:p.review_count||(p.extras&&p.extras.reviews)||0
+        oldness:computeOldnessDays(p)
       }));
       tokenEstimate=JSON.stringify(payload).length/4;
     }
     const cost=tokenEstimate/1000*0.002;
     toast.info(`Analizando ${sample.length} productos (~$${cost.toFixed(2)})`);
-    const instruction='Devuelve SOLO un JSON plano con pesos 0-100 para estas 7 claves exactas, sin texto adicional:\n["price","rating","units_sold","revenue","desire","competition","review_count"]';
+    const instruction='Devuelve SOLO un JSON plano con pesos 0-100 para estas 7 claves exactas, sin texto adicional:\n["price","rating","units_sold","revenue","desire","competition","oldness"]';
     const prompt=`Basado en estos productos ${JSON.stringify(payload)}\n${instruction}`;
     let res=await fetch('/custom_gpt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,response_format:{type:'json_object'}})});
     if(!res.ok){
@@ -696,6 +731,20 @@ async function loadConfig() {
     if (input) input.value = '';
     if (saveBtn) saveBtn.disabled = true;
   }
+  userConfig.oldness_preference = cfg.oldness_preference || 'newer';
+  const prefEls = document.querySelectorAll('input[name="oldness_preference"]');
+  prefEls.forEach(el => {
+    el.checked = el.value === userConfig.oldness_preference;
+    el.addEventListener('change', e => {
+      const val = e.target.value;
+      userConfig.oldness_preference = val;
+      fetch('/setconfig', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ oldness_preference: val })
+      });
+    });
+  });
   await loadWeights();
 }
 

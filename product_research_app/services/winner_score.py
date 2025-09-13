@@ -5,13 +5,14 @@ import math
 import hashlib
 import logging
 import os
+import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, date
 from pathlib import Path
 from typing import Dict, Any, Iterable, Optional, Callable
 
 from ..utils.db import rget
-from .. import database
+from .. import database, config
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ ALLOWED_FIELDS = (
     "revenue",
     "desire",
     "competition",
-    "review_count",
+    "oldness",
 )
 DEFAULT_WEIGHTS = {k: 1.0 for k in ALLOWED_FIELDS}
 
@@ -32,8 +33,66 @@ WEIGHT_KEYS = list(ALLOWED_FIELDS)
 ALIASES = {
     "unitsSold": "units_sold",
     "orders": "units_sold",
-    "reviews": "review_count",
 }
+
+DATE_RANGE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})\s*~\s*(\d{4}-\d{2}-\d{2})")
+
+
+def parse_date_range(s: str | None):
+    if not s:
+        return None, None
+    m = DATE_RANGE_RE.search(str(s))
+    if not m:
+        return None, None
+    try:
+        d1 = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+        d2 = datetime.strptime(m.group(2), "%Y-%m-%d").date()
+        return min(d1, d2), max(d1, d2)
+    except Exception:
+        return None, None
+
+
+def compute_oldness_days(product: dict) -> int | None:
+    start, _end = parse_date_range(product.get("date_range") or product.get("Date Range"))
+    if start is None:
+        for key in ("first_seen", "created_at", "createdAt"):
+            v = product.get(key)
+            if v:
+                try:
+                    start = datetime.strptime(str(v)[:10], "%Y-%m-%d").date()
+                    break
+                except Exception:
+                    pass
+    if start is None:
+        return None
+    today = date.today()
+    delta = (today - start).days
+    return max(0, delta)
+
+
+OLDNESS_MIN = 0.0
+OLDNESS_MAX = 0.0
+
+
+def prepare_oldness_bounds(rows: Iterable[Any]) -> None:
+    global OLDNESS_MIN, OLDNESS_MAX
+    vals: list[int] = []
+    for row in rows:
+        try:
+            data = dict(row)
+        except Exception:
+            data = {}
+        extras = _get_extras(row)
+        data.update(extras)
+        val = compute_oldness_days(data)
+        if val is not None:
+            vals.append(val)
+    if vals:
+        OLDNESS_MIN = float(min(vals))
+        OLDNESS_MAX = float(max(vals))
+    else:
+        OLDNESS_MIN = OLDNESS_MAX = 0.0
+
 
 WEIGHTS_CACHE: Dict[str, float] | None = None
 WEIGHTS_VERSION: int = 0
@@ -342,6 +401,19 @@ def _feat_competition(product_row: Any, extras: Dict[str, Any]) -> Optional[floa
     return None
 
 
+def _feat_oldness(product_row: Any, extras: Dict[str, Any]) -> Optional[float]:
+    data: Dict[str, Any] = {}
+    try:
+        data.update(dict(product_row))
+    except Exception:
+        pass
+    data.update(extras)
+    val = compute_oldness_days(data)
+    if val is None:
+        return None
+    return float(val)
+
+
 FeatureGetter = Callable[[Any, Dict[str, Any]], Optional[float]]
 
 FEATURE_MAP: Dict[str, FeatureGetter] = {
@@ -349,9 +421,9 @@ FEATURE_MAP: Dict[str, FeatureGetter] = {
     "rating": lambda p, e: _get_from_sources(p, e, ["rating", "Product Rating"]),
     "units_sold": lambda p, e: _get_from_sources(p, e, ["units_sold", "Item Sold"]),
     "revenue": lambda p, e: _get_from_sources(p, e, ["revenue", "Revenue($)"]),
-    "review_count": lambda p, e: _get_from_sources(p, e, ["review_count", "reviews", "reviewcount"]),
     "desire": _feat_desire,
     "competition": _feat_competition,
+    "oldness": lambda p, e: _feat_oldness(p, e),
 }
 
 
@@ -371,8 +443,16 @@ def _norm_revenue(v: float) -> float:
     return clamp(math.log1p(v) / math.log1p(1_000_000.0))
 
 
-def _norm_review(v: float) -> float:
-    return clamp(math.log1p(v) / math.log1p(10000.0))
+def _norm_oldness(v: float) -> float:
+    vmin, vmax = OLDNESS_MIN, OLDNESS_MAX
+    if vmax == vmin:
+        n = 0.0
+    else:
+        n = (v - vmin) / (vmax - vmin)
+    pref = config.load_config().get("oldness_preference", "newer")
+    if pref == "newer":
+        n = 1.0 - n
+    return clamp(n)
 
 def _norm_identity(v: float) -> float:
     return clamp(v)
@@ -383,9 +463,9 @@ NORMALIZERS: Dict[str, Callable[[float], float]] = {
     "rating": _norm_rating,
     "units_sold": _norm_units,
     "revenue": _norm_revenue,
-    "review_count": _norm_review,
     "desire": _norm_identity,
     "competition": _norm_identity,
+    "oldness": _norm_oldness,
 }
 
 
@@ -486,6 +566,8 @@ def generate_winner_scores(
         rows = cur.fetchall()
     else:
         rows = database.list_products(conn)
+
+    prepare_oldness_bounds(rows)
 
     processed = 0
     updated_int = 0
