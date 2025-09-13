@@ -42,6 +42,7 @@ from . import database
 from . import config
 from .services import ai_columns
 from .services import winner_score as winner_calc
+from .services.config import init_app_config
 from . import gpt
 from . import title_analyzer
 from .utils.db import row_to_dict, rget
@@ -71,6 +72,7 @@ def ensure_db():
     try:
         conn = database.get_connection(DB_PATH)
         database.initialize_database(conn)
+        init_app_config()
     except Exception:
         logger.exception("Database initialization failed")
         raise
@@ -578,7 +580,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, OPTIONS")
         self.end_headers()
 
     def do_GET(self):
@@ -599,6 +601,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             has_key = bool(config.get_api_key())
             self._set_json()
             self.wfile.write(json.dumps({"ok": True, "has_key": has_key}).encode("utf-8"))
+            return
+        if path == "/api/config/weights":
+            from .services.config import get_winner_weights
+
+            self._set_json()
+            self.wfile.write(json.dumps({"weights": get_winner_weights()}).encode("utf-8"))
             return
         if path == "/api/config/winner-weights":
             from .services import winner_score
@@ -1258,6 +1266,21 @@ class RequestHandler(BaseHTTPRequestHandler):
     def do_PUT(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path == "/api/config/weights":
+            length = int(self.headers.get('Content-Length', 0))
+            raw = self.rfile.read(length).decode('utf-8') if length else ""
+            try:
+                data = json.loads(raw or "{}")
+                if not isinstance(data, dict):
+                    raise ValueError
+            except Exception:
+                data = {}
+            from .services.config import set_winner_weights
+
+            saved = set_winner_weights(data.get("weights", {}))
+            self._set_json()
+            self.wfile.write(json.dumps({"weights": saved}).encode('utf-8'))
+            return
         if path.startswith("/products/"):
             try:
                 pid = int(path.split("/")[-1])
