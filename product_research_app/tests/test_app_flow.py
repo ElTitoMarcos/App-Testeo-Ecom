@@ -26,9 +26,12 @@ def setup_env(tmp_path, monkeypatch):
         force=True,
     )
     monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "config.json")
-    from product_research_app.services import winner_score
     monkeypatch.setattr(winner_score, "WINNER_WEIGHTS_FILE", tmp_path / "winner_weights.json")
-    return web_app.ensure_db()
+    from product_research_app.services import config as cfg_service
+    monkeypatch.setattr(cfg_service, "DB_PATH", web_app.DB_PATH)
+    conn = web_app.ensure_db()
+    cfg_service.init_app_config()
+    return conn
 
 def make_xlsx(path: Path, rows: List[List[object]]):
     from openpyxl import Workbook
@@ -725,3 +728,14 @@ def test_weights_eff_stable_when_touching_missing_metric(tmp_path, monkeypatch):
     assert resp2["weights_all"] != hash_all1
     assert resp2["weights_eff"] == hash_eff1
     assert resp2["diag"]["sum_filtered"] == 0.0
+
+def test_config_weights_defaults_and_update(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    from product_research_app.services import config as cfg_service
+    weights = cfg_service.get_winner_weights()
+    assert all(v == 50 for v in weights.values())
+    updated = cfg_service.set_winner_weights({"price": 10, "rating": 200, "foo": 5})
+    assert updated["price"] == 10
+    assert updated["rating"] == 100
+    assert updated["units_sold"] == 50
+    assert cfg_service.get_winner_weights() == updated
