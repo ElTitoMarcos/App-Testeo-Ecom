@@ -604,8 +604,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             from .services import winner_score
 
             data = winner_score.load_winner_weights_raw()
-            weights = {k: float(v) for k, v in data.get("weights", {}).items()}
-            weights_int = {k: int(round(v)) for k, v in weights.items()}
+            weights = winner_score.sanitize_weights(data.get("weights"))
+            weights_int = {k: int(round(v * 100)) for k, v in weights.items()}
             logger.info("weights_effective_int=%s", weights_int)
             resp = {
                 "weights": weights_int,
@@ -2156,14 +2156,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         if 'model' in data and data['model']:
             cfg['model'] = data['model']
         if 'weights' in data and isinstance(data['weights'], dict):
-            # update only known keys to avoid arbitrary injection
-            weights = config.SCORING_DEFAULT_WEIGHTS.copy()
-            for k, v in data['weights'].items():
-                try:
-                    weights[k] = float(v)
-                except Exception:
-                    continue
-            cfg['weights'] = weights
+            cfg['weights'] = winner_calc.sanitize_weights(data['weights'])
         if 'autoFillIAOnImport' in data:
             cfg['autoFillIAOnImport'] = bool(data['autoFillIAOnImport'])
         config.save_config(cfg)
@@ -2385,7 +2378,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._set_json(400)
             self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
             return
-        features = data.get("features") or WINNER_SCORE_FIELDS
+        features = [f for f in (data.get("features") or WINNER_SCORE_FIELDS) if f in winner_calc.ALLOWED_FIELDS]
         samples_in = data.get("data_sample") or []
         target = data.get("target") or ""
         if not samples_in or not target:
@@ -2407,7 +2400,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         try:
             result = gpt.recommend_winner_weights(api_key, model, samples, target)
-            weights = result.get("weights", {})
+            weights = winner_calc.sanitize_weights(result.get("weights", {}))
             notes = result.get("justification", "")
         except Exception as exc:
             self._set_json(500)
@@ -2430,7 +2423,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._set_json(400)
             self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
             return
-        features = data.get("features") or WINNER_SCORE_FIELDS
+        features = [f for f in (data.get("features") or WINNER_SCORE_FIELDS) if f in winner_calc.ALLOWED_FIELDS]
         samples_in = data.get("data_sample") or []
         target = data.get("target") or ""
         if not samples_in or not target or len(samples_in) < 2:
@@ -2448,8 +2441,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             num = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
             corr = abs(num / (denom_x * denom_y)) if denom_x and denom_y else 0.0
             weights[field] = corr
-        total = sum(weights.values()) or 1.0
-        weights = {k: v / total for k, v in weights.items()}
+        weights = winner_calc.sanitize_weights({k: weights.get(k, 0.0) for k in features})
         resp = {"weights": {k: weights.get(k, 0.0) for k in features}, "method": "stat", "diagnostics": {"n": len(samples_in)}}
         self._set_json()
         self.wfile.write(json.dumps(resp).encode('utf-8'))

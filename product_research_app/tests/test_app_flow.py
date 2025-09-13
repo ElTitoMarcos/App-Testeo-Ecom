@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from product_research_app import web_app, database, config
+from product_research_app.services import winner_score
 from product_research_app.utils.db import row_to_dict
 
 def setup_env(tmp_path, monkeypatch):
@@ -609,7 +610,7 @@ def test_logging_and_explain_endpoint(tmp_path, monkeypatch):
 
     log_text = web_app.LOG_PATH.read_text()
     assert "review_count" in log_text
-    assert "effective_weights={'rating': 1.0}" in log_text
+    assert "effective_weights={'price': 0.0, 'rating': 1.0" in log_text
 
     parsed = urlparse(f"/api/winner-score/explain?ids={pid}")
 
@@ -626,7 +627,8 @@ def test_logging_and_explain_endpoint(tmp_path, monkeypatch):
     info = resp[str(pid)]
     assert "rating" in info["present"]
     assert "review_count" in info["missing"]
-    assert info["effective_weights"] == {"rating": 1.0}
+    expected = {k: (1.0 if k == "rating" else 0.0) for k in winner_score.ALLOWED_FIELDS}
+    assert info["effective_weights"] == expected
 
 
 def test_weights_eff_stable_when_touching_missing_metric(tmp_path, monkeypatch):
