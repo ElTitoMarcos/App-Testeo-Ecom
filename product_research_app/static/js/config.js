@@ -31,11 +31,11 @@ let userConfig = {};
 function defaultFactors(){
   return WEIGHT_FIELDS.map(f => ({ ...f, weight:50 }));
 }
-let saveTimer=null, dirty=false;
-let recomputeTimer=null;
-function markDirty(){ dirty=true; clearTimeout(saveTimer); saveTimer=setTimeout(saveIfDirty,700); }
-function clearDirty(){ dirty=false; clearTimeout(saveTimer); }
-async function saveIfDirty(){ if(!dirty) return; await saveSettings(); dirty=false; }
+let saveTimer=null;
+function markDirty(){
+  clearTimeout(saveTimer);
+  saveTimer=setTimeout(saveSettings,700);
+}
 
 function renderFactors(){
   const list = document.getElementById('weightsList');
@@ -70,23 +70,26 @@ function renderFactors(){
       const slider = li.querySelector('#awarenessSlider');
       const weightEl = li.querySelector('#awarenessWeight');
       const segs = Array.from(li.querySelectorAll('.awareness-labels span'));
-      function setAw(v){
-        const val = Math.max(0, Math.min(100, parseInt(v,10) || 0));
-        f.weight = val;
-        slider.value = val;
-        weightEl.textContent = val;
-        const idx = Math.min(4, Math.floor(val/20));
+      function updateAw(val){
+        const v = Math.max(0, Math.min(100, parseInt(val,10) || 0));
+        f.weight = v;
+        slider.value = v;
+        weightEl.textContent = v;
+        const idx = Math.min(4, Math.floor(v/20));
         segs.forEach((el,i)=>el.classList.toggle('active', i===idx));
       }
-      setAw(f.weight);
-      slider.addEventListener('input', e => { setAw(e.target.value); markDirty(); });
+      updateAw(f.weight);
+      slider.addEventListener('input', e => {
+        updateAw(e.target.value);
+        markDirty();
+      });
     } else {
       li.innerHTML = `<div class="priority-badge">#${priority}</div><div class="content"><label for="weight-${f.key}" class="label">${f.label}</label><input id="weight-${f.key}" class="weight-range" type="range" min="0" max="100" step="1" value="${f.weight}"><div class="slider-extremes scale"><span class="extreme-left">${EXTREMES[f.key].left}</span><span class="extreme-right">${EXTREMES[f.key].right}</span></div><span class="weight-badge">peso: ${f.weight}/100</span></div><div class="drag-handle" aria-hidden>≡</div>`;
       const range = li.querySelector('.weight-range');
       range.addEventListener('input', e => {
-        const v = parseInt(e.target.value,10);
-        e.target.value = v;
+        const v = Math.max(0, Math.min(100, parseInt(e.target.value,10) || 0));
         f.weight = v;
+        range.value = v;
         li.querySelector('.weight-badge').textContent = `peso: ${f.weight}/100`;
         markDirty();
       });
@@ -109,27 +112,21 @@ function resetWeights(){
 
 async function saveSettings(){
   const payload = {
-    winner_weights: Object.fromEntries(factors.map(f => [f.key, Math.max(0, Math.min(100, Math.round(f.weight)))])),
-    winner_order: factors.map(f => f.key)
+    winner_weights: Object.fromEntries(
+      factors.map(f => [f.key, Math.max(0, Math.min(100, Math.round(f.weight)))])
+    )
   };
-  try {
-    await api.updateSettings(payload);
-    scheduleRecompute();
-    clearDirty();
-  } catch (err) {
-    console.error('Error saving weights', err);
-  }
-}
-
-function scheduleRecompute(){
-  clearTimeout(recomputeTimer);
-  recomputeTimer = setTimeout(async () => {
-    try {
-      await api.post('/api/winner-score/recompute', { scope: 'all' });
-    } catch (e) {
-      console.warn('recompute failed', e);
+  try{
+    const res = await api.patch('/api/config/winner-weights', payload);
+    if (typeof reloadProductsLight === 'function') {
+      reloadProductsLight();
+    } else if (typeof reloadProducts === 'function') {
+      reloadProducts();
     }
-  }, 700);
+  }catch(err){
+    console.warn('saveSettings failed', err);
+    toast.error('No se pudo guardar la configuración');
+  }
 }
 
 const AWARE_MAP = {
@@ -247,14 +244,13 @@ async function loadWeights(){
   try{
     const res = await fetch('/api/config/winner-weights');
     const data = await res.json();
-    const weights = data.weights || {};
-    const order = Array.isArray(data.order) && data.order.length ? data.order.slice() : WEIGHT_KEYS.slice();
+    const weights = data.winner_weights || {};
+    const order = Array.isArray(data.winner_order) && data.winner_order.length ? data.winner_order.slice() : WEIGHT_KEYS.slice();
     if(!order.includes('awareness')) order.push('awareness');
     const base = {};
     WEIGHT_FIELDS.forEach(f=>{ base[f.key] = { ...f, weight:50 }; });
     factors = order.filter(k=>base[k]).map(k=>({ ...base[k], weight: weights[k] !== undefined ? Math.round(weights[k]) : 50 }));
     renderFactors();
-    clearDirty();
     const resetBtn=document.getElementById('btnReset');
     if(resetBtn) resetBtn.onclick=resetWeights;
     const aiBtn=document.getElementById('btnAiWeights');
@@ -268,5 +264,4 @@ window.loadWeights = loadWeights;
 window.resetWeights = resetWeights;
 window.adjustWeightsAI = adjustWeightsAI;
 window.markDirty = markDirty;
-window.saveIfDirty = saveIfDirty;
 window.metricKeys = metricKeys;
