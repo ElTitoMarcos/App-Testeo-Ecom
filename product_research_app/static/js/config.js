@@ -7,7 +7,8 @@ const WEIGHT_FIELDS = [
   { key: 'revenue',      label: 'Revenue' },
   { key: 'desire',       label: 'Desire' },
   { key: 'competition',  label: 'Competition' },
-  { key: 'oldness',      label: 'Oldness (antigüedad)' }
+  { key: 'oldness',      label: 'Oldness (antigüedad)' },
+  { key: 'awareness',    label: 'Awareness' }
 ];
 const WEIGHT_KEYS = WEIGHT_FIELDS.map(f => f.key);
 const EXTREMES = {
@@ -17,7 +18,8 @@ const EXTREMES = {
   revenue:     { left: 'Menores ingresos', right: 'Mayores ingresos' },
   desire:      { left: 'Menor deseo',      right: 'Mayor deseo' },
   competition: { left: 'Menos competencia', right: 'Más competencia' },
-  oldness:     { left: 'Más reciente',     right: 'Más antiguo' }
+  oldness:     { left: 'Más reciente',     right: 'Más antiguo' },
+  awareness:   { left: 'Unaware',          right: 'Most aware' }
 };
 const ALIASES = { unitsSold: 'units_sold', orders: 'units_sold' };
 function normalizeKey(k){ return ALIASES[k] || k; }
@@ -83,6 +85,18 @@ async function saveSettings(){
   }
 }
 
+const AWARE_MAP = {
+  'unaware': 0,
+  'problem aware': 0.25,
+  'solution aware': 0.5,
+  'product aware': 0.75,
+  'most aware': 1
+};
+function awarenessValue(p){
+  const s = (p.awareness_level || '').toString().trim().toLowerCase();
+  return AWARE_MAP[s] ?? 0.5;
+}
+
 function stratifiedSample(list, n){
   const byCat = {};
   list.forEach(p=>{ const c = p.category || 'N/A'; (byCat[c] = byCat[c] || []).push(p); });
@@ -114,7 +128,8 @@ async function adjustWeightsAI(){
       revenue:p.revenue||(p.extras&&p.extras['Revenue($)'])||0,
       desire:p.desire_magnitude,
       competition:p.competition_level,
-      oldness:computeOldnessDays(p)
+      oldness:computeOldnessDays(p),
+      awareness: awarenessValue(p)
     }));
     let tokenEstimate=JSON.stringify(payload).length/4;
     const maxTokens=0.30/0.002*1000;
@@ -129,13 +144,14 @@ async function adjustWeightsAI(){
         revenue:p.revenue||(p.extras&&p.extras['Revenue($)'])||0,
         desire:p.desire_magnitude,
         competition:p.competition_level,
-        oldness:computeOldnessDays(p)
+        oldness:computeOldnessDays(p),
+        awareness: awarenessValue(p)
       }));
       tokenEstimate=JSON.stringify(payload).length/4;
     }
     const cost=tokenEstimate/1000*0.002;
     toast.info(`Analizando ${sample.length} productos (~$${cost.toFixed(2)})`);
-    const instruction='Devuelve SOLO un JSON plano con pesos 0-100 para estas 7 claves exactas, sin texto adicional:\n["price","rating","units_sold","revenue","desire","competition","oldness"]';
+    const instruction='Devuelve SOLO un JSON plano con pesos 0-100 para estas 8 claves exactas, sin texto adicional:\n["price","rating","units_sold","revenue","desire","competition","oldness","awareness"]';
     const prompt=`Basado en estos productos ${JSON.stringify(payload)}\n${instruction}`;
     let res=await fetch('/custom_gpt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,response_format:{type:'json_object'}})});
     if(!res.ok){
@@ -185,7 +201,8 @@ async function loadWeights(){
     const res = await fetch('/api/config/winner-weights');
     const data = await res.json();
     const weights = data.weights || {};
-    const order = Array.isArray(data.order) && data.order.length ? data.order : WEIGHT_KEYS;
+    const order = Array.isArray(data.order) && data.order.length ? data.order.slice() : WEIGHT_KEYS.slice();
+    if(!order.includes('awareness')) order.push('awareness');
     const base = {};
     WEIGHT_FIELDS.forEach(f=>{ base[f.key] = { ...f, weight:50 }; });
     factors = order.filter(k=>base[k]).map(k=>({ ...base[k], weight: weights[k] !== undefined ? Math.round(weights[k]) : 50 }));
