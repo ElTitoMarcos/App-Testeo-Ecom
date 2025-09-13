@@ -519,6 +519,15 @@ const WEIGHT_FIELDS = [
   { key: 'oldness',      label: 'Oldness (antigüedad)' }
 ];
 const WEIGHT_KEYS = WEIGHT_FIELDS.map(f=>f.key);
+const EXTREMES = {
+  price:        { left: "Más barato",        right: "Más caro" },
+  rating:       { left: "Peor rating",       right: "Mejor rating" },
+  units_sold:   { left: "Menos ventas",      right: "Más ventas" },
+  revenue:      { left: "Menores ingresos",  right: "Mayores ingresos" },
+  desire:       { left: "Menor deseo",       right: "Mayor deseo" },
+  competition:  { left: "Menos competencia", right: "Más competencia" },
+  oldness:      { left: "Más reciente",      right: "Más antiguo" }
+};
 const ALIASES = { unitsSold:'units_sold', orders:'units_sold' };
 function normalizeKey(k){ return ALIASES[k] || k; }
 const metricDefs = WEIGHT_FIELDS;
@@ -555,7 +564,7 @@ function showSavedTick(key){
 
 function updateSliderLabel(el) {
   const num = Math.round(Number(el.value) || 0);
-  el.nextElementSibling?.querySelector('.weight-value')?.replaceChildren(document.createTextNode(String(num)));
+  el.closest('.ws-slider-wrap')?.querySelector('.weight-value')?.replaceChildren(document.createTextNode(String(num)));
 }
 
 function renderWeights(){
@@ -567,7 +576,7 @@ function renderWeights(){
     const li=document.createElement('li');
     li.className='metric-row';
     li.dataset.key=key;
-    li.innerHTML=`<span class="ws-handle">≡</span><span class="ws-name">${def.label}</span><div class="ws-slider-wrap"><input type="range" name="${key}" min="0" max="100" step="1" value="${Math.round(weightValues[key]||0)}" class="ws-slider"><span class="ws-value"><span class="weight-value"></span></span></div><span class="ws-status"></span>`;
+    li.innerHTML=`<span class="ws-handle">≡</span><span class="ws-name sr-only">${def.label}</span><div class="ws-slider-wrap"><div class="weight-slider"><input type="range" name="${key}" min="0" max="100" step="1" value="${Math.round(weightValues[key]||0)}" class="ws-slider"><div class="slider-extremes"><span class="extreme-left">${EXTREMES[key].left}</span><span class="extreme-right">${EXTREMES[key].right}</span></div></div><span class="ws-value"><span class="weight-value"></span></span></div><span class="ws-status"></span>`;
     const range=li.querySelector('.ws-slider');
     range.addEventListener('input',e=>{
       const k=normalizeKey(e.target.name);
