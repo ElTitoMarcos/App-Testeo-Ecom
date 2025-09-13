@@ -112,11 +112,16 @@ function resetWeights(){
 
 async function saveSettings(){
   const payload = {
-    winner_weights: Object.fromEntries(
-      factors.map(f => [f.key, Math.max(0, Math.min(100, Math.round(f.weight)))])
-    )
+    // El backend espera "weights" (0–100 enteros)
+    weights: Object.fromEntries(
+      factors.map(f => [f.key, Math.max(0, Math.min(100, Math.round(Number(f.weight))))])
+    ),
+    // Persistimos también el orden visible en la UI
+    order: factors.map(f => f.key)
   };
+
   try{
+    // Usa la misma librería "api" que ya importa config.js
     const res = await api.patch('/api/config/winner-weights', payload);
     if (typeof reloadProductsLight === 'function') {
       reloadProductsLight();
@@ -125,7 +130,9 @@ async function saveSettings(){
     }
   }catch(err){
     console.warn('saveSettings failed', err);
-    toast.error('No se pudo guardar la configuración');
+    if (typeof toast !== 'undefined' && toast && toast.error) {
+      toast.error('No se pudo guardar la configuración');
+    }
   }
 }
 
