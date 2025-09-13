@@ -29,11 +29,9 @@ def _merge_winner_weights(current: dict | None, incoming: dict | None) -> dict:
 @app.route("/api/config/winner-weights", methods=["GET"])
 def api_get_winner_weights():
     settings = load_settings()
-    weights = settings.get("winner_weights") or {}
-    order = settings.get("winner_order") or list(weights.keys())
-    resp = jsonify({"winner_weights": weights, "winner_order": order})
+    resp = jsonify(settings.get("winner_weights") or {})
     resp.headers["Cache-Control"] = "no-store"
-    return resp
+    return resp, 200
 
 
 # PATCH /api/config/winner-weights
@@ -43,11 +41,12 @@ def api_patch_winner_weights():
     incoming = _coerce_weights(payload.get("winner_weights") or payload)
 
     settings = load_settings()
+    current = _coerce_weights(settings.get("winner_weights"))
 
-    if "awareness" not in incoming and "awareness" not in (settings.get("winner_weights") or {}):
+    if "awareness" not in incoming and "awareness" not in current:
         incoming["awareness"] = 50
 
-    settings["winner_weights"] = _merge_winner_weights(settings.get("winner_weights"), incoming)
+    settings["winner_weights"] = _merge_winner_weights(current, incoming)
 
     order = settings.get("winner_order") or list(settings["winner_weights"].keys())
     if "awareness" not in order:
