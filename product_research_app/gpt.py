@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from . import database, config
+from .services import winner_score as winner_calc
 
 logger = logging.getLogger(__name__)
 
@@ -1045,9 +1046,12 @@ def recommend_winner_weights(
 ) -> Dict[str, Any]:
     """Ask GPT to propose Winner Score weights with justification."""
 
+    fields = sorted({k for s in samples for k in s.keys() if k != success_key})
+    if not fields:
+        fields = list(winner_calc.ALLOWED_FIELDS)
     if not samples:
         return {
-            "weights": {k: 1.0 / len(WINNER_SCORE_FIELDS) for k in WINNER_SCORE_FIELDS},
+            "weights": {k: 1.0 / len(fields) for k in fields},
             "justification": "",
         }
 
@@ -1073,13 +1077,13 @@ def recommend_winner_weights(
         justification = parsed.get("justificacion") or parsed.get("justification") or ""
     except Exception:
         return {
-            "weights": {k: 1.0 / len(WINNER_SCORE_FIELDS) for k in WINNER_SCORE_FIELDS},
+            "weights": {k: 1.0 / len(fields) for k in fields},
             "justification": "",
         }
 
     total = 0.0
     cleaned: Dict[str, float] = {}
-    for key in WINNER_SCORE_FIELDS:
+    for key in fields:
         try:
             val = float(weights_raw.get(key, 0.0))
             if val < 0:
@@ -1090,7 +1094,7 @@ def recommend_winner_weights(
         total += val
     if total <= 0:
         return {
-            "weights": {k: 1.0 / len(WINNER_SCORE_FIELDS) for k in WINNER_SCORE_FIELDS},
+            "weights": {k: 1.0 / len(fields) for k in fields},
             "justification": justification,
         }
     normalized = {k: v / total for k, v in cleaned.items()}

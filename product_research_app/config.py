@@ -186,6 +186,7 @@ SCORING_DEFAULT_WEIGHTS: Dict[str, float] = {
     "desire": 1.0,
     "competition": 1.0,
     "oldness": 1.0,
+    "awareness": 1.0,
 }
 
 
