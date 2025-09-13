@@ -273,29 +273,36 @@ async function adjustWeightsAI(){
 async function openConfigModal(){
   try{
     const res = await fetch('/api/config/winner-weights');
-    const data = await res.json(); // { weights, order, effective:{int:...} }
+    const data = await res.json(); // backend: { weights, order, effective? }  (o legado: mapa plano)
 
-    const weights = (data && data.weights) ? data.weights : {};
+    // Soporta ambas formas (nueva y legacy)
+    const weights = (data && data.weights) ? data.weights : (data || {});
     const order   = (data && Array.isArray(data.order) && data.order.length)
       ? data.order
       : (typeof WEIGHT_KEYS !== 'undefined' ? WEIGHT_KEYS : Object.keys(weights));
 
-    // Construye factors en el ORDEN guardado, con fallback de peso=50
-    const byKey = Object.fromEntries(WEIGHT_FIELDS.map(f => [f.key, f]));
+    // Construcción de factors respetando orden y pesos persistidos
+    const fieldList = (typeof WEIGHT_FIELDS !== 'undefined' && Array.isArray(WEIGHT_FIELDS)) ? WEIGHT_FIELDS : [];
+    const byKey = Object.fromEntries(fieldList.map(f => [f.key, f]));
+
     window.factors = order
-      .filter(k => byKey[k])
+      .filter(k => byKey[k]) // ignora claves desconocidas
       .map(k => ({
         ...byKey[k],
-        weight: (weights[k] !== undefined && !isNaN(weights[k])) ? Math.round(Number(weights[k])) : 50
+        weight: (weights[k] !== undefined && !isNaN(weights[k]))
+          ? Math.round(Number(weights[k]))
+          : 50
       }));
 
     renderFactors();
 
-    const resetBtn=document.getElementById('btnReset');
+    // Wire de botones (no dupliques si ya existe)
+    const resetBtn = document.getElementById('btnReset');
     if (resetBtn) resetBtn.onclick = resetWeights;
-    const aiBtn=document.getElementById('btnAiWeights');
+    const aiBtn = document.getElementById('btnAiWeights');
     if (aiBtn) aiBtn.onclick = adjustWeightsAI;
 
+    console.debug('openConfigModal -> weights/order aplicados:', { weights, order });
   }catch(err){
     console.error('Error loading weights', err);
   }
