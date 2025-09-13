@@ -106,9 +106,8 @@ body.dark pre { background:#2e315f; }
   <div class="legend">ℹ️ Arrastra para reordenar. Más arriba = mayor prioridad. El número (0–100) es el peso.</div>
   <ul id="weightsList" class="weights-list"></ul>
   <div class="config-footer">
-    <button id="resetWeights">Reset</button>
-    <button id="saveWeights">Guardar</button>
-    <button id="aiWeights">Ajustar pesos con IA</button>
+    <button id="btnReset" class="btn">Reset</button>
+    <button id="btnAiWeights" class="btn primary">Ajustar pesos con IA</button>
   </div>
 </div>
 <div id="custom" style="display:none;">
@@ -532,11 +531,16 @@ function defaultFactors(){
 
 function clampWeight(v){ return Math.max(0, Math.min(100, Math.round(v))); }
 let saveTimer=null, dirty=false;
-function enableSaveButton(){ const b=document.getElementById('saveWeights'); if(b) b.disabled=false; }
-function disableSaveButton(){ const b=document.getElementById('saveWeights'); if(b) b.disabled=true; }
-function markDirty(){ dirty=true; enableSaveButton(); clearTimeout(saveTimer); saveTimer=setTimeout(saveIfDirty,700); }
-function clearDirty(){ dirty=false; disableSaveButton(); clearTimeout(saveTimer); }
-async function saveIfDirty(){ if(!dirty) return; await saveSettings(); }
+function markDirty(){
+  dirty=true;
+  clearTimeout(saveTimer);
+  saveTimer=setTimeout(saveIfDirty,700);
+}
+async function saveIfDirty(){
+  if(!dirty) return;
+  await saveSettings();
+  dirty=false;
+}
 
 function renderFactors(){
   const list=document.getElementById('weightsList');
@@ -558,12 +562,19 @@ function renderFactors(){
     });
     list.appendChild(li);
   });
-  Sortable.create(list,{ handle:'.drag-handle', animation:150, onEnd:()=>{
-    const orderKeys=Array.from(list.children).map(li=>li.dataset.key);
-    factors.sort((a,b)=>orderKeys.indexOf(a.key)-orderKeys.indexOf(b.key));
-    renderFactors();
-    markDirty();
-  }});
+  Sortable.create(list,{ handle:'.drag-handle', animation:150, onEnd:onReorder });
+}
+
+function onReorder(){
+  const list=document.getElementById('weightsList');
+  if(!list) return;
+  const orderKeys=Array.from(list.children).map(li=>li.dataset.key);
+  factors=orderKeys.map(k=>factors.find(f=>f.key===k)).filter(Boolean);
+  Array.from(list.children).forEach((li,idx)=>{
+    const badge=li.querySelector('.priority-badge');
+    if(badge) badge.textContent=`#${idx+1}`;
+  });
+  markDirty();
 }
 
 function resetWeights(){
@@ -579,15 +590,11 @@ async function saveSettings(){
   };
   try{
     await api.updateSettings(payload);
-    toast.success('Pesos y prioridades guardados');
-    clearDirty();
   }catch(err){
     console.error('Error saving weights',err);
     toast.error('No se pudo guardar');
   }
 }
-
-async function saveWeights(){ await saveSettings(); }
 
 function stratifiedSample(list, n){
   const byCat = {};
@@ -697,13 +704,11 @@ async function loadWeights(){
     WEIGHT_FIELDS.forEach(f=>{ base[f.key] = { ...f, weight:50 }; });
     factors = order.filter(k=>base[k]).map(k=>({ ...base[k], weight: weights[k] !== undefined ? Math.round(weights[k]) : 50 }));
     renderFactors();
-    clearDirty();
-    const resetBtn=document.getElementById('resetWeights');
+    dirty=false;
+    const resetBtn=document.getElementById('btnReset');
     if(resetBtn) resetBtn.onclick=resetWeights;
-    const aiBtn=document.getElementById('aiWeights');
+    const aiBtn=document.getElementById('btnAiWeights');
     if(aiBtn) aiBtn.onclick=adjustWeightsAI;
-    const saveBtn=document.getElementById('saveWeights');
-    if(saveBtn) saveBtn.onclick=saveWeights;
   }catch(err){
     console.error('Error loading weights', err);
   }
@@ -1127,10 +1132,12 @@ document.getElementById('configBtn').onclick = async () => {
   const btn = document.getElementById('configBtn');
   const modal = document.createElement('div');
   modal.className = 'modal config-modal';
+  modal.id = 'configModal';
   modal.setAttribute('role','dialog');
   modal.setAttribute('aria-modal','true');
   modal.innerHTML = '<header class="modal-header"><h3 id="configModalTitle">Configuración</h3><button type="button" class="modal-close" aria-label="Cerrar">✕</button></header><div class="modal-body"></div>';
   modal.setAttribute('aria-labelledby','configModalTitle');
+  modal.addEventListener('close', saveIfDirty);
   const body = modal.querySelector('.modal-body');
   const cfgParent = cfg.parentElement;
   const wParent = wcard.parentElement;
@@ -1141,6 +1148,7 @@ document.getElementById('configBtn').onclick = async () => {
   cfg.style.display = 'block';
   wcard.style.display = 'block';
   const handle = modalManager.open(modal, {returnFocus: btn, closeOnBackdrop:true, onClose: () => {
+    saveIfDirty();
     cfg.style.display = 'none';
     wcard.style.display = 'none';
     cfgParent.insertBefore(cfg, cfgNext);

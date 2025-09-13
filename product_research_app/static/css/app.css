@@ -709,11 +709,8 @@ input[type="range"].weight-range { width: 100% !important; }
   margin: 0;
   padding: 0;
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   gap: 10px;
-}
-@media (max-width: 991px), (max-height: 699px){
-  .weights-list { grid-template-columns:1fr; }
 }
 
 .weight-card {
@@ -771,12 +768,10 @@ body.dark .weight-badge {
   position: sticky;
   bottom: 0;
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 8px 0;
-  margin-top: 8px;
+  gap: 10px;
+  padding: 10px 0 0;
   background: inherit;
-  box-shadow: 0 -2px 4px rgba(0,0,0,0.2);
+  border-top: 1px solid rgba(255,255,255,.08);
 }
 
 /* Cabecera y celdas de la columna Desire */
