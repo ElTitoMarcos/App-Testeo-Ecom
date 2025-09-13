@@ -678,7 +678,8 @@ th.ec-col-competition,   td.ec-col-competition   { width: var(--ec-w-competition
 
 /* La barra debe ocupar 100% sí o sí */
 .weight-slider { display: flex; flex-direction: column; width: 100%; }
-.weight-range {
+.weight-range,
+.weight-slider {
   display: block;
   width: 100% !important;
   max-width: none !important;
@@ -687,9 +688,20 @@ th.ec-col-competition,   td.ec-col-competition   { width: var(--ec-w-competition
   cursor: pointer;
   accent-color: #0077cc;
 }
-body.dark .weight-range{ accent-color:#7a53d6; }
-.weight-range::-webkit-slider-thumb{ width:20px; height:20px; border-radius:50%; cursor:pointer; }
-.weight-range::-moz-range-thumb{ width:20px; height:20px; border-radius:50%; cursor:pointer; }
+body.dark .weight-range, body.dark .weight-slider{ accent-color:#7a53d6; }
+.weight-range::-webkit-slider-thumb,
+.weight-slider::-webkit-slider-thumb{ width:20px; height:20px; border-radius:50%; cursor:pointer; }
+.weight-range::-moz-range-thumb,
+.weight-slider::-moz-range-thumb{ width:20px; height:20px; border-radius:50%; cursor:pointer; }
+input[type="range"].segmented{
+  background: repeating-linear-gradient(
+    90deg,
+    rgba(255,255,255,.18) 0 calc(20% - 1px),
+    rgba(255,255,255,.18) 0,
+    transparent calc(20% - 1px) 20%
+  );
+  border-radius: 8px;
+}
 
 /* Etiquetas en los extremos de la barra */
 .slider-extremes {
@@ -755,7 +767,38 @@ body.dark .weight-card:nth-child(odd) { background: rgba(255,255,255,0.03); }
 
 .weight-card .label{ margin-bottom:2px; }
 .weight-card .scale{ margin-top:2px; }
-.weight-card .meta{ display:none; }
+.weight-card .meta{ margin-top:4px; }
+
+.awareness-scale{
+  display:grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 0;
+  margin-top: 4px;
+  font-size: 12px;
+  opacity: .9;
+}
+.awareness-scale .seg{
+  text-align:center;
+  position:relative;
+  padding-top: 4px;
+}
+.awareness-scale .seg::before{
+  content:'';
+  position:absolute;
+  top:0; left:0; right:0;
+  height:2px;
+  background: rgba(255,255,255,.18);
+}
+.awareness-scale .seg + .seg::after{
+  content:'';
+  position:absolute;
+  left:0; top:0; bottom:-4px;
+  width:1px; background: rgba(255,255,255,.25);
+}
+.awareness-scale .seg.active{
+  background: rgba(124,93,255,.10);
+  border-radius: 6px;
+}
 
 .weight-badge {
   display: inline-flex;
