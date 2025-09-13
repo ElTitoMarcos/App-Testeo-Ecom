@@ -112,11 +112,16 @@ function resetWeights(){
 
 async function saveSettings(){
   const payload = {
-    winner_weights: Object.fromEntries(
-      factors.map(f => [f.key, Math.max(0, Math.min(100, Math.round(f.weight)))])
-    )
+    // El backend espera "weights" (0–100 enteros)
+    weights: Object.fromEntries(
+      factors.map(f => [f.key, Math.max(0, Math.min(100, Math.round(Number(f.weight))))])
+    ),
+    // Persistimos también el orden visible en la UI
+    order: factors.map(f => f.key)
   };
+
   try{
+    // Usa la misma librería "api" que ya importa config.js
     const res = await api.patch('/api/config/winner-weights', payload);
     if (typeof reloadProductsLight === 'function') {
       reloadProductsLight();
@@ -125,7 +130,9 @@ async function saveSettings(){
     }
   }catch(err){
     console.warn('saveSettings failed', err);
-    toast.error('No se pudo guardar la configuración');
+    if (typeof toast !== 'undefined' && toast && toast.error) {
+      toast.error('No se pudo guardar la configuración');
+    }
   }
 }
 
@@ -243,18 +250,34 @@ async function adjustWeightsAI(){
 async function openConfigModal(){
   try{
     const res = await fetch('/api/config/winner-weights');
-    const weights = await res.json();
-    const base = {};
-    WEIGHT_FIELDS.forEach(f=>{ base[f.key] = { ...f, weight:50 }; });
-    factors = WEIGHT_KEYS.map(k => ({
-      ...base[k],
-      weight: weights[k] !== undefined ? Math.round(weights[k]) : 50
-    }));
+    const data = await res.json();
+
+    // El backend devuelve { weights, order, effective:{int:...} }
+    const weights = (data && data.weights) ? data.weights : {};
+    const order   = (data && Array.isArray(data.order) && data.order.length)
+      ? data.order
+      : (typeof WEIGHT_KEYS !== 'undefined' ? WEIGHT_KEYS : Object.keys(weights));
+
+    // WEIGHT_FIELDS existe en este módulo; lo indexamos por key
+    const byKey = Object.fromEntries((WEIGHT_FIELDS || []).map(f => [f.key, f]));
+    const orderedKeys = (order && order.length) ? order : Object.keys(byKey);
+
+    // Construimos factors respetando el orden persistido y aplicando los pesos guardados (fallback 50)
+    window.factors = orderedKeys
+      .filter(k => byKey[k]) // ignora claves desconocidas
+      .map(k => ({
+        ...byKey[k],
+        weight: (weights[k] !== undefined && !isNaN(weights[k])) ? Math.round(Number(weights[k])) : 50
+      }));
+
     renderFactors();
-    const resetBtn=document.getElementById('btnReset');
-    if(resetBtn) resetBtn.onclick=resetWeights;
-    const aiBtn=document.getElementById('btnAiWeights');
-    if(aiBtn) aiBtn.onclick=adjustWeightsAI;
+
+    const resetBtn = document.getElementById('btnReset');
+    if (resetBtn) resetBtn.onclick = resetWeights;
+
+    const aiBtn = document.getElementById('btnAiWeights');
+    if (aiBtn) aiBtn.onclick = adjustWeightsAI;
+
   }catch(err){
     console.error('Error loading weights', err);
   }
