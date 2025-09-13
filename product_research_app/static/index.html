@@ -231,8 +231,9 @@ body.dark pre { background:#2e315f; }
 <script src="/static/js/winner_score.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
 <script type="module">
-import { fetchJson } from "/static/js/net.js";
+import * as api from "/static/js/net.js";
 import * as groupsService from "/static/js/groups-service.js";
+const { fetchJson } = api;
 window.fetchJson = fetchJson;
 window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
@@ -810,13 +811,18 @@ function renderTable() {
       if (col.maxWidth) td.style.maxWidth = col.maxWidth + 'px';
       if (col.align) td.style.textAlign = col.align;
       let value = '';
-      if (metricKeys.includes(key)) {
+      if (key === 'desire') {
+        // La columna textual "Desire" NUNCA debe tratarse como métrica
+        value = typeof item.desire === 'string' ? item.desire.trim() : (item.desire ?? '');
+      } else if (metricKeys.includes(key)) {
         value = item.winner_score_breakdown && item.winner_score_breakdown.scores ? item.winner_score_breakdown.scores[key] : '';
         if (item.winner_score_breakdown && item.winner_score_breakdown.justifications) {
           const j = item.winner_score_breakdown.justifications[key];
           if (j) td.title = 'Justificación: ' + j;
         }
-      } else if (['id','name','category','price','image_url','winner_score','desire','desire_magnitude','awareness_level','competition_level','date_range'].includes(key)) {
+      } else if (key === 'desire_magnitude') {
+        value = item.desire_magnitude;
+      } else if (['id','name','category','price','image_url','winner_score','awareness_level','competition_level','date_range'].includes(key)) {
         value = item[key];
       } else {
         value = item.extras ? item.extras[key] : '';
@@ -887,7 +893,7 @@ function renderTable() {
         td.title = fullVal;
         input.addEventListener('blur', async () => {
           const val = input.value.trim() || null;
-          try { await fetchJson(`/products/${item.id}`, {method:'PUT', body: JSON.stringify({desire: val})}); } catch(e) {}
+          try { await api.updateProductField(item.id, { desire: val }); } catch(e) {}
           item.desire = val;
           ecAutoFitColumns(gridRoot);
         });
@@ -903,7 +909,7 @@ function renderTable() {
         });
         select.addEventListener('change', async () => {
           const val = select.value || null;
-          try { await fetchJson(`/products/${item.id}`, {method:'PUT', body: JSON.stringify({desire_magnitude: val})}); } catch(e) {}
+          try { await api.updateProductField(item.id, { desire_magnitude: val }); } catch(e) {}
           item.desire_magnitude = val;
         });
         td.appendChild(select);
@@ -918,7 +924,7 @@ function renderTable() {
         });
         select.addEventListener('change', async () => {
           const val = select.value || null;
-          try { await fetchJson(`/products/${item.id}`, {method:'PUT', body: JSON.stringify({awareness_level: val})}); } catch(e) {}
+          try { await api.updateProductField(item.id, { awareness_level: val }); } catch(e) {}
           item.awareness_level = val;
         });
         td.appendChild(select);
@@ -933,7 +939,7 @@ function renderTable() {
         });
         select.addEventListener('change', async () => {
           const val = select.value || null;
-          try { await fetchJson(`/products/${item.id}`, {method:'PUT', body: JSON.stringify({competition_level: val})}); } catch(e) {}
+          try { await api.updateProductField(item.id, { competition_level: val }); } catch(e) {}
           item.competition_level = val;
         });
         td.appendChild(select);
