@@ -112,27 +112,23 @@ function resetWeights(){
 
 async function saveSettings(){
   const payload = {
-    // El backend espera "weights" (0–100 enteros)
+    // usar "weights" (no "winner_weights") y persistir el orden visible
     weights: Object.fromEntries(
       factors.map(f => [f.key, Math.max(0, Math.min(100, Math.round(Number(f.weight))))])
     ),
-    // Persistimos también el orden visible en la UI
     order: factors.map(f => f.key)
   };
-
   try{
-    // Usa la misma librería "api" que ya importa config.js
-    const res = await api.patch('/api/config/winner-weights', payload);
-    if (typeof reloadProductsLight === 'function') {
-      reloadProductsLight();
-    } else if (typeof reloadProducts === 'function') {
-      reloadProducts();
-    }
+    await fetch('/api/config/winner-weights', {
+      method:'PATCH',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    if (typeof reloadProductsLight === 'function') reloadProductsLight();
+    else if (typeof reloadProducts === 'function') reloadProducts();
   }catch(err){
     console.warn('saveSettings failed', err);
-    if (typeof toast !== 'undefined' && toast && toast.error) {
-      toast.error('No se pudo guardar la configuración');
-    }
+    if (typeof toast !== 'undefined' && toast.error) toast.error('No se pudo guardar la configuración');
   }
 }
 
@@ -170,16 +166,12 @@ function stratifiedSample(list, n){
 }
 
 async function adjustWeightsAI(){
-  // Helpers
-  const num = (v) => {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : 0;
-  };
+  const num = v => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
   const stratifiedSampleBy = (arr, key, n) => {
     if (!Array.isArray(arr) || arr.length <= n) return (arr || []).slice();
     const sorted = [...arr].sort((a,b) => num(b[key]) - num(a[key]));
     const out = [];
-    for (let i = 0; i < n; i++){
+    for (let i=0; i<n; i++){
       const idx = Math.floor(i * (sorted.length - 1) / Math.max(1,(n - 1)));
       out.push(sorted[idx]);
     }
@@ -188,12 +180,9 @@ async function adjustWeightsAI(){
 
   try{
     const products = Array.isArray(window.allProducts) ? window.allProducts : [];
-    if (!products.length){
-      if (typeof toast !== 'undefined') toast.info('No hay productos cargados');
-      return;
-    }
+    if (!products.length){ if (typeof toast !== 'undefined') toast.info('No hay productos cargados'); return; }
 
-    // Dataset con las 8 features del Winner Score
+    // Construir dataset con las 8 features del Winner Score
     const rows = products.map(p => {
       const ratingRaw = p.rating ?? (p.extras && p.extras.rating);
       const unitsRaw  = p.units_sold ?? (p.extras && (p.extras['Item Sold'] || p.extras['Orders']));
@@ -210,22 +199,20 @@ async function adjustWeightsAI(){
       };
     });
 
-    // Target: revenue si >=50% de filas lo tienen; si no, units_sold
+    // Target: revenue si >=50% lo tiene; si no, units_sold
     const revCount = rows.filter(r => r.revenue > 0).length;
     const targetName = (revCount >= Math.ceil(rows.length * 0.5)) ? 'revenue' : 'units_sold';
 
-    // Enviar el MAYOR número posible en una sola llamada, con tope razonable por coste
+    // Enviar el mayor número posible en una sola llamada (controlado por presupuesto)
     const cfg = (window.userConfig && window.userConfig.aiCost) ? window.userConfig.aiCost : { costCapUSD: 0.25, estTokensPerItemIn: 300, estTokensPerItemOut: 80 };
     const estTokPerItem = (num(cfg.estTokensPerItemIn) + num(cfg.estTokensPerItemOut)) || 380;
     const pricePerK = 0.002; // estimación conservadora
     const maxByBudget = Math.max(30, Math.floor((cfg.costCapUSD || 0.25) / pricePerK * 1000 / estTokPerItem));
-    const HARD_CAP = 500; // seguridad
+    const HARD_CAP = 500;
     const MAX = Math.min(HARD_CAP, Math.max(60, maxByBudget));
 
     let data_sample = rows.map(r => ({ ...r, target: r[targetName] }));
-    if (data_sample.length > MAX){
-      data_sample = stratifiedSampleBy(data_sample, targetName, MAX);
-    }
+    if (data_sample.length > MAX) data_sample = stratifiedSampleBy(data_sample, targetName, MAX);
 
     const features = (typeof metricKeys !== 'undefined' && metricKeys.length) ? metricKeys : [
       'price','rating','units_sold','revenue','desire','competition','oldness','awareness'
@@ -243,10 +230,10 @@ async function adjustWeightsAI(){
     }
     if (!res.ok) throw new Error('Auto-weights request failed');
 
-    const out = await res.json(); // { weights:{k:0..1|0..100}, method,... }
+    const out = await res.json(); // { weights:{k:0..1|0..100}, method?... }
     const returned = (out && out.weights) ? out.weights : {};
 
-    // Normaliza a 0..100 y ordena por importancia
+    // Normalizar a 0..100 enteros y ordenar por importancia
     const intWeights = {};
     for (const k of features){
       let v = num(returned[k]);
@@ -256,23 +243,19 @@ async function adjustWeightsAI(){
     }
     const newOrder = [...features].sort((a,b) => (intWeights[b]||0) - (intWeights[a]||0));
 
-    // Aplica a la UI (reordena y actualiza sliders)
+    // Aplicar en UI
     if (Array.isArray(window.factors) && window.factors.length){
       const byKey = Object.fromEntries(window.factors.map(f => [f.key, f]));
       window.factors = newOrder.filter(k => byKey[k]).map(k => ({ ...byKey[k], weight: intWeights[k] ?? byKey[k].weight }));
       if (typeof renderFactors === 'function') renderFactors();
     }
 
-    // Persiste inmediatamente {weights, order} con un solo PATCH
+    // Guardar {weights, order} y recargar desde servidor para reflejar lo persistido
     await fetch('/api/config/winner-weights', {
       method:'PATCH', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ weights: intWeights, order: newOrder })
     });
-
-    // Recarga desde servidor para reflejar lo guardado
-    if (typeof openConfigModal === 'function') {
-      await openConfigModal();
-    }
+    if (typeof openConfigModal === 'function') await openConfigModal();
 
     if (typeof toast !== 'undefined' && toast.success){
       const method = (out && out.method) ? out.method : 'auto';
@@ -290,21 +273,17 @@ async function adjustWeightsAI(){
 async function openConfigModal(){
   try{
     const res = await fetch('/api/config/winner-weights');
-    const data = await res.json();
+    const data = await res.json(); // { weights, order, effective:{int:...} }
 
-    // El backend devuelve { weights, order, effective:{int:...} }
     const weights = (data && data.weights) ? data.weights : {};
     const order   = (data && Array.isArray(data.order) && data.order.length)
       ? data.order
       : (typeof WEIGHT_KEYS !== 'undefined' ? WEIGHT_KEYS : Object.keys(weights));
 
-    // WEIGHT_FIELDS existe en este módulo; lo indexamos por key
-    const byKey = Object.fromEntries((WEIGHT_FIELDS || []).map(f => [f.key, f]));
-    const orderedKeys = (order && order.length) ? order : Object.keys(byKey);
-
-    // Construimos factors respetando el orden persistido y aplicando los pesos guardados (fallback 50)
-    window.factors = orderedKeys
-      .filter(k => byKey[k]) // ignora claves desconocidas
+    // Construye factors en el ORDEN guardado, con fallback de peso=50
+    const byKey = Object.fromEntries(WEIGHT_FIELDS.map(f => [f.key, f]));
+    window.factors = order
+      .filter(k => byKey[k])
       .map(k => ({
         ...byKey[k],
         weight: (weights[k] !== undefined && !isNaN(weights[k])) ? Math.round(Number(weights[k])) : 50
@@ -312,10 +291,9 @@ async function openConfigModal(){
 
     renderFactors();
 
-    const resetBtn = document.getElementById('btnReset');
+    const resetBtn=document.getElementById('btnReset');
     if (resetBtn) resetBtn.onclick = resetWeights;
-
-    const aiBtn = document.getElementById('btnAiWeights');
+    const aiBtn=document.getElementById('btnAiWeights');
     if (aiBtn) aiBtn.onclick = adjustWeightsAI;
 
   }catch(err){
@@ -324,7 +302,7 @@ async function openConfigModal(){
 }
 
 window.openConfigModal = openConfigModal;
-window.loadWeights = openConfigModal; // alias for legacy calls
+window.loadWeights = openConfigModal;
 window.resetWeights = resetWeights;
 window.adjustWeightsAI = adjustWeightsAI;
 window.markDirty = markDirty;
