@@ -28,21 +28,11 @@ const metricKeys = WEIGHT_KEYS;
 let factors = [];
 let userConfig = {};
 
-// Awareness slider helpers
 const STAGE_LABELS = ['Unaware','Problem aware','Solution aware','Product aware','Most aware'];
-function activeSegmentIndexFromWeight(w){ return Math.min(4, Math.floor(Math.max(0, Math.min(100, w)) / 20)); }
-function markAwarenessActiveSegment(w){
-  const idx = activeSegmentIndexFromWeight(w);
-  document.querySelectorAll('.awareness-scale .seg').forEach((el,i)=>{
-    el.classList.toggle('active', i === idx);
-  });
-}
 
 function defaultFactors(){
   return WEIGHT_FIELDS.map(f => ({ ...f, weight:50 }));
 }
-
-function clampWeight(v){ return Math.max(0, Math.min(100, Math.round(v))); }
 let saveTimer=null, dirty=false;
 let recomputeTimer=null;
 function markDirty(){ dirty=true; clearTimeout(saveTimer); saveTimer=setTimeout(saveIfDirty,700); }
@@ -61,22 +51,11 @@ function renderFactors(){
     if(f.key === 'awareness'){
       li.innerHTML = `<div class="priority-badge">#${priority}</div><div class="content"><div class="label">Awareness</div>
 
-    <input id="awarenessSlider" class="weight-slider segmented" type="range" min="0" max="100" step="1" list="awarenessTicks" />
-    <datalist id="awarenessTicks">
-      <option value="0"></option>
-      <option value="20"></option>
-      <option value="40"></option>
-      <option value="60"></option>
-      <option value="80"></option>
-      <option value="100"></option>
-    </datalist>
-
-    <div class="awareness-scale">
-      <div class="seg">Unaware</div>
-      <div class="seg">Problem aware</div>
-      <div class="seg">Solution aware</div>
-      <div class="seg">Product aware</div>
-      <div class="seg">Most aware</div>
+    <div class="segmented-range">
+      <input id="awarenessSlider" class="weight-slider seg-awareness" type="range" min="0" max="100" step="1" />
+      <div class="segments" aria-hidden="true">
+        ${STAGE_LABELS.map(l=>`<div class="seg"><span>${l}</span></div>`).join('')}
+      </div>
     </div>
 
     <div class="meta"><span class="weight-badge">peso: <span id="awarenessWeight"></span>/100</span></div>
@@ -86,12 +65,11 @@ function renderFactors(){
       const weightEl = li.querySelector('#awarenessWeight');
       slider.value = f.weight;
       weightEl.textContent = f.weight;
-      markAwarenessActiveSegment(f.weight);
       slider.addEventListener('input', e => {
-        const v = parseInt(e.target.value,10);
+        const v = Math.max(0, Math.min(100, parseInt(e.target.value,10)));
+        slider.value = v;
         f.weight = v;
         weightEl.textContent = v;
-        markAwarenessActiveSegment(v);
         markDirty();
       });
     } else {
@@ -123,27 +101,27 @@ function resetWeights(){
 
 async function saveSettings(){
   const payload = {
-    winner_weights: Object.fromEntries(factors.map(x=>[x.key, clampWeight(x.weight)])),
-    winner_order: factors.map(x=>x.key)
+    winner_weights: Object.fromEntries(factors.map(f => [f.key, Math.max(0, Math.min(100, Math.round(f.weight)))])),
+    winner_order: factors.map(f => f.key)
   };
-  try{
+  try {
     await api.updateSettings(payload);
     scheduleRecompute();
     clearDirty();
-  }catch(err){
-    console.error('Error saving weights',err);
+  } catch (err) {
+    console.error('Error saving weights', err);
   }
 }
 
 function scheduleRecompute(){
   clearTimeout(recomputeTimer);
-  recomputeTimer = setTimeout(async ()=>{
-    try{
-      await api.fetchJson('/api/winner-score/recompute', { method:'POST', body: JSON.stringify({ scope: 'all' }) });
-    }catch(e){
+  recomputeTimer = setTimeout(async () => {
+    try {
+      await api.post('/api/winner-score/recompute', { scope: 'all' });
+    } catch (e) {
       console.warn('recompute failed', e);
     }
-  },800);
+  }, 700);
 }
 
 const AWARE_MAP = {
