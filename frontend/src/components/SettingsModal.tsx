@@ -1,5 +1,16 @@
 import React, { useEffect, useRef, useState } from "react";
 
+// Campos válidos para Winner Score (orden no importa)
+const WEIGHT_KEYS = [
+  "price",
+  "rating",
+  "units_sold",
+  "revenue",
+  "desire",
+  "competition",
+  "oldness",
+] as const;
+
 // Order matters - used to render sliders
 const FIELDS = [
   { key: "price", label: "Price" },
@@ -11,15 +22,13 @@ const FIELDS = [
   { key: "oldness", label: "Oldness" },
 ];
 
-const DEFAULTS_50 = {
-  price: 50,
-  rating: 50,
-  units_sold: 50,
-  revenue: 50,
-  desire: 50,
-  competition: 50,
-  oldness: 50,
-};
+const DEFAULTS_50: Record<(typeof WEIGHT_KEYS)[number], number> = WEIGHT_KEYS.reduce(
+  (acc, k) => {
+    acc[k] = 50;
+    return acc;
+  },
+  {} as Record<(typeof WEIGHT_KEYS)[number], number>
+);
 
 export default function SettingsModal() {
   const [weights, setWeights] = useState<Record<string, number>>(DEFAULTS_50);
@@ -72,10 +81,30 @@ export default function SettingsModal() {
     patchWeights(next, false);
   };
 
-  const onReset = () => {
-    const next = { ...DEFAULTS_50 };
-    setWeights(next);
-    patchWeights(next, true);
+  const onReset = async () => {
+    // 1) Cancela cualquier guardado debounced pendiente que pudiera pisarte el reset
+    if (saveDebounced?.current) clearTimeout(saveDebounced.current);
+
+    // 2) Construye el objeto RAW con todos a 50 (neutro)
+    const fifty: Record<string, number> = WEIGHT_KEYS.reduce((acc, k) => {
+      acc[k] = 50;
+      return acc;
+    }, {} as Record<string, number>);
+
+    // 3) Refleja el cambio en la UI inmediatamente
+    setWeights((prev) => ({ ...prev, ...fifty }));
+
+    // 4) Persiste en tu endpoint actual (RAW). Ignoramos la respuesta a propósito.
+    try {
+      await fetch("/api/config/winner-weights", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ weights: fifty }),
+        keepalive: true,
+      });
+    } catch {
+      /* opcional: toast de error silencioso */
+    }
   };
 
   // Flush si se cierra rápido el modal
