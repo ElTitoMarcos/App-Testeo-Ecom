@@ -443,9 +443,17 @@ body.dark .bottombar {
   overscroll-behavior: contain;
   flex: 1 1 auto;
 }
-.config-modal .modal-body {
-  max-height: none;
-  overflow: visible;
+.config-modal {
+  display:flex;
+  flex-direction:column;
+  max-height:90vh;
+}
+.config-modal .modal-header{ flex:0 0 auto; }
+.config-modal .modal-body{
+  flex:1 1 auto;
+  min-height:0;
+  overflow-y:auto;
+  padding:8px 0 12px;
 }
 .modal-body input {
   width: 100%;
@@ -704,16 +712,13 @@ input[type="range"].weight-range { width: 100% !important; }
   opacity: .85;
 }
 
-.weights-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-}
-@media (max-width: 991px), (max-height: 699px){
-  .weights-list { grid-template-columns:1fr; }
+.weights-list{
+  list-style:none;
+  margin:0;
+  padding:0;
+  display:grid;
+  grid-template-columns:1fr;
+  gap:10px;
 }
 
 .weight-card {
@@ -767,16 +772,14 @@ body.dark .weight-badge {
   color: #E5EAF5;
 }
 
-.config-footer {
-  position: sticky;
-  bottom: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 8px 0;
-  margin-top: 8px;
-  background: inherit;
-  box-shadow: 0 -2px 4px rgba(0,0,0,0.2);
+.config-footer{
+  flex:0 0 auto;
+  display:flex;
+  gap:10px;
+  padding:10px 0 0;
+  background:inherit;
+  border-top:1px solid rgba(255,255,255,.08);
+  z-index:2;
 }
 
 /* Cabecera y celdas de la columna Desire */
