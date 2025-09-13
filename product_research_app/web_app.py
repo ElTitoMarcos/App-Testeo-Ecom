@@ -604,9 +604,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             from .services.config import get_winner_weights_raw, compute_effective_int
 
             raw = get_winner_weights_raw()
-            eff_int = compute_effective_int(raw)
-            logger.info("weights_effective_int=%s", eff_int)
-            resp = {"weights": raw, "effective": {"int": eff_int}}
+            logger.info("weights_effective_int=%s", compute_effective_int(raw))
+            resp = {"weights": raw}
             self._set_json()
             self.wfile.write(json.dumps(resp).encode("utf-8"))
             return
@@ -1373,7 +1372,8 @@ class RequestHandler(BaseHTTPRequestHandler):
 
             saved = set_winner_weights_raw(raw_in)
             winner_score.invalidate_weights_cache()
-            resp = {"weights": saved, "effective": {"int": compute_effective_int(saved)}}
+            logger.info("weights_effective_int=%s", compute_effective_int(saved))
+            resp = {"weights": saved}
             self._set_json()
             self.wfile.write(json.dumps(resp).encode('utf-8'))
             return

@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 
+const API_WEIGHTS = "/api/config/winner-weights";
+
 // Order matters - used to render sliders
 const FIELDS = [
   { key: "price", label: "Price" },
@@ -29,7 +31,7 @@ export default function SettingsModal() {
   // CARGA (RAW)
   useEffect(() => {
     let alive = true;
-    fetch("/api/config/winner-weights")
+    fetch(API_WEIGHTS)
       .then((r) => r.json())
       .then((d) => {
         if (!alive) return;
@@ -49,7 +51,7 @@ export default function SettingsModal() {
   function patchWeights(next: Record<string, number>, immediate = false) {
     if (!loadedRef.current) return;
     const send = () => {
-      fetch("/api/config/winner-weights", {
+      fetch(API_WEIGHTS, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ weights: next }),
@@ -61,7 +63,7 @@ export default function SettingsModal() {
       send();
     } else {
       if (saveDebounced.current) clearTimeout(saveDebounced.current);
-      saveDebounced.current = setTimeout(send, 300);
+      saveDebounced.current = setTimeout(send, 250);
     }
   }
 
@@ -80,13 +82,12 @@ export default function SettingsModal() {
 
   // Flush si se cierra rápido el modal
   useEffect(() => {
-    const flush = () => {
+    return () => {
       if (saveDebounced.current) {
         clearTimeout(saveDebounced.current);
         patchWeights(weights, true);
       }
     };
-    return () => flush();
   }, [weights]);
 
   return (
