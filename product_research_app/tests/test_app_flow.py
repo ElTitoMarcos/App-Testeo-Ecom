@@ -40,7 +40,7 @@ def make_xlsx(path: Path, rows: List[List[object]]):
         "rating",
         "units_sold",
         "revenue",
-        "review_count",
+        "date_range",
         "image_count",
         "shipping_days",
         "profit_margin",
@@ -64,8 +64,8 @@ def test_import_generates_scores(tmp_path, monkeypatch):
     make_xlsx(
         xlsx,
         [
-            ["Prod1", 10, 4.5, 100, 1000, 50, 3, 5, 0.3, "High", "Low"],
-            ["Prod2", 20, 3.0, 50, 500, 10, 2, 7, 0.2, "Medium", "Medium"],
+            ["Prod1", 10, 4.5, 100, 1000, "2024-01-01~2024-02-01", 3, 5, 0.3, "High", "Low"],
+            ["Prod2", 20, 3.0, 50, 500, "2024-03-01~2024-04-01", 2, 7, 0.2, "Medium", "Medium"],
         ],
     )
     job_id = database.create_import_job(conn, str(xlsx))
@@ -578,7 +578,7 @@ def test_logging_and_explain_endpoint(tmp_path, monkeypatch):
     monkeypatch.setattr(web_app, "ensure_db", lambda: conn)
     web_app.DEBUG = True
 
-    config.update_weight("review_count", 2.0)
+    config.update_weight("oldness", 2.0)
 
     pid = database.insert_product(
         conn,
@@ -609,7 +609,7 @@ def test_logging_and_explain_endpoint(tmp_path, monkeypatch):
     web_app.RequestHandler.handle_scoring_v2_generate(handler)
 
     log_text = web_app.LOG_PATH.read_text()
-    assert "review_count" in log_text
+    assert "oldness" in log_text
     assert "effective_weights={'price': 0.0, 'rating': 1.0" in log_text
 
     parsed = urlparse(f"/api/winner-score/explain?ids={pid}")
@@ -626,7 +626,7 @@ def test_logging_and_explain_endpoint(tmp_path, monkeypatch):
     resp = json.loads(handler2.wfile.getvalue().decode("utf-8"))
     info = resp[str(pid)]
     assert "rating" in info["present"]
-    assert "review_count" in info["missing"]
+    assert "oldness" in info["missing"]
     expected = {k: (1.0 if k == "rating" else 0.0) for k in winner_score.ALLOWED_FIELDS}
     assert info["effective_weights"] == expected
 

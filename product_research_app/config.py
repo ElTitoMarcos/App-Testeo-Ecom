@@ -39,6 +39,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "aiImageCostMaxUSD": 0.02,
     "weightsVersion": 0,
     "weightsUpdatedAt": 0,
+    "oldness_preference": "newer",
 }
 
 
@@ -182,9 +183,9 @@ SCORING_DEFAULT_WEIGHTS: Dict[str, float] = {
     "rating": 1.0,
     "units_sold": 1.0,
     "revenue": 1.0,
-    "review_count": 1.0,
     "desire": 1.0,
     "competition": 1.0,
+    "oldness": 1.0,
 }
 
 

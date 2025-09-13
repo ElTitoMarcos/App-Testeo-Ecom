@@ -2590,6 +2590,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         else:
             rows = database.list_products(conn)
 
+        winner_calc.prepare_oldness_bounds(rows)
+
         data: Dict[str, Any] = {}
         for row in rows:
             res = winner_calc.compute_winner_score_v2(row, weights)
