@@ -170,7 +170,7 @@ function stratifiedSample(list, n){
 }
 
 async function adjustWeightsAI(){
-  // Helpers locales para robustez (no toques computeOldnessDays ni awarenessValue)
+  // Helpers
   const num = (v) => {
     const n = Number(v);
     return Number.isFinite(n) ? n : 0;
@@ -193,11 +193,11 @@ async function adjustWeightsAI(){
       return;
     }
 
-    // Construimos dataset con las 8 features del Winner Score
+    // Dataset con las 8 features del Winner Score
     const rows = products.map(p => {
       const ratingRaw = p.rating ?? (p.extras && p.extras.rating);
-      const unitsRaw  = p.units_sold ?? (p.extras && p.extras['Item Sold']);
-      const revRaw    = p.revenue ?? (p.extras && p.extras['Revenue($)']);
+      const unitsRaw  = p.units_sold ?? (p.extras && (p.extras['Item Sold'] || p.extras['Orders']));
+      const revRaw    = p.revenue ?? (p.extras && (p.extras['Revenue($)'] || p.extras['Revenue']));
       return {
         price:       num(p.price),
         rating:      num(ratingRaw),
@@ -210,31 +210,32 @@ async function adjustWeightsAI(){
       };
     });
 
-    // Target: preferimos 'revenue' si está presente en ≥50% de filas, si no 'units_sold'
+    // Target: revenue si >=50% de filas lo tienen; si no, units_sold
     const revCount = rows.filter(r => r.revenue > 0).length;
     const targetName = (revCount >= Math.ceil(rows.length * 0.5)) ? 'revenue' : 'units_sold';
 
-    // data_sample: el backend espera un campo 'target' numérico en cada fila
-    let data_sample = rows.map(r => ({ ...r, target: num(r[targetName]) }));
+    // Enviar el MAYOR número posible en una sola llamada, con tope razonable por coste
+    const cfg = (window.userConfig && window.userConfig.aiCost) ? window.userConfig.aiCost : { costCapUSD: 0.25, estTokensPerItemIn: 300, estTokensPerItemOut: 80 };
+    const estTokPerItem = (num(cfg.estTokensPerItemIn) + num(cfg.estTokensPerItemOut)) || 380;
+    const pricePerK = 0.002; // estimación conservadora
+    const maxByBudget = Math.max(30, Math.floor((cfg.costCapUSD || 0.25) / pricePerK * 1000 / estTokPerItem));
+    const HARD_CAP = 500; // seguridad
+    const MAX = Math.min(HARD_CAP, Math.max(60, maxByBudget));
 
-    // Para controlar coste: si hay muchísimos, muestrear de forma estratificada por el target
-    const MAX = 150; // puedes subirlo si te compensa el coste
+    let data_sample = rows.map(r => ({ ...r, target: r[targetName] }));
     if (data_sample.length > MAX){
       data_sample = stratifiedSampleBy(data_sample, targetName, MAX);
     }
 
-    // Payload para el endpoint GPT (features -> las 8 claves del score)
     const features = (typeof metricKeys !== 'undefined' && metricKeys.length) ? metricKeys : [
       'price','rating','units_sold','revenue','desire','competition','oldness','awareness'
     ];
     const payload = { features, target: targetName, data_sample };
 
-    // 1º intento: GPT
+    // 1 intento: GPT; fallback estadístico si falla
     let res = await fetch('/scoring/v2/auto-weights-gpt', {
       method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
     });
-
-    // Fallback: correlación estadística si GPT falla
     if (!res.ok){
       res = await fetch('/scoring/v2/auto-weights-stat', {
         method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
@@ -242,27 +243,40 @@ async function adjustWeightsAI(){
     }
     if (!res.ok) throw new Error('Auto-weights request failed');
 
-    const data = await res.json(); // { weights: {k:0..1}, method:'gpt'|'stat' }
-    const returned = data && data.weights ? data.weights : {};
-    const newWeights = {};
-    features.forEach(k => {
-      let v = num(returned[k]);
-      // Si viene 0..1, escalar a 0..100
-      if (v > 0 && v <= 1) v = v * 100;
-      if (v < 0) v = 0; if (v > 100) v = 100;
-      newWeights[k] = Math.round(v);
-    });
+    const out = await res.json(); // { weights:{k:0..1|0..100}, method,... }
+    const returned = (out && out.weights) ? out.weights : {};
 
-    // Aplicar en UI y persistir
+    // Normaliza a 0..100 y ordena por importancia
+    const intWeights = {};
+    for (const k of features){
+      let v = num(returned[k]);
+      if (v > 0 && v <= 1) v = v * 100;
+      v = Math.max(0, Math.min(100, Math.round(v)));
+      intWeights[k] = v;
+    }
+    const newOrder = [...features].sort((a,b) => (intWeights[b]||0) - (intWeights[a]||0));
+
+    // Aplica a la UI (reordena y actualiza sliders)
     if (Array.isArray(window.factors) && window.factors.length){
-      window.factors = window.factors.map(f => ({ ...f, weight: newWeights[f.key] ?? f.weight }));
+      const byKey = Object.fromEntries(window.factors.map(f => [f.key, f]));
+      window.factors = newOrder.filter(k => byKey[k]).map(k => ({ ...byKey[k], weight: intWeights[k] ?? byKey[k].weight }));
       if (typeof renderFactors === 'function') renderFactors();
     }
-    if (typeof saveSettings === 'function') await saveSettings();
+
+    // Persiste inmediatamente {weights, order} con un solo PATCH
+    await fetch('/api/config/winner-weights', {
+      method:'PATCH', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ weights: intWeights, order: newOrder })
+    });
+
+    // Recarga desde servidor para reflejar lo guardado
+    if (typeof openConfigModal === 'function') {
+      await openConfigModal();
+    }
 
     if (typeof toast !== 'undefined' && toast.success){
-      const method = (data && data.method) ? data.method : 'auto';
-      toast.success(`Pesos ajustados por IA (${method})`);
+      const method = (out && out.method) ? out.method : 'auto';
+      toast.success(`Pesos ajustados por IA (${method}) con ${data_sample.length} muestras`);
     }
   }catch(err){
     console.error(err);
