@@ -376,7 +376,7 @@ def test_config_oldness_preference_roundtrip(tmp_path, monkeypatch):
 
     class DummyGet:
         def __init__(self):
-            self.path = "/config"
+            self.path = "/api/config"
             self.headers = {}
             self.rfile = io.BytesIO()
             self.wfile = io.BytesIO()
@@ -387,13 +387,13 @@ def test_config_oldness_preference_roundtrip(tmp_path, monkeypatch):
     g = DummyGet()
     web_app.RequestHandler.do_GET(g)
     resp = json.loads(g.wfile.getvalue().decode("utf-8"))
-    assert resp.get("oldness_preference") == "newer"
+    assert resp.get("oldness_preference_pct") == 50
 
-    body = json.dumps({"oldness_preference": "older"})
+    body = json.dumps({"oldness_preference_pct": 70})
 
-    class DummyPost:
+    class DummyPut:
         def __init__(self, body):
-            self.path = "/setconfig"
+            self.path = "/api/config"
             self.headers = {"Content-Length": str(len(body))}
             self.rfile = io.BytesIO(body.encode("utf-8"))
             self.wfile = io.BytesIO()
@@ -401,10 +401,10 @@ def test_config_oldness_preference_roundtrip(tmp_path, monkeypatch):
         def _set_json(self, code=200):
             self.status = code
 
-    p = DummyPost(body)
-    web_app.RequestHandler.handle_setconfig(p)
+    p = DummyPut(body)
+    web_app.RequestHandler.do_PUT(p)
     assert p.status == 200
-    assert config.load_config().get("oldness_preference") == "older"
+    assert config.load_config().get("oldness_preference_pct") == 70
 
 def test_get_endpoints_return_json(tmp_path, monkeypatch):
     setup_env(tmp_path, monkeypatch)

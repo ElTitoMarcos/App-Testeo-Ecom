@@ -719,12 +719,21 @@ class RequestHandler(BaseHTTPRequestHandler):
                 "model": cfg.get("model", "gpt-4o"),
                 "weights": config.get_weights(),
                 "has_api_key": bool(key),
-                "oldness_preference": cfg.get("oldness_preference", "newer"),
+                "oldness_preference_pct": cfg.get("oldness_preference_pct", 50),
             }
             if key:
                 data["api_key_last4"] = key[-4:]
                 data["api_key_length"] = len(key)
                 data["api_key_hash"] = hashlib.sha256(key.encode("utf-8")).hexdigest()
+            self._set_json()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+            return
+        if path == "/api/config":
+            cfg = config.load_config()
+            data = {
+                "weights": cfg.get("weights", {}),
+                "oldness_preference_pct": cfg.get("oldness_preference_pct", 50),
+            }
             self._set_json()
             self.wfile.write(json.dumps(data).encode("utf-8"))
             return
@@ -1318,6 +1327,22 @@ class RequestHandler(BaseHTTPRequestHandler):
                 except Exception:
                     continue
             cfg['weights'] = weights_cfg
+            config.save_config(cfg)
+            self._set_json()
+            self.wfile.write(json.dumps({"status": "ok"}).encode('utf-8'))
+            return
+        if path == "/api/config":
+            length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(length).decode('utf-8')
+            try:
+                data = json.loads(body or "{}")
+            except Exception:
+                data = {}
+            cfg = config.load_config()
+            try:
+                cfg['oldness_preference_pct'] = int(data.get('oldness_preference_pct', 50))
+            except Exception:
+                cfg['oldness_preference_pct'] = 50
             config.save_config(cfg)
             self._set_json()
             self.wfile.write(json.dumps({"status": "ok"}).encode('utf-8'))
@@ -2160,10 +2185,11 @@ class RequestHandler(BaseHTTPRequestHandler):
             cfg['weights'] = winner_calc.sanitize_weights(data['weights'])
         if 'autoFillIAOnImport' in data:
             cfg['autoFillIAOnImport'] = bool(data['autoFillIAOnImport'])
-        if 'oldness_preference' in data:
-            pref = str(data.get('oldness_preference', '')).strip().lower()
-            if pref in ("older", "newer"):
-                cfg['oldness_preference'] = pref
+        if 'oldness_preference_pct' in data:
+            try:
+                cfg['oldness_preference_pct'] = int(data.get('oldness_preference_pct', 50))
+            except Exception:
+                pass
         config.save_config(cfg)
         self._set_json()
         self.wfile.write(json.dumps({"status": "ok"}).encode('utf-8'))

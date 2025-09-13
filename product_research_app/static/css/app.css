@@ -652,6 +652,7 @@ th.ec-col-competition,   td.ec-col-competition   { width: var(--ec-w-competition
   margin-bottom: 16px;
   width: 100%;
 }
+.oldness-pref-row { margin-top: -6px; }
 
 /* Icono drag y valor a la derecha consistentes */
 .weight-drag { text-align: center; opacity: .9; cursor: grab; }

@@ -70,6 +70,52 @@ def compute_oldness_days(product: dict) -> int | None:
     return max(0, delta)
 
 
+def minmax_norm(pop: list[float], v: float) -> float:
+    vals = [x for x in pop if x is not None]
+    if not vals:
+        return 0.0
+    vmin, vmax = min(vals), max(vals)
+    if vmax == vmin:
+        # Todos iguales: devuelve neutro para NO empujar a 0 o 1
+        return 0.5
+    return (v - vmin) / (vmax - vmin)
+
+
+def get_oldness_pref01(cfg: dict) -> float:
+    # 0 = prefiero recientes, 1 = prefiero antiguos
+    try:
+        p = float(cfg.get("oldness_preference_pct", 50)) / 100.0
+    except Exception:
+        p = 0.5
+    return max(0.0, min(1.0, p))
+
+
+def parse_date_yyyy_mm_dd(s: str | None):
+    if not s:
+        return None
+    try:
+        return datetime.strptime(str(s)[:10], "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def compute_oldness_days_from_product(p: dict) -> int | None:
+    # usa date_range "YYYY-MM-DD~YYYY-MM-DD" si existe; si no, first_seen/created_at
+    dr = (p.get("date_range") or p.get("Date Range") or "").strip()
+    start = None
+    if "~" in dr:
+        left = dr.split("~", 1)[0].strip()
+        start = parse_date_yyyy_mm_dd(left)
+    if start is None:
+        for k in ("first_seen", "created_at", "createdAt"):
+            start = parse_date_yyyy_mm_dd(p.get(k))
+            if start:
+                break
+    if start is None:
+        return None
+    return max(0, (date.today() - start).days)
+
+
 OLDNESS_MIN = 0.0
 OLDNESS_MAX = 0.0
 
@@ -449,9 +495,12 @@ def _norm_oldness(v: float) -> float:
         n = 0.0
     else:
         n = (v - vmin) / (vmax - vmin)
-    pref = config.load_config().get("oldness_preference", "newer")
-    if pref == "newer":
-        n = 1.0 - n
+    cfg = config.load_config()
+    try:
+        pref = float(cfg.get("oldness_preference_pct", 50)) / 100.0
+    except Exception:
+        pref = 0.5
+    n = pref * n + (1.0 - pref) * (1.0 - n)
     return clamp(n)
 
 def _norm_identity(v: float) -> float:
@@ -567,7 +616,38 @@ def generate_winner_scores(
     else:
         rows = database.list_products(conn)
 
-    prepare_oldness_bounds(rows)
+    rows_list = list(rows)
+
+    ALL_KEYS = ("price", "rating", "units_sold", "revenue", "desire", "competition", "oldness")
+    raw_by_product: list[dict] = []
+    for row in rows_list:
+        extras = _get_extras(row)
+        data: dict = {}
+        try:
+            data.update(dict(row))
+        except Exception:
+            pass
+        data.update(extras)
+        raw = {
+            "price": _get_from_sources(row, extras, ["price"]),
+            "rating": _get_from_sources(row, extras, ["rating", "Product Rating"]),
+            "units_sold": _get_from_sources(row, extras, ["units_sold", "Item Sold"]),
+            "revenue": _get_from_sources(row, extras, ["revenue", "Revenue($)"]),
+            "desire": _feat_desire(row, extras),
+            "competition": _feat_competition(row, extras),
+            "oldness": compute_oldness_days_from_product(data),
+        }
+        raw_by_product.append(raw)
+
+    dataset_by_key = {k: [row[k] for row in raw_by_product] for k in ALL_KEYS}
+
+    cfg = config.load_config()
+    pref = get_oldness_pref01(cfg)
+    logger.debug(
+        "Winner Score: oldness_preference_pct=%s pref01=%.3f",
+        cfg.get("oldness_preference_pct"),
+        pref,
+    )
 
     processed = 0
     updated_int = 0
@@ -576,28 +656,44 @@ def generate_winner_scores(
     diag_missing: Optional[Iterable[str]] = None
     diag_sum_filtered: float = 0.0
     diag_eff: Dict[str, float] = {}
-    for row in rows:
+    for row, raw_row in zip(rows_list, raw_by_product):
         pid = row["id"]
         old_score = row["winner_score"]
-        res = compute_winner_score_v2(row, weights)
-        sf = res.get("score_float") or 0.0
-        present = set(res.get("present_fields", []))
-        missing = set(res.get("missing_fields", []))
-        eff_w = {k: round(v, 3) for k, v in res.get("effective_weights", {}).items()}
+        present: set[str] = set()
+        missing: set[str] = set()
+        norms: Dict[str, float] = {}
+        for k in ALL_KEYS:
+            raw_v = raw_row.get(k)
+            if raw_v is None:
+                missing.add(k)
+                continue
+            n = minmax_norm(dataset_by_key[k], raw_v)
+            if k == "oldness":
+                n = pref * n + (1.0 - pref) * (1.0 - n)
+            norms[k] = n
+            present.add(k)
+
+        eff_weights = {k: weights.get(k, 0.0) for k in norms}
+        sum_filtered = sum(eff_weights.values())
+        s = sum_filtered or 1.0
+        eff_weights = {k: v / s for k, v in eff_weights.items()}
+        score_raw = sum(eff_weights[k] * norms[k] for k in norms)
+        score_raw_0_100 = max(0.0, min(1.0, score_raw)) * 100.0
+        new_score = int(round(score_raw_0_100))
+
+        eff_all = {k: eff_weights.get(k, 0.0) for k in ALLOWED_FIELDS}
         eff_hash = hashlib.sha1(
-            json.dumps(res.get("effective_weights", {}), sort_keys=True).encode("utf-8")
+            json.dumps(eff_all, sort_keys=True).encode("utf-8")
         ).hexdigest()[:8]
         weights_hash_eff = eff_hash
-        eff_w_int = {k: int(round(v * 100)) for k, v in res.get("effective_weights", {}).items()}
+        eff_w_int = {k: int(round(v * 100)) for k, v in eff_all.items()}
+        eff_w = {k: round(v, 3) for k, v in eff_all.items()}
 
         if debug and diag_present is None:
             diag_present = present
             diag_missing = missing
-            diag_sum_filtered = float(res.get("sum_filtered", 0.0))
-            diag_eff = {k: round(v, 6) for k, v in res.get("effective_weights", {}).items()}
-
-        score_raw_0_100 = max(0.0, min(1.0, sf)) * 100.0
-        new_score = int(round(score_raw_0_100))
+            diag_sum_filtered = float(sum_filtered)
+            diag_eff = {k: round(v, 6) for k, v in eff_all.items()}
 
         if new_score != old_score or row["winner_score_raw"] != score_raw_0_100:
             conn.execute(

@@ -546,6 +546,14 @@ function saveWeightDebounced(key, value){
   saveFns[key](value);
 }
 
+const saveOldnessPref = debounce(val=>{
+  fetch('/api/config', {
+    method:'PUT',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ oldness_preference_pct: val })
+  });
+},300);
+
 function updateSliderLabel(el) {
   const num = Math.round(Number(el.value) || 0);
   el.closest('.weight-row')?.querySelector('.weight-value')?.replaceChildren(document.createTextNode(String(num)));
@@ -572,8 +580,24 @@ function renderWeights(){
     });
     ['mousedown','touchstart'].forEach(ev=>{ range.addEventListener(ev,e=>{ e.stopPropagation(); }); });
     list.appendChild(li);
+    if(key==='oldness'){
+      const pref=document.createElement('li');
+      const val=userConfig.oldness_preference_pct ?? 50;
+      pref.className='weight-row oldness-pref-row';
+      pref.innerHTML=`<div class="weight-drag" aria-hidden></div><div class="weight-slider"><input class="weight-range" type="range" min="0" max="100" step="1" value="${val}"/><div class="slider-extremes"><span>Más reciente</span><span>Más antiguo</span></div></div><div class="weight-value">${val}</div>`;
+      const prange=pref.querySelector('.weight-range');
+      prange.addEventListener('input',e=>{
+        const v=Math.round(parseFloat(e.target.value));
+        e.target.value=v;
+        userConfig.oldness_preference_pct=v;
+        updateSliderLabel(prange);
+        saveOldnessPref(v);
+      });
+      ['mousedown','touchstart'].forEach(ev=>{ prange.addEventListener(ev,e=>{ e.stopPropagation(); }); });
+      list.appendChild(pref);
+    }
   });
-  Sortable.create(list,{ handle:'.weight-drag', animation:150, onEnd:()=>{ weightOrder=Array.from(list.children).map(li=>li.dataset.key); }});
+  Sortable.create(list,{ handle:'.weight-drag', animation:150, onEnd:()=>{ weightOrder=Array.from(list.children).map(li=>li.dataset.key).filter(Boolean); }});
 }
 
 function resetWeights(){
@@ -687,6 +711,13 @@ async function loadWeights(){
       if(metricKeys.includes(k)) weightValues[k] = Math.round(weights[k]);
     }
     weightOrder = defaultOrder();
+    try{
+      const prefRes = await fetch('/api/config');
+      const cfg = await prefRes.json();
+      userConfig.oldness_preference_pct = Number(cfg.oldness_preference_pct ?? 50);
+    }catch(_err){
+      userConfig.oldness_preference_pct = 50;
+    }
     renderWeights();
     document.getElementById('resetWeights').onclick = resetWeights;
     const aiBtn=document.getElementById('aiWeights');
