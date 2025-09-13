@@ -1326,6 +1326,39 @@ class RequestHandler(BaseHTTPRequestHandler):
     def do_PATCH(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path.startswith("/api/products/"):
+            try:
+                pid = int(path.split("/")[-1])
+            except Exception:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"error": "Invalid ID"}).encode("utf-8"))
+                return
+            length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(length).decode('utf-8') if length else ""
+            try:
+                data = json.loads(body or "{}")
+                if not isinstance(data, dict):
+                    raise ValueError
+            except Exception:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+                return
+            logger.info("PATCH product_id=%s fields=%s", pid, list(data.keys()))
+            conn = ensure_db()
+            prod = database.get_product(conn, pid)
+            if not prod:
+                logger.warning("PATCH not found product_id=%s", pid)
+                self._set_json(404)
+                self.wfile.write(json.dumps({"error": "Not found"}).encode('utf-8'))
+                return
+            allowed = {"desire", "desire_magnitude", "awareness_level", "competition_level"}
+            fields = {k: v for k, v in data.items() if k in allowed}
+            if fields:
+                database.update_product(conn, pid, **fields)
+            product = row_to_dict(database.get_product(conn, pid))
+            self._set_json()
+            self.wfile.write(json.dumps(product).encode('utf-8'))
+            return
         if path == "/api/config/winner-weights":
             length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(length).decode('utf-8')

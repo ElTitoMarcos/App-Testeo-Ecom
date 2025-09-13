@@ -357,7 +357,7 @@ def insert_product(
         currency: Optional currency code
         image_url: Optional URL or path to image
         source: Optional source string describing where the product was imported from
-        desire: Short text describing the desire (<=180 characters)
+        desire: Optional text describing the desire
         desire_magnitude: One of 'Low', 'Medium', 'High'
         awareness_level: One of 'Unaware','Problem-Aware','Solution-Aware','Product-Aware','Most Aware'
         competition_level: One of 'Low', 'Medium', 'High'
@@ -369,8 +369,6 @@ def insert_product(
     """
     cur = conn.cursor()
     import_date = datetime.utcnow().isoformat()
-    if desire is not None and len(desire) > 180:
-        desire = desire[:180]
     allowed_tri = {"Low", "Medium", "High"}
     if desire_magnitude not in allowed_tri:
         desire_magnitude = None
@@ -502,8 +500,6 @@ def update_product(
     data = {k: v for k, v in fields.items() if k in allowed_cols}
     if not data:
         return
-    if "desire" in data and data["desire"] and len(data["desire"]) > 180:
-        data["desire"] = data["desire"][:180]
     tri_vals = {"Low", "Medium", "High"}
     if "desire_magnitude" in data and data["desire_magnitude"] not in tri_vals:
         data["desire_magnitude"] = None
