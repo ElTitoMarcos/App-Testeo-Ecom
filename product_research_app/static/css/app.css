@@ -709,11 +709,11 @@ input[type="range"].weight-range { width: 100% !important; }
   margin: 0;
   padding: 0;
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   gap: 10px;
 }
-@media (max-width: 991px), (max-height: 699px){
-  .weights-list { grid-template-columns:1fr; }
+@media (min-width: 0){
+  .weights-list{ grid-template-columns: 1fr; }
 }
 
 .weight-card {
@@ -726,7 +726,6 @@ input[type="range"].weight-range { width: 100% !important; }
 }
 .weight-card:nth-child(odd) { background: rgba(0,0,0,0.03); }
 body.dark .weight-card:nth-child(odd) { background: rgba(255,255,255,0.03); }
-.weights-list .weight-card:nth-child(odd){ margin-bottom:0; }
 
 .priority-badge {
   width: 40px;
@@ -770,13 +769,14 @@ body.dark .weight-badge {
 .config-footer {
   position: sticky;
   bottom: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 8px 0;
-  margin-top: 8px;
-  background: inherit;
-  box-shadow: 0 -2px 4px rgba(0,0,0,0.2);
+  display:flex;
+  flex-wrap:wrap;
+  gap:10px;
+  justify-content:flex-start;
+  padding:8px 0;
+  margin-top:8px;
+  background:inherit;
+  box-shadow:0 -2px 4px rgba(0,0,0,0.2);
 }
 
 /* Cabecera y celdas de la columna Desire */
