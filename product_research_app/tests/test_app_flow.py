@@ -296,7 +296,7 @@ def test_desire_serialization_and_logging(tmp_path, monkeypatch):
     assert isinstance(p1["price"], (int, float))
     assert p2["desire"] == "Extra"
     assert p2["extras"].get("desire") == "Extra"
-    assert p3["desire"] == ""
+    assert p3["desire"] is None
     log_text = web_app.LOG_PATH.read_text()
     assert f"desire_missing=true" in log_text and f"product={pid3}" in log_text
 
