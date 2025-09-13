@@ -2,9 +2,10 @@ import sqlite3
 import pytest
 import sys
 from pathlib import Path
+import math
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
-from product_research_app import config, database
+from product_research_app import config, database, gpt
 from product_research_app.utils.db import row_to_dict, rget
 from product_research_app.services import winner_score as ws
 from datetime import date, timedelta
@@ -103,3 +104,15 @@ def test_awareness_weight_impacts_score():
     hi0 = ws.compute_winner_score_v2(prod_high, {"awareness": 0})
     lo0 = ws.compute_winner_score_v2(prod_low, {"awareness": 0})
     assert hi0["score"] == lo0["score"]
+
+def test_recommend_winner_weights_includes_awareness(monkeypatch):
+    # simulate GPT returning weights for price and awareness
+    def fake_call(api_key, model, messages):
+        return {"choices": [{"message": {"content": '{"pesos": {"price": 1, "awareness": 3}}'}}]}
+
+    monkeypatch.setattr(gpt, "call_openai_chat", fake_call)
+    samples = [{"price": 10.0, "awareness": 0.75, "target": 5.0}]
+    res = gpt.recommend_winner_weights("k", "m", samples, "target")
+    weights = res["weights"]
+    assert set(weights) == {"price", "awareness"}
+    assert math.isclose(sum(weights.values()), 1.0)
