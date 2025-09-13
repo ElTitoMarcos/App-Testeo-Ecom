@@ -475,19 +475,20 @@ function preprocessProducts(list){
   dupMap.forEach(arr => { if (arr.length > 1) arr.forEach(it => it.isDuplicate = true); });
 }
 
-const WEIGHT_KEYS = ['price','rating','units_sold','revenue','desire','competition','review_count'];
+const WEIGHT_FIELDS = [
+  { key: 'price',        label: 'Price' },
+  { key: 'rating',       label: 'Rating' },
+  { key: 'units_sold',   label: 'Units Sold' },
+  { key: 'revenue',      label: 'Revenue' },
+  { key: 'desire',       label: 'Desire' },
+  { key: 'competition',  label: 'Competition' },
+  { key: 'review_count', label: 'Review Count' }
+];
+const WEIGHT_KEYS = WEIGHT_FIELDS.map(f=>f.key);
 const ALIASES = { unitsSold:'units_sold', orders:'units_sold', reviews:'review_count' };
 function normalizeKey(k){ return ALIASES[k] || k; }
-const metricDefs = [
-  {key:'price',label:'Price'},
-  {key:'rating',label:'Rating'},
-  {key:'units_sold',label:'Units Sold'},
-  {key:'revenue',label:'Revenue'},
-  {key:'desire',label:'Desire'},
-  {key:'competition',label:'Competition'},
-  {key:'review_count',label:'Review Count'}
-];
-const metricKeys = metricDefs.map(m=>m.key);
+const metricDefs = WEIGHT_FIELDS;
+const metricKeys = WEIGHT_KEYS;
 let weightValues = {};
 let weightOrder = [];
 
@@ -495,7 +496,7 @@ function debounce(fn, ms=150){
   let t; return (...args)=>{ clearTimeout(t); t=setTimeout(()=>fn(...args), ms); };
 }
 
-function defaultWeights(){ const o={}; WEIGHT_KEYS.forEach(k=>o[k]=0); return o; }
+function defaultWeights(){ const o={}; WEIGHT_KEYS.forEach(k=>o[k]=1); return o; }
 function defaultOrder(){ return [...WEIGHT_KEYS]; }
 
 const saveFns = {};
@@ -579,19 +580,35 @@ function stratifiedSample(list, n){
 async function adjustWeightsAI(){
   try{
     let sample=stratifiedSample(allProducts||[],30);
-    let payload=sample.map(p=>({name:p.name,category:p.category,price:p.price,units:p.units_sold||(p.extras&&p.extras['Item Sold'])||0,ingresos:p.revenue||(p.extras&&p.extras['Revenue($)'])||0,conversion:p.extras&&p.extras['Creator Conversion Ratio'],fecha:p.extras&&p.extras['date_range'],desire:p.desire_magnitude,awareness:p.awareness_level,competition:p.competition_level}));
+    let payload=sample.map(p=>({
+      price:p.price,
+      rating:p.rating || (p.extras&&p.extras.rating),
+      units_sold:p.units_sold||(p.extras&&p.extras['Item Sold'])||0,
+      revenue:p.revenue||(p.extras&&p.extras['Revenue($)'])||0,
+      desire:p.desire_magnitude,
+      competition:p.competition_level,
+      review_count:p.review_count||(p.extras&&p.extras.reviews)||0
+    }));
     let tokenEstimate=JSON.stringify(payload).length/4;
     const maxTokens=0.30/0.002*1000;
     while(tokenEstimate>maxTokens && sample.length>1){
       const ratio=maxTokens/tokenEstimate;
       const newN=Math.max(1,Math.floor(sample.length*ratio));
       sample=stratifiedSample(allProducts||[],newN);
-      payload=sample.map(p=>({name:p.name,category:p.category,price:p.price,units:p.units_sold||(p.extras&&p.extras['Item Sold'])||0,ingresos:p.revenue||(p.extras&&p.extras['Revenue($)'])||0,conversion:p.extras&&p.extras['Creator Conversion Ratio'],fecha:p.extras&&p.extras['date_range'],desire:p.desire_magnitude,awareness:p.awareness_level,competition:p.competition_level}));
+      payload=sample.map(p=>({
+        price:p.price,
+        rating:p.rating || (p.extras&&p.extras.rating),
+        units_sold:p.units_sold||(p.extras&&p.extras['Item Sold'])||0,
+        revenue:p.revenue||(p.extras&&p.extras['Revenue($)'])||0,
+        desire:p.desire_magnitude,
+        competition:p.competition_level,
+        review_count:p.review_count||(p.extras&&p.extras.reviews)||0
+      }));
       tokenEstimate=JSON.stringify(payload).length/4;
     }
     const cost=tokenEstimate/1000*0.002;
     toast.info(`Analizando ${sample.length} productos (~$${cost.toFixed(2)})`);
-    const instruction='Devuelve SOLO un JSON plano con pesos 0-100 para estas 10 claves exactas, sin texto adicional:\n["magnitud_deseo","nivel_consciencia_headroom","evidencia_demanda","tasa_conversion","ventas_por_dia","recencia_lanzamiento","competition_level_invertido","facilidad_anuncio","escalabilidad","durabilidad_recurrencia"]';
+    const instruction='Devuelve SOLO un JSON plano con pesos 0-100 para estas 7 claves exactas, sin texto adicional:\n["price","rating","units_sold","revenue","desire","competition","review_count"]';
     const prompt=`Basado en estos productos ${JSON.stringify(payload)}\n${instruction}`;
     let res=await fetch('/custom_gpt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,response_format:{type:'json_object'}})});
     if(!res.ok){
@@ -638,8 +655,10 @@ async function loadWeights(){
   try{
     const res = await fetch('/api/config/winner-weights');
     const { weights } = await res.json();
-    weightValues = {};
-    for(const k in weights){ weightValues[k] = Math.round(weights[k]); }
+    weightValues = defaultWeights();
+    for(const k in weights){
+      if(metricKeys.includes(k)) weightValues[k] = Math.round(weights[k]);
+    }
     weightOrder = defaultOrder();
     renderWeights();
     document.getElementById('resetWeights').onclick = resetWeights;
