@@ -11,12 +11,12 @@ from pathlib import Path
 from typing import Dict, Any, Iterable, Optional, Callable
 
 from ..utils.db import rget
-from .. import config, database
+from .. import database
 
 logger = logging.getLogger(__name__)
 
-# Winner Score weight keys and compatibility aliases
-WEIGHT_KEYS = [
+# Winner Score allowed fields and compatibility aliases
+ALLOWED_FIELDS = (
     "price",
     "rating",
     "units_sold",
@@ -24,24 +24,30 @@ WEIGHT_KEYS = [
     "desire",
     "competition",
     "review_count",
-    "image_count",
-    "profit_margin",
-    "shipping_days",
-]
+)
+DEFAULT_WEIGHTS = {k: 1.0 for k in ALLOWED_FIELDS}
+
+WEIGHT_KEYS = list(ALLOWED_FIELDS)
 
 ALIASES = {
     "unitsSold": "units_sold",
     "orders": "units_sold",
     "reviews": "review_count",
-    "imgs": "image_count",
-    "ship_days": "shipping_days",
 }
 
 WEIGHTS_CACHE: Dict[str, float] | None = None
 WEIGHTS_VERSION: int = 0
 
 WINNER_WEIGHTS_FILE = Path(__file__).resolve().parent / "winner_weights.json"
-DEFAULT_WEIGHTS = config.SCORING_DEFAULT_WEIGHTS.copy()
+
+
+def sanitize_weights(weights: dict | None) -> dict:
+    w = (weights or {}).copy()
+    w = {k: float(v) for k, v in w.items() if k in ALLOWED_FIELDS}
+    if not w:
+        w = DEFAULT_WEIGHTS.copy()
+    s = sum(w.values()) or 1.0
+    return {k: v / s for k, v in w.items()}
 
 
 def invalidate_weights_cache() -> None:
@@ -115,20 +121,17 @@ def load_winner_weights() -> Dict[str, float]:
     if WEIGHTS_CACHE is not None:
         return WEIGHTS_CACHE
     raw = load_winner_weights_raw().get("weights", {})
-    weights: Dict[str, float] = {}
-    for key in WEIGHT_KEYS:
-        try:
-            weights[key] = float(raw.get(key, 0.0))
-        except Exception:
-            weights[key] = 0.0
+    weights = sanitize_weights(raw)
     WEIGHTS_CACHE = weights
     return weights
 
 
 def update_winner_weight(key: str, value: float) -> None:
     """Update a single weight in persistent storage."""
-
-    norm = normalize_weight_key(key)
+    try:
+        norm = normalize_weight_key(key)
+    except ValueError:
+        return
     data = load_winner_weights_raw()
     weights = data.get("weights", {})
     try:
@@ -144,15 +147,14 @@ def update_winner_weight(key: str, value: float) -> None:
 
 def set_winner_weights(weights: Dict[str, float]) -> None:
     """Replace or update multiple weights at once."""
-
     data = load_winner_weights_raw()
-    stored = data.get("weights", {})
+    cleaned: Dict[str, float] = {}
     for k, v in weights.items():
         try:
-            stored[normalize_weight_key(k)] = float(v)
+            cleaned[normalize_weight_key(k)] = float(v)
         except ValueError:
             continue
-    data["weights"] = stored
+    data["weights"] = sanitize_weights(cleaned)
     data["updated_at"] = datetime.utcnow().isoformat()
     data["version"] = int(data.get("version", 0)) + 1
     save_winner_weights_raw(data)
@@ -348,9 +350,6 @@ FEATURE_MAP: Dict[str, FeatureGetter] = {
     "units_sold": lambda p, e: _get_from_sources(p, e, ["units_sold", "Item Sold"]),
     "revenue": lambda p, e: _get_from_sources(p, e, ["revenue", "Revenue($)"]),
     "review_count": lambda p, e: _get_from_sources(p, e, ["review_count", "reviews", "reviewcount"]),
-    "image_count": lambda p, e: _get_from_sources(p, e, ["image_count", "images"]),
-    "shipping_days": lambda p, e: _get_from_sources(p, e, ["shipping_days", "shipping_time", "delivery_days"]),
-    "profit_margin": lambda p, e: _get_from_sources(p, e, ["profit_margin", "margin"]),
     "desire": _feat_desire,
     "competition": _feat_competition,
 }
@@ -375,21 +374,6 @@ def _norm_revenue(v: float) -> float:
 def _norm_review(v: float) -> float:
     return clamp(math.log1p(v) / math.log1p(10000.0))
 
-
-def _norm_image(v: float) -> float:
-    return clamp(v / 10.0)
-
-
-def _norm_shipping(v: float) -> float:
-    return clamp(1.0 - v / 30.0)
-
-
-def _norm_margin(v: float) -> float:
-    if v > 1:
-        v /= 100.0
-    return clamp(v)
-
-
 def _norm_identity(v: float) -> float:
     return clamp(v)
 
@@ -400,9 +384,6 @@ NORMALIZERS: Dict[str, Callable[[float], float]] = {
     "units_sold": _norm_units,
     "revenue": _norm_revenue,
     "review_count": _norm_review,
-    "image_count": _norm_image,
-    "shipping_days": _norm_shipping,
-    "profit_margin": _norm_margin,
     "desire": _norm_identity,
     "competition": _norm_identity,
 }
@@ -417,33 +398,33 @@ def compute_winner_score_v2(product_row: Any, weights: Dict[str, float]) -> Dict
 
     extras = _get_extras(product_row)
     feats: Dict[str, float] = {}
-    missing_fields: list[str] = []
     for name, getter in FEATURE_MAP.items():
         val = getter(product_row, extras)
         if val is None or (isinstance(val, float) and math.isnan(val)):
-            missing_fields.append(name)
             continue
         norm = NORMALIZERS[name](val)
         feats[name] = norm
 
     present = list(feats.keys())
-    missing_fields = list(set(FEATURE_MAP.keys()) - set(present))
+    missing_fields = [f for f in ALLOWED_FIELDS if f not in present]
     used = len(present)
+
+    effective_weights = sanitize_weights(weights)
 
     if used == 0:
         return {
             "score": 0,
             "score_float": 0.0,
             "used": 0,
-            "missing": len(FEATURE_MAP),
+            "missing": len(ALLOWED_FIELDS),
             "missing_fields": missing_fields,
             "present_fields": present,
-            "effective_weights": {},
+            "effective_weights": effective_weights,
             "sum_filtered": 0.0,
             "fallback": True,
         }
 
-    filtered = {k: weights.get(k, 0.0) for k in present}
+    filtered = {k: effective_weights.get(k, 0.0) for k in present}
     sum_filtered = sum(max(0.0, v) for v in filtered.values())
     if sum_filtered > 0:
         weights_used = {k: max(0.0, filtered.get(k, 0.0)) / sum_filtered for k in present}
@@ -452,16 +433,18 @@ def compute_winner_score_v2(product_row: Any, weights: Dict[str, float]) -> Dict
         weights_used = {k: 1.0 / used for k in present}
         fallback = True
 
+    eff_all = {k: weights_used.get(k, 0.0) for k in ALLOWED_FIELDS}
+
     score_float = sum(feats[k] * weights_used.get(k, 0.0) for k in present)
     score_int = int(round(score_float * 100))
     return {
         "score": score_int,
         "score_float": score_float,
         "used": used,
-        "missing": len(FEATURE_MAP) - used,
+        "missing": len(ALLOWED_FIELDS) - used,
         "missing_fields": missing_fields,
         "present_fields": present,
-        "effective_weights": weights_used,
+        "effective_weights": eff_all,
         "sum_filtered": sum_filtered,
         "fallback": fallback,
     }
