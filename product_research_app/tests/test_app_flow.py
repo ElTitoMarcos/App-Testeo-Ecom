@@ -371,6 +371,41 @@ def test_patch_winner_weights_persists(tmp_path, monkeypatch):
     data = winner_score.load_winner_weights_raw()
     assert data.get("weights", {}).get("rating") == 0.25
 
+def test_config_oldness_preference_roundtrip(tmp_path, monkeypatch):
+    setup_env(tmp_path, monkeypatch)
+
+    class DummyGet:
+        def __init__(self):
+            self.path = "/config"
+            self.headers = {}
+            self.rfile = io.BytesIO()
+            self.wfile = io.BytesIO()
+
+        def _set_json(self, code=200):
+            self.status = code
+
+    g = DummyGet()
+    web_app.RequestHandler.do_GET(g)
+    resp = json.loads(g.wfile.getvalue().decode("utf-8"))
+    assert resp.get("oldness_preference") == "newer"
+
+    body = json.dumps({"oldness_preference": "older"})
+
+    class DummyPost:
+        def __init__(self, body):
+            self.path = "/setconfig"
+            self.headers = {"Content-Length": str(len(body))}
+            self.rfile = io.BytesIO(body.encode("utf-8"))
+            self.wfile = io.BytesIO()
+
+        def _set_json(self, code=200):
+            self.status = code
+
+    p = DummyPost(body)
+    web_app.RequestHandler.handle_setconfig(p)
+    assert p.status == 200
+    assert config.load_config().get("oldness_preference") == "older"
+
 def test_get_endpoints_return_json(tmp_path, monkeypatch):
     setup_env(tmp_path, monkeypatch)
     from http.server import HTTPServer

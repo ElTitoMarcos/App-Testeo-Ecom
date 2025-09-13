@@ -43,6 +43,9 @@ body.dark details summary { color:#80b3ff; }
 pre { white-space:pre-wrap; background:#f5f7ff; padding:8px; border-radius:4px; }
 body.dark pre { background:#2e315f; }
 /* Weight slider styling */
+.field-label { display:block; margin-top:10px; font-weight:600; }
+.segmented { display:flex; gap:8px; margin-top:4px; }
+.segmented label { display:flex; align-items:center; gap:4px; }
 </style>
 </head>
 <body class="dark">
@@ -101,6 +104,17 @@ body.dark pre { background:#2e315f; }
 <div id="weightsCard" class="card" style="display:none;">
   <strong>Ponderaciones Winner Score</strong>
   <ul id="weightsList" style="list-style:none; margin-top:8px; padding:0;"></ul>
+  <label class="field-label">Preferencia de Oldness</label>
+  <div class="segmented">
+    <label>
+      <input type="radio" name="oldness_preference" value="newer">
+      Prefiero recientes
+    </label>
+    <label>
+      <input type="radio" name="oldness_preference" value="older">
+      Prefiero antiguos
+    </label>
+  </div>
   <div style="margin-top:10px; display:flex; flex-wrap:wrap; gap:6px;">
     <button id="resetWeights">Reset</button>
     <button id="aiWeights">Ajustar pesos con IA</button>
@@ -502,7 +516,7 @@ const WEIGHT_FIELDS = [
   { key: 'revenue',      label: 'Revenue' },
   { key: 'desire',       label: 'Desire' },
   { key: 'competition',  label: 'Competition' },
-  { key: 'oldness',      label: 'Oldness' }
+  { key: 'oldness',      label: 'Oldness (antigüedad)' }
 ];
 const WEIGHT_KEYS = WEIGHT_FIELDS.map(f=>f.key);
 const ALIASES = { unitsSold:'units_sold', orders:'units_sold' };
@@ -511,6 +525,7 @@ const metricDefs = WEIGHT_FIELDS;
 const metricKeys = WEIGHT_KEYS;
 let weightValues = {};
 let weightOrder = [];
+let userConfig = { oldness_preference: 'newer' };
 
 function debounce(fn, ms=150){
   let t; return (...args)=>{ clearTimeout(t); t=setTimeout(()=>fn(...args), ms); };
@@ -716,6 +731,20 @@ async function loadConfig() {
     if (input) input.value = '';
     if (saveBtn) saveBtn.disabled = true;
   }
+  userConfig.oldness_preference = cfg.oldness_preference || 'newer';
+  const prefEls = document.querySelectorAll('input[name="oldness_preference"]');
+  prefEls.forEach(el => {
+    el.checked = el.value === userConfig.oldness_preference;
+    el.addEventListener('change', e => {
+      const val = e.target.value;
+      userConfig.oldness_preference = val;
+      fetch('/setconfig', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ oldness_preference: val })
+      });
+    });
+  });
   await loadWeights();
 }
 
