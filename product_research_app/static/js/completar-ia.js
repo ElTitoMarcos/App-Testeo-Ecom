@@ -48,11 +48,15 @@ function applyUpdates(product, updates) {
     applied[k] = nv;
   });
   if (Object.keys(applied).length) {
-    fetch(`/products/${product.id}`, {
-      method: 'PUT',
+    fetch(`/api/products/${product.id}`, {
+      method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(applied)
-    }).catch(() => {});
+    }).then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    }).catch(err => {
+      toast?.error?.(`No se pudo guardar Desire: ${err.message}`);
+    });
     if (window.ecAutoFitColumns && window.gridRoot) ecAutoFitColumns(gridRoot);
   }
   return applied;

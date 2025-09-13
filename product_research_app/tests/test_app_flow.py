@@ -294,7 +294,7 @@ def test_desire_serialization_and_logging(tmp_path, monkeypatch):
     p3 = next(p for p in resp if p["id"] == pid3)
     assert p1["desire"] == "Top"
     assert isinstance(p1["price"], (int, float))
-    assert p2["desire"] is None
+    assert p2["desire"] == "Extra"
     assert p2["extras"].get("desire") == "Extra"
     assert p3["desire"] is None
     log_text = web_app.LOG_PATH.read_text()

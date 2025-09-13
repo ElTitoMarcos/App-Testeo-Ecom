@@ -680,16 +680,16 @@ class RequestHandler(BaseHTTPRequestHandler):
                     dr = extra_dict.get("date_range")
                 price_val = rget(p, "price")
                 desire_db = rget(p, "desire")
-                if desire_db in (None, ""):
-                    _ensure_desire(p, extra_dict)
-                desire_val = desire_db or None
+                desire_val = (desire_db.strip() if isinstance(desire_db, str) else desire_db) or None
+                if desire_val is None:
+                    # _ensure_desire debe devolver el mejor candidato desde extras/AI
+                    desire_val = _ensure_desire(p, extra_dict) or None
                 row = {
                     "id": rget(p, "id"),
                     "name": rget(p, "name"),
                     "category": rget(p, "category"),
                     "price": price_val,
                     "image_url": rget(p, "image_url"),
-                    "desire": desire_val,
                     "desire_magnitude": rget(p, "desire_magnitude"),
                     "awareness_level": rget(p, "awareness_level"),
                     "competition_level": rget(p, "competition_level"),
@@ -701,6 +701,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "date_range": dr or "",
                     "extras": extra_dict,
                 }
+                row["desire"] = desire_val
                 if price_val is not None:
                     try:
                         row["price_display"] = round(float(price_val), 2)
