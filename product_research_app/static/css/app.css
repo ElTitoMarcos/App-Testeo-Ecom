@@ -654,6 +654,40 @@ body.dark .ws-slider{ accent-color:#7a53d6; }
 .ws-slider::-moz-range-thumb{ width:20px; height:20px; border-radius:50%; cursor:pointer; }
 .ws-value{ width:40px; text-align:right; }
 
+/* Oculta visualmente, mantiene el espacio en el DOM para accesibilidad */
+.sr-only {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
+/* Contenedor de extremos justo bajo la barra, sin alterar su ancho */
+.slider-extremes {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  line-height: 1.2;
+  opacity: 0.85;
+  margin-top: 4px;
+}
+
+/* Asegura que el ancho de extremos = ancho de la barra */
+.weight-slider {
+  display: flex;
+  flex-direction: column;
+}
+
+/* (Opcional) Evita que el texto de extremos salte de línea y rompa el ancho */
+.slider-extremes span {
+  white-space: nowrap;
+}
+
 /* Cabecera y celdas de la columna Desire */
 th.col-desire, td.col-desire { width: 360px; max-width: 360px; }
 /* Contenido multi-línea sin corte */
