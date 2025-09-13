@@ -105,7 +105,6 @@ def test_awareness_weight_impacts_score():
     lo0 = ws.compute_winner_score_v2(prod_low, {"awareness": 0})
     assert hi0["score"] == lo0["score"]
 
-
 def test_recommend_winner_weights_includes_awareness(monkeypatch):
     # simulate GPT returning weights for price and awareness
     def fake_call(api_key, model, messages):
