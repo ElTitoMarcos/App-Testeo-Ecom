@@ -1,13 +1,45 @@
 import { fetchJson } from './net.js';
 import { fmtInt, fmtPrice, fmtPct, fmtFloat2 } from './format.js';
 
+function toISOFromDDMMYYYY(v) {
+  const s = (v || '').trim();
+  const m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!m) return null;
+  const [, dd, mm, yyyy] = m;
+  return `${yyyy}-${mm}-${dd}`;
+}
+function formatDDMMYYYY(d) {
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const yyyy = d.getFullYear();
+  return `${dd}/${mm}/${yyyy}`;
+}
+
 const container = document.getElementById('trendsSummary');
 const btn = document.getElementById('trendsBtn');
-const startInput = document.getElementById('trendStart');
-const endInput = document.getElementById('trendEnd');
-const applyBtn = document.getElementById('applyTrendFilters');
+const $desde = document.querySelector('#fecha-desde');
+const $hasta = document.querySelector('#fecha-hasta');
+const $btnAplicar = document.querySelector('#btn-aplicar-tendencias');
 const metricButtons = document.querySelectorAll('#topCatCard .metric-btn');
 const toggleLogBtn = document.getElementById('toggleLog');
+
+document.addEventListener('DOMContentLoaded', () => {
+  try {
+    const today = new Date();
+    const from = new Date(today);
+    from.setDate(today.getDate() - 29);
+    if ($desde && !$desde.value) $desde.value = formatDDMMYYYY(from);
+    if ($hasta && !$hasta.value) $hasta.value = formatDDMMYYYY(today);
+    fetchTrends();
+  } catch (_) {}
+});
+
+if ($btnAplicar) {
+  $btnAplicar.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    fetchTrends();
+  });
+}
 
 let currentMetric = 'revenue';
 let scatterLog = false;
@@ -19,18 +51,25 @@ function showSkeleton() {
   document.getElementById('kpiGrid').innerHTML = '<div class="skeleton"></div>'.repeat(6);
 }
 
-async function loadData() {
+async function fetchTrends() {
   showSkeleton();
-  const from = startInput.value;
-  const to = endInput.value;
-  const url = `/api/trends/summary?from=${from}&to=${to}`;
+  const url = new URL('/api/trends/summary', window.location.origin);
+  const fromISO = $desde ? toISOFromDDMMYYYY($desde.value) : null;
+  const toISO = $hasta ? toISOFromDDMMYYYY($hasta.value) : null;
+  if (fromISO) url.searchParams.set('from', fromISO);
+  if (toISO) url.searchParams.set('to', toISO);
   try {
-    currentData = await fetchJson(url);
-    const start = new Date(from);
-    const end = new Date(to);
-    const diff = end.getTime() - start.getTime();
-    const prevFrom = new Date(start.getTime() - diff).toISOString().slice(0,10);
-    prevData = await fetchJson(`/api/trends/summary?from=${prevFrom}&to=${from}`);
+    currentData = await fetchJson(url.toString());
+    if (fromISO && toISO) {
+      const start = new Date(fromISO);
+      const end = new Date(toISO);
+      const diff = end.getTime() - start.getTime();
+      const prevFrom = new Date(start.getTime() - diff).toISOString().slice(0,10);
+      const prevUrl = new URL('/api/trends/summary', window.location.origin);
+      prevUrl.searchParams.set('from', prevFrom);
+      prevUrl.searchParams.set('to', fromISO);
+      prevData = await fetchJson(prevUrl.toString());
+    }
     render();
   } catch (e) {
     // fetchJson already toasts
@@ -107,10 +146,8 @@ function renderTable(){
 
 btn?.addEventListener('click', () => {
   container.style.display = container.style.display === 'block' ? 'none' : 'block';
-  if(container.style.display === 'block') loadData();
+  if(container.style.display === 'block') fetchTrends();
 });
-
-applyBtn?.addEventListener('click', () => loadData());
 
 metricButtons.forEach(btn => btn.addEventListener('click', e => {
   metricButtons.forEach(b=>b.classList.remove('active'));
