@@ -130,3 +130,76 @@
   window.confirmDialog = confirmDialog;
   window.promptDialog = promptDialog;
 })();
+
+// ---- helpers fecha (reusar si ya existen) ----
+function toISOFromDDMMYYYY(v){ const s=(v||'').trim(); const m=s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/); if(!m) return null; const[,dd,mm,yyyy]=m; return `${yyyy}-${mm}-${dd}`; }
+function formatDDMMYYYY(d){ const dd=String(d.getDate()).padStart(2,'0'); const mm=String(d.getMonth()+1).padStart(2,'0'); const yyyy=d.getFullYear(); return `${dd}/${mm}/${yyyy}`; }
+
+// ---- init fechas si están vacías ----
+function initTrendDatesIfEmpty(){
+  const $desde = document.querySelector('#fecha-desde');
+  const $hasta = document.querySelector('#fecha-hasta');
+  const today = new Date();
+  const from = new Date(today); from.setDate(today.getDate() - 29);
+  if ($desde && !$desde.value) $desde.value = formatDDMMYYYY(from);
+  if ($hasta && !$hasta.value) $hasta.value = formatDDMMYYYY(today);
+}
+
+// ---- mostrar/ocultar vistas ----
+function openTrends(){
+  const trends = document.querySelector('#section-trends');
+  const products = document.querySelector('#section-products');
+  if (trends) trends.hidden = false;
+  if (products) products.hidden = true;
+  document.querySelector('#btn-ver-tendencias')?.classList.add('active');
+  initTrendDatesIfEmpty();
+  if (typeof fetchTrends === 'function') {
+    fetchTrends();
+  } else {
+    // Fallback: petición mínima al endpoint para no quedar “muerto”
+    (async ()=>{
+      const url = new URL('/api/trends/summary', window.location.origin);
+      const res = await fetch(url.toString(), { credentials:'same-origin' });
+      const json = res.ok ? await res.json() : null;
+      if (json && typeof renderTrends === 'function') renderTrends(json);
+    })();
+  }
+}
+function closeTrends(){
+  const trends = document.querySelector('#section-trends');
+  const products = document.querySelector('#section-products');
+  if (trends) trends.hidden = true;
+  if (products) products.hidden = false;
+  document.querySelector('#btn-ver-tendencias')?.classList.remove('active');
+}
+
+// ---- delegación global: funciona aunque el botón se renderice dinámicamente ----
+(function wireToggleTrends(){
+  if (window.__wiredToggleTrends) return;
+  window.__wiredToggleTrends = true;
+
+  document.addEventListener('click', (e)=>{
+    const el = e.target.closest('[data-action="toggle-trends"], #btn-ver-tendencias');
+    if (!el) return;
+    e.preventDefault(); // evita submit/navegación
+    const trendsHidden = document.querySelector('#section-trends')?.hidden !== false;
+    (trendsHidden ? openTrends : closeTrends)();
+  });
+
+  // Tecla Escape para salir de Tendencias
+  document.addEventListener('keydown', (e)=>{
+    if (e.key === 'Escape' && document.querySelector('#section-trends')?.hidden === false) {
+      closeTrends();
+    }
+  });
+})();
+
+// Botón "Aplicar" (por si sigue sin disparar)
+(function wireTrendsApply(){
+  const btn = document.querySelector('#btn-aplicar-tendencias');
+  if (!btn) return;
+  btn.addEventListener('click', (e)=>{
+    e.preventDefault();
+    if (typeof fetchTrends === 'function') fetchTrends();
+  });
+})();
