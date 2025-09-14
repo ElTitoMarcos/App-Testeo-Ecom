@@ -66,29 +66,30 @@ body.dark pre { background:#2e315f; }
 body.dark .skeleton{background:#333;}
 @keyframes skeleton-pulse{0%{opacity:0.7;}50%{opacity:0.4;}100%{opacity:0.7;}}
 
-/* Oculta KPIs si aún existen en el DOM */
-.kpi-grid, .kpi, .kpis { display: none !important; }
-
-/* Fila de gráficos */
+/* Layout compacto */
 .trends-row {
   display: grid;
-  grid-template-columns: 2fr 1.2fr;
-  gap: 16px;
-  margin-top: 8px;
+  grid-template-columns: 1fr 0.9fr;
+  gap: 12px;
+  margin: 8px 0 12px;
 }
+.card.sm { padding: 10px; border-radius: 10px; background: var(--panel, #171a2b); }
+.card-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
+#chart-top-categories, #chart-pareto { width: 100%; height: 260px !important; }
 
-/* Cards y lienzos */
-#section-trends .card { background: var(--panel, #171a2b); border-radius: 10px; padding: 12px; }
-#section-trends .card.lg { min-height: 380px; }
-#section-trends .card.md { min-height: 380px; }
-#section-trends .card-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
-#chart-top-categories, #chart-pareto { width:100%; height:320px !important; }
-
-/* Tabla compacta */
-.table.compact th, .table.compact td { padding: 8px 10px; }
+/* Tabla compacta (10 filas por defecto) */
+.table.compact { font-size: 13px; }
+.table.compact th, .table.compact td { padding: 6px 8px; }
+.table.compact tbody tr:nth-child(n+11) { display: none; }
 .table.compact th[role="button"] { cursor: pointer; user-select: none; }
 .table.compact th.sort-asc::after  { content: " \25B2"; opacity: .7; }
 .table.compact th.sort-desc::after { content: " \25BC"; opacity: .7; }
+
+.table-actions { margin-top: 6px; display: flex; justify-content: flex-end; }
+button.mini { font-size: 12px; padding: 4px 8px; border-radius: 8px; }
+
+/* Oculta cualquier bloque de KPIs heredado para evitar huecos */
+.kpi-grid, .kpis, .kpi { display: none !important; }
 
 </style>
 </head>
@@ -165,13 +166,12 @@ body.dark .skeleton{background:#333;}
   </div>
   <div id="trends-status"></div>
   <div class="trends-row">
-    <div id="card-top-categories" class="card lg">
+    <div id="card-top-categories" class="card sm">
       <canvas id="chart-top-categories"></canvas>
     </div>
-    <div id="card-pareto" class="card md">
+    <div id="card-pareto" class="card sm">
       <div class="card-header">
         <span>Pareto de ingresos (Top 10)</span>
-        <button id="btn-log-trends" class="mini">Log</button>
       </div>
       <canvas id="chart-pareto"></canvas>
     </div>
@@ -189,6 +189,9 @@ body.dark .skeleton{background:#333;}
     </thead>
     <tbody></tbody>
   </table>
+  <div class="table-actions">
+    <button id="btn-toggle-rows" class="mini" type="button">Ver más</button>
+  </div>
 </section>
 
 <section id="section-products">
