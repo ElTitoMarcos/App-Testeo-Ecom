@@ -10,3 +10,26 @@ export function winnerScoreClass(s){
   return 'badge score-red';
 }
 
+export function fmtNumber(n, dec = 0) {
+  return Number(n || 0).toLocaleString('es-ES', {
+    minimumFractionDigits: dec,
+    maximumFractionDigits: dec,
+  });
+}
+
+export function fmtInt(n) {
+  return fmtNumber(n, 0);
+}
+
+export function fmtPrice(n) {
+  return fmtNumber(n, 2);
+}
+
+export function fmtFloat2(n) {
+  return fmtNumber(n, 2);
+}
+
+export function fmtPct(n) {
+  return fmtNumber(n, 1) + '%';
+}
+

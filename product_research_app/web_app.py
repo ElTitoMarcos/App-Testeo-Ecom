@@ -36,12 +36,14 @@ import time
 import sqlite3
 import math
 import hashlib
+from datetime import datetime
 from typing import Dict, Any, List
 
 from . import database
 from . import config
 from .services import ai_columns
 from .services import winner_score as winner_calc
+from .services import trends_service
 from . import gpt
 from . import title_analyzer
 from .utils.db import row_to_dict, rget
@@ -599,6 +601,27 @@ class RequestHandler(BaseHTTPRequestHandler):
             has_key = bool(config.get_api_key())
             self._set_json()
             self.wfile.write(json.dumps({"ok": True, "has_key": has_key}).encode("utf-8"))
+            return
+        if path == "/api/trends/summary":
+            params = parse_qs(parsed.query)
+            start_s = params.get("from", [""])[0]
+            end_s = params.get("to", [""])[0]
+            filters_s = params.get("filters", [None])[0]
+            try:
+                start_dt = datetime.fromisoformat(start_s)
+                end_dt = datetime.fromisoformat(end_s)
+            except Exception:
+                self.send_error(400, "invalid range")
+                return
+            filters = None
+            if filters_s:
+                try:
+                    filters = json.loads(filters_s)
+                except Exception:
+                    filters = None
+            resp = trends_service.get_trends_summary(start_dt, end_dt, filters)
+            self._set_json()
+            self.wfile.write(json.dumps(resp).encode("utf-8"))
             return
         if path == "/api/config/winner-weights":
             from .services.config import (
