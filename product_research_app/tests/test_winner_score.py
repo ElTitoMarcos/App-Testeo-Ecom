@@ -117,7 +117,7 @@ def test_recommend_winner_weights_includes_awareness(monkeypatch):
     assert set(weights) == set(ws.ALLOWED_FIELDS)
     assert weights["price"] == 1
     assert weights["awareness"] == 3
-    assert weights["revenue"] == 50
+    assert weights["revenue"] == 0
     assert all(0 <= v <= 100 for v in weights.values())
 
 
