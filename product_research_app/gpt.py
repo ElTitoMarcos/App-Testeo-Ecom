@@ -1044,61 +1044,91 @@ def recommend_winner_weights(
     samples: List[Dict[str, Any]],
     success_key: str,
 ) -> Dict[str, Any]:
-    """Ask GPT to propose Winner Score weights with justification."""
+    """Devuelve pesos 0..100 independientes (NO normalizados) e incluye siempre revenue."""
 
-    fields = sorted({k for s in samples for k in s.keys() if k != success_key})
-    if not fields:
-        fields = list(winner_calc.ALLOWED_FIELDS)
+    # Usar el set completo permitido (incluye revenue)
+    try:
+        allowed = list(winner_calc.ALLOWED_FIELDS)
+    except Exception:
+        # Fallback si no está importado winner_calc en este módulo
+        allowed = [
+            "price",
+            "rating",
+            "units_sold",
+            "revenue",
+            "desire",
+            "competition",
+            "oldness",
+            "awareness",
+        ]
+
+    # Si no hay muestras, devolver neutro 50
     if not samples:
-        return {
-            "weights": {k: 1.0 / len(fields) for k in fields},
-            "justification": "",
-        }
+        return {"weights": {k: 50 for k in allowed}, "justification": ""}
 
-    sample_json = json.dumps(samples[:20], ensure_ascii=False)
+    # Prompt compacto (seguimos usando tu call_openai_chat)
+    # ⚠️ El modelo puede devolver distintos formatos; aceptamos varias claves.
+    sample_json = json.dumps(samples[:50], ensure_ascii=False)
     prompt = (
-        "Eres un optimizador de modelos para e-commerce. Tengo una tabla de productos con las ocho "
-        f"variables de Winner Score y un valor de éxito real '{success_key}'. "
-        "Quiero pesos normalizados (suma=1) que maximicen la correlación entre el score total y el éxito. "
-        "Devuelve JSON con { 'pesos': {variable: peso}, 'justificacion': 'texto breve' }.\nMuestra:\n"
-        + sample_json
+        "Eres un optimizador de modelos de e-commerce.\n"
+        f"Variables del Winner Score: {allowed}\n"
+        f"Señal de éxito a maximizar: '{success_key}'.\n"
+        "Devuelve JSON ESTRICTO con pesos 0..100 por variable (independientes, NO normalizados):\n"
+        "{\n"
+        '  "pesos_0_100": {\n'
+        '    "price": 0..100,\n'
+        '    "rating": 0..100,\n'
+        '    "units_sold": 0..100,\n'
+        '    "revenue": 0..100,\n'
+        '    "desire": 0..100,\n'
+        '    "competition": 0..100,\n'
+        '    "oldness": 0..100,\n'
+        '    "awareness": 0..100\n'
+        "  },\n"
+        '  "orden": ["revenue","price",...],\n'
+        '  "justificacion": "1-2 frases"\n'
+        "}\n"
+        "- No normalices para que sumen 100; cada peso es una intensidad 0..100.\n\n"
+        "Muestra parcial:\n" + sample_json
     )
     messages = [
         {"role": "system", "content": "Eres un optimizador de modelos para e-commerce."},
         {"role": "user", "content": prompt},
     ]
+
     try:
         resp = call_openai_chat(api_key, model, messages)
         content = resp["choices"][0]["message"]["content"].strip()
         parsed = json.loads(content)
-        if not isinstance(parsed, dict):
-            raise ValueError("Respuesta no es un objeto JSON")
-        weights_raw = parsed.get("pesos") or parsed.get("weights") or {}
-        justification = parsed.get("justificacion") or parsed.get("justification") or ""
     except Exception:
-        return {
-            "weights": {k: 1.0 / len(fields) for k in fields},
-            "justification": "",
-        }
+        return {"weights": {k: 50 for k in allowed}, "justification": ""}
 
-    total = 0.0
-    cleaned: Dict[str, float] = {}
-    for key in fields:
+    raw = parsed.get("pesos_0_100") or parsed.get("pesos") or parsed.get("weights") or {}
+    justification = parsed.get("justificacion") or parsed.get("justification") or ""
+
+    # Reescalar si vino en 0..1 o sum≈1
+    try:
+        vals = [float(v) for v in raw.values()]
+    except Exception:
+        vals = []
+    if vals:
+        all_01 = all(0.0 <= float(v) <= 1.0 for v in vals)
+        sum_is_1 = abs(sum(vals) - 1.0) < 1e-6
+        if all_01 and (sum_is_1 or max(vals) <= 1.0):
+            raw = {k: float(v) * 100.0 for k, v in raw.items()}
+
+    # Completar el mapa 0..100 y sanear
+    out: Dict[str, int] = {}
+    for k in allowed:
+        v = raw.get(k, 50)
         try:
-            val = float(weights_raw.get(key, 0.0))
-            if val < 0:
-                val = 0.0
+            v = float(v)
         except Exception:
-            val = 0.0
-        cleaned[key] = val
-        total += val
-    if total <= 0:
-        return {
-            "weights": {k: 1.0 / len(fields) for k in fields},
-            "justification": justification,
-        }
-    normalized = {k: v / total for k, v in cleaned.items()}
-    return {"weights": normalized, "justification": justification}
+            v = 50.0
+        v = max(0.0, min(100.0, v))
+        out[k] = int(round(v))
+
+    return {"weights": out, "justification": justification}
 
 
 def summarize_top_products(api_key: str, model: str, products: List[Dict[str, Any]]) -> str:
