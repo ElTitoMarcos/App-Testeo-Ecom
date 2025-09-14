@@ -826,3 +826,50 @@ th.col-desire, td.col-desire { width: 360px; max-width: 360px; }
   resize: vertical;
 }
 
+/* Contenedor compacto */
+.weights-section.compact .weight-item {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--panel-700, #23283a);
+}
+.weights-section.compact .weight-item.disabled { opacity: .55; }
+
+/* Filas finas */
+.weights-section.compact .wi-row { display: grid; align-items: center; }
+.weights-section.compact .wi-head {
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.weights-section.compact .wi-title { font-weight: 600; }
+.weights-section.compact .wi-handle { opacity: .7; cursor: grab; }
+
+/* Slider ocupa todo el ancho, con menos altura vertical */
+.weights-section.compact .wi-slider { margin: 2px 0 6px 0; }
+.weights-section.compact .wi-slider input[type="range"] { width: 100%; }
+
+/* Meta en una fila */
+.weights-section.compact .wi-meta {
+  grid-template-columns: auto 1fr auto auto;
+  gap: 10px;
+  font-size: 12px;
+  opacity: .85;
+}
+.weights-section.compact .wi-min { justify-self: start; }
+.weights-section.compact .wi-max { justify-self: end; }
+
+/* Pastilla de peso */
+.weights-section.compact .wi-pill {
+  justify-self: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(99,102,241,.15);
+  border: 1px solid rgba(99,102,241,.35);
+}
+
+/* Toggle pequeño */
+.weights-section.compact .wi-toggle input[type="checkbox"] {
+  transform: scale(.9);
+}
+

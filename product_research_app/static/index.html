@@ -238,8 +238,7 @@ import * as api from "/static/js/net.js";
 import * as groupsService from "/static/js/groups-service.js";
 const { fetchJson } = api;
 const metricKeys = window.metricKeys;
-const openConfigModal = window.openConfigModal;
-const saveIfDirty = window.saveIfDirty;
+const openSettingsModal = window.openSettingsModal;
 window.fetchJson = fetchJson;
 window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
@@ -910,47 +909,7 @@ window.onload = async () => {
   }
 };
 // Toggle config panel
-document.getElementById('configBtn').onclick = async () => {
-  await openConfigModal();
-  const cfg = document.getElementById('config');
-  const wcard = document.getElementById('weightsCard');
-  const footer = document.getElementById('weightsFooter');
-  if(!cfg || !wcard || !footer || !window.modalManager) return;
-  const btn = document.getElementById('configBtn');
-  const modal = document.createElement('div');
-  modal.id = 'configModal';
-  modal.className = 'modal config-modal';
-  modal.setAttribute('role','dialog');
-  modal.setAttribute('aria-modal','true');
-  modal.setAttribute('aria-labelledby','configModalTitle');
-  modal.innerHTML = '<header class="modal-header"><h3 id="configModalTitle">Configuración</h3><button type="button" class="modal-close" aria-label="Cerrar">✕</button></header><div class="modal-body"></div>';
-  const body = modal.querySelector('.modal-body');
-  const cfgParent = cfg.parentElement;
-  const wParent = wcard.parentElement;
-  const fParent = footer.parentElement;
-  const cfgNext = cfg.nextSibling;
-  const wNext = wcard.nextSibling;
-  const fNext = footer.nextSibling;
-  body.appendChild(cfg);
-  body.appendChild(wcard);
-  modal.appendChild(footer);
-  cfg.style.display = 'block';
-  wcard.style.display = 'block';
-  footer.style.display = 'flex';
-  const handle = modalManager.open(modal, {returnFocus: btn, closeOnBackdrop:true, onClose: () => {
-    cfg.style.display = 'none';
-    wcard.style.display = 'none';
-    footer.style.display = 'none';
-    cfgParent.insertBefore(cfg, cfgNext);
-    wParent.insertBefore(wcard, wNext);
-    fParent.insertBefore(footer, fNext);
-    saveIfDirty();
-  }});
-  modal.querySelector('.modal-close').addEventListener('click', () => handle.close());
-  modal.addEventListener('close', saveIfDirty);
-  const first = modal.querySelector('input,select,textarea,button');
-  if(first) first.focus();
-};
+document.getElementById('configBtn').onclick = openSettingsModal;
 
 
 // Handle file upload: clicking the upload button opens file chooser
