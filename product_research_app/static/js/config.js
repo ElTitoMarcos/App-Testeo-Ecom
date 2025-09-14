@@ -388,37 +388,27 @@ async function adjustWeightsAI(){
     }
     if (!res.ok) throw new Error('Auto-weights request failed');
 
-    const out = await res.json(); // { weights:{k:0..1|0..100}, method?... }
-    const returned = (out && out.weights) ? out.weights : {};
+    const out = await res.json(); // { weights:{}, weights_order:[...], method?... }
+    const intWeights = (out && out.weights) ? out.weights : {};
+    const newOrder = (out && Array.isArray(out.weights_order) && out.weights_order.length)
+      ? out.weights_order.slice()
+      : Object.keys(intWeights).sort((a,b) => (intWeights[b]||0) - (intWeights[a]||0));
 
-    // Normalizar a 0..100 enteros y ordenar por importancia
-    const intWeights = {};
-    for (const k of features){
-      let v = num(returned[k]);
-      if (v > 0 && v <= 1) v = v * 100;
-      v = Math.max(0, Math.min(100, Math.round(v)));
-      intWeights[k] = v;
-    }
-    const newOrder = [...features].sort((a,b) => (intWeights[b]||0) - (intWeights[a]||0));
-
-    // Aplicar en UI
-    if (Array.isArray(window.factors) && window.factors.length){
-      const byKey = Object.fromEntries(window.factors.map(f => [f.key, f]));
-      window.factors = newOrder.filter(k => byKey[k]).map(k => ({ ...byKey[k], weight: intWeights[k] ?? byKey[k].weight }));
-      if (typeof renderWeightsUI === 'function') renderWeightsUI();
-    }
-
-    // Guardar {weights, order} y recargar desde servidor para reflejar lo persistido
+    // Persistir en backend y refrescar UI con lo guardado
+    const state = await SettingsCache.get();
     const resSave = await fetch('/api/config/winner-weights', {
       method:'PATCH', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ weights: intWeights, order: newOrder })
+      body: JSON.stringify({ weights: intWeights, weights_order: newOrder, weights_enabled: state.enabled })
     });
-    const saved = await resSave.json().catch(()=>null);
-    if (saved) SettingsCache.set(saved);
-    if (typeof openConfigModal === 'function') await openConfigModal();
+    if (!resSave.ok) throw new Error('Persist weights failed');
+    const saved = await resSave.json();
+    SettingsCache.set(saved);
+    // renderWeightsUI reinstates slider helpers like enhanceRangeWithFloat
+    const fresh = await SettingsCache.get();
+    if (typeof renderWeightsUI === 'function') renderWeightsUI(fresh);
 
     if (typeof toast !== 'undefined' && toast.success){
-      const method = (out && out.method) ? out.method : 'auto';
+      const method = (out && out.method) ? out.method : 'gpt';
       toast.success(`Pesos ajustados por IA (${method}) con ${data_sample.length} muestras`);
     }
   }catch(err){
