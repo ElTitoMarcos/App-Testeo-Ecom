@@ -323,76 +323,55 @@ function stratifiedSample(list, n){
   return sample.slice(0,n);
 }
 
-async function adjustWeightsAI(){
-  const num = v => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
-  try{
-    const base = Array.isArray(window.products) && window.products.length
-      ? window.products.slice()
-      : (Array.isArray(window.allProducts) ? window.allProducts.slice() : []);
-    if (!base.length){ if (typeof toast !== 'undefined') toast.info('No hay productos cargados'); return; }
-    let rows = base;
-    const MAX = 100;
-    if (rows.length > MAX){
-      rows = typeof stratifiedSample === 'function' ? stratifiedSample(rows, MAX) : rows.slice(0, MAX);
-    }
-    const samples = rows.map(p => {
-      const ratingRaw = p.rating ?? (p.extras && p.extras.rating);
-      const unitsRaw  = p.units_sold ?? (p.extras && (p.extras['Item Sold'] || p.extras['Orders']));
-      let revRaw    = p.revenue ?? (p.extras && (p.extras['Revenue($)'] || p.extras['Revenue']));
-      const price    = num(p.price);
-      const units    = num(unitsRaw);
-      let revenue    = num(revRaw);
-      if (!revenue && price && units) revenue = price * units;
-      return {
-        price:       price,
-        rating:      num(ratingRaw),
-        units_sold:  units,
-        revenue:     revenue,
-        desire:      num(p.desire_magnitude),
-        competition: num(p.competition_level),
-        oldness:     num(typeof computeOldnessDays === 'function' ? computeOldnessDays(p) : 0),
-        awareness:   num(typeof awarenessValue === 'function' ? awarenessValue(p) : 0),
-      };
-    });
+function setSliderValue(key, val){
+  const slider = document.getElementById(`weight-${key}`);
+  if (!slider) return;
+  const v = Math.max(0, Math.min(100, parseInt(val,10) || 0));
+  slider.value = v;
+  const item = slider.closest('li.weight-item');
+  const pill = item ? item.querySelector('.wi-pill') : null;
+  if (pill) pill.textContent = `peso: ${v}/100`;
+  const factor = factors.find(f => f.key === key);
+  if (factor) factor.weight = v;
+  cacheState.weights[key] = v;
+}
 
-    if (typeof toast !== 'undefined' && toast.info){ toast.info('Ajustando pesos con IA...'); }
-    const res = await fetch('/api/config/winner-weights/ai', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ samples, success_key: 'revenue' })
-    });
-    const data = await res.json().catch(()=>({}));
-    if (!res.ok){
-      if (data && data.error === 'missing_api_key' && typeof showApiKeyModal === 'function') {
-        await showApiKeyModal();
-      } else if (typeof toast !== 'undefined' && toast.error) {
-        toast.error('No se pudo ajustar por IA');
-      }
-      return;
-    }
-
-    const state = await SettingsCache.get().catch(()=>({enabled:{}}));
-    const weights = data.winner_weights || {};
-    const order = data.winner_order || Object.keys(weights);
-    const nextState = { order, weights, enabled: state.enabled };
-    SettingsCache.set(nextState);
-    isInitialRender = true;
-    renderWeightsUI(nextState);
-
-    if (data.effective && data.effective.int){
-      window.winnerWeightsEffective = data.effective.int;
-      const effEl = document.getElementById('effectiveWeights');
-      if (effEl) effEl.textContent = JSON.stringify(data.effective.int);
-    }
-
-    if (data.justification){
-      const btn = document.getElementById('btnAiWeights');
-      if (btn) btn.title = data.justification;
-    }
-
-    if (typeof toast !== 'undefined' && toast.success){ toast.success('Pesos ajustados por IA'); }
-  }catch(err){
-    if (typeof toast !== 'undefined' && toast.error){ toast.error('No se pudo ajustar por IA'); }
+function setToggleEnabled(key, enabled){
+  const item = document.querySelector(`li.weight-item[data-key="${key}"]`);
+  const toggle = item ? item.querySelector('.wt-enabled') : null;
+  if (toggle){
+    toggle.checked = enabled;
   }
+  const factor = factors.find(f => f.key === key);
+  if (factor) factor.enabled = enabled;
+  cacheState.enabled[key] = enabled;
+}
+
+function reorderWeightsUI(order){
+  const list = document.getElementById('weightsList');
+  if (!list) return;
+  const items = Array.from(list.children);
+  const byKey = Object.fromEntries(items.map(el => [el.dataset.key, el]));
+  const ordered = [];
+  order.forEach(k => {
+    const el = byKey[k];
+    if (el) ordered.push(el);
+  });
+  list.innerHTML = '';
+  ordered.forEach(el => list.appendChild(el));
+  factors.sort((a,b) => order.indexOf(a.key) - order.indexOf(b.key));
+  cacheState.order = factors.map(f => f.key);
+  factors.forEach((f, idx) => {
+    const el = byKey[f.key];
+    const rank = el ? el.querySelector('.wi-rank') : null;
+    if (rank) rank.textContent = `#${idx+1}`;
+  });
+}
+
+function renderEffectiveBadges(eff){
+  window.winnerWeightsEffective = eff;
+  const effEl = document.getElementById('effectiveWeights');
+  if (effEl) effEl.textContent = JSON.stringify(eff);
 }
 
 
@@ -422,13 +401,10 @@ async function openConfigModal(){
   revealSettingsModalContent();
   const resetBtn = document.getElementById('btnReset');
   if (resetBtn) resetBtn.onclick = resetWeights;
-  const aiBtn = document.getElementById('btnAiWeights');
-  if (aiBtn) aiBtn.onclick = adjustWeightsAI;
 }
 
 window.openConfigModal = openConfigModal;
 window.loadWeights = hydrateSettingsModal;
 window.resetWeights = resetWeights;
-window.adjustWeightsAI = adjustWeightsAI;
 window.markDirty = markDirty;
 window.metricKeys = metricKeys;
