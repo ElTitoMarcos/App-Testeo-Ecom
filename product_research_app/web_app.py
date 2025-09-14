@@ -2448,52 +2448,42 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._set_json(400)
             self.wfile.write(json.dumps({"error": "No API key configured"}).encode('utf-8'))
             return
-        try:
-            result = gpt.recommend_winner_weights(api_key, model, samples, target)
-            # result["weights"] ya es 0..100 independiente e incluye revenue
-            weights_raw = result.get("weights", {}) or {}
-            notes = result.get("justification", "")
-        except Exception as exc:
-            self._set_json(500)
-            self.wfile.write(json.dumps({"error": str(exc)}).encode('utf-8'))
-            return
+        # --- pedir a GPT (o devolverá fallback desde gpt.py) ---
+        result = gpt.recommend_winner_weights(api_key, model, samples, target)
+        weights_raw = result.get("weights", {}) or {}
+        notes = result.get("justification", "")
 
-        # Filtrar a campos permitidos y garantizar enteros 0..100
+        # Filtra a campos permitidos + clamp 0..100 enteros
         allowed = list(winner_calc.ALLOWED_FIELDS)
         final_weights = {}
         for k in allowed:
-            v = weights_raw.get(k, 50)
+            v = weights_raw.get(k, 0)
             try:
                 v = float(v)
             except Exception:
-                v = 50.0
+                v = 0.0
             v = max(0.0, min(100.0, v))
             final_weights[k] = int(round(v))
 
-        # Orden (mayor peso primero); si empate, mantener orden previo
+        # ORDER: por peso desc; a igualdad conserva el orden previo
         prev_settings = winner_calc.load_settings()
         prev_order = prev_settings.get("weights_order") or list(allowed)
-        order = sorted(
-            final_weights.keys(),
-            key=lambda k: (
-                -final_weights[k],
-                prev_order.index(k) if k in prev_order else 999,
-            ),
-        )
+        order = sorted(final_weights.keys(), key=lambda k: (-final_weights[k], prev_order.index(k) if k in prev_order else 999))
 
+        # Logs (útiles para ti): ahora ai_raw/ints son lo mismo (0..100 independientes)
         logger.info(
             "ai_raw=%s enabled_only=%s ints=%s order=%s sum=%s",
-            final_weights,  # ahora mostramos crudos 0..100
-            final_weights,  # mantenemos la clave para no romper parseos previos de logs
-            final_weights,  # 'ints' deja de ser 'suma 100'; es el mismo 0..100
+            final_weights,
+            final_weights,
+            final_weights,
             order,
             sum(final_weights.values()),
         )
 
-        # Responder con 0..100 independ. + orden (el frontend ya hace el PATCH)
+        # Respuesta para el frontend (este ya hace el PATCH /api/config/winner-weights)
         resp = {
-            "weights": final_weights,        # 0..100 independientes
-            "weights_order": order,          # prioridad explícita
+            "weights": final_weights,      # 0..100 independientes
+            "weights_order": order,        # prioridad explícita
             "order": order,
             "method": "gpt",
             "diagnostics": {"notes": notes},
@@ -2540,19 +2530,13 @@ class RequestHandler(BaseHTTPRequestHandler):
         allowed = list(winner_calc.ALLOWED_FIELDS)
         final_weights = {}
         for k in allowed:
-            v = weights_raw.get(k, 50.0)
+            v = weights_raw.get(k, 0.0)
             v = max(0.0, min(100.0, float(v)))
             final_weights[k] = int(round(v))
 
         prev_settings = winner_calc.load_settings()
         prev_order = prev_settings.get("weights_order") or list(allowed)
-        order = sorted(
-            final_weights.keys(),
-            key=lambda k: (
-                -final_weights[k],
-                prev_order.index(k) if k in prev_order else 999,
-            ),
-        )
+        order = sorted(final_weights.keys(), key=lambda k: (-final_weights[k], prev_order.index(k) if k in prev_order else 999))
 
         resp = {
             "weights": final_weights,        # 0..100 independientes
