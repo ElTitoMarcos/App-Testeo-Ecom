@@ -202,6 +202,66 @@ def sanitize_weights(weights: dict | None) -> dict:
     return {k: v / s for k, v in w.items()}
 
 
+def to_int_weights_0_100(raw: dict[str, float], prev_cfg: dict) -> tuple[dict[str, int], list[str]]:
+    """Scale arbitrary weights to 0-100 integers using Hamilton apportionment.
+
+    ``raw`` may contain any non-negative values (normalized or not).  ``prev_cfg``
+    should provide previous ``{"weights": ..., "weights_enabled": ...}`` so that
+    missing keys can fall back to prior configuration.
+    """
+
+    vals = {
+        k: (
+            0.0
+            if v is None or not isinstance(v, (int, float)) or v < 0
+            else float(v)
+        )
+        for k, v in raw.items()
+    }
+    if not vals or all(v == 0 for v in vals.values()):
+        prev_w = {k: int(v) for k, v in (prev_cfg.get("weights") or {}).items()}
+        if prev_w:
+            order = sorted(prev_w, key=lambda k: prev_w[k], reverse=True)
+            return prev_w, order
+        fields = list((prev_cfg.get("weights") or {}).keys()) or list(vals.keys())
+        if not fields:
+            fields = [
+                "price",
+                "rating",
+                "units_sold",
+                "revenue",
+                "desire",
+                "competition",
+            ]
+        base = {k: 1.0 for k in fields}
+        return _hamilton_0_100(base)
+
+    return _hamilton_0_100(vals)
+
+
+def _hamilton_0_100(vals: dict[str, float]) -> tuple[dict[str, int], list[str]]:
+    total = sum(vals.values())
+    if total <= 0:
+        n = len(vals) or 1
+        q, r = divmod(100, n)
+        ints = {k: q for k in vals.keys()}
+        for k in sorted(vals.keys())[:r]:
+            ints[k] += 1
+        order = sorted(ints, key=lambda k: ints[k], reverse=True)
+        return ints, order
+    shares = {k: (v / total) * 100.0 for k, v in vals.items()}
+    floors = {k: int(shares[k] // 1) for k in shares}
+    leftover = 100 - sum(floors.values())
+    frac_sorted = sorted(
+        shares.items(), key=lambda kv: (kv[1] - int(kv[1]), kv[0]), reverse=True
+    )
+    ints = floors.copy()
+    for i in range(leftover):
+        ints[frac_sorted[i % len(frac_sorted)][0]] += 1
+    order = sorted(ints, key=lambda k: ints[k], reverse=True)
+    return ints, order
+
+
 def invalidate_weights_cache() -> None:
     global WEIGHTS_CACHE, ORDER_CACHE, ENABLED_CACHE, WEIGHTS_VERSION
     WEIGHTS_CACHE = None
