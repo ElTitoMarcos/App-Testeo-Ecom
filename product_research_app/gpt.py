@@ -1044,61 +1044,95 @@ def recommend_winner_weights(
     samples: List[Dict[str, Any]],
     success_key: str,
 ) -> Dict[str, Any]:
-    """Ask GPT to propose Winner Score weights with justification."""
+    """
+    Devuelve pesos CRUDOS 0..100 (independientes, NO normalizados) y un orden de prioridad.
+    Garantiza SIEMPRE todas las variables de ALLOWED_FIELDS (incluido 'revenue'), aunque
+    en samples falten. Si la IA responde normalizado (0..1 o suma≈1), se reescala a 0..100.
+    """
+    allowed = list(winner_calc.ALLOWED_FIELDS)
 
-    fields = sorted({k for s in samples for k in s.keys() if k != success_key})
-    if not fields:
-        fields = list(winner_calc.ALLOWED_FIELDS)
-    if not samples:
-        return {
-            "weights": {k: 1.0 / len(fields) for k in fields},
-            "justification": "",
-        }
+    # Recorte prudente de muestra (tokens)
+    sample_json = json.dumps(samples[:50], ensure_ascii=False)
 
-    sample_json = json.dumps(samples[:20], ensure_ascii=False)
     prompt = (
-        "Eres un optimizador de modelos para e-commerce. Tengo una tabla de productos con las ocho "
-        f"variables de Winner Score y un valor de éxito real '{success_key}'. "
-        "Quiero pesos normalizados (suma=1) que maximicen la correlación entre el score total y el éxito. "
-        "Devuelve JSON con { 'pesos': {variable: peso}, 'justificacion': 'texto breve' }.\nMuestra:\n"
-        + sample_json
+        "Eres un optimizador de modelos para e-commerce.\n"
+        f"Variables: {allowed}\n"
+        f"Señal de éxito real: '{success_key}'.\n"
+        "Devuélveme JSON ESTRICTO con este formato:\n"
+        "{\n"
+        '  "pesos_0_100": {\n'
+        '    "price": 0..100,\n'
+        '    "rating": 0..100,\n'
+        '    "units_sold": 0..100,\n'
+        '    "revenue": 0..100,\n'
+        '    "desire": 0..100,\n'
+        '    "competition": 0..100,\n'
+        '    "oldness": 0..100,\n'
+        '    "awareness": 0..100\n'
+        "  },\n"
+        '  "orden": ["price","rating",...],\n'
+        '  "justificacion": "1-2 frases"\n'
+        "}\n\n"
+        "- No normalices para sumar 100: cada peso es independiente (intensidad 0..100).\n"
+        "- Si ves correlación clara con el éxito, sube a 70–100; si es ruido, 0–30.\n\n"
+        "Muestra (parcial):\n" + sample_json
     )
+
     messages = [
         {"role": "system", "content": "Eres un optimizador de modelos para e-commerce."},
         {"role": "user", "content": prompt},
     ]
+
     try:
         resp = call_openai_chat(api_key, model, messages)
         content = resp["choices"][0]["message"]["content"].strip()
         parsed = json.loads(content)
-        if not isinstance(parsed, dict):
-            raise ValueError("Respuesta no es un objeto JSON")
-        weights_raw = parsed.get("pesos") or parsed.get("weights") or {}
-        justification = parsed.get("justificacion") or parsed.get("justification") or ""
     except Exception:
         return {
-            "weights": {k: 1.0 / len(fields) for k in fields},
+            "weights": {k: 50 for k in allowed},
+            "order": allowed[:],
             "justification": "",
         }
 
-    total = 0.0
-    cleaned: Dict[str, float] = {}
-    for key in fields:
+    raw = parsed.get("pesos_0_100") or parsed.get("pesos") or parsed.get("weights") or {}
+    order_in = parsed.get("orden") or parsed.get("order") or []
+
+    # Si vino en 0..1 (o suma≈1), reescala a 0..100
+    try:
+        vals = [float(v) for v in raw.values()]
+    except Exception:
+        vals = []
+    if vals and all(0.0 <= float(v) <= 1.0 for v in vals):
+        raw = {k: float(v) * 100.0 for k, v in raw.items()}
+
+    # Mapa 0..100 completo, forzando claves que falten (ej. revenue)
+    weights_0_100: Dict[str, int] = {}
+    for k in allowed:
+        v = raw.get(k, 50)
         try:
-            val = float(weights_raw.get(key, 0.0))
-            if val < 0:
-                val = 0.0
+            v = float(v)
         except Exception:
-            val = 0.0
-        cleaned[key] = val
-        total += val
-    if total <= 0:
-        return {
-            "weights": {k: 1.0 / len(fields) for k in fields},
-            "justification": justification,
-        }
-    normalized = {k: v / total for k, v in cleaned.items()}
-    return {"weights": normalized, "justification": justification}
+            v = 50.0
+        v = 0.0 if v < 0 else (100.0 if v > 100 else v)
+        weights_0_100[k] = int(round(v))
+
+    # Orden limpio; si no llega, deriva por pesos
+    order_clean: list[str] = []
+    seen = set()
+    for k in order_in:
+        if k in allowed and k not in seen:
+            order_clean.append(k); seen.add(k)
+    for k, _ in sorted(weights_0_100.items(), key=lambda kv: kv[1], reverse=True):
+        if k not in seen:
+            order_clean.append(k); seen.add(k)
+
+    justification = parsed.get("justificacion") or parsed.get("justification") or ""
+
+    return {
+        "weights": weights_0_100,
+        "order": order_clean,
+        "justification": justification,
+    }
 
 
 def summarize_top_products(api_key: str, model: str, products: List[Dict[str, Any]]) -> str:
