@@ -82,32 +82,39 @@ body.dark pre { background:#2e315f; }
   </div>
 </div>
 <div id="importBanner" style="display:none; padding:8px; text-align:center;"></div>
-<div id="config" style="display:none;">
-  <div class="config-controls">
-    <label for="modelSelect">Modelo</label>
-    <select id="modelSelect">
-      <option value="gpt-4o">GPT-4o</option>
-      <option value="gpt-4">GPT-4</option>
-      <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
-    </select>
-    <button id="toggleApiKey" type="button" style="display:none;">Cambiar API Key</button>
-  </div>
-  <div class="api-row">
-    <label for="apiKey">API Key</label>
-    <div class="api-input-row">
-      <input type="password" id="apiKey" />
-      <button id="saveApiKey" disabled aria-label="Guardar API Key" title="Guardar API Key">Guardar API Key</button>
+<div id="settings-modal" class="modal-overlay" aria-hidden="true">
+  <div class="modal config-modal" role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle">
+    <header class="modal-header"><h3 id="settingsModalTitle">Configuración</h3><button type="button" class="modal-close" data-close aria-label="Cerrar">✕</button></header>
+    <div class="modal-body">
+      <div id="config">
+        <div class="config-controls">
+          <label for="modelSelect">Modelo</label>
+          <select id="modelSelect">
+            <option value="gpt-4o">GPT-4o</option>
+            <option value="gpt-4">GPT-4</option>
+            <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
+          </select>
+          <button id="toggleApiKey" type="button" style="display:none;">Cambiar API Key</button>
+        </div>
+        <div class="api-row">
+          <label for="apiKey">API Key</label>
+          <div class="api-input-row">
+            <input type="password" id="apiKey" />
+            <button id="saveApiKey" disabled aria-label="Guardar API Key" title="Guardar API Key">Guardar API Key</button>
+          </div>
+        </div>
+      </div>
+      <div id="weightsCard" class="card">
+        <strong>Ponderaciones Winner Score</strong>
+        <div class="legend">ℹ️ Arrastra para reordenar. Más arriba = mayor prioridad. El número (0–100) es el peso.</div>
+        <ul id="weightsList" class="weights-list"></ul>
+      </div>
+      <div id="weightsFooter" class="config-footer">
+        <button id="btnReset" class="btn">Reset</button>
+        <button id="btnAiWeights" class="btn primary">Ajustar pesos con IA</button>
+      </div>
     </div>
   </div>
-</div>
-<div id="weightsCard" class="card" style="display:none;">
-  <strong>Ponderaciones Winner Score</strong>
-  <div class="legend">ℹ️ Arrastra para reordenar. Más arriba = mayor prioridad. El número (0–100) es el peso.</div>
-  <ul id="weightsList" class="weights-list"></ul>
-</div>
-<div id="weightsFooter" class="config-footer" style="display:none;">
-  <button id="btnReset" class="btn">Reset</button>
-  <button id="btnAiWeights" class="btn primary">Ajustar pesos con IA</button>
 </div>
 <div id="custom" style="display:none;">
   <div id="history" style="margin-top:10px;"></div>
@@ -238,8 +245,6 @@ import * as api from "/static/js/net.js";
 import * as groupsService from "/static/js/groups-service.js";
 const { fetchJson } = api;
 const metricKeys = window.metricKeys;
-const openConfigModal = window.openConfigModal;
-const saveIfDirty = window.saveIfDirty;
 window.fetchJson = fetchJson;
 window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
@@ -909,50 +914,6 @@ window.onload = async () => {
     pollImportStatus(tid);
   }
 };
-// Toggle config panel
-document.getElementById('configBtn').onclick = async () => {
-  await openConfigModal();
-  const cfg = document.getElementById('config');
-  const wcard = document.getElementById('weightsCard');
-  const footer = document.getElementById('weightsFooter');
-  if(!cfg || !wcard || !footer || !window.modalManager) return;
-  const btn = document.getElementById('configBtn');
-  const modal = document.createElement('div');
-  modal.id = 'configModal';
-  modal.className = 'modal config-modal';
-  modal.setAttribute('role','dialog');
-  modal.setAttribute('aria-modal','true');
-  modal.setAttribute('aria-labelledby','configModalTitle');
-  modal.innerHTML = '<header class="modal-header"><h3 id="configModalTitle">Configuración</h3><button type="button" class="modal-close" aria-label="Cerrar">✕</button></header><div class="modal-body"></div>';
-  const body = modal.querySelector('.modal-body');
-  const cfgParent = cfg.parentElement;
-  const wParent = wcard.parentElement;
-  const fParent = footer.parentElement;
-  const cfgNext = cfg.nextSibling;
-  const wNext = wcard.nextSibling;
-  const fNext = footer.nextSibling;
-  body.appendChild(cfg);
-  body.appendChild(wcard);
-  modal.appendChild(footer);
-  cfg.style.display = 'block';
-  wcard.style.display = 'block';
-  footer.style.display = 'flex';
-  const handle = modalManager.open(modal, {returnFocus: btn, closeOnBackdrop:true, onClose: () => {
-    cfg.style.display = 'none';
-    wcard.style.display = 'none';
-    footer.style.display = 'none';
-    cfgParent.insertBefore(cfg, cfgNext);
-    wParent.insertBefore(wcard, wNext);
-    fParent.insertBefore(footer, fNext);
-    saveIfDirty();
-  }});
-  modal.querySelector('.modal-close').addEventListener('click', () => handle.close());
-  modal.addEventListener('close', saveIfDirty);
-  const first = modal.querySelector('input,select,textarea,button');
-  if(first) first.focus();
-};
-
-
 // Handle file upload: clicking the upload button opens file chooser
 const fileInputEl = document.getElementById('fileInput');
 document.getElementById('uploadBtn').onclick = () => {

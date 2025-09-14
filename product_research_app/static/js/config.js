@@ -58,10 +58,6 @@ let factors = [];
 let userConfig = {};
 let cacheState = { order: [], weights: {}, enabled: {} };
 
-document.addEventListener('DOMContentLoaded', () => {
-  SettingsCache.get().catch(() => {});
-});
-
 function defaultFactors(){
   return WEIGHT_FIELDS.map(f => ({ ...f, weight:50, enabled:true }));
 }
@@ -418,39 +414,110 @@ async function adjustWeightsAI(){
   }
 }
 
-
-function showSettingsModalShell(){
-  const list = document.getElementById('weightsList');
-  if (list) list.innerHTML = '';
+// ---------- Utilidad: normalizar config ----------
+function normalizeConfig(cfg) {
+  const weights = cfg?.weights || {};
+  const order = (Array.isArray(cfg?.weights_order) && cfg.weights_order.length)
+    ? cfg.weights_order.slice()
+    : Object.keys(weights);
+  const enabled = {};
+  for (const k of order) enabled[k] = cfg?.weights_enabled?.[k] ?? true;
+  return { order, weights, enabled };
 }
 
-function revealSettingsModalContent(){ /* no-op */ }
+// ---------- Shell modal ----------
+function showSettingsShell(modal) {
+  modal.classList.add('open');
+  modal.setAttribute('aria-hidden', 'false');
+  document.body.style.overflow = 'hidden';
+}
+function hideSettings(modal) {
+  modal.classList.remove('open');
+  modal.setAttribute('aria-hidden', 'true');
+  document.body.style.overflow = '';
+}
 
-async function hydrateSettingsModal(){
-  try{
-    isInitialRender = true;
-    const state = await SettingsCache.get();
+// ---------- Apertura robusta ----------
+async function openSettingsModal(ev) {
+  ev?.preventDefault?.();
+
+  const modal = document.querySelector('#settings-modal');
+  if (!modal) {
+    console.error('settings modal not found (#settings-modal)');
+    return;
+  }
+
+  // Evita aperturas concurrentes
+  if (modal.dataset.loading === '1') return;
+  modal.dataset.loading = '1';
+
+  // Asegura z-index y clic en backdrop
+  modal.style.zIndex = '10000';
+  showSettingsShell(modal);
+
+  // Skeleton opcional: limpia contenedor de lista
+  const list = modal.querySelector('#weightsList');
+  if (list) list.innerHTML = '<div class="skeleton">Cargando configuración…</div>';
+
+  try {
+    const cfg = await fetch('/config', { cache: 'no-store' }).then(r => r.json());
+    const state = normalizeConfig(cfg);
+    // Tu renderer existente: repinta sliders + toggles + drag + pill flotante
     renderWeightsUI(state);
-    console.debug('hydrateSettingsModal -> weights/order aplicados:', state);
-  }catch(err){
-    /* silencioso */
+  } catch (err) {
+    console.warn('Fallo al cargar /config, usando fallback:', err);
+    const fallback = normalizeConfig({ weights: { price:50, rating:50, units_sold:50, revenue:50, desire:50, competition:50 } });
+    renderWeightsUI(fallback);
+  } finally {
+    modal.dataset.loading = '0';
+  }
+
+  // Cierre por X, ESC y backdrop (una sola vez)
+  const resetBtn = modal.querySelector('#btnReset');
+  if (resetBtn && !resetBtn.dataset.bound) {
+    resetBtn.dataset.bound = '1';
+    resetBtn.addEventListener('click', resetWeights);
+  }
+  const aiBtn = modal.querySelector('#btnAiWeights');
+  if (aiBtn && !aiBtn.dataset.bound) {
+    aiBtn.dataset.bound = '1';
+    aiBtn.addEventListener('click', adjustWeightsAI);
+  }
+  const btnClose = modal.querySelector('[data-close], .modal-close, .btn-close');
+  if (btnClose && !btnClose.dataset.bound) {
+    btnClose.dataset.bound = '1';
+    btnClose.addEventListener('click', () => hideSettings(modal));
+  }
+  if (!modal.dataset.escBound) {
+    modal.dataset.escBound = '1';
+    modal.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') hideSettings(modal);
+    });
+  }
+  const backdrop = modal.querySelector('.modal-backdrop, .backdrop, .overlay') || modal;
+  if (backdrop && !backdrop.dataset.bound) {
+    backdrop.dataset.bound = '1';
+    backdrop.addEventListener('click', (e) => {
+      if (e.target === backdrop) hideSettings(modal);
+    });
   }
 }
 
-async function openConfigModal(){
-  showSettingsModalShell();
-  await hydrateSettingsModal();
-  document.querySelector('#configModal')?.classList.add('ready');
-  document.querySelector('#settings-modal')?.classList.add('ready');
-  revealSettingsModalContent();
-  const resetBtn = document.getElementById('btnReset');
-  if (resetBtn) resetBtn.onclick = resetWeights;
-  const aiBtn = document.getElementById('btnAiWeights');
-  if (aiBtn) aiBtn.onclick = adjustWeightsAI;
+// ---------- Enlace del botón (evita doble binding) ----------
+function bindSettingsButton() {
+  const btn = document.querySelector('[data-open-settings], #btnSettings, .btn-settings, #configBtn');
+  if (!btn) return;
+  btn.removeEventListener('click', openSettingsModal);
+  btn.addEventListener('click', openSettingsModal);
 }
 
-window.openConfigModal = openConfigModal;
-window.loadWeights = hydrateSettingsModal;
+// Arranque
+document.addEventListener('DOMContentLoaded', () => {
+  bindSettingsButton();
+  // Prefetch sin bloquear UI
+  fetch('/config', { cache: 'no-store' }).catch(()=>{});
+});
+
 window.resetWeights = resetWeights;
 window.adjustWeightsAI = adjustWeightsAI;
 window.markDirty = markDirty;

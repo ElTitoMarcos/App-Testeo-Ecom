@@ -150,6 +150,8 @@ body.dark .popover {
   background: #0F1424;
   border: 1px solid #34456B;
 }
+#settings-modal { display:none; }
+#settings-modal.open { display:flex; pointer-events:auto; z-index:10000; }
 #legendPop {
   left: 16px;
   bottom: 56px;
