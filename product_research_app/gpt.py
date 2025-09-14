@@ -1046,14 +1046,15 @@ def recommend_winner_weights(
 ) -> Dict[str, Any]:
     """
     Devuelve pesos CRUDOS 0..100 (independientes, NO normalizados) y un orden de prioridad.
-    Garantiza SIEMPRE todas las variables de ALLOWED_FIELDS (incluido 'revenue'), aunque
-    en samples falten. Si la IA responde normalizado (0..1 o suma≈1), se reescala a 0..100.
+    Garantiza SIEMPRE todas las variables de winner_score.ALLOWED_FIELDS (incluida 'revenue').
+    Si la IA responde 0..1 o normalizados, se reescala a 0..100.
     """
     allowed = list(winner_calc.ALLOWED_FIELDS)
 
-    # Recorte prudente de muestra (tokens)
-    sample_json = json.dumps(samples[:50], ensure_ascii=False)
+    if not samples:
+        return {"weights": {k: 50 for k in allowed}, "order": allowed[:], "justification": ""}
 
+    sample_json = json.dumps(samples[:50], ensure_ascii=False)
     prompt = (
         "Eres un optimizador de modelos para e-commerce.\n"
         f"Variables: {allowed}\n"
@@ -1073,11 +1074,10 @@ def recommend_winner_weights(
         '  "orden": ["price","rating",...],\n'
         '  "justificacion": "1-2 frases"\n'
         "}\n\n"
-        "- No normalices para sumar 100: cada peso es independiente (intensidad 0..100).\n"
-        "- Si ves correlación clara con el éxito, sube a 70–100; si es ruido, 0–30.\n\n"
+        "- No normalices para sumar 100: cada peso es independiente (0..100).\n"
+        "- Si ves correlación con el éxito, usa 70–100; si es ruido, 0–30.\n\n"
         "Muestra (parcial):\n" + sample_json
     )
-
     messages = [
         {"role": "system", "content": "Eres un optimizador de modelos para e-commerce."},
         {"role": "user", "content": prompt},
@@ -1088,16 +1088,13 @@ def recommend_winner_weights(
         content = resp["choices"][0]["message"]["content"].strip()
         parsed = json.loads(content)
     except Exception:
-        return {
-            "weights": {k: 50 for k in allowed},
-            "order": allowed[:],
-            "justification": "",
-        }
+        return {"weights": {k: 50 for k in allowed}, "order": allowed[:], "justification": ""}
 
     raw = parsed.get("pesos_0_100") or parsed.get("pesos") or parsed.get("weights") or {}
     order_in = parsed.get("orden") or parsed.get("order") or []
+    justification = parsed.get("justificacion") or parsed.get("justification") or ""
 
-    # Si vino en 0..1 (o suma≈1), reescala a 0..100
+    # Reescalar si vino en 0..1
     try:
         vals = [float(v) for v in raw.values()]
     except Exception:
@@ -1105,34 +1102,25 @@ def recommend_winner_weights(
     if vals and all(0.0 <= float(v) <= 1.0 for v in vals):
         raw = {k: float(v) * 100.0 for k, v in raw.items()}
 
-    # Mapa 0..100 completo, forzando claves que falten (ej. revenue)
-    weights_0_100: Dict[str, int] = {}
+    # Completar 0..100 con todas las claves (incl. revenue)
+    out: Dict[str, int] = {}
     for k in allowed:
         v = raw.get(k, 50)
         try:
             v = float(v)
         except Exception:
             v = 50.0
-        v = 0.0 if v < 0 else (100.0 if v > 100 else v)
-        weights_0_100[k] = int(round(v))
+        v = max(0.0, min(100.0, v))
+        out[k] = int(round(v))
 
-    # Orden limpio; si no llega, deriva por pesos
-    order_clean: list[str] = []
-    seen = set()
-    for k in order_in:
-        if k in allowed and k not in seen:
-            order_clean.append(k); seen.add(k)
-    for k, _ in sorted(weights_0_100.items(), key=lambda kv: kv[1], reverse=True):
+    # Orden limpio; si no llega, derivar por peso (desc)
+    seen: set[str] = set()
+    order_clean: list[str] = [k for k in order_in if k in allowed and not (k in seen or seen.add(k))]
+    for k, _ in sorted(out.items(), key=lambda kv: kv[1], reverse=True):
         if k not in seen:
             order_clean.append(k); seen.add(k)
 
-    justification = parsed.get("justificacion") or parsed.get("justification") or ""
-
-    return {
-        "weights": weights_0_100,
-        "order": order_clean,
-        "justification": justification,
-    }
+    return {"weights": out, "order": order_clean, "justification": justification}
 
 
 def summarize_top_products(api_key: str, model: str, products: List[Dict[str, Any]]) -> str:
