@@ -44,10 +44,31 @@ DEFAULT_WEIGHTS = {k: 1.0 for k in ALLOWED_FIELDS}
 
 WEIGHT_KEYS = list(ALLOWED_FIELDS)
 
+# Common aliases used by external clients or AI models
 ALIASES = {
     "unitsSold": "units_sold",
     "orders": "units_sold",
+    "income": "revenue",
+    "turnover": "revenue",
+    "sales_revenue": "revenue",
+    "sold_units": "units_sold",
+    "units": "units_sold",
+    "qty_sold": "units_sold",
+    "score": "rating",
+    "stars": "rating",
 }
+
+# Canonical order of known weight fields
+KNOWN_FIELDS = [
+    "price",
+    "rating",
+    "units_sold",
+    "revenue",
+    "desire",
+    "competition",
+    "oldness",
+    "awareness",
+]
 
 AWARE_STAGES = [
     "unaware",
@@ -237,6 +258,53 @@ def to_int_weights_0_100(raw: dict[str, float], prev_cfg: dict) -> tuple[dict[st
         return _hamilton_0_100(base)
 
     return _hamilton_0_100(vals)
+
+
+def _map_field_name(k: str) -> str:
+    k = (k or "").strip().lower()
+    k = ALIASES.get(k, k)
+    return k
+
+
+def _to_abs_0_100(v):
+    # acepta 0–1, 0–100, strings "35%" o "35"
+    if isinstance(v, str):
+        s = v.strip().replace('%', '')
+        try:
+            v = float(s)
+        except Exception:
+            return None
+    if isinstance(v, (int, float)):
+        x = float(v)
+        if 0.0 <= x <= 1.0:
+            return int(round(x * 100))
+        if x < 0:
+            x = 0
+        if x > 100:
+            x = 100
+        return int(round(x))
+    return None
+
+
+def ai_to_abs_int_weights(ai_raw: dict, prev_cfg: dict) -> dict[str, int]:
+    prev = {k: int(v) for k, v in (prev_cfg.get('weights') or {}).items()}
+    out: dict[str, int] = {}
+    # 1) mapear claves IA → internas
+    for k, v in (ai_raw or {}).items():
+        fk = _map_field_name(k)
+        if fk in KNOWN_FIELDS:
+            mv = _to_abs_0_100(v)
+            if mv is not None:
+                out[fk] = mv
+    # 2) completar faltantes con anteriores
+    for f in KNOWN_FIELDS:
+        if f not in out:
+            if f in prev:
+                out[f] = prev[f]
+    # 3) si sigue faltando alguno (ej. primera vez), por defecto 50
+    for f in KNOWN_FIELDS:
+        out.setdefault(f, 50)
+    return out
 
 
 def _hamilton_0_100(vals: dict[str, float]) -> tuple[dict[str, int], list[str]]:

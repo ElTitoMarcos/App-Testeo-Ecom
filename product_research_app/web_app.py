@@ -1393,26 +1393,62 @@ class RequestHandler(BaseHTTPRequestHandler):
             )
             from .services import winner_score
 
-            payload_map = (
+            prev_settings = winner_score.load_settings()
+            prev_cfg = {
+                "weights": {
+                    k: int(v)
+                    for k, v in (prev_settings.get("winner_weights") or {}).items()
+                },
+                "weights_enabled": {
+                    k: bool(v)
+                    for k, v in (prev_settings.get("weights_enabled") or {}).items()
+                },
+            }
+            ai_raw = (
                 data.get("winner_weights")
                 or data.get("weights")
                 or {k: v for k, v in data.items() if k in ALLOWED_FIELDS}
             )
-            saved = set_winner_weights_raw(payload_map)
-            order_in = data.get("order") if isinstance(data, dict) else None
+            mapped_abs = winner_score.ai_to_abs_int_weights(ai_raw, prev_cfg)
+            enabled = prev_cfg.get("weights_enabled") or {}
+            final_weights = {
+                k: int(v) for k, v in (prev_cfg.get("weights") or {}).items()
+            }
+            for k in winner_score.KNOWN_FIELDS:
+                if enabled.get(k, True):
+                    final_weights[k] = mapped_abs.get(k, final_weights.get(k, 50))
+            final_weights.setdefault(
+                "revenue", (prev_cfg.get("weights") or {}).get("revenue", 50)
+            )
+            order_in = data.get("weights_order") or data.get("order")
             if isinstance(order_in, list):
-                order = [k for k in order_in if k in saved]
+                order = [k for k in order_in if k in final_weights]
             else:
-                order = get_winner_order_raw()
+                order = sorted(
+                    final_weights, key=lambda k: final_weights[k], reverse=True
+                )
             if "awareness" not in order:
                 order.append("awareness")
-            saved_order = set_winner_order_raw(order)
             en_in = data.get("weights_enabled") if isinstance(data, dict) else None
             if isinstance(en_in, dict):
                 set_weights_enabled_raw(en_in)
-            enabled = get_weights_enabled_raw()
+                enabled = en_in
+            else:
+                enabled = get_weights_enabled_raw()
+            logger.info(
+                "ai_raw=%s mapped_abs=%s enabled=%s final=%s has_revenue=%s",
+                ai_raw,
+                mapped_abs,
+                enabled,
+                final_weights,
+                "revenue" in final_weights,
+            )
+            saved = set_winner_weights_raw(final_weights)
+            saved_order = set_winner_order_raw(order)
             winner_score.invalidate_weights_cache()
-            eff_map = {k: (saved.get(k, 0) if enabled.get(k, True) else 0) for k in saved}
+            eff_map = {
+                k: (saved.get(k, 0) if enabled.get(k, True) else 0) for k in saved
+            }
             resp = {
                 **saved,
                 "weights": saved,
@@ -2447,7 +2483,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         try:
             result = gpt.recommend_winner_weights(api_key, model, samples, target)
-            weights = winner_calc.sanitize_weights(result.get("weights", {}))
+            ai_raw = result.get("weights", {})
             notes = result.get("justification", "")
         except Exception as exc:
             self._set_json(500)
@@ -2463,21 +2499,25 @@ class RequestHandler(BaseHTTPRequestHandler):
                 for k, v in (prev_settings.get("weights_enabled") or {}).items()
             },
         }
-        enabled_map = prev_cfg.get("weights_enabled") or {}
-        enabled_keys = [k for k, on in enabled_map.items() if on]
-        raw_enabled = {k: weights.get(k, 0.0) for k in enabled_keys if k in weights} or weights
-        ints_enabled, order = winner_calc.to_int_weights_0_100(raw_enabled, prev_cfg)
-        prev_all = prev_cfg.get("weights") or {}
-        final_weights = prev_all.copy()
-        for k, v in ints_enabled.items():
-            final_weights[k] = v
+        enabled = prev_cfg.get("weights_enabled") or {}
+        mapped_abs = winner_calc.ai_to_abs_int_weights(ai_raw, prev_cfg)
+        final_weights = {
+            k: int(v) for k, v in (prev_cfg.get("weights") or {}).items()
+        }
+        for k in winner_calc.KNOWN_FIELDS:
+            if enabled.get(k, True):
+                final_weights[k] = mapped_abs.get(k, final_weights.get(k, 50))
+        final_weights.setdefault(
+            "revenue", (prev_cfg.get("weights") or {}).get("revenue", 50)
+        )
+        order = sorted(final_weights, key=lambda k: final_weights[k], reverse=True)
         logger.info(
-            "ai_raw=%s enabled_only=%s ints=%s order=%s sum=%s",
-            weights,
-            raw_enabled,
-            ints_enabled,
-            order,
-            sum(ints_enabled.values()),
+            "ai_raw=%s mapped_abs=%s enabled=%s final=%s has_revenue=%s",
+            ai_raw,
+            mapped_abs,
+            enabled,
+            final_weights,
+            "revenue" in final_weights,
         )
         resp = {
             "weights": final_weights,
