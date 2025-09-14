@@ -16,6 +16,7 @@ ALLOWED_FIELDS = (
 )
 DEFAULT_WEIGHTS_RAW: Dict[str, int] = {k: 50 for k in ALLOWED_FIELDS}
 DEFAULT_ORDER: List[str] = list(ALLOWED_FIELDS)
+DEFAULT_ENABLED: Dict[str, bool] = {k: True for k in ALLOWED_FIELDS}
 
 # Compatibility placeholder; not used but kept for tests that monkeypatch it
 DB_PATH = Path(__file__).resolve().parents[1] / "data.sqlite3"
@@ -46,19 +47,34 @@ def init_app_config() -> None:
     if not isinstance(weights, dict):
         cfg["winner_weights"] = DEFAULT_WEIGHTS_RAW.copy()
         changed = True
+        weights = cfg["winner_weights"]
     else:
         for k, v in DEFAULT_WEIGHTS_RAW.items():
             if k not in weights:
                 weights[k] = v
                 changed = True
+
     order = cfg.get("winner_order")
     if not isinstance(order, list):
         cfg["winner_order"] = DEFAULT_ORDER.copy()
+        cfg["weights_order"] = DEFAULT_ORDER.copy()
         changed = True
     else:
         if "awareness" not in order:
             order.append("awareness")
             changed = True
+        cfg.setdefault("weights_order", order.copy())
+
+    enabled = cfg.get("weights_enabled")
+    if not isinstance(enabled, dict):
+        cfg["weights_enabled"] = DEFAULT_ENABLED.copy()
+        changed = True
+    else:
+        for k in DEFAULT_ENABLED.keys():
+            if k not in enabled:
+                enabled[k] = True
+                changed = True
+
     if "weightsUpdatedAt" not in cfg:
         cfg["weightsUpdatedAt"] = int(time.time())
         changed = True
@@ -66,7 +82,7 @@ def init_app_config() -> None:
         save_config(cfg)
 
 
-def _load() -> Tuple[Dict[str, int], List[str]]:
+def _load() -> Tuple[Dict[str, int], List[str], Dict[str, bool]]:
     cfg = load_config()
     weights = cfg.get("winner_weights")
     if not isinstance(weights, dict) or not weights:
@@ -75,18 +91,31 @@ def _load() -> Tuple[Dict[str, int], List[str]]:
     for k, v in DEFAULT_WEIGHTS_RAW.items():
         weights.setdefault(k, v)
     order = _normalize_order(cfg.get("winner_order"), weights)
-    return weights, order
+    enabled = cfg.get("weights_enabled")
+    if not isinstance(enabled, dict):
+        enabled = DEFAULT_ENABLED.copy()
+    else:
+        enabled = {k: bool(enabled.get(k, True)) for k in DEFAULT_ENABLED.keys()}
+    return weights, order, enabled
 
 
-def update_winner_settings(weights_in=None, order_in=None) -> Tuple[Dict[str, int], List[str]]:
+def update_winner_settings(
+    weights_in=None,
+    order_in=None,
+    enabled_in=None,
+) -> Tuple[Dict[str, int], List[str], Dict[str, bool]]:
     init_app_config()
     cfg = load_config()
     weights = cfg.get("winner_weights", DEFAULT_WEIGHTS_RAW.copy())
     order = cfg.get("winner_order", DEFAULT_ORDER.copy())
+    enabled = cfg.get("weights_enabled", DEFAULT_ENABLED.copy())
+
     weights = _coerce_weights(weights)
     for k, v in DEFAULT_WEIGHTS_RAW.items():
         weights.setdefault(k, v)
     order = _normalize_order(order, weights)
+    enabled = {k: bool(enabled.get(k, True)) for k in DEFAULT_ENABLED.keys()}
+
     if weights_in is not None:
         wi = _coerce_weights(weights_in)
         weights.update(wi)
@@ -94,31 +123,49 @@ def update_winner_settings(weights_in=None, order_in=None) -> Tuple[Dict[str, in
             weights.setdefault(k, v)
     if order_in is not None:
         order = _normalize_order(order_in, weights)
+    if enabled_in is not None:
+        enabled = {
+            k: bool(enabled_in.get(k, enabled.get(k, True)))
+            for k in DEFAULT_ENABLED.keys()
+        }
+
     cfg["winner_weights"] = weights
     cfg["winner_order"] = order
+    cfg["weights_order"] = order
+    cfg["weights_enabled"] = enabled
     cfg["weightsUpdatedAt"] = int(time.time())
     save_config(cfg)
-    return weights, order
+    return weights, order, enabled
 
 
 def get_winner_weights_raw() -> Dict[str, int]:
-    weights, _ = _load()
+    weights, _, _ = _load()
     return weights
 
 
 def get_winner_order_raw() -> List[str]:
-    _, order = _load()
+    _, order, _ = _load()
     return order
 
 
+def get_weights_enabled_raw() -> Dict[str, bool]:
+    _, _, enabled = _load()
+    return enabled
+
+
 def set_winner_weights_raw(weights: Dict[str, object]) -> Dict[str, int]:
-    weights, _ = update_winner_settings(weights_in=weights, order_in=None)
+    weights, _, _ = update_winner_settings(weights_in=weights, order_in=None)
     return weights
 
 
 def set_winner_order_raw(order: List[str]) -> List[str]:
-    _, order = update_winner_settings(weights_in=None, order_in=order)
+    _, order, _ = update_winner_settings(weights_in=None, order_in=order)
     return order
+
+
+def set_weights_enabled_raw(enabled: Dict[str, object]) -> Dict[str, bool]:
+    _, _, enabled = update_winner_settings(weights_in=None, order_in=None, enabled_in=enabled)
+    return enabled
 
 
 # Útil para logs/cálculo: pesos efectivos enteros 0..100 considerando prioridad

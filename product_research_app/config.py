@@ -76,6 +76,23 @@ def load_config() -> Dict[str, Any]:
         changed = True
     if _merge_defaults(data, DEFAULT_CONFIG):
         changed = True
+
+    # ensure weights_enabled defaulting to True for all weight keys
+    weights_map = data.get("winner_weights")
+    if isinstance(weights_map, dict):
+        enabled = data.get("weights_enabled")
+        if not isinstance(enabled, dict):
+            data["weights_enabled"] = {k: True for k in weights_map.keys()}
+            changed = True
+        else:
+            for k in weights_map.keys():
+                if k not in enabled:
+                    enabled[k] = True
+                    changed = True
+    if "winner_order" in data and "weights_order" not in data:
+        data["weights_order"] = list(data["winner_order"])
+        changed = True
+
     if changed:
         save_config(data)
     return data

@@ -604,14 +604,24 @@ class RequestHandler(BaseHTTPRequestHandler):
             from .services.config import (
                 get_winner_weights_raw,
                 get_winner_order_raw,
+                get_weights_enabled_raw,
                 compute_effective_int,
             )
 
             raw = get_winner_weights_raw()
             order = get_winner_order_raw()
-            eff_int = compute_effective_int(raw, order)
+            enabled = get_weights_enabled_raw()
+            raw_eff = {k: (raw.get(k, 0) if enabled.get(k, True) else 0) for k in raw}
+            eff_int = compute_effective_int(raw_eff, order)
             logger.info("weights_effective_int=%s order=%s", eff_int, order)
-            resp = {**raw, "weights": raw, "order": order, "effective": {"int": eff_int}}
+            resp = {
+                **raw,
+                "weights": raw,
+                "order": order,
+                "effective": {"int": eff_int},
+                "weights_enabled": enabled,
+                "weights_order": order,
+            }
             self._set_json()
             self.wfile.write(json.dumps(resp).encode("utf-8"))
             return
@@ -1376,6 +1386,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 set_winner_weights_raw,
                 set_winner_order_raw,
                 get_winner_order_raw,
+                set_weights_enabled_raw,
+                get_weights_enabled_raw,
                 compute_effective_int,
                 ALLOWED_FIELDS,
             )
@@ -1395,8 +1407,20 @@ class RequestHandler(BaseHTTPRequestHandler):
             if "awareness" not in order:
                 order.append("awareness")
             saved_order = set_winner_order_raw(order)
+            en_in = data.get("weights_enabled") if isinstance(data, dict) else None
+            if isinstance(en_in, dict):
+                set_weights_enabled_raw(en_in)
+            enabled = get_weights_enabled_raw()
             winner_score.invalidate_weights_cache()
-            resp = {**saved, "weights": saved, "order": saved_order, "effective": {"int": compute_effective_int(saved, saved_order)}}
+            eff_map = {k: (saved.get(k, 0) if enabled.get(k, True) else 0) for k in saved}
+            resp = {
+                **saved,
+                "weights": saved,
+                "order": saved_order,
+                "effective": {"int": compute_effective_int(eff_map, saved_order)},
+                "weights_enabled": enabled,
+                "weights_order": saved_order,
+            }
             self._set_json()
             self.wfile.write(json.dumps(resp).encode('utf-8'))
             return
@@ -2601,7 +2625,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         ids = [int(x) for x in ids_param.split(",") if x.strip()]
 
         conn = ensure_db()
-        weights = winner_calc.load_winner_weights()
+        weights, order, enabled = winner_calc.load_winner_settings()
 
         if ids:
             placeholders = ",".join("?" for _ in ids)
@@ -2617,7 +2641,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         data: Dict[str, Any] = {}
         for row in rows:
-            res = winner_calc.compute_winner_score_v2(row, weights)
+            res = winner_calc.compute_winner_score_v2(row, weights, order, enabled)
             sf = res.get("score_float") or 0.0
             score_raw = max(0.0, min(1.0, sf)) * 100.0
             data[row["id"]] = {
