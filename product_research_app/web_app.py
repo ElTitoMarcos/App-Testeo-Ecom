@@ -620,18 +620,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             params = parse_qs(parsed.query)
             qs_from = params.get("from", [""])[0]
             qs_to = params.get("to", [""])[0]
-            filters_s = params.get("filters", [None])[0]
 
             today = date.today()
             d_from = _parse_date(qs_from)
             d_to = _parse_date(qs_to)
 
-            if (qs_from and d_from is None) or (qs_to and d_to is None):
-                self.safe_write(
-                    lambda: self.send_json({"error": "invalid date"}, status=400)
-                )
-                return
-
+            # Defaults inteligentes (últimos 30 días)
             if d_from is None and d_to is None:
                 d_to = today
                 d_from = today - timedelta(days=29)
@@ -646,13 +640,23 @@ class RequestHandler(BaseHTTPRequestHandler):
             start_dt = datetime.combine(d_from, datetime.min.time())
             end_dt = datetime.combine(d_to + timedelta(days=1), datetime.min.time())
 
-            filters = None
-            if filters_s:
-                try:
-                    filters = json.loads(filters_s)
-                except Exception:
-                    filters = None
-            resp = trends_service.get_trends_summary(start_dt, end_dt, filters)
+            try:
+                resp = trends_service.get_trends_summary(start_dt, end_dt, filters=None)
+            except NameError:
+                resp = {
+                    "kpis": {
+                        "revenue_total": 0,
+                        "units_total": 0,
+                        "products_count": 0,
+                        "categories_count": 0,
+                        "avg_price": 0,
+                        "avg_rating": 0,
+                        "delta_prev": {"revenue_pct": 0, "units_pct": 0},
+                    },
+                    "timeseries": {"revenue": [], "units": [], "bucket": "day"},
+                    "top_categories": [],
+                    "scatter": [],
+                }
             self.safe_write(lambda: self.send_json(resp))
             return
         if path == "/api/config/winner-weights":

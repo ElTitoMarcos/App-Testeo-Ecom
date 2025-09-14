@@ -3,9 +3,9 @@ import { toISOFromDDMMYYYY, formatDDMMYYYY } from './dates.js';
 
 const container = document.getElementById('trendsSummary');
 const btn = document.getElementById('trendsBtn');
-const startInput = document.getElementById('trendStart');
-const endInput = document.getElementById('trendEnd');
-const applyBtn = document.getElementById('applyTrendFilters');
+const startInput = document.getElementById('fecha-desde');
+const endInput = document.getElementById('fecha-hasta');
+const applyBtn = document.getElementById('btn-aplicar-tendencias');
 const metricButtons = document.querySelectorAll('#topCatCard .metric-btn');
 const toggleLogBtn = document.getElementById('toggleLog');
 
@@ -53,10 +53,18 @@ async function fetchTrends() {
     }
     render();
   } catch (e) {
-    toast.error('No se pudieron cargar las tendencias.');
+    showToastError('No se pudieron cargar las tendencias.');
     if (currentData) render();
   } finally {
     setLoading(false);
+  }
+}
+
+function showToastError(msg) {
+  if (window.toast && typeof window.toast.error === 'function') {
+    window.toast.error(msg);
+  } else {
+    alert(msg);
   }
 }
 
