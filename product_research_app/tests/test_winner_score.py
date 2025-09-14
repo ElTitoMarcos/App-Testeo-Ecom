@@ -131,3 +131,13 @@ def test_awareness_priority_and_closeness():
 def test_compute_effective_weights_includes_awareness():
     eff = ws.compute_effective_weights({"awareness": 10}, [])
     assert "awareness" in eff and eff["awareness"] > 0
+
+
+def test_disabled_weight_excluded_from_score():
+    ws.prepare_oldness_bounds([])
+    prod = {"price": 10.0, "rating": 5.0}
+    weights = {"price": 50, "rating": 50}
+    enabled = {"price": False, "rating": True}
+    res = ws.compute_winner_score_v2(prod, weights, order=["price", "rating"], enabled=enabled)
+    assert "price" in res.get("disabled_fields", [])
+    assert res["effective_weights"]["price"] == 0.0

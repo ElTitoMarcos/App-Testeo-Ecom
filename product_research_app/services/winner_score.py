@@ -175,6 +175,7 @@ def prepare_oldness_bounds(rows: Iterable[Any]) -> None:
 
 WEIGHTS_CACHE: Dict[str, float] | None = None
 ORDER_CACHE: list[str] | None = None
+ENABLED_CACHE: Dict[str, bool] | None = None
 WEIGHTS_VERSION: int = 0
 
 
@@ -202,9 +203,10 @@ def sanitize_weights(weights: dict | None) -> dict:
 
 
 def invalidate_weights_cache() -> None:
-    global WEIGHTS_CACHE, ORDER_CACHE, WEIGHTS_VERSION
+    global WEIGHTS_CACHE, ORDER_CACHE, ENABLED_CACHE, WEIGHTS_VERSION
     WEIGHTS_CACHE = None
     ORDER_CACHE = None
+    ENABLED_CACHE = None
     WEIGHTS_VERSION += 1
 
 
@@ -228,8 +230,8 @@ def normalize_weight_key(key: str) -> str:
 def load_winner_weights_raw() -> Dict[str, Any]:
     """Return persisted weights with minimal metadata."""
 
-    w, o = load_winner_settings()
-    return {"weights": w, "order": o}
+    w, o, e = load_winner_settings()
+    return {"weights": w, "order": o, "weights_enabled": e}
 
 
 def save_winner_weights_raw(data: Dict[str, Any]) -> None:
@@ -238,24 +240,36 @@ def save_winner_weights_raw(data: Dict[str, Any]) -> None:
         from .config import set_winner_order_raw
 
         set_winner_order_raw(data.get("order", []))
+    if "weights_enabled" in data:
+        from .config import set_weights_enabled_raw
+
+        set_weights_enabled_raw(data.get("weights_enabled", {}))
     invalidate_weights_cache()
 
 
-def load_winner_settings() -> tuple[Dict[str, float], list[str]]:
-    global WEIGHTS_CACHE, ORDER_CACHE
-    if WEIGHTS_CACHE is not None and ORDER_CACHE is not None:
-        return WEIGHTS_CACHE, ORDER_CACHE
+def load_winner_settings() -> tuple[Dict[str, float], list[str], Dict[str, bool]]:
+    global WEIGHTS_CACHE, ORDER_CACHE, ENABLED_CACHE
+    if (
+        WEIGHTS_CACHE is not None
+        and ORDER_CACHE is not None
+        and ENABLED_CACHE is not None
+    ):
+        return WEIGHTS_CACHE, ORDER_CACHE, ENABLED_CACHE
     weights = get_winner_weights_raw()
     order = get_winner_order_raw()
+    from .config import get_weights_enabled_raw
+
+    enabled = get_weights_enabled_raw()
     WEIGHTS_CACHE = weights
     ORDER_CACHE = order
-    return weights, order
+    ENABLED_CACHE = enabled
+    return weights, order, enabled
 
 
 def load_winner_weights() -> Dict[str, float]:
     """Load Winner Score weights (RAW integers)."""
 
-    weights, _ = load_winner_settings()
+    weights, _, _ = load_winner_settings()
     return weights
 
 
@@ -536,7 +550,10 @@ NORMALIZERS: Dict[str, Callable[[float], float]] = {
 
 
 def compute_winner_score_v2(
-    product_row: Any, user_weights: Dict[str, float], order: Optional[list[str]] = None
+    product_row: Any,
+    user_weights: Dict[str, float],
+    order: Optional[list[str]] = None,
+    enabled: Optional[Dict[str, bool]] = None,
 ) -> Dict[str, Any]:
     """Compute Winner Score using available features only."""
 
@@ -553,6 +570,7 @@ def compute_winner_score_v2(
 
     present = list(raw_vals.keys())
     missing_fields = [f for f in ALLOWED_FIELDS if f not in present]
+    disabled_fields = [f for f in ALLOWED_FIELDS if enabled and not enabled.get(f, True)]
 
     dir_old, w_old_intensity = _oldness_pref_and_weight(user_weights)
 
@@ -563,8 +581,16 @@ def compute_winner_score_v2(
             n = 1.0 - n
         norms[k] = n
 
-    weights_for_priority = {k: int(round(user_weights.get(k, 0))) for k in ALLOWED_FIELDS}
-    weights_for_priority["oldness"] = int(round(w_old_intensity * 100))
+    weights_for_priority: Dict[str, int] = {}
+    for k in ALLOWED_FIELDS:
+        base = int(round(user_weights.get(k, 0)))
+        on = enabled.get(k, True) if enabled else True
+        weights_for_priority[k] = base if on else 0
+    weights_for_priority["oldness"] = (
+        int(round(w_old_intensity * 100))
+        if (enabled.get("oldness", True) if enabled else True)
+        else 0
+    )
     if order is None:
         order = list(weights_for_priority.keys())
     eff_all = compute_effective_weights(weights_for_priority, order)
@@ -583,6 +609,7 @@ def compute_winner_score_v2(
         "missing_fields": missing_fields,
         "present_fields": present,
         "effective_weights": eff_all_full,
+        "disabled_fields": disabled_fields,
         "sum_filtered": sum_filtered,
         "fallback": sum_filtered == 0,
         "order": order,
@@ -608,9 +635,12 @@ def generate_winner_scores(
     """
 
     if weights is None:
-        weights, order = load_winner_settings()
+        weights, order, enabled = load_winner_settings()
     else:
         order = get_winner_order_raw()
+        from .config import get_weights_enabled_raw
+
+        enabled = get_weights_enabled_raw()
 
     dir_old, w_old_intensity = _oldness_pref_and_weight(weights)
     oldness_ui = float(weights.get("oldness", 50))
@@ -644,10 +674,11 @@ def generate_winner_scores(
     for row in rows:
         pid = row["id"]
         old_score = row["winner_score"]
-        res = compute_winner_score_v2(row, weights, order)
+        res = compute_winner_score_v2(row, weights, order, enabled)
         sf = res.get("score_float") or 0.0
         present = set(res.get("present_fields", []))
         missing = set(res.get("missing_fields", []))
+        disabled = set(res.get("disabled_fields", []))
         eff_w = {k: round(v, 3) for k, v in res.get("effective_weights", {}).items()}
         eff_hash = hashlib.sha1(
             json.dumps(res.get("effective_weights", {}), sort_keys=True).encode("utf-8")
@@ -675,7 +706,7 @@ def generate_winner_scores(
 
         if not present:
             logger.warning(
-                "Winner Score: product=%s score_int=%s score_raw=%.3f weights_all=%s weights_eff=%s present=%s missing=%s "
+                "Winner Score: product=%s score_int=%s score_raw=%.3f weights_all=%s weights_eff=%s present=%s missing=%s disabled=%s "
                 "effective_weights=%s order=%s weights_effective_int=%s oldness_dir=%s oldness_intensity=%.3f oldness_ui=%.1f no_features_present",
                 pid,
                 new_score,
@@ -684,6 +715,7 @@ def generate_winner_scores(
                 eff_hash,
                 present,
                 missing,
+                disabled,
                 eff_w,
                 ord_list,
                 eff_w_int,
@@ -693,7 +725,7 @@ def generate_winner_scores(
             )
         else:
             logger.info(
-                "Winner Score: product=%s score_int=%s score_raw=%.3f weights_all=%s weights_eff=%s present=%s missing=%s "
+                "Winner Score: product=%s score_int=%s score_raw=%.3f weights_all=%s weights_eff=%s present=%s missing=%s disabled=%s "
                 "effective_weights=%s order=%s weights_effective_int=%s oldness_dir=%s oldness_intensity=%.3f oldness_ui=%.1f",
                 pid,
                 new_score,
@@ -702,6 +734,7 @@ def generate_winner_scores(
                 eff_hash,
                 present,
                 missing,
+                disabled,
                 eff_w,
                 ord_list,
                 eff_w_int,

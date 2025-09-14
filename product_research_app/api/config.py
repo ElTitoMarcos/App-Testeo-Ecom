@@ -5,6 +5,7 @@ from product_research_app.services.winner_score import (
     recompute_scores_for_all_products,
     load_settings,
     save_settings,
+    invalidate_weights_cache,
 )
 from product_research_app.services.config import (
     ALLOWED_FIELDS,
@@ -45,8 +46,18 @@ def api_get_winner_weights():
     settings = load_settings()
     weights = _coerce_weights(settings.get("winner_weights"))
     order = settings.get("winner_order") or list(weights.keys())
-    eff = compute_effective_int(weights, order)
-    resp = jsonify({**weights, "weights": weights, "order": order, "effective": {"int": eff}})
+    enabled_raw = settings.get("weights_enabled") if isinstance(settings.get("weights_enabled"), dict) else {}
+    enabled = {k: bool(enabled_raw.get(k, True)) for k in weights.keys()}
+    weights_eff = {k: (weights.get(k, 0) if enabled.get(k, True) else 0) for k in weights.keys()}
+    eff = compute_effective_int(weights_eff, order)
+    resp = jsonify({
+        **weights,
+        "weights": weights,
+        "order": order,
+        "effective": {"int": eff},
+        "weights_enabled": enabled,
+        "weights_order": settings.get("weights_order") or order,
+    })
     resp.headers["Cache-Control"] = "no-store"
     return resp, 200
 
@@ -68,7 +79,7 @@ def api_patch_winner_weights():
         incoming["awareness"] = 50
     settings["winner_weights"] = _merge_winner_weights(current, incoming)
 
-    order_in = body.get("order")
+    order_in = body.get("order") or body.get("weights_order")
     if isinstance(order_in, list):
         order = [k for k in order_in if k in ALLOWED_FIELDS]
     else:
@@ -76,8 +87,16 @@ def api_patch_winner_weights():
     if "awareness" not in order:
         order.append("awareness")
     settings["winner_order"] = order
+    settings["weights_order"] = order
+
+    en_in = body.get("weights_enabled")
+    if isinstance(en_in, dict):
+        current_en = settings.get("weights_enabled", {})
+        enabled = {k: bool(en_in.get(k, current_en.get(k, True))) for k in ALLOWED_FIELDS}
+        settings["weights_enabled"] = enabled
 
     save_settings(settings)
+    invalidate_weights_cache()
 
     updated = 0
     try:
