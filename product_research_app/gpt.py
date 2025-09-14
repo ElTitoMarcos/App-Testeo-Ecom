@@ -1044,30 +1044,70 @@ def recommend_winner_weights(
     samples: List[Dict[str, Any]],
     success_key: str,
 ) -> Dict[str, Any]:
-    """Devuelve pesos 0..100 independientes (NO normalizados) e incluye siempre revenue."""
-
-    # Usar el set completo permitido (incluye revenue)
+    """
+    Devuelve pesos 0..100 (independientes, NO normalizados) y, si la IA falla o devuelve
+    basura, calcula un fallback estadístico por correlación con la señal de éxito.
+    Incluye SIEMPRE todas las variables permitidas (incluida 'revenue').
+    """
     try:
         allowed = list(winner_calc.ALLOWED_FIELDS)
     except Exception:
-        # Fallback si no está importado winner_calc en este módulo
-        allowed = [
-            "price",
-            "rating",
-            "units_sold",
-            "revenue",
-            "desire",
-            "competition",
-            "oldness",
-            "awareness",
-        ]
+        allowed = ["price","rating","units_sold","revenue","desire","competition","oldness","awareness"]
 
-    # Si no hay muestras, devolver neutro 50
+    def _stat_fallback(rows: List[Dict[str, float]], target: str) -> Dict[str, int]:
+        # Pearson simple sin numpy, robusto a valores faltantes.
+        def _corr(xs, ys):
+            n = len(xs)
+            if n < 2: return 0.0
+            mx = sum(xs)/n; my = sum(ys)/n
+            num = sum((x-mx)*(y-my) for x,y in zip(xs,ys))
+            denx = sum((x-mx)**2 for x in xs)**0.5
+            deny = sum((y-my)**2 for y in ys)**0.5
+            return 0.0 if denx==0 or deny==0 else (num/(denx*deny))
+        tgt = [float(r.get(target, 0.0)) for r in rows]
+        raw = {}
+        for k in allowed:
+            if k == target:  # aún queremos ponderar target si lo deseas; aquí usamos solo como señal
+                # lo dejamos, pero correlación de la variable consigo misma sería 1.0 — no usarla para inflarla
+                pass
+            xs = [float(r.get(k, 0.0)) for r in rows]
+            c = abs(_corr(xs, tgt))
+            raw[k] = c
+        # Reescala 0..100; si todo cero, da un perfil razonable
+        mx = max(raw.values() or [0.0])
+        if mx <= 0:
+            profile = {"revenue":80,"units_sold":70,"rating":60,"price":55,"desire":45,"competition":35,"oldness":25,"awareness":15}
+            return {k:int(profile.get(k,50)) for k in allowed}
+        return {k: int(round((v/mx)*100.0)) for k,v in raw.items()}
+
+    def _extract_json_block(text: str) -> dict:
+        import json, re
+        # código entre ```json ... ``` o ``` ... ```
+        m = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text)
+        if m:
+            try: return json.loads(m.group(1))
+            except Exception: pass
+        # primera llave balanceada
+        s = text
+        try:
+            start = s.index("{")
+            depth = 0
+            for i,ch in enumerate(s[start:], start):
+                if ch == "{": depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return json.loads(s[start:i+1])
+        except Exception:
+            pass
+        # último intento directo
+        return json.loads(text)
+
+    # Si no hay muestras, devuelve algo neutro pero válido
     if not samples:
         return {"weights": {k: 50 for k in allowed}, "justification": ""}
 
-    # Prompt compacto (seguimos usando tu call_openai_chat)
-    # ⚠️ El modelo puede devolver distintos formatos; aceptamos varias claves.
+    # Construir prompt
     sample_json = json.dumps(samples[:50], ensure_ascii=False)
     prompt = (
         "Eres un optimizador de modelos de e-commerce.\n"
@@ -1096,17 +1136,21 @@ def recommend_winner_weights(
         {"role": "user", "content": prompt},
     ]
 
+    parsed = {}
     try:
         resp = call_openai_chat(api_key, model, messages)
         content = resp["choices"][0]["message"]["content"].strip()
-        parsed = json.loads(content)
+        parsed = _extract_json_block(content)
     except Exception:
-        return {"weights": {k: 50 for k in allowed}, "justification": ""}
+        parsed = {}
 
-    raw = parsed.get("pesos_0_100") or parsed.get("pesos") or parsed.get("weights") or {}
-    justification = parsed.get("justificacion") or parsed.get("justification") or ""
+    # Leer posibles claves de pesos
+    raw = {}
+    if isinstance(parsed, dict):
+        raw = parsed.get("pesos_0_100") or parsed.get("pesos") or parsed.get("weights") or {}
+    justification = (parsed.get("justificacion") or parsed.get("justification") or "") if isinstance(parsed, dict) else ""
 
-    # Reescalar si vino en 0..1 o sum≈1
+    # Reescalar si vino en 0..1 o suma≈1
     try:
         vals = [float(v) for v in raw.values()]
     except Exception:
@@ -1117,16 +1161,25 @@ def recommend_winner_weights(
         if all_01 and (sum_is_1 or max(vals) <= 1.0):
             raw = {k: float(v) * 100.0 for k, v in raw.items()}
 
-    # Completar el mapa 0..100 y sanear
+    # Completar 0..100, clamp y enteros
     out: Dict[str, int] = {}
     for k in allowed:
-        v = raw.get(k, 50)
-        try:
-            v = float(v)
-        except Exception:
-            v = 50.0
+        v = raw.get(k, None)
+        if v is None:
+            continue
+        try: v = float(v)
+        except Exception: v = None
+        if v is None: continue
         v = max(0.0, min(100.0, v))
         out[k] = int(round(v))
+
+    # Si no hay nada útil o todos iguales → fallback estadístico por correlación
+    if not out or len(set(out.values())) == 1:
+        out = _stat_fallback(samples, success_key)
+
+    # Garantiza todas las claves (si falta alguna tras fallback, rellena 0)
+    for k in allowed:
+        out.setdefault(k, 0)
 
     return {"weights": out, "justification": justification}
 
