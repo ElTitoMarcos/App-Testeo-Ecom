@@ -1,5 +1,5 @@
-import { fetchJson } from './net.js';
 import { fmtInt, fmtPrice, fmtPct, fmtFloat2 } from './format.js';
+import { toISOFromDDMMYYYY, formatDDMMYYYY } from './dates.js';
 
 const container = document.getElementById('trendsSummary');
 const btn = document.getElementById('trendsBtn');
@@ -15,25 +15,48 @@ let currentData = null;
 let prevData = null;
 let revenueSpark, unitsSpark, topCatChart, scatterChart;
 
-function showSkeleton() {
-  document.getElementById('kpiGrid').innerHTML = '<div class="skeleton"></div>'.repeat(6);
+function setLoading(v) {
+  const grid = document.getElementById('kpiGrid');
+  if (v) {
+    grid.innerHTML = '<div class="skeleton"></div>'.repeat(6);
+  } else if (!currentData) {
+    grid.innerHTML = '';
+  }
 }
 
-async function loadData() {
-  showSkeleton();
-  const from = startInput.value;
-  const to = endInput.value;
-  const url = `/api/trends/summary?from=${from}&to=${to}`;
+async function fetchTrends() {
+  setLoading(true);
   try {
-    currentData = await fetchJson(url);
-    const start = new Date(from);
-    const end = new Date(to);
-    const diff = end.getTime() - start.getTime();
-    const prevFrom = new Date(start.getTime() - diff).toISOString().slice(0,10);
-    prevData = await fetchJson(`/api/trends/summary?from=${prevFrom}&to=${from}`);
+    const fISO = toISOFromDDMMYYYY(startInput.value);
+    const tISO = toISOFromDDMMYYYY(endInput.value);
+    const url = new URL('/api/trends/summary', window.location.origin);
+    if (fISO) url.searchParams.set('from', fISO);
+    if (tISO) url.searchParams.set('to', tISO);
+
+    const res = await fetch(url.toString());
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    currentData = await res.json();
+
+    if (fISO && tISO) {
+      const start = new Date(fISO);
+      const end = new Date(tISO);
+      const diff = end.getTime() - start.getTime();
+      const prevFrom = new Date(start.getTime() - diff).toISOString().slice(0,10);
+      const prevUrl = new URL('/api/trends/summary', window.location.origin);
+      prevUrl.searchParams.set('from', prevFrom);
+      prevUrl.searchParams.set('to', start.toISOString().slice(0,10));
+      const r2 = await fetch(prevUrl.toString());
+      if (!r2.ok) throw new Error(`HTTP ${r2.status}`);
+      prevData = await r2.json();
+    } else {
+      prevData = currentData;
+    }
     render();
   } catch (e) {
-    // fetchJson already toasts
+    toast.error('No se pudieron cargar las tendencias.');
+    if (currentData) render();
+  } finally {
+    setLoading(false);
   }
 }
 
@@ -107,10 +130,9 @@ function renderTable(){
 
 btn?.addEventListener('click', () => {
   container.style.display = container.style.display === 'block' ? 'none' : 'block';
-  if(container.style.display === 'block') loadData();
 });
 
-applyBtn?.addEventListener('click', () => loadData());
+applyBtn?.addEventListener('click', () => fetchTrends());
 
 metricButtons.forEach(btn => btn.addEventListener('click', e => {
   metricButtons.forEach(b=>b.classList.remove('active'));
@@ -123,5 +145,12 @@ toggleLogBtn?.addEventListener('click', () => {
   scatterLog = !scatterLog;
   renderCharts();
 });
+
+const today = new Date();
+const from = new Date(today);
+from.setDate(today.getDate() - 29);
+startInput.value = formatDDMMYYYY(from);
+endInput.value = formatDDMMYYYY(today);
+fetchTrends();
 
 export {};
