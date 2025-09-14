@@ -1,16 +1,18 @@
 from flask import request, jsonify, current_app
 from . import app
 
-from product_research_app.services.winner_score import (
-    recompute_scores_for_all_products,
-    load_settings,
-    save_settings,
-    invalidate_weights_cache,
-)
+from product_research_app.gpt import recommend_winner_weights
 from product_research_app.services.config import (
     ALLOWED_FIELDS,
     compute_effective_int,
+    load_settings,
+    save_settings,
 )
+from product_research_app.services.winner_score import (
+    recompute_scores_for_all_products,
+    invalidate_weights_cache,
+)
+from product_research_app.config import get_api_key, get_model
 
 
 def _coerce_weights(raw: dict | None) -> dict[str, int]:
@@ -109,28 +111,23 @@ def api_patch_winner_weights():
     return resp, 200
 
 
+@app.route("/api/config/winner-weights/ai/ping", methods=["GET"])
+def api_ai_weights_ping():
+    current_app.logger.info("PING /api/config/winner-weights/ai/ping")
+    return jsonify({"ok": True}), 200
+
+
 # POST /api/config/winner-weights/ai
 @app.route("/api/config/winner-weights/ai", methods=["POST"])
 def api_post_winner_weights_ai():
-    from flask import request, jsonify, current_app
-    from product_research_app.gpt import recommend_winner_weights
-    from product_research_app.services.config import (
-        set_winner_weights_raw,
-        set_winner_order_raw,
-        compute_effective_int,
-    )
-    from product_research_app.services.winner_score import (
-        recompute_scores_for_all_products,
-        invalidate_weights_cache,
-    )
-    from product_research_app.config import get_api_key, get_model
-
+    current_app.logger.info("POST /api/config/winner-weights/ai ENTER")
     body = request.get_json(force=True) or {}
     samples = body.get("samples") or []
     success_key = body.get("success_key") or "revenue"
 
     api_key = get_api_key()
     if not api_key:
+        current_app.logger.warning("AI weights: missing_api_key")
         return jsonify({"error": "missing_api_key"}), 400
     model = get_model()
 
@@ -138,32 +135,37 @@ def api_post_winner_weights_ai():
     weights = rec.get("weights") or {}
     order = rec.get("order") or list(weights.keys())
 
-    # Persistir tal cual (0..100 independientes) + orden explícito
-    set_winner_weights_raw(weights)
-    set_winner_order_raw(order)
+    # Persistir pesos crudos 0..100 y orden explícito
+    settings = load_settings()
+    settings["winner_weights"] = {k: int(weights.get(k, 50)) for k in ALLOWED_FIELDS}
+    # Normalizar y completar orden
+    seen = set()
+    order_clean = [k for k in order if k in ALLOWED_FIELDS and not (k in seen or seen.add(k))]
+    for k in ALLOWED_FIELDS:
+        if k not in seen:
+            order_clean.append(k); seen.add(k)
+    settings["winner_order"] = order_clean
+    settings["weights_order"] = order_clean
+    save_settings(settings)
+
     invalidate_weights_cache()
 
-    # Recalcular Winner Score con los nuevos pesos/orden
     updated = 0
     try:
         updated = recompute_scores_for_all_products(scope="all")
     except Exception as e:
         current_app.logger.warning("recompute on ai save failed: %s", e)
 
-    eff_int = compute_effective_int(weights, order)
-    current_app.logger.info(
-        "ai_raw=%s order=%s effective_int=%s",
-        weights,
-        order,
-        eff_int,
-    )
-    resp = jsonify({
+    eff_int = compute_effective_int(settings["winner_weights"], order_clean)
+    resp = {
         "ok": True,
-        "winner_weights": weights,
-        "winner_order": order,
-        "effective": {"int": eff_int},
+        "winner_weights": settings["winner_weights"],   # 0..100 independientes
+        "winner_order": order_clean,                    # prioridad explícita
+        "effective": {"int": eff_int},                  # referencia (suma 100)
         "updated": updated,
-        "justification": rec.get("justification", "")
-    })
-    resp.headers["Cache-Control"] = "no-store"
-    return resp, 200
+        "justification": rec.get("justification", ""),
+    }
+    current_app.logger.info("AI weights OK: %s", resp)
+    r = jsonify(resp)
+    r.headers["Cache-Control"] = "no-store"
+    return r, 200

@@ -1,6 +1,6 @@
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any
 
 from ..config import load_config, save_config
 
@@ -17,6 +17,14 @@ ALLOWED_FIELDS = (
 DEFAULT_WEIGHTS_RAW: Dict[str, int] = {k: 50 for k in ALLOWED_FIELDS}
 DEFAULT_ORDER: List[str] = list(ALLOWED_FIELDS)
 DEFAULT_ENABLED: Dict[str, bool] = {k: True for k in ALLOWED_FIELDS}
+
+
+def load_settings() -> Dict[str, Any]:
+    return load_config()
+
+
+def save_settings(settings: Dict[str, Any]) -> None:
+    save_config(settings)
 
 # Compatibility placeholder; not used but kept for tests that monkeypatch it
 DB_PATH = Path(__file__).resolve().parents[1] / "data.sqlite3"
