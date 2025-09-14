@@ -42,6 +42,7 @@ from . import database
 from . import config
 from .services import ai_columns
 from .services import winner_score as winner_calc
+from .services import auto_weights
 from . import gpt
 from . import title_analyzer
 from .utils.db import row_to_dict, rget
@@ -2447,11 +2448,11 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         try:
             result = gpt.recommend_winner_weights(api_key, model, samples, target)
-            weights = winner_calc.sanitize_weights(result.get("weights", {}))
+            ai_raw = result.get("weights", {})
             notes = result.get("justification", "")
         except Exception as exc:
             self._set_json(500)
-            self.wfile.write(json.dumps({"error": str(exc)}).encode('utf-8'))
+            self.wfile.write(json.dumps({"error": str(exc)}).encode("utf-8"))
             return
         prev_settings = winner_calc.load_settings()
         prev_cfg = {
@@ -2463,31 +2464,35 @@ class RequestHandler(BaseHTTPRequestHandler):
                 for k, v in (prev_settings.get("weights_enabled") or {}).items()
             },
         }
-        enabled_map = prev_cfg.get("weights_enabled") or {}
-        enabled_keys = [k for k, on in enabled_map.items() if on]
-        raw_enabled = {k: weights.get(k, 0.0) for k in enabled_keys if k in weights} or weights
-        ints_enabled, order = winner_calc.to_int_weights_0_100(raw_enabled, prev_cfg)
-        prev_all = prev_cfg.get("weights") or {}
-        final_weights = prev_all.copy()
-        for k, v in ints_enabled.items():
-            final_weights[k] = v
+        final_weights, order, fallback = auto_weights.compute_final_weights(prev_cfg, ai_raw)
+        payload = {
+            "weights": final_weights,
+            "weights_order": order,
+            "weights_enabled": prev_cfg.get("weights_enabled") or {},
+        }
+        from .services.config import update_winner_settings
+
+        update_winner_settings(
+            weights_in=payload["weights"],
+            order_in=payload["weights_order"],
+            enabled_in=payload["weights_enabled"],
+        )
         logger.info(
-            "ai_raw=%s enabled_only=%s ints=%s order=%s sum=%s",
-            weights,
-            raw_enabled,
-            ints_enabled,
+            "ai_raw=%s final=%s order=%s fallback_uniform=%s",
+            ai_raw,
+            final_weights,
             order,
-            sum(ints_enabled.values()),
+            fallback,
         )
         resp = {
             "weights": final_weights,
             "weights_order": order,
             "order": order,
             "method": "gpt",
-            "diagnostics": {"notes": notes},
+            "diagnostics": {"notes": notes, "fallback_uniform": fallback},
         }
         self._set_json()
-        self.wfile.write(json.dumps(resp).encode('utf-8'))
+        self.wfile.write(json.dumps(resp).encode("utf-8"))
 
     def handle_scoring_v2_auto_weights_stat(self):
         length = int(self.headers.get("Content-Length", 0))

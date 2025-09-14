@@ -662,6 +662,25 @@ th.ec-col-competition,   td.ec-col-competition   { width: var(--ec-w-competition
 
 /* Fila con 3 columnas: ≡ | barra (1fr) | valor fijo */
 #weightsCard{ overflow-x:hidden; }
+#settingsPane{
+  display:flex; flex-direction:column;
+  height: calc(100vh - 220px);
+  min-height: 420px;
+}
+#weightsScroll{
+  flex:1 1 auto;
+  overflow:auto;
+  padding-right: 4px;
+}
+#weightsActions{
+  flex:0 0 auto;
+  display:flex; gap:10px;
+  justify-content:flex-start;
+  padding: 10px 0 4px;
+  border-top: 1px solid rgba(255,255,255,.06);
+  background: transparent;
+}
+#weightsActions .btn{ min-width: 160px; }
 .weight-row {
   display: grid;
   grid-template-columns: 24px minmax(0, 1fr) 40px; /* barra ocupa todo */

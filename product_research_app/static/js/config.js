@@ -140,8 +140,13 @@ function enhanceRangeWithFloat(rangeEl, itemEl){
 }
 
 function renderWeightsUI(state){
-  const list = document.getElementById('weightsList');
-  if(!list) return;
+  const root = document.getElementById('weightsScroll');
+  if(!root) return;
+  root.innerHTML = '';
+  const list = document.createElement('ul');
+  list.id = 'weightsList';
+  list.className = 'weights-list';
+  root.appendChild(list);
   if(state){
     cacheState = state;
     const fieldList = (typeof WEIGHT_FIELDS !== 'undefined' && Array.isArray(WEIGHT_FIELDS)) ? WEIGHT_FIELDS : [];
@@ -160,7 +165,6 @@ function renderWeightsUI(state){
       enabled: Object.fromEntries(factors.map(f => [f.key, f.enabled !== false]))
     };
   }
-  list.innerHTML = '';
   factors.forEach((f,idx) => {
     const priority = idx + 1;
     const li = document.createElement('li');
@@ -246,8 +250,8 @@ function renderWeightsUI(state){
     renderWeightsUI();
     if(!isInitialRender) markDirty();
   }});
-  const root = document.getElementById('weightsCard');
-  if (root && !root.classList.contains('weights-section')) root.classList.add('weights-section');
+  const rootCard = document.getElementById('weightsCard');
+  if (rootCard && !rootCard.classList.contains('weights-section')) rootCard.classList.add('weights-section');
   document.querySelector('.weights-section')?.classList.add('compact');
   isInitialRender = false;
   window.factors = factors;
@@ -420,37 +424,52 @@ async function adjustWeightsAI(){
 
 
 function showSettingsModalShell(){
-  const list = document.getElementById('weightsList');
-  if (list) list.innerHTML = '';
+  const scroll = document.getElementById('weightsScroll');
+  if (scroll) scroll.innerHTML = '';
 }
 
 function revealSettingsModalContent(){ /* no-op */ }
 
-async function hydrateSettingsModal(){
-  try{
-    isInitialRender = true;
-    const state = await SettingsCache.get();
-    renderWeightsUI(state);
-    console.debug('hydrateSettingsModal -> weights/order aplicados:', state);
-  }catch(err){
-    /* silencioso */
+function bindButtonsOnce(){
+  const resetBtn = document.getElementById('btnResetWeights');
+  if (resetBtn && !resetBtn.dataset.bound){
+    resetBtn.addEventListener('click', resetWeights);
+    resetBtn.dataset.bound = '1';
+  }
+  const aiBtn = document.getElementById('btnAutoWeights');
+  if (aiBtn && !aiBtn.dataset.bound){
+    aiBtn.addEventListener('click', adjustWeightsAI);
+    aiBtn.dataset.bound = '1';
   }
 }
 
 async function openConfigModal(){
   showSettingsModalShell();
-  await hydrateSettingsModal();
+  try{
+    isInitialRender = true;
+    const state = await SettingsCache.get();
+    renderWeightsUI(state);
+    bindButtonsOnce();
+    console.debug('openConfigModal -> weights/order aplicados:', state);
+  }catch(err){
+    /* silencioso */
+  }
   document.querySelector('#configModal')?.classList.add('ready');
   document.querySelector('#settings-modal')?.classList.add('ready');
   revealSettingsModalContent();
-  const resetBtn = document.getElementById('btnReset');
-  if (resetBtn) resetBtn.onclick = resetWeights;
-  const aiBtn = document.getElementById('btnAiWeights');
-  if (aiBtn) aiBtn.onclick = adjustWeightsAI;
+}
+
+async function loadWeights(){
+  try{
+    const state = await SettingsCache.get();
+    renderWeightsUI(state);
+  }catch(err){
+    /* silencioso */
+  }
 }
 
 window.openConfigModal = openConfigModal;
-window.loadWeights = hydrateSettingsModal;
+window.loadWeights = loadWeights;
 window.resetWeights = resetWeights;
 window.adjustWeightsAI = adjustWeightsAI;
 window.markDirty = markDirty;
