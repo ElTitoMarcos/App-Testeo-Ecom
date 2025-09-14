@@ -132,11 +132,12 @@ body.dark .skeleton{background:#333;}
 <div id="custom" style="display:none;">
   <div id="history" style="margin-top:10px;"></div>
 </div>
-<div id="trendsSummary" class="card">
+<div id="trendsSummary" class="card" style="position:relative;">
+  <button id="btn-log-tendencias" class="mini" style="position:absolute; right:8px; top:8px;">Log</button>
   <div id="trendHeader">
-    <label>Desde: <input type="text" id="trendStart" placeholder="dd/mm/aaaa"></label>
-    <label>Hasta: <input type="text" id="trendEnd" placeholder="dd/mm/aaaa"></label>
-    <button id="applyTrendFilters" aria-label="Aplicar filtros">Aplicar</button>
+    <label>Desde: <input type="text" id="fecha-desde" placeholder="dd/mm/aaaa"></label>
+    <label>Hasta: <input type="text" id="fecha-hasta" placeholder="dd/mm/aaaa"></label>
+    <button id="btn-aplicar-tendencias" aria-label="Aplicar filtros">Aplicar</button>
   </div>
   <div id="kpiGrid" class="kpi-grid"></div>
   <div class="sparklines-row">
@@ -167,6 +168,7 @@ body.dark .skeleton{background:#333;}
   <div class="card" id="topCatTableCard">
     <table id="topCatTable"></table>
   </div>
+  <pre id="log-tendencias" style="display:none; max-height:200px; overflow:auto; background:#111; color:#8fe; padding:8px;"></pre>
 </div>
 
   <table id="productTable">

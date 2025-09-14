@@ -3,11 +3,15 @@ import { toISOFromDDMMYYYY, formatDDMMYYYY } from './dates.js';
 
 const container = document.getElementById('trendsSummary');
 const btn = document.getElementById('trendsBtn');
-const startInput = document.getElementById('trendStart');
-const endInput = document.getElementById('trendEnd');
-const applyBtn = document.getElementById('applyTrendFilters');
+const startInput = document.getElementById('fecha-desde');
+const endInput = document.getElementById('fecha-hasta');
+const applyBtn = document.getElementById('btn-aplicar-tendencias');
 const metricButtons = document.querySelectorAll('#topCatCard .metric-btn');
 const toggleLogBtn = document.getElementById('toggleLog');
+const btnLog = document.getElementById('btn-log-tendencias');
+const logEl = document.getElementById('log-tendencias');
+
+let lastFetchInfo = { url: null, status: null, error: null, payloadKeys: null };
 
 let currentMetric = 'revenue';
 let scatterLog = false;
@@ -32,10 +36,17 @@ async function fetchTrends() {
     const url = new URL('/api/trends/summary', window.location.origin);
     if (fISO) url.searchParams.set('from', fISO);
     if (tISO) url.searchParams.set('to', tISO);
-
-    const res = await fetch(url.toString());
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    lastFetchInfo.url = url.toString();
+    const res = await fetch(url.toString(), { credentials: 'same-origin' });
+    lastFetchInfo.status = res.status;
+    if (!res.ok) {
+      lastFetchInfo.error = `HTTP ${res.status}`;
+      showTrendsToast('No se pudieron cargar las tendencias.');
+      return;
+    }
     currentData = await res.json();
+    lastFetchInfo.error = null;
+    lastFetchInfo.payloadKeys = Object.keys(currentData || {}).join(', ');
 
     if (fISO && tISO) {
       const start = new Date(fISO);
@@ -51,12 +62,26 @@ async function fetchTrends() {
     } else {
       prevData = currentData;
     }
-    render();
+    if (typeof renderTrends === 'function') {
+      renderTrends(currentData);
+    } else {
+      render();
+    }
   } catch (e) {
-    toast.error('No se pudieron cargar las tendencias.');
+    lastFetchInfo.error = (e && e.message) ? e.message : String(e);
+    showTrendsToast('No se pudieron cargar las tendencias.');
     if (currentData) render();
   } finally {
     setLoading(false);
+  }
+}
+
+function showTrendsToast(msg) {
+  if (window.toast && typeof window.toast.error === 'function') {
+    window.toast.error(msg);
+  } else if (logEl) {
+    logEl.style.display = 'block';
+    logEl.textContent = `[Trends] ${msg}\n` + JSON.stringify(lastFetchInfo, null, 2);
   }
 }
 
@@ -132,7 +157,10 @@ btn?.addEventListener('click', () => {
   container.style.display = container.style.display === 'block' ? 'none' : 'block';
 });
 
-applyBtn?.addEventListener('click', () => fetchTrends());
+applyBtn?.addEventListener('click', (ev) => {
+  ev.preventDefault();
+  fetchTrends();
+});
 
 metricButtons.forEach(btn => btn.addEventListener('click', e => {
   metricButtons.forEach(b=>b.classList.remove('active'));
@@ -146,11 +174,25 @@ toggleLogBtn?.addEventListener('click', () => {
   renderCharts();
 });
 
-const today = new Date();
-const from = new Date(today);
-from.setDate(today.getDate() - 29);
-startInput.value = formatDDMMYYYY(from);
-endInput.value = formatDDMMYYYY(today);
-fetchTrends();
+if (btnLog && logEl) {
+  btnLog.addEventListener('click', () => {
+    logEl.style.display = logEl.style.display === 'none' ? 'block' : 'none';
+    const { url, status, error, payloadKeys } = lastFetchInfo;
+    logEl.textContent = `[Trends]\nURL: ${url || '-'}\nStatus: ${status || '-'}\nError: ${error || '-'}\nPayload keys: ${payloadKeys || '-'}`;
+  });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  try {
+    const today = new Date();
+    const from = new Date(today);
+    from.setDate(today.getDate() - 29);
+    if (startInput && !startInput.value) startInput.value = formatDDMMYYYY(from);
+    if (endInput && !endInput.value) endInput.value = formatDDMMYYYY(today);
+    fetchTrends();
+  } catch (e) {
+    console.error('init tendencias', e);
+  }
+});
 
 export {};
