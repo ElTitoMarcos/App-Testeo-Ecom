@@ -11,112 +11,90 @@ const WEIGHT_FIELDS = [
   { key: 'awareness',    label: 'Awareness' }
 ];
 const WEIGHT_KEYS = WEIGHT_FIELDS.map(f => f.key);
-const EXTREMES = {
-  price:       { left: 'Más barato',       right: 'Más caro' },
-  rating:      { left: 'Peor rating',      right: 'Mejor rating' },
-  units_sold:  { left: 'Menos ventas',     right: 'Más ventas' },
-  revenue:     { left: 'Menores ingresos', right: 'Mayores ingresos' },
-  desire:      { left: 'Menor deseo',      right: 'Mayor deseo' },
-  competition: { left: 'Menos competencia', right: 'Más competencia' },
-  oldness:     { left: 'Más reciente',     right: 'Más antiguo' },
-  awareness:   { left: 'Unaware',          right: 'Most aware' }
-};
 const ALIASES = { unitsSold: 'units_sold', orders: 'units_sold' };
 function normalizeKey(k){ return ALIASES[k] || k; }
 const metricDefs = WEIGHT_FIELDS;
 const metricKeys = WEIGHT_KEYS;
-let factors = [];
-let userConfig = {};
 
-function defaultFactors(){
-  return WEIGHT_FIELDS.map(f => ({ ...f, weight:50 }));
+function defaultState(){
+  return {
+    order: WEIGHT_KEYS.slice(),
+    weights: Object.fromEntries(WEIGHT_KEYS.map(k => [k,50])),
+    enabled: Object.fromEntries(WEIGHT_KEYS.map(k => [k,true]))
+  };
 }
-let saveTimer=null;
+let settingsState = defaultState();
+
+let saveTimer = null;
 function markDirty(){
   clearTimeout(saveTimer);
-  saveTimer=setTimeout(saveSettings,700);
+  saveTimer = setTimeout(saveSettings,700);
+}
+function saveIfDirty(){
+  if(saveTimer){
+    clearTimeout(saveTimer);
+    saveSettings();
+  }
 }
 
-function renderFactors(){
+function renderWeightsUI(state){
   const list = document.getElementById('weightsList');
   if(!list) return;
-  list.innerHTML = '';
-  factors.forEach((f,idx) => {
-    const priority = idx+1;
+  list.innerHTML='';
+  state.order.forEach((key, idx)=>{
+    const def = WEIGHT_FIELDS.find(f=>f.key===key);
+    if(!def) return;
     const li = document.createElement('li');
-    li.className = 'weight-card';
-    li.dataset.key = f.key;
-    if(f.key === 'awareness'){
-      li.innerHTML = `<div class="priority-badge">#${priority}</div><div class="content"><div class="label">Awareness</div>
-
-    <div class="segmented-range">
-      <input id="awarenessSlider" class="weight-slider seg-awareness" type="range" min="0" max="100" step="1" />
-      <div class="ticks" aria-hidden="true">
-        <i style="left:20%"></i><i style="left:40%"></i><i style="left:60%"></i><i style="left:80%"></i>
+    li.className = 'weight-item weight-card';
+    li.dataset.key = key;
+    if(!state.enabled[key]) li.classList.add('disabled');
+    li.innerHTML = `
+      <div class="priority-badge">#${idx+1}</div>
+      <div class="content">
+        <div class="label">${def.label}</div>
+        <div class="controls">
+          <input type="number" min="0" max="100" step="1" class="weight-input" value="${state.weights[key]}">
+          <input type="checkbox" class="enable-toggle" ${state.enabled[key] ? 'checked' : ''}>
+        </div>
       </div>
-    </div>
-
-    <div class="awareness-labels">
-      <span>Unaware</span>
-      <span>Problem aware</span>
-      <span>Solution aware</span>
-      <span>Product aware</span>
-      <span>Most aware</span>
-    </div>
-
-    <div class="meta"><span class="weight-badge">peso: <span id="awarenessWeight"></span>/100</span></div>
-  </div>
-  <div class="drag-handle" title="Arrastra para reordenar">≡</div>`;
-      const slider = li.querySelector('#awarenessSlider');
-      const weightEl = li.querySelector('#awarenessWeight');
-      const segs = Array.from(li.querySelectorAll('.awareness-labels span'));
-      function updateAw(val){
-        const v = Math.max(0, Math.min(100, parseInt(val,10) || 0));
-        f.weight = v;
-        slider.value = v;
-        weightEl.textContent = v;
-        const idx = Math.min(4, Math.floor(v/20));
-        segs.forEach((el,i)=>el.classList.toggle('active', i===idx));
-      }
-      updateAw(f.weight);
-      slider.addEventListener('input', e => {
-        updateAw(e.target.value);
-        markDirty();
-      });
-    } else {
-      li.innerHTML = `<div class="priority-badge">#${priority}</div><div class="content"><label for="weight-${f.key}" class="label">${f.label}</label><input id="weight-${f.key}" class="weight-range" type="range" min="0" max="100" step="1" value="${f.weight}"><div class="slider-extremes scale"><span class="extreme-left">${EXTREMES[f.key].left}</span><span class="extreme-right">${EXTREMES[f.key].right}</span></div><span class="weight-badge">peso: ${f.weight}/100</span></div><div class="drag-handle" aria-hidden>≡</div>`;
-      const range = li.querySelector('.weight-range');
-      range.addEventListener('input', e => {
-        const v = Math.max(0, Math.min(100, parseInt(e.target.value,10) || 0));
-        f.weight = v;
-        range.value = v;
-        li.querySelector('.weight-badge').textContent = `peso: ${f.weight}/100`;
-        markDirty();
-      });
-    }
+      <div class="drag-handle" title="Arrastra para reordenar">≡</div>
+    `;
+    const numInput = li.querySelector('.weight-input');
+    const toggle = li.querySelector('.enable-toggle');
+    numInput.addEventListener('input', e=>{
+      const v = Math.max(0, Math.min(100, parseInt(e.target.value,10) || 0));
+      state.weights[key] = v;
+      numInput.value = v;
+      markDirty();
+    });
+    toggle.addEventListener('change', ()=>{
+      state.enabled[key] = toggle.checked;
+      numInput.disabled = !toggle.checked;
+      li.classList.toggle('disabled', !toggle.checked);
+      markDirty();
+    });
+    numInput.disabled = !state.enabled[key];
     list.appendChild(li);
   });
   Sortable.create(list,{ handle:'.drag-handle', animation:150, onEnd:()=>{
-    const orderKeys = Array.from(list.children).map(li=>li.dataset.key);
-    factors.sort((a,b)=>orderKeys.indexOf(a.key)-orderKeys.indexOf(b.key));
-    renderFactors();
+    state.order = Array.from(list.children).map(li=>li.dataset.key);
+    renderWeightsUI(state);
     markDirty();
   }});
 }
 
 function resetWeights(){
-  factors = defaultFactors();
-  renderFactors();
+  settingsState = defaultState();
+  renderWeightsUI(settingsState);
   markDirty();
 }
 
 async function saveSettings(){
   const payload = {
-    // usar "weights" (no "winner_weights") y persistir el orden visible
-    weights: Object.fromEntries(
-      factors.map(f => [f.key, Math.max(0, Math.min(100, Math.round(Number(f.weight))))])
-    ),
-    order: factors.map(f => f.key)
+    weights: {...settingsState.weights},
+    order: [...settingsState.order],
+    weights_order: [...settingsState.order],
+    weights_enabled: {...settingsState.enabled}
   };
   try{
     await fetch('/api/config/winner-weights', {
@@ -182,7 +160,6 @@ async function adjustWeightsAI(){
     const products = Array.isArray(window.allProducts) ? window.allProducts : [];
     if (!products.length){ if (typeof toast !== 'undefined') toast.info('No hay productos cargados'); return; }
 
-    // Construir dataset con las 8 features del Winner Score
     const rows = products.map(p => {
       const ratingRaw = p.rating ?? (p.extras && p.extras.rating);
       const unitsRaw  = p.units_sold ?? (p.extras && (p.extras['Item Sold'] || p.extras['Orders']));
@@ -199,14 +176,12 @@ async function adjustWeightsAI(){
       };
     });
 
-    // Target: revenue si >=50% lo tiene; si no, units_sold
     const revCount = rows.filter(r => r.revenue > 0).length;
     const targetName = (revCount >= Math.ceil(rows.length * 0.5)) ? 'revenue' : 'units_sold';
 
-    // Enviar el mayor número posible en una sola llamada (controlado por presupuesto)
     const cfg = (window.userConfig && window.userConfig.aiCost) ? window.userConfig.aiCost : { costCapUSD: 0.25, estTokensPerItemIn: 300, estTokensPerItemOut: 80 };
     const estTokPerItem = (num(cfg.estTokensPerItemIn) + num(cfg.estTokensPerItemOut)) || 380;
-    const pricePerK = 0.002; // estimación conservadora
+    const pricePerK = 0.002;
     const maxByBudget = Math.max(30, Math.floor((cfg.costCapUSD || 0.25) / pricePerK * 1000 / estTokPerItem));
     const HARD_CAP = 500;
     const MAX = Math.min(HARD_CAP, Math.max(60, maxByBudget));
@@ -219,7 +194,6 @@ async function adjustWeightsAI(){
     ];
     const payload = { features, target: targetName, data_sample };
 
-    // 1 intento: GPT; fallback estadístico si falla
     let res = await fetch('/scoring/v2/auto-weights-gpt', {
       method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
     });
@@ -230,10 +204,9 @@ async function adjustWeightsAI(){
     }
     if (!res.ok) throw new Error('Auto-weights request failed');
 
-    const out = await res.json(); // { weights:{k:0..1|0..100}, method?... }
+    const out = await res.json();
     const returned = (out && out.weights) ? out.weights : {};
 
-    // Normalizar a 0..100 enteros y ordenar por importancia
     const intWeights = {};
     for (const k of features){
       let v = num(returned[k]);
@@ -243,19 +216,19 @@ async function adjustWeightsAI(){
     }
     const newOrder = [...features].sort((a,b) => (intWeights[b]||0) - (intWeights[a]||0));
 
-    // Aplicar en UI
-    if (Array.isArray(window.factors) && window.factors.length){
-      const byKey = Object.fromEntries(window.factors.map(f => [f.key, f]));
-      window.factors = newOrder.filter(k => byKey[k]).map(k => ({ ...byKey[k], weight: intWeights[k] ?? byKey[k].weight }));
-      if (typeof renderFactors === 'function') renderFactors();
-    }
+    settingsState.weights = { ...settingsState.weights, ...intWeights };
+    settingsState.order = newOrder.filter(k => settingsState.weights[k] !== undefined);
+    renderWeightsUI(settingsState);
 
-    // Guardar {weights, order} y recargar desde servidor para reflejar lo persistido
     await fetch('/api/config/winner-weights', {
       method:'PATCH', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ weights: intWeights, order: newOrder })
+      body: JSON.stringify({
+        weights: intWeights,
+        order: newOrder,
+        weights_order: newOrder,
+        weights_enabled: { ...settingsState.enabled }
+      })
     });
-    if (typeof openConfigModal === 'function') await openConfigModal();
 
     if (typeof toast !== 'undefined' && toast.success){
       const method = (out && out.method) ? out.method : 'auto';
@@ -269,48 +242,36 @@ async function adjustWeightsAI(){
   }
 }
 
-
-async function openConfigModal(){
+async function hydrateSettingsModal(){
   try{
     const res = await fetch('/api/config/winner-weights');
-    const data = await res.json(); // backend: { weights, order, effective? }  (o legado: mapa plano)
+    const data = await res.json();
 
-    // Soporta ambas formas (nueva y legacy)
     const weights = (data && data.weights) ? data.weights : (data || {});
-    const order   = (data && Array.isArray(data.order) && data.order.length)
-      ? data.order
-      : (typeof WEIGHT_KEYS !== 'undefined' ? WEIGHT_KEYS : Object.keys(weights));
+    const order = (data && data.weights_order && Array.isArray(data.weights_order)) ? data.weights_order
+                : (data && Array.isArray(data.order) && data.order.length ? data.order : WEIGHT_KEYS.slice());
+    const enabled = (data && data.weights_enabled) ? data.weights_enabled : Object.fromEntries(Object.keys(weights).map(k => [k,true]));
 
-    // Construcción de factors respetando orden y pesos persistidos
-    const fieldList = (typeof WEIGHT_FIELDS !== 'undefined' && Array.isArray(WEIGHT_FIELDS)) ? WEIGHT_FIELDS : [];
-    const byKey = Object.fromEntries(fieldList.map(f => [f.key, f]));
+    const base = defaultState();
+    base.order = order.filter(k => WEIGHT_KEYS.includes(k)).concat(WEIGHT_KEYS.filter(k=>!order.includes(k)));
+    base.weights = { ...base.weights, ...Object.fromEntries(Object.entries(weights).map(([k,v]) => [k, Math.max(0, Math.min(100, Math.round(Number(v))))])) };
+    base.enabled = { ...base.enabled, ...Object.fromEntries(Object.entries(enabled).map(([k,v]) => [k, !!v])) };
+    settingsState = base;
 
-    window.factors = order
-      .filter(k => byKey[k]) // ignora claves desconocidas
-      .map(k => ({
-        ...byKey[k],
-        weight: (weights[k] !== undefined && !isNaN(weights[k]))
-          ? Math.round(Number(weights[k]))
-          : 50
-      }));
+    renderWeightsUI(settingsState);
 
-    renderFactors();
-
-    // Wire de botones (no dupliques si ya existe)
     const resetBtn = document.getElementById('btnReset');
     if (resetBtn) resetBtn.onclick = resetWeights;
     const aiBtn = document.getElementById('btnAiWeights');
     if (aiBtn) aiBtn.onclick = adjustWeightsAI;
-
-    console.debug('openConfigModal -> weights/order aplicados:', { weights, order });
   }catch(err){
     console.error('Error loading weights', err);
   }
 }
 
-window.openConfigModal = openConfigModal;
-window.loadWeights = openConfigModal;
+window.hydrateSettingsModal = hydrateSettingsModal;
 window.resetWeights = resetWeights;
 window.adjustWeightsAI = adjustWeightsAI;
 window.markDirty = markDirty;
+window.saveIfDirty = saveIfDirty;
 window.metricKeys = metricKeys;
