@@ -759,6 +759,7 @@ body.dark .weight-card:nth-child(odd) { background: rgba(255,255,255,0.03); }
 .weight-card .label{ margin-bottom:2px; }
 .weight-card .scale{ margin-top:2px; }
 .weight-card .meta{ margin-top:4px; }
+.weight-card.disabled{ opacity:0.5; }
 
 /* Awareness segmented slider */
 .segmented-range{ position:relative; margin:10px 0 6px; }
