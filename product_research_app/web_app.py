@@ -1189,6 +1189,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/auto_weights":
             self.handle_auto_weights()
             return
+        if path == "/api/config/winner-weights/ai":
+            self.handle_scoring_v2_auto_weights_gpt()
+            return
         if path == "/scoring/v2/auto-weights-gpt":
             self.handle_scoring_v2_auto_weights_gpt()
             return
