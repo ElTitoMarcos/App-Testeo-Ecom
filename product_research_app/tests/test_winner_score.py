@@ -108,14 +108,14 @@ def test_awareness_weight_impacts_score():
 def test_recommend_winner_weights_includes_awareness(monkeypatch):
     # simulate GPT returning weights for price and awareness
     def fake_call(api_key, model, messages):
-        return {"choices": [{"message": {"content": '{"pesos": {"price": 1, "awareness": 3}}'}}]}
+        return {"choices": [{"message": {"content": '{"weights": {"price": 1, "awareness": 3}}'}}]}
 
     monkeypatch.setattr(gpt, "call_openai_chat", fake_call)
     samples = [{"price": 10.0, "awareness": 0.75, "target": 5.0}]
     res = gpt.recommend_winner_weights("k", "m", samples, "target")
     weights = res["weights"]
     assert set(weights) == {"price", "awareness"}
-    assert math.isclose(sum(weights.values()), 1.0)
+    assert weights["awareness"] == 3
 
 
 def test_awareness_priority_and_closeness():
@@ -143,23 +143,44 @@ def test_disabled_weight_excluded_from_score():
     assert res["effective_weights"]["price"] == 0.0
 
 
-def test_to_int_weights_uses_hamilton_method():
+def test_to_int_weights_clamps_and_orders():
     raw = {
-        "price": 0.35,
-        "rating": 0.25,
-        "units_sold": 0.15,
-        "revenue": 0.15,
-        "desire": 0.07,
-        "competition": 0.03,
+        "price": 72,
+        "rating": 88,
+        "units_sold": 65,
+        "revenue": 50,
+        "desire": 40,
+        "competition": 30,
+        "oldness": 10,
+        "awareness": 20,
     }
-    ints, order = ws.to_int_weights_0_100(raw, {"weights": {}, "weights_enabled": {}})
-    assert ints == {
-        "price": 35,
-        "rating": 25,
-        "units_sold": 15,
-        "revenue": 15,
-        "desire": 7,
-        "competition": 3,
+    ints, order = ws.to_int_weights_0_100(raw, {})
+    assert ints == raw
+    assert order == [
+        "rating",
+        "price",
+        "units_sold",
+        "revenue",
+        "desire",
+        "competition",
+        "awareness",
+        "oldness",
+    ]
+    assert sum(ints.values()) == 375
+
+
+def test_to_int_weights_missing_metric_warns(caplog):
+    raw = {
+        "price": 72,
+        "rating": 88,
+        "units_sold": 65,
+        "desire": 40,
+        "competition": 30,
+        "oldness": 10,
+        "awareness": 20,
     }
-    assert sum(ints.values()) == 100
-    assert order[0] == "price" and order[-1] == "competition"
+    with caplog.at_level("WARNING"):
+        ints, order = ws.to_int_weights_0_100(raw, {})
+    assert ints["revenue"] == 0
+    assert any("missing revenue" in rec.message for rec in caplog.records)
+    assert set(ints.keys()) == set(ws.ALLOWED_FIELDS)
