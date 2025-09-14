@@ -2450,41 +2450,50 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         try:
             result = gpt.recommend_winner_weights(api_key, model, samples, target)
-            weights = winner_calc.sanitize_weights(result.get("weights", {}))
+            # result["weights"] ya es 0..100 independiente e incluye revenue
+            weights_raw = result.get("weights", {}) or {}
             notes = result.get("justification", "")
         except Exception as exc:
             self._set_json(500)
             self.wfile.write(json.dumps({"error": str(exc)}).encode('utf-8'))
             return
+
+        # Filtrar a campos permitidos y garantizar enteros 0..100
+        allowed = list(winner_calc.ALLOWED_FIELDS)
+        final_weights = {}
+        for k in allowed:
+            v = weights_raw.get(k, 50)
+            try:
+                v = float(v)
+            except Exception:
+                v = 50.0
+            v = max(0.0, min(100.0, v))
+            final_weights[k] = int(round(v))
+
+        # Orden (mayor peso primero); si empate, mantener orden previo
         prev_settings = winner_calc.load_settings()
-        prev_cfg = {
-            "weights": {
-                k: int(v) for k, v in (prev_settings.get("winner_weights") or {}).items()
-            },
-            "weights_enabled": {
-                k: bool(v)
-                for k, v in (prev_settings.get("weights_enabled") or {}).items()
-            },
-        }
-        enabled_map = prev_cfg.get("weights_enabled") or {}
-        enabled_keys = [k for k, on in enabled_map.items() if on]
-        raw_enabled = {k: weights.get(k, 0.0) for k in enabled_keys if k in weights} or weights
-        ints_enabled, order = winner_calc.to_int_weights_0_100(raw_enabled, prev_cfg)
-        prev_all = prev_cfg.get("weights") or {}
-        final_weights = prev_all.copy()
-        for k, v in ints_enabled.items():
-            final_weights[k] = v
+        prev_order = prev_settings.get("weights_order") or list(allowed)
+        order = sorted(
+            final_weights.keys(),
+            key=lambda k: (
+                -final_weights[k],
+                prev_order.index(k) if k in prev_order else 999,
+            ),
+        )
+
         logger.info(
             "ai_raw=%s enabled_only=%s ints=%s order=%s sum=%s",
-            weights,
-            raw_enabled,
-            ints_enabled,
+            final_weights,  # ahora mostramos crudos 0..100
+            final_weights,  # mantenemos la clave para no romper parseos previos de logs
+            final_weights,  # 'ints' deja de ser 'suma 100'; es el mismo 0..100
             order,
-            sum(ints_enabled.values()),
+            sum(final_weights.values()),
         )
+
+        # Responder con 0..100 independ. + orden (el frontend ya hace el PATCH)
         resp = {
-            "weights": final_weights,
-            "weights_order": order,
+            "weights": final_weights,        # 0..100 independientes
+            "weights_order": order,          # prioridad explícita
             "order": order,
             "method": "gpt",
             "diagnostics": {"notes": notes},
@@ -2519,8 +2528,39 @@ class RequestHandler(BaseHTTPRequestHandler):
             num = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
             corr = abs(num / (denom_x * denom_y)) if denom_x and denom_y else 0.0
             weights[field] = corr
-        weights = winner_calc.sanitize_weights({k: weights.get(k, 0.0) for k in features})
-        resp = {"weights": {k: weights.get(k, 0.0) for k in features}, "method": "stat", "diagnostics": {"n": len(samples_in)}}
+
+        # weights como correlación absoluta -> reescala a 0..100 independientes
+        weights01 = {k: float(weights.get(k, 0.0)) for k in features}
+        maxv = max(weights01.values() or [0.0])
+        weights_raw = {
+            k: (v / maxv * 100.0 if maxv > 0 else 50.0)
+            for k, v in weights01.items()
+        }
+
+        allowed = list(winner_calc.ALLOWED_FIELDS)
+        final_weights = {}
+        for k in allowed:
+            v = weights_raw.get(k, 50.0)
+            v = max(0.0, min(100.0, float(v)))
+            final_weights[k] = int(round(v))
+
+        prev_settings = winner_calc.load_settings()
+        prev_order = prev_settings.get("weights_order") or list(allowed)
+        order = sorted(
+            final_weights.keys(),
+            key=lambda k: (
+                -final_weights[k],
+                prev_order.index(k) if k in prev_order else 999,
+            ),
+        )
+
+        resp = {
+            "weights": final_weights,        # 0..100 independientes
+            "weights_order": order,
+            "order": order,
+            "method": "stat",
+            "diagnostics": {"n": len(samples_in)},
+        }
         self._set_json()
         self.wfile.write(json.dumps(resp).encode('utf-8'))
 
