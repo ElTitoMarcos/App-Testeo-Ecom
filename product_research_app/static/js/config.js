@@ -53,26 +53,38 @@ function renderWeightsUI(state){
       <div class="content">
         <div class="label">${def.label}</div>
         <div class="controls">
-          <input type="number" min="0" max="100" step="1" class="weight-input" value="${state.weights[key]}">
+          <div class="weight-controls">
+            <input class="weight-range" type="range" min="0" max="100" step="1" value="${state.weights[key]}" aria-label="Peso de ${def.label}">
+            <input class="weight-number" type="number" min="0" max="100" step="1" value="${state.weights[key]}" aria-label="Peso de ${def.label}">
+          </div>
           <input type="checkbox" class="enable-toggle" ${state.enabled[key] ? 'checked' : ''}>
         </div>
       </div>
       <div class="drag-handle" title="Arrastra para reordenar">≡</div>
     `;
-    const numInput = li.querySelector('.weight-input');
+    const rangeInput = li.querySelector('.weight-range');
+    const numInput = li.querySelector('.weight-number');
     const toggle = li.querySelector('.enable-toggle');
-    numInput.addEventListener('input', e=>{
-      const v = Math.max(0, Math.min(100, parseInt(e.target.value,10) || 0));
-      state.weights[key] = v;
+    rangeInput.addEventListener('input', e=>{
+      const v = Math.max(0, Math.min(100, Math.round(+e.target.value)));
       numInput.value = v;
+      state.weights[key] = v;
       markDirty();
     });
-    toggle.addEventListener('change', ()=>{
-      state.enabled[key] = toggle.checked;
-      numInput.disabled = !toggle.checked;
-      li.classList.toggle('disabled', !toggle.checked);
+    numInput.addEventListener('input', e=>{
+      const v = Math.max(0, Math.min(100, Math.round(+e.target.value || 0)));
+      rangeInput.value = v;
+      state.weights[key] = v;
       markDirty();
     });
+    toggle.addEventListener('change', e=>{
+      state.enabled[key] = !!e.target.checked;
+      li.classList.toggle('disabled', !state.enabled[key]);
+      rangeInput.disabled = !state.enabled[key];
+      numInput.disabled = !state.enabled[key];
+      markDirty();
+    });
+    rangeInput.disabled = !state.enabled[key];
     numInput.disabled = !state.enabled[key];
     list.appendChild(li);
   });

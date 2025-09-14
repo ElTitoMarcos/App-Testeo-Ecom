@@ -736,8 +736,12 @@ input[type="range"].weight-range { width: 100% !important; }
 body.dark .weight-card:nth-child(odd) { background: rgba(255,255,255,0.03); }
 .weights-list .weight-card:nth-child(odd){ margin-bottom:0; }
 
-.weight-item.disabled{ opacity:0.5; }
-.weight-item.disabled .weight-input{ pointer-events:none; cursor:not-allowed; }
+.weight-item{ display:flex; flex-direction:column; gap:8px; }
+.weight-item.disabled{ opacity:.55; }
+.weight-controls{ display:flex; align-items:center; gap:10px; }
+.weight-range{ flex:1; height:6px; border-radius:999px; background:var(--track,#1e293b); }
+.weight-range::-webkit-slider-thumb{ width:16px; height:16px; border-radius:50%; background:var(--thumb,#6366f1); }
+.weight-number{ width:64px; text-align:center; }
 
 .priority-badge {
   width: 40px;
