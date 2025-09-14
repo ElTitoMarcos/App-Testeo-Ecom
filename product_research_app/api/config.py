@@ -107,3 +107,57 @@ def api_patch_winner_weights():
     resp = jsonify({"ok": True, "winner_weights": settings["winner_weights"], "winner_order": order, "updated": updated})
     resp.headers["Cache-Control"] = "no-store"
     return resp, 200
+
+
+# POST /api/config/winner-weights/ai
+@app.route("/api/config/winner-weights/ai", methods=["POST"])
+def api_post_winner_weights_ai():
+    from flask import request, jsonify, current_app
+    from product_research_app.gpt import recommend_winner_weights
+    from product_research_app.services.config import (
+        set_winner_weights_raw,
+        set_winner_order_raw,
+        compute_effective_int,
+    )
+    from product_research_app.services.winner_score import (
+        recompute_scores_for_all_products,
+        invalidate_weights_cache,
+    )
+    from product_research_app.config import get_api_key, get_model
+
+    body = request.get_json(force=True) or {}
+    samples = body.get("samples") or []
+    success_key = body.get("success_key") or "revenue"
+
+    api_key = get_api_key()
+    if not api_key:
+        return jsonify({"error": "missing_api_key"}), 400
+    model = get_model()
+
+    rec = recommend_winner_weights(api_key, model, samples, success_key)
+    weights = rec.get("weights") or {}
+    order = rec.get("order") or list(weights.keys())
+
+    # Persistir tal cual (0..100 independientes) + orden explícito
+    set_winner_weights_raw(weights)
+    set_winner_order_raw(order)
+    invalidate_weights_cache()
+
+    # Recalcular Winner Score con los nuevos pesos/orden
+    updated = 0
+    try:
+        updated = recompute_scores_for_all_products(scope="all")
+    except Exception as e:
+        current_app.logger.warning("recompute on ai save failed: %s", e)
+
+    eff_int = compute_effective_int(weights, order)
+    resp = jsonify({
+        "ok": True,
+        "winner_weights": weights,
+        "winner_order": order,
+        "effective": {"int": eff_int},
+        "updated": updated,
+        "justification": rec.get("justification", "")
+    })
+    resp.headers["Cache-Control"] = "no-store"
+    return resp, 200
