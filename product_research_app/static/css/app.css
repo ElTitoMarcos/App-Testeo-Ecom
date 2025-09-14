@@ -778,6 +778,77 @@ input[type="range"].seg-awareness{ width:100%; display:block; margin:0; }
   gap:0; margin-top:6px; font-size:12px; opacity:.95;
   text-align:center;
 }
+
+/* Tarjetas más finas */
+.weights-section.compact .weight-item,
+.weights-section.compact .weight-card {
+  margin: 10px 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+}
+
+/* Encabezado (rank + título + handle) en una línea baja */
+.weights-section.compact .weight-item .wi-head,
+.weights-section.compact .weight-item .header,
+.weights-section.compact .weight-item .row-head,
+.weights-section.compact .weight-card .wi-head,
+.weights-section.compact .weight-card .header,
+.weights-section.compact .weight-card .row-head,
+.weights-section.compact .weight-card .content {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+/* Slider ocupa una sola línea, menos separación vertical */
+.weights-section.compact .weight-item .wi-slider,
+.weights-section.compact .weight-item .slider,
+.weights-section.compact .weight-item .row-slider,
+.weights-section.compact .weight-card .wi-slider,
+.weights-section.compact .weight-card .slider,
+.weights-section.compact .weight-card .row-slider,
+.weights-section.compact .weight-card .weight-range {
+  margin: 2px 0 6px 0;
+}
+
+/* Línea meta inferior: min | pill peso | toggle | max */
+.weights-section.compact .weight-item .wi-meta,
+.weights-section.compact .weight-item .meta,
+.weights-section.compact .weight-item .row-meta,
+.weights-section.compact .weight-card .wi-meta,
+.weights-section.compact .weight-card .meta,
+.weights-section.compact .weight-card .row-meta,
+.weights-section.compact .weight-card .content .weight-badge {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  opacity: .9;
+}
+
+/* Pastilla de peso centrada */
+.weights-section.compact .wi-meta .wi-pill,
+.weights-section.compact .meta .pill,
+.weights-section.compact .weight-card .weight-badge {
+  justify-self: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(99,102,241,.35);
+  background: rgba(99,102,241,.15);
+}
+
+/* Toggle pequeño */
+.weights-section.compact .wi-meta input[type="checkbox"],
+.weights-section.compact .weight-card .wt-enabled {
+  transform: scale(.9);
+}
+
+/* Item deshabilitado cuando toggle OFF (no tocar estilos globales del slider) */
+.weights-section.compact .weight-item.disabled,
+.weights-section.compact .weight-card.disabled { opacity:.55; }
 .awareness-labels span{ padding-top:2px; }
 .awareness-labels span.active{
   background: rgba(124,93,255,.12);
