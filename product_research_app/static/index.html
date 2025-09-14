@@ -65,6 +65,31 @@ body.dark pre { background:#2e315f; }
 .skeleton{background:#ddd;border-radius:4px;height:40px;animation:skeleton-pulse 1.2s infinite ease-in-out;}
 body.dark .skeleton{background:#333;}
 @keyframes skeleton-pulse{0%{opacity:0.7;}50%{opacity:0.4;}100%{opacity:0.7;}}
+
+/* Oculta KPIs si aún existen en el DOM */
+.kpi-grid, .kpi, .kpis { display: none !important; }
+
+/* Fila de gráficos */
+.trends-row {
+  display: grid;
+  grid-template-columns: 2fr 1.2fr;
+  gap: 16px;
+  margin-top: 8px;
+}
+
+/* Cards y lienzos */
+#trendsSummary .card { background: var(--panel, #171a2b); border-radius: 10px; padding: 12px; }
+#trendsSummary .card.lg { min-height: 380px; }
+#trendsSummary .card.md { min-height: 380px; }
+#trendsSummary .card-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
+#chart-top-categories, #chart-pareto { width:100%; height:320px !important; }
+
+/* Tabla compacta */
+.table.compact th, .table.compact td { padding: 8px 10px; }
+.table.compact th[role="button"] { cursor: pointer; user-select: none; }
+.table.compact th.sort-asc::after  { content: " \25B2"; opacity: .7; }
+.table.compact th.sort-desc::after { content: " \25BC"; opacity: .7; }
+
 </style>
 </head>
 <body class="dark">
@@ -132,41 +157,37 @@ body.dark .skeleton{background:#333;}
 <div id="custom" style="display:none;">
   <div id="history" style="margin-top:10px;"></div>
 </div>
-<div id="trendsSummary" class="card">
+<div id="trendsSummary">
   <div id="trendHeader">
     <label>Desde: <input type="text" id="fecha-desde"></label>
     <label>Hasta: <input type="text" id="fecha-hasta"></label>
     <button id="btn-aplicar-tendencias" aria-label="Aplicar filtros">Aplicar</button>
   </div>
-  <div id="kpiGrid" class="kpi-grid"></div>
-  <div class="sparklines-row">
-    <canvas id="sparkRevenue"></canvas>
-    <canvas id="sparkUnits"></canvas>
-  </div>
-  <div class="trend-main">
-    <div class="card" id="topCatCard">
-      <div class="card-header" style="display:flex;align-items:center;gap:8px;">
-        <span>Top categorías</span>
-        <div class="metric-selector">
-          <button class="metric-btn active" data-metric="revenue" aria-label="Ordenar por ingresos">Ingresos</button>
-          <button class="metric-btn" data-metric="units" aria-label="Ordenar por unidades">Unidades</button>
-          <button class="metric-btn" data-metric="avg_price" aria-label="Ordenar por precio medio">Precio</button>
-          <button class="metric-btn" data-metric="avg_rating" aria-label="Ordenar por rating medio">Rating</button>
-        </div>
-      </div>
-      <div class="chart-wrapper"><canvas id="topCatChart"></canvas></div>
+  <div class="trends-row">
+    <div id="card-top-categories" class="card lg">
+      <canvas id="chart-top-categories"></canvas>
     </div>
-    <div class="card" id="priceRevCard">
-      <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
-        <span>Precio vs Ingresos</span>
-        <button id="toggleLog" class="metric-btn" aria-label="Alternar escala log">Log</button>
+    <div id="card-pareto" class="card md">
+      <div class="card-header">
+        <span>Pareto de ingresos (Top 10)</span>
+        <button id="btn-log-trends" class="mini">Log</button>
       </div>
-      <div class="chart-wrapper"><canvas id="priceRevChart"></canvas></div>
+      <canvas id="chart-pareto"></canvas>
     </div>
   </div>
-  <div class="card" id="topCatTableCard">
-    <table id="topCatTable"></table>
-  </div>
+  <table id="tbl-categorias" class="table compact">
+    <thead>
+      <tr>
+        <th data-sort-key="categoria" role="button">Categorías</th>
+        <th data-sort-key="productos" role="button">Productos</th>
+        <th data-sort-key="unidades" role="button">Unidades</th>
+        <th data-sort-key="ingresos" role="button">Ingresos</th>
+        <th data-sort-key="precio" role="button">Precio</th>
+        <th data-sort-key="rating" role="button">Rating</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
 </div>
 
   <table id="productTable">
