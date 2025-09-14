@@ -141,3 +141,25 @@ def test_disabled_weight_excluded_from_score():
     res = ws.compute_winner_score_v2(prod, weights, order=["price", "rating"], enabled=enabled)
     assert "price" in res.get("disabled_fields", [])
     assert res["effective_weights"]["price"] == 0.0
+
+
+def test_to_int_weights_uses_hamilton_method():
+    raw = {
+        "price": 0.35,
+        "rating": 0.25,
+        "units_sold": 0.15,
+        "revenue": 0.15,
+        "desire": 0.07,
+        "competition": 0.03,
+    }
+    ints, order = ws.to_int_weights_0_100(raw, {"weights": {}, "weights_enabled": {}})
+    assert ints == {
+        "price": 35,
+        "rating": 25,
+        "units_sold": 15,
+        "revenue": 15,
+        "desire": 7,
+        "competition": 3,
+    }
+    assert sum(ints.values()) == 100
+    assert order[0] == "price" and order[-1] == "competition"

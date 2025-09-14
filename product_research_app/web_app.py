@@ -2453,8 +2453,36 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._set_json(500)
             self.wfile.write(json.dumps({"error": str(exc)}).encode('utf-8'))
             return
+        prev_settings = winner_calc.load_settings()
+        prev_cfg = {
+            "weights": {
+                k: int(v) for k, v in (prev_settings.get("winner_weights") or {}).items()
+            },
+            "weights_enabled": {
+                k: bool(v)
+                for k, v in (prev_settings.get("weights_enabled") or {}).items()
+            },
+        }
+        enabled_map = prev_cfg.get("weights_enabled") or {}
+        enabled_keys = [k for k, on in enabled_map.items() if on]
+        raw_enabled = {k: weights.get(k, 0.0) for k in enabled_keys if k in weights} or weights
+        ints_enabled, order = winner_calc.to_int_weights_0_100(raw_enabled, prev_cfg)
+        prev_all = prev_cfg.get("weights") or {}
+        final_weights = prev_all.copy()
+        for k, v in ints_enabled.items():
+            final_weights[k] = v
+        logger.info(
+            "ai_raw=%s enabled_only=%s ints=%s order=%s sum=%s",
+            weights,
+            raw_enabled,
+            ints_enabled,
+            order,
+            sum(ints_enabled.values()),
+        )
         resp = {
-            "weights": {k: weights.get(k, 0.0) for k in features},
+            "weights": final_weights,
+            "weights_order": order,
+            "order": order,
             "method": "gpt",
             "diagnostics": {"notes": notes},
         }

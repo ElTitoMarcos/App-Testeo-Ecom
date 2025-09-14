@@ -388,18 +388,11 @@ async function adjustWeightsAI(){
     }
     if (!res.ok) throw new Error('Auto-weights request failed');
 
-    const out = await res.json(); // { weights:{k:0..1|0..100}, method?... }
-    const returned = (out && out.weights) ? out.weights : {};
-
-    // Normalizar a 0..100 enteros y ordenar por importancia
-    const intWeights = {};
-    for (const k of features){
-      let v = num(returned[k]);
-      if (v > 0 && v <= 1) v = v * 100;
-      v = Math.max(0, Math.min(100, Math.round(v)));
-      intWeights[k] = v;
-    }
-    const newOrder = [...features].sort((a,b) => (intWeights[b]||0) - (intWeights[a]||0));
+    const out = await res.json(); // { weights:{}, weights_order:[...], method?... }
+    const intWeights = (out && out.weights) ? out.weights : {};
+    const newOrder = (out && Array.isArray(out.weights_order) && out.weights_order.length)
+      ? out.weights_order.slice()
+      : Object.keys(intWeights).sort((a,b) => (intWeights[b]||0) - (intWeights[a]||0));
 
     // Aplicar en UI
     if (Array.isArray(window.factors) && window.factors.length){
@@ -409,9 +402,10 @@ async function adjustWeightsAI(){
     }
 
     // Guardar {weights, order} y recargar desde servidor para reflejar lo persistido
+    const state = await SettingsCache.get();
     const resSave = await fetch('/api/config/winner-weights', {
       method:'PATCH', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ weights: intWeights, order: newOrder })
+      body: JSON.stringify({ weights: intWeights, weights_order: newOrder, weights_enabled: state.enabled })
     });
     const saved = await resSave.json().catch(()=>null);
     if (saved) SettingsCache.set(saved);
