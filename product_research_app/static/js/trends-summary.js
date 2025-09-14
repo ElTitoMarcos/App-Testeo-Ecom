@@ -20,22 +20,6 @@ function formatMoney(v){
   return n.toLocaleString('es-ES', { maximumFractionDigits: 0 });
 }
 
-function toISOFromDDMMYYYY(v) {
-  const s = (v || '').trim();
-  const m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-  if (!m) return null;
-  const [, dd, mm, yyyy] = m;
-  return `${yyyy}-${mm}-${dd}`;
-}
-function formatDDMMYYYY(d) {
-  const dd = String(d.getDate()).padStart(2, '0');
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const yyyy = d.getFullYear();
-  return `${dd}/${mm}/${yyyy}`;
-}
-
-const container = document.getElementById('trendsSummary');
-const btn = document.getElementById('trendsBtn');
 const $desde = document.querySelector('#fecha-desde');
 const $hasta = document.querySelector('#fecha-hasta');
 const $btnAplicar = document.querySelector('#btn-aplicar-tendencias');
@@ -44,28 +28,12 @@ const btnLog = document.getElementById('btn-log-trends');
 let currentData = null;
 let paretoLog = false;
 
-document.addEventListener('DOMContentLoaded', () => {
-  try {
-    const today = new Date();
-    const from = new Date(today);
-    from.setDate(today.getDate() - 29);
-    if ($desde && !$desde.value) $desde.value = formatDDMMYYYY(from);
-    if ($hasta && !$hasta.value) $hasta.value = formatDDMMYYYY(today);
-    fetchTrends();
-  } catch (_) {}
-});
-
 if ($btnAplicar) {
-  $btnAplicar.addEventListener('click', (ev) => {
+  $btnAplicar.addEventListener('click', function(ev){
     ev.preventDefault();
-    fetchTrends();
+    if (typeof fetchTrends === 'function') fetchTrends();
   });
 }
-
-btn?.addEventListener('click', () => {
-  container.style.display = container.style.display === 'block' ? 'none' : 'block';
-  if (container.style.display === 'block') fetchTrends();
-});
 
 btnLog?.addEventListener('click', (ev) => {
   ev.preventDefault();
@@ -73,25 +41,25 @@ btnLog?.addEventListener('click', (ev) => {
   renderPareto(currentData);
 });
 
-async function fetchTrends() {
+async function fetchTrends(){
+  const $status = document.querySelector('#trends-status');
   try {
-    const url = new URL('/api/trends/summary', window.location.origin);
+    if ($status) $status.textContent = 'Cargando...';
     const fISO = $desde ? toISOFromDDMMYYYY($desde.value) : null;
     const tISO = $hasta ? toISOFromDDMMYYYY($hasta.value) : null;
+    const url = new URL('/api/trends/summary', window.location.origin);
     if (fISO) url.searchParams.set('from', fISO);
     if (tISO) url.searchParams.set('to', tISO);
-
     const res = await fetch(url.toString(), { credentials: 'same-origin' });
-    if (!res.ok) {
-      (window.toast?.error || alert).call(window.toast || window, 'No se pudieron cargar las tendencias.');
-      return;
-    }
+    if (!res.ok) throw new Error('HTTP '+res.status);
     const json = await res.json();
     currentData = json;
     renderTrends(json);
     renderCategoriasTable(json);
-  } catch (e) {
-    (window.toast?.error || alert).call(window.toast || window, 'No se pudieron cargar las tendencias.');
+  } catch(e){
+    (window.toast?.error || alert).call(window.toast||window, 'No se pudieron cargar las tendencias.');
+  } finally {
+    if ($status) $status.textContent = '';
   }
 }
 
@@ -121,7 +89,6 @@ function renderTopCategoriesBar(data) {
   const top = [...(data.top_categories || data.categories || [])].slice(0, 10);
   const labels = top.map(x => x.path || x.category);
   const values = top.map(x => x.revenue);
-
   const ctx = document.getElementById('chart-top-categories');
   if (!ctx) return;
   if (ctx._chart) { ctx._chart.destroy(); }
@@ -253,5 +220,46 @@ function renderPareto(data) {
   });
 })();
 
-export {};
+function showTrendsSection(){
+  const $trends = document.querySelector('#section-trends');
+  const $list = document.querySelector('#section-products');
+  if ($trends) $trends.hidden = false;
+  if ($list) $list.hidden = true;
 
+  const $desde = document.querySelector('#fecha-desde');
+  const $hasta = document.querySelector('#fecha-hasta');
+  try {
+    const today = new Date();
+    const from = new Date(today); from.setDate(today.getDate() - 29);
+    if ($desde && !$desde.value) $desde.value = formatDDMMYYYY(from);
+    if ($hasta && !$hasta.value) $hasta.value = formatDDMMYYYY(today);
+  } catch(_) {}
+
+  if (typeof fetchTrends === 'function') {
+    fetchTrends();
+  } else {
+    (async function(){
+      const url = new URL('/api/trends/summary', window.location.origin);
+      const res = await fetch(url.toString(), { credentials:'same-origin' });
+      if (res.ok) {
+        const json = await res.json();
+        if (typeof renderTrends === 'function') renderTrends(json);
+      } else {
+        (window.toast?.error || alert).call(window.toast||window, 'No se pudieron cargar las tendencias.');
+      }
+    })();
+  }
+
+  const firstChart = document.querySelector('#chart-top-categories, #card-top-categories');
+  if (firstChart && typeof firstChart.scrollIntoView === 'function') {
+    firstChart.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+}
+
+document.addEventListener('click', function(e){
+  const btn = e.target.closest('#btn-ver-tendencias, .btn-ver-tendencias, [data-action="show-trends"]');
+  if (!btn) return;
+  e.preventDefault();
+  showTrendsSection();
+});
+export {};

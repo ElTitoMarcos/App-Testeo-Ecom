@@ -46,7 +46,7 @@ body.dark pre { background:#2e315f; }
 /* Weight slider styling */
 .field-label { display:block; margin-top:10px; font-weight:600; }
 
-#trendsSummary{display:none;}
+#section-trends[hidden]{display:none;}
 #trendHeader{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin-bottom:16px;}
 .kpi-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:20px;}
 @media (max-width:600px){.kpi-grid{grid-template-columns:repeat(2,1fr);}}
@@ -78,10 +78,10 @@ body.dark .skeleton{background:#333;}
 }
 
 /* Cards y lienzos */
-#trendsSummary .card { background: var(--panel, #171a2b); border-radius: 10px; padding: 12px; }
-#trendsSummary .card.lg { min-height: 380px; }
-#trendsSummary .card.md { min-height: 380px; }
-#trendsSummary .card-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
+#section-trends .card { background: var(--panel, #171a2b); border-radius: 10px; padding: 12px; }
+#section-trends .card.lg { min-height: 380px; }
+#section-trends .card.md { min-height: 380px; }
+#section-trends .card-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
 #chart-top-categories, #chart-pareto { width:100%; height:320px !important; }
 
 /* Tabla compacta */
@@ -103,7 +103,7 @@ body.dark .skeleton{background:#333;}
       <input type="file" id="fileInput" style="display:none;" />
       <button id="uploadBtn" title="Subir archivo">📤</button>
       <button id="refreshBtn" title="Actualizar lista">🔄</button>
-      <button id="trendsBtn" title="Ver tendencias">📊</button>
+      <button id="btn-ver-tendencias" title="Ver tendencias">📊</button>
       <button id="darkToggle" title="Modo oscuro">🌙</button>
       <button id="configBtn" title="Configuración avanzada">⚙️</button>
     </div>
@@ -157,12 +157,13 @@ body.dark .skeleton{background:#333;}
 <div id="custom" style="display:none;">
   <div id="history" style="margin-top:10px;"></div>
 </div>
-<div id="trendsSummary">
+<section id="section-trends" hidden>
   <div id="trendHeader">
     <label>Desde: <input type="text" id="fecha-desde"></label>
     <label>Hasta: <input type="text" id="fecha-hasta"></label>
     <button id="btn-aplicar-tendencias" aria-label="Aplicar filtros">Aplicar</button>
   </div>
+  <div id="trends-status"></div>
   <div class="trends-row">
     <div id="card-top-categories" class="card lg">
       <canvas id="chart-top-categories"></canvas>
@@ -188,15 +189,16 @@ body.dark .skeleton{background:#333;}
     </thead>
     <tbody></tbody>
   </table>
-</div>
+</section>
 
+<section id="section-products">
   <table id="productTable">
   <thead class="sticky-thead">
     <tr id="headerRow"></tr>
   </thead>
   <tbody></tbody>
-</table>
-<div id="bottomBar" class="bottombar hidden">
+  </table>
+  <div id="bottomBar" class="bottombar hidden">
   <button id="legendBtn" class="legend-btn" title="Mostrar leyenda" aria-label="Mostrar leyenda">ℹ️</button>
   <span id="selCount"></span>
   <select id="groupSelect" aria-label="Filtrar por grupo"></select>
@@ -205,12 +207,13 @@ body.dark .skeleton{background:#333;}
   <button id="btnDelete" class="bar-btn" disabled title="Eliminar seleccionados" aria-label="Eliminar seleccionados">Eliminar</button>
   <button id="btnExport" class="bar-btn" disabled title="Exportar seleccionados" aria-label="Exportar seleccionados">Exportar</button>
   <button id="btnColumns" class="bar-btn" title="Gestionar columnas" aria-label="Gestionar columnas">Columnas</button>
-</div>
-<div id="legendPop" class="popover hidden">
+  </div>
+  <div id="legendPop" class="popover hidden">
   <div>• Fila roja: duplicado</div>
   <div>• 🔥 x1–x5: tendencia en el nombre</div>
-</div>
-<div id="columnsPanel" class="popover hidden"></div>
+  </div>
+  <div id="columnsPanel" class="popover hidden"></div>
+</section>
 
 <!-- Overlay for viewing images in larger size -->
 <div id="imgOverlay" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background: rgba(0,0,0,0.8); justify-content:center; align-items:center; z-index:1000;">
