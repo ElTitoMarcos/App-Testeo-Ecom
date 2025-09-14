@@ -387,29 +387,29 @@ async function adjustWeightsAI(){
       });
     }
     if (!res.ok) throw new Error('Auto-weights request failed');
-
-    const out = await res.json(); // { weights:{}, weights_order:[...], method?... }
-    const intWeights = (out && out.weights) ? out.weights : {};
-    const newOrder = (out && Array.isArray(out.weights_order) && out.weights_order.length)
-      ? out.weights_order.slice()
-      : Object.keys(intWeights).sort((a,b) => (intWeights[b]||0) - (intWeights[a]||0));
-
-    // Persistir en backend y refrescar UI con lo guardado
-    const state = await SettingsCache.get();
-    const resSave = await fetch('/api/config/winner-weights', {
-      method:'PATCH', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ weights: intWeights, weights_order: newOrder, weights_enabled: state.enabled })
+    const out = await res.json();
+    const patchBody = {
+      weights: out.weights,
+      weights_order: out.weights_order,
+      weights_enabled: out.weights_enabled
+    };
+    const patchRes = await fetch('/api/config/winner-weights', {
+      method:'PATCH',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(patchBody)
     });
-    if (!resSave.ok) throw new Error('Persist weights failed');
-    const saved = await resSave.json();
-    SettingsCache.set(saved);
-    // renderWeightsUI reinstates slider helpers like enhanceRangeWithFloat
-    const fresh = await SettingsCache.get();
-    if (typeof renderWeightsUI === 'function') renderWeightsUI(fresh);
+    if (!patchRes.ok) throw new Error('Config patch failed');
+    await patchRes.json().catch(()=>null);
+    const cfg = await fetch('/config', { cache:'no-store' }).then(r=>r.json());
+    SettingsCache.set(cfg);
+    if (typeof renderWeightsUI === 'function') renderWeightsUI(cfg);
 
-    if (typeof toast !== 'undefined' && toast.success){
-      const method = (out && out.method) ? out.method : 'gpt';
-      toast.success(`Pesos ajustados por IA (${method}) con ${data_sample.length} muestras`);
+    if (typeof toast !== 'undefined'){
+      if (out && out.fallback_uniform){
+        if (toast.info) toast.info('La IA devolvió pesos uniformes; se mantienen los anteriores.');
+      } else if (toast.success){
+        toast.success(`Pesos ajustados por IA con ${data_sample.length} muestras (sin normalizar).`);
+      }
     }
   }catch(err){
     if (typeof toast !== 'undefined' && toast.error){

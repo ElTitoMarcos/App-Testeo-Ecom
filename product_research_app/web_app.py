@@ -2447,7 +2447,11 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         try:
             result = gpt.recommend_winner_weights(api_key, model, samples, target)
-            weights = winner_calc.sanitize_weights(result.get("weights", {}))
+            ai_raw = {
+                k: v
+                for k, v in (result.get("weights") or {}).items()
+                if k in winner_calc.ALLOWED_FIELDS
+            }
             notes = result.get("justification", "")
         except Exception as exc:
             self._set_json(500)
@@ -2463,28 +2467,34 @@ class RequestHandler(BaseHTTPRequestHandler):
                 for k, v in (prev_settings.get("weights_enabled") or {}).items()
             },
         }
-        enabled_map = prev_cfg.get("weights_enabled") or {}
-        enabled_keys = [k for k, on in enabled_map.items() if on]
-        raw_enabled = {k: weights.get(k, 0.0) for k in enabled_keys if k in weights} or weights
-        ints_enabled, order = winner_calc.to_int_weights_0_100(raw_enabled, prev_cfg)
-        prev_all = prev_cfg.get("weights") or {}
-        final_weights = prev_all.copy()
-        for k, v in ints_enabled.items():
-            final_weights[k] = v
-        logger.info(
-            "ai_raw=%s enabled_only=%s ints=%s order=%s sum=%s",
-            weights,
-            raw_enabled,
-            ints_enabled,
-            order,
-            sum(ints_enabled.values()),
-        )
-        resp = {
-            "weights": final_weights,
+        abs_weights, order, fb = winner_calc.to_abs_int_weights_0_100(ai_raw, prev_cfg)
+        payload = {
+            "weights": abs_weights,
             "weights_order": order,
+            "weights_enabled": prev_cfg.get("weights_enabled") or {},
+        }
+        if fb:
+            logger.info(
+                "ai_raw=%s abs=%s order=%s fallback_uniform=%s reason=uniform_ai_weights",
+                ai_raw,
+                abs_weights,
+                order,
+                fb,
+            )
+        else:
+            logger.info(
+                "ai_raw=%s abs=%s order=%s fallback_uniform=%s",
+                ai_raw,
+                abs_weights,
+                order,
+                fb,
+            )
+        resp = {
+            **payload,
             "order": order,
             "method": "gpt",
             "diagnostics": {"notes": notes},
+            "fallback_uniform": fb,
         }
         self._set_json()
         self.wfile.write(json.dumps(resp).encode('utf-8'))
@@ -2516,8 +2526,44 @@ class RequestHandler(BaseHTTPRequestHandler):
             num = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
             corr = abs(num / (denom_x * denom_y)) if denom_x and denom_y else 0.0
             weights[field] = corr
-        weights = winner_calc.sanitize_weights({k: weights.get(k, 0.0) for k in features})
-        resp = {"weights": {k: weights.get(k, 0.0) for k in features}, "method": "stat", "diagnostics": {"n": len(samples_in)}}
+        prev_settings = winner_calc.load_settings()
+        prev_cfg = {
+            "weights": {
+                k: int(v) for k, v in (prev_settings.get("winner_weights") or {}).items()
+            },
+            "weights_enabled": {
+                k: bool(v)
+                for k, v in (prev_settings.get("weights_enabled") or {}).items()
+            },
+        }
+        abs_weights, order, fb = winner_calc.to_abs_int_weights_0_100(weights, prev_cfg)
+        payload = {
+            "weights": abs_weights,
+            "weights_order": order,
+            "weights_enabled": prev_cfg.get("weights_enabled") or {},
+        }
+        if fb:
+            logger.info(
+                "ai_raw=%s abs=%s order=%s fallback_uniform=%s reason=uniform_ai_weights",
+                weights,
+                abs_weights,
+                order,
+                fb,
+            )
+        else:
+            logger.info(
+                "ai_raw=%s abs=%s order=%s fallback_uniform=%s",
+                weights,
+                abs_weights,
+                order,
+                fb,
+            )
+        resp = {
+            **payload,
+            "method": "stat",
+            "diagnostics": {"n": len(samples_in)},
+            "fallback_uniform": fb,
+        }
         self._set_json()
         self.wfile.write(json.dumps(resp).encode('utf-8'))
 
