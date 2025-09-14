@@ -107,7 +107,7 @@ body.dark pre { background:#2e315f; }
 </div>
 <div id="weightsFooter" class="config-footer" style="display:none;">
   <button id="btnReset" class="btn">Reset</button>
-  <button id="btnAiWeights" class="btn primary">Ajustar pesos con IA</button>
+  <button id="btn-ai-weights" data-action="ai-weights" type="button" class="btn primary">Ajustar pesos con IA</button>
 </div>
 <div id="custom" style="display:none;">
   <div id="history" style="margin-top:10px;"></div>
@@ -1495,5 +1495,6 @@ window.parseDate = parseDate;
 <script type="module" src="/static/js/completar-ia.js"></script>
 <div id="chartTooltip" style="position:absolute; background:#fff; border:1px solid #333; padding:4px; font-size:12px; border-radius:4px; pointer-events:none; display:none; z-index:2000;"></div>
 <script src="/static/js/filters.js"></script>
+<script src="/static/js/weights-ai.js"></script>
 </body>
 </html>
