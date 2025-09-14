@@ -203,5 +203,41 @@ function renderCategoriasTable(data){
   tbody.innerHTML = html;
 }
 
+  const $desde = document.querySelector('#fecha-desde');
+  const $hasta = document.querySelector('#fecha-hasta');
+  try {
+    const today = new Date();
+    const from = new Date(today); from.setDate(today.getDate() - 29);
+    if ($desde && !$desde.value) $desde.value = formatDDMMYYYY(from);
+    if ($hasta && !$hasta.value) $hasta.value = formatDDMMYYYY(today);
+  } catch(_) {}
+
+  if (typeof fetchTrends === 'function') {
+    fetchTrends();
+  } else {
+    (async function(){
+      const url = new URL('/api/trends/summary', window.location.origin);
+      const res = await fetch(url.toString(), { credentials:'same-origin' });
+      if (res.ok) {
+        const json = await res.json();
+        if (typeof renderTrends === 'function') renderTrends(json);
+      } else {
+        (window.toast?.error || alert).call(window.toast||window, 'No se pudieron cargar las tendencias.');
+      }
+    })();
+  }
+
+  const firstChart = document.querySelector('#chart-top-categories, #card-top-categories');
+  if (firstChart && typeof firstChart.scrollIntoView === 'function') {
+    firstChart.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+}
+
+document.addEventListener('click', function(e){
+  const btn = e.target.closest('#btn-ver-tendencias, .btn-ver-tendencias, [data-action="show-trends"]');
+  if (!btn) return;
+  e.preventDefault();
+  showTrendsSection();
+});
 export {};
 
