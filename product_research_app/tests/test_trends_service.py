@@ -29,7 +29,8 @@ def test_trends_no_data(tmp_path, monkeypatch):
     res = trends_service.get_trends_summary(start, end)
     assert res["categories"] == []
     assert res["timeseries"] == []
-
+    assert res["totals"]["units"] == 0
+    assert res["totals"]["revenue"] == 0
 
 def test_trends_with_data_delta(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)
@@ -53,3 +54,6 @@ def test_trends_with_data_delta(tmp_path, monkeypatch):
     assert "delta_revenue_pct" in cat
     assert cat["delta_revenue_pct"] == 0
     assert res["timeseries"]
+    totals = res["totals"]
+    assert "delta_revenue_pct" in totals
+    assert "delta_units_pct" in totals

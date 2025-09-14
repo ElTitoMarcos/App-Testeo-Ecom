@@ -62,6 +62,9 @@ def get_trends_summary(start: datetime, end: datetime, filters: Optional[Dict[st
     ).fetchall()
 
     prev_rev: Dict[str, float] = {}
+    prev_units: Dict[str, float] = {}
+    prev_total_rev = 0.0
+    prev_total_units = 0.0
     for prow in prev_rows:
         extra = _parse_extra(prow[1])
         units = float(extra.get("units_sold") or 0)
@@ -69,7 +72,11 @@ def get_trends_summary(start: datetime, end: datetime, filters: Optional[Dict[st
         if revenue is None:
             price = prow[2] or 0
             revenue = price * units
-        prev_rev[prow[0] or ""] = prev_rev.get(prow[0] or "", 0.0) + float(revenue or 0)
+        cat = prow[0] or ""
+        prev_rev[cat] = prev_rev.get(cat, 0.0) + float(revenue or 0)
+        prev_units[cat] = prev_units.get(cat, 0.0) + units
+        prev_total_rev += float(revenue or 0)
+        prev_total_units += units
 
     categories: list[Dict[str, Any]] = []
     cat_data: Dict[str, Dict[str, Any]] = {}
@@ -120,6 +127,14 @@ def get_trends_summary(start: datetime, end: datetime, filters: Optional[Dict[st
         ts["units"] += units
         ts["revenue"] += float(revenue or 0)
 
+    total_products = 0
+    total_units = 0.0
+    total_revenue = 0.0
+    price_sum = 0.0
+    price_count = 0
+    rating_sum = 0.0
+    rating_count = 0
+    
     for cat, data in cat_data.items():
         units = data["units"]
         revenue = data["revenue"]
@@ -140,12 +155,41 @@ def get_trends_summary(start: datetime, end: datetime, filters: Optional[Dict[st
                 "delta_revenue_pct": delta_pct,
             }
         )
+        total_products += len(data["products"])
+        total_units += units
+        total_revenue += revenue
+        price_sum += data["price_sum"]
+        price_count += data["price_count"]
+        rating_sum += data["rating_sum"]
+        rating_count += data["rating_count"]
 
     categories.sort(key=lambda x: x["revenue"], reverse=True)
     ts_list = [
         {"date": k, "units": v["units"], "revenue": v["revenue"]}
         for k, v in sorted(timeseries.items())
     ]
+
+    avg_price = price_sum / price_count if price_count else 0.0
+    avg_rating = rating_sum / rating_count if rating_count else 0.0
+    rev_per_unit = total_revenue / total_units if total_units else 0.0
+    totals = {
+        "unique_products": total_products,
+        "units": total_units,
+        "revenue": total_revenue,
+        "avg_price": avg_price,
+        "avg_rating": avg_rating,
+        "rev_per_unit": rev_per_unit,
+    }
+    totals["delta_revenue_pct"] = (
+        (total_revenue - prev_total_rev) / prev_total_rev * 100.0
+        if prev_total_rev
+        else 0.0
+    )
+    totals["delta_units_pct"] = (
+        (total_units - prev_total_units) / prev_total_units * 100.0
+        if prev_total_units
+        else 0.0
+    )
 
     logger.info(
         "trends_summary_done categories=%s points=%s duration_ms=%.2f",
@@ -157,4 +201,5 @@ def get_trends_summary(start: datetime, end: datetime, filters: Optional[Dict[st
         "categories": categories,
         "timeseries": ts_list,
         "granularity": granularity,
+        "totals": totals,
     }
