@@ -736,6 +736,9 @@ input[type="range"].weight-range { width: 100% !important; }
 body.dark .weight-card:nth-child(odd) { background: rgba(255,255,255,0.03); }
 .weights-list .weight-card:nth-child(odd){ margin-bottom:0; }
 
+.weight-item.disabled{ opacity:0.5; }
+.weight-item.disabled .weight-input{ pointer-events:none; cursor:not-allowed; }
+
 .priority-badge {
   width: 40px;
   height: 40px;
