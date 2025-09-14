@@ -103,11 +103,13 @@ body.dark pre { background:#2e315f; }
 <div id="weightsCard" class="card" style="display:none;">
   <strong>Ponderaciones Winner Score</strong>
   <div class="legend">ℹ️ Arrastra para reordenar. Más arriba = mayor prioridad. El número (0–100) es el peso.</div>
-  <ul id="weightsList" class="weights-list"></ul>
-</div>
-<div id="weightsFooter" class="config-footer" style="display:none;">
-  <button id="btnReset" class="btn">Reset</button>
-  <button id="btnAiWeights" class="btn primary">Ajustar pesos con IA</button>
+  <section class="weights-section compact" id="weightsSection">
+    <div class="weights-scroll" id="weightsScroll"></div>
+    <div class="weights-footer" id="weightsFooter">
+      <button id="btnResetWeights" class="btn btn-secondary">Reset</button>
+      <button id="btnAutoWeights" class="btn btn-primary">Ajustar pesos con IA</button>
+    </div>
+  </section>
 </div>
 <div id="custom" style="display:none;">
   <div id="history" style="margin-top:10px;"></div>
@@ -914,8 +916,7 @@ document.getElementById('configBtn').onclick = async () => {
   await openConfigModal();
   const cfg = document.getElementById('config');
   const wcard = document.getElementById('weightsCard');
-  const footer = document.getElementById('weightsFooter');
-  if(!cfg || !wcard || !footer || !window.modalManager) return;
+  if(!cfg || !wcard || !window.modalManager) return;
   const btn = document.getElementById('configBtn');
   const modal = document.createElement('div');
   modal.id = 'configModal';
@@ -927,23 +928,17 @@ document.getElementById('configBtn').onclick = async () => {
   const body = modal.querySelector('.modal-body');
   const cfgParent = cfg.parentElement;
   const wParent = wcard.parentElement;
-  const fParent = footer.parentElement;
   const cfgNext = cfg.nextSibling;
   const wNext = wcard.nextSibling;
-  const fNext = footer.nextSibling;
   body.appendChild(cfg);
   body.appendChild(wcard);
-  modal.appendChild(footer);
   cfg.style.display = 'block';
   wcard.style.display = 'block';
-  footer.style.display = 'flex';
   const handle = modalManager.open(modal, {returnFocus: btn, closeOnBackdrop:true, onClose: () => {
     cfg.style.display = 'none';
     wcard.style.display = 'none';
-    footer.style.display = 'none';
     cfgParent.insertBefore(cfg, cfgNext);
     wParent.insertBefore(wcard, wNext);
-    fParent.insertBefore(footer, fNext);
     saveIfDirty();
   }});
   modal.querySelector('.modal-close').addEventListener('click', () => handle.close());

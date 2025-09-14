@@ -785,6 +785,31 @@ input[type="range"].seg-awareness{ width:100%; display:block; margin:0; }
   text-align:center;
 }
 
+.weights-section {
+  position: relative;
+  display: grid;
+  grid-template-rows: 1fr auto;
+  max-height: calc(100vh - 220px);
+}
+#weightsScroll {
+  overflow: auto;
+  padding-bottom: 56px;
+}
+.weights-footer {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  gap: 10px;
+  justify-content: flex-start;
+  align-items: center;
+  padding: 10px 12px;
+  background: linear-gradient(to top, rgba(20,22,35,.95), rgba(20,22,35,.75) 40%, rgba(20,22,35,0) 100%);
+  backdrop-filter: blur(2px);
+  border-top: 1px solid rgba(255,255,255,.06);
+  z-index: 2;
+}
+.weights-footer .btn { min-width: 160px; }
+
 /* Tarjetas más finas */
 .weights-section.compact .weight-item,
 .weights-section.compact .weight-card {

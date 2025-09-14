@@ -72,6 +72,19 @@ function markDirty(){
   saveTimer=setTimeout(saveSettings,700);
 }
 
+function bindWeightsFooter() {
+  const reset = document.getElementById('btnResetWeights');
+  const auto = document.getElementById('btnAutoWeights');
+  if (reset && !reset.dataset.bound) {
+    reset.dataset.bound = '1';
+    reset.addEventListener('click', resetWeights);
+  }
+  if (auto && !auto.dataset.bound) {
+    auto.dataset.bound = '1';
+    auto.addEventListener('click', adjustWeightsAI);
+  }
+}
+
 function bindToggle(itemEl, field, state) {
   const toggle = itemEl.querySelector('.wt-enabled');
   if (!toggle) return;
@@ -140,8 +153,11 @@ function enhanceRangeWithFloat(rangeEl, itemEl){
 }
 
 function renderWeightsUI(state){
-  const list = document.getElementById('weightsList');
-  if(!list) return;
+  const scroll = document.getElementById('weightsScroll');
+  if(!scroll) return;
+  const list = document.createElement('ul');
+  list.id = 'weightsList';
+  list.className = 'weights-list';
   if(state){
     cacheState = state;
     const fieldList = (typeof WEIGHT_FIELDS !== 'undefined' && Array.isArray(WEIGHT_FIELDS)) ? WEIGHT_FIELDS : [];
@@ -160,7 +176,7 @@ function renderWeightsUI(state){
       enabled: Object.fromEntries(factors.map(f => [f.key, f.enabled !== false]))
     };
   }
-  list.innerHTML = '';
+  scroll.innerHTML = '';
   factors.forEach((f,idx) => {
     const priority = idx + 1;
     const li = document.createElement('li');
@@ -239,6 +255,7 @@ function renderWeightsUI(state){
     list.appendChild(li);
     enhanceRangeWithFloat(li.querySelector('input[type="range"]'), li);
   });
+  scroll.appendChild(list);
   Sortable.create(list,{ handle:'.wi-handle', animation:150, onEnd:()=>{
     const orderKeys = Array.from(list.children).map(li=>li.dataset.key);
     factors.sort((a,b)=>orderKeys.indexOf(a.key)-orderKeys.indexOf(b.key));
@@ -246,7 +263,8 @@ function renderWeightsUI(state){
     renderWeightsUI();
     if(!isInitialRender) markDirty();
   }});
-  const root = document.getElementById('weightsCard');
+  bindWeightsFooter();
+  const root = document.getElementById('weightsSection');
   if (root && !root.classList.contains('weights-section')) root.classList.add('weights-section');
   document.querySelector('.weights-section')?.classList.add('compact');
   isInitialRender = false;
@@ -420,8 +438,8 @@ async function adjustWeightsAI(){
 
 
 function showSettingsModalShell(){
-  const list = document.getElementById('weightsList');
-  if (list) list.innerHTML = '';
+  const scroll = document.getElementById('weightsScroll');
+  if (scroll) scroll.innerHTML = '';
 }
 
 function revealSettingsModalContent(){ /* no-op */ }
@@ -440,13 +458,10 @@ async function hydrateSettingsModal(){
 async function openConfigModal(){
   showSettingsModalShell();
   await hydrateSettingsModal();
+  bindWeightsFooter();
   document.querySelector('#configModal')?.classList.add('ready');
   document.querySelector('#settings-modal')?.classList.add('ready');
   revealSettingsModalContent();
-  const resetBtn = document.getElementById('btnReset');
-  if (resetBtn) resetBtn.onclick = resetWeights;
-  const aiBtn = document.getElementById('btnAiWeights');
-  if (aiBtn) aiBtn.onclick = adjustWeightsAI;
 }
 
 window.openConfigModal = openConfigModal;
