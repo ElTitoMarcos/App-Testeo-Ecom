@@ -871,6 +871,96 @@ body.dark .weight-badge {
   color: #E5EAF5;
 }
 
+/* Cabecera: #, título, handle a la derecha */
+.weight-item .wi-head {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+/* Fila del slider: una sola línea y poca separación vertical */
+.weight-item .wi-slider { margin: 2px 0 6px; }
+
+/* Meta-línea: IZQ (mín) | CENTRO (pill+toggle) | DER (máx) */
+.weight-item .wi-meta {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+}
+
+/* Bloque central con pill + toggle */
+.weight-item .wi-center {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  justify-self: center;
+}
+
+/* Extremos alineados */
+.weight-item .wi-min { justify-self: start; }
+.weight-item .wi-max { justify-self: end; }
+
+/* Pill “peso: 50/100” */
+.weight-item .wi-pill {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(99,102,241,.15);
+  border: 1px solid rgba(99,102,241,.35);
+  white-space: nowrap;
+  line-height: 20px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Toggle compacto */
+.weight-item .wi-toggle input[type="checkbox"] { transform: scale(.9); }
+
+/* Item deshabilitado por toggle */
+.weight-item.disabled { opacity: .55; }
+.weight-item.disabled input[type="range"],
+.weight-item.disabled input[type="number"] { pointer-events: none; }
+
+/* Compact mode overrides */
+.weights-section.compact .weight-item .wi-head {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.weights-section.compact .weight-item .wi-slider { margin: 2px 0 6px; }
+.weights-section.compact .weight-item .wi-meta {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+}
+.weights-section.compact .weight-item .wi-center {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  justify-self: center;
+}
+.weights-section.compact .weight-item .wi-min { justify-self: start; }
+.weights-section.compact .weight-item .wi-max { justify-self: end; }
+.weights-section.compact .weight-item .wi-pill {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(99,102,241,.15);
+  border: 1px solid rgba(99,102,241,.35);
+  white-space: nowrap;
+  line-height: 20px;
+  font-variant-numeric: tabular-nums;
+}
+.weights-section.compact .weight-item .wi-toggle input[type="checkbox"] { transform: scale(.9); }
+.weights-section.compact .weight-item.disabled { opacity: .55; }
+.weights-section.compact .weight-item.disabled input[type="range"],
+.weights-section.compact .weight-item.disabled input[type="number"] { pointer-events: none; }
+
 .config-footer{
   flex:0 0 auto;
   display:flex;
