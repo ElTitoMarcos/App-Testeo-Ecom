@@ -202,6 +202,86 @@ def sanitize_weights(weights: dict | None) -> dict:
     return {k: v / s for k, v in w.items()}
 
 
+def to_abs_int_weights_0_100(ai_raw: dict, prev_cfg: dict) -> tuple[dict[str, int], list[str], bool]:
+    """
+    Convierte salida de la IA a pesos ABSOLUTOS independientes (0–100).
+    - Acepta números, strings con '%', y valores en [0,1] (se escalan *individualmente* x100).
+    - No normaliza por suma.
+    - Fallback: si la IA devuelve valores casi uniformes, conserva los anteriores.
+    Devuelve: (weights_final, order_desc, used_fallback)
+    """
+    prev_weights = {k: int(v) for k, v in (prev_cfg.get("weights") or {}).items()}
+    enabled_map = prev_cfg.get("weights_enabled") or {}
+
+    out: dict[str, int] = {}
+
+    def map_one(v):
+        # strings "35%" o "35"
+        if isinstance(v, str):
+            s = v.strip().replace('%', '')
+            try:
+                v = float(s)
+            except Exception:
+                return None
+            # si el string fue "35" lo tratamos como ya 0–100
+            if 0 <= v <= 100:
+                return int(round(v))
+            return int(round(max(0, min(100, v))))
+        # números
+        if isinstance(v, (int, float)):
+            # valores [0,1] => escala individual x100
+            if 0.0 <= v <= 1.0:
+                return int(round(v * 100))
+            # ya 0–100
+            if 0 <= v <= 100:
+                return int(round(v))
+            # fuera de rango => clamp
+            return int(round(max(0, min(100, float(v)))))
+        return None
+
+    # mapeo directo
+    for k, v in (ai_raw or {}).items():
+        mapped = map_one(v)
+        if mapped is not None:
+            out[k] = mapped
+
+    # completa faltantes con anteriores
+    for k in prev_weights.keys():
+        if k not in out:
+            out[k] = prev_weights[k]
+
+    # si quedó vacío, usa anteriores; si tampoco hay, usa 50 por defecto
+    if not out:
+        out = {
+            k: prev_weights.get(k, 50)
+            for k in (prev_weights.keys() or [
+                "price",
+                "rating",
+                "units_sold",
+                "revenue",
+                "desire",
+                "competition",
+                "oldness",
+                "awareness",
+            ])
+        }
+
+    # detección de "casi uniformes" (desv. típica muy baja o todos iguales)
+    vals = list(out.values())
+    if vals:
+        mean = sum(vals) / len(vals)
+        var = sum((x - mean) ** 2 for x in vals) / len(vals)
+        if var < 1.0:  # ~todos iguales (ej. 14/100)
+            # fallback: conservar previos si existen
+            if prev_weights:
+                out = prev_weights.copy()
+                order = sorted(out, key=lambda k: out[k], reverse=True)
+                return out, order, True
+
+    order = sorted(out, key=lambda k: out[k], reverse=True)
+    return out, order, False
+
+
 def to_int_weights_0_100(raw: dict[str, float], prev_cfg: dict) -> tuple[dict[str, int], list[str]]:
     """Scale arbitrary weights to 0-100 integers using Hamilton apportionment.
 
