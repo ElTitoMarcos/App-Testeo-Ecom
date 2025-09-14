@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from product_research_app import web_app, database, config
+from product_research_app import web_app, database, config, gpt
 from product_research_app.services import winner_score
 from product_research_app.services import config as cfg_service
 from product_research_app.utils.db import row_to_dict
@@ -731,3 +731,110 @@ def test_weights_eff_stable_when_touching_missing_metric(tmp_path, monkeypatch):
     assert resp2["weights_all"] != hash_all1
     assert resp2["weights_eff"] != hash_eff1
     assert resp2["diag"]["sum_filtered"] > sum1
+
+
+def test_auto_weights_missing_revenue_persisted(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "get_api_key", lambda: "k")
+    monkeypatch.setattr(config, "get_model", lambda: "m")
+
+    def fake_recommend(api_key, model, samples, target):
+        return {
+            "weights": {
+                "price": 72,
+                "rating": 88,
+                "units_sold": 65,
+                "desire": 40,
+                "competition": 30,
+                "oldness": 10,
+                "awareness": 20,
+            },
+            "justification": "",
+        }
+
+    monkeypatch.setattr(gpt, "recommend_winner_weights", fake_recommend)
+    sample = {
+        "price": 1,
+        "rating": 1,
+        "units_sold": 1,
+        "revenue": 1,
+        "desire": 1,
+        "competition": 1,
+        "oldness": 1,
+        "awareness": 1,
+        "target": 1,
+    }
+    body = json.dumps({"data_sample": [sample], "target": "target"})
+
+    class Dummy:
+        def __init__(self, body):
+            self.path = "/scoring/v2/auto-weights-gpt"
+            self.headers = {"Content-Length": str(len(body))}
+            self.rfile = io.BytesIO(body.encode("utf-8"))
+            self.wfile = io.BytesIO()
+
+        def _set_json(self, code=200):
+            self.status = code
+
+    h = Dummy(body)
+    web_app.RequestHandler.handle_scoring_v2_auto_weights_gpt(h)
+    resp = json.loads(h.wfile.getvalue().decode("utf-8"))
+    assert h.status == 200
+    assert resp["weights"]["revenue"] == 0
+    from product_research_app.services.config import get_winner_weights_raw
+
+    saved = get_winner_weights_raw()
+    assert saved["revenue"] == 0
+    log_text = web_app.LOG_PATH.read_text()
+    assert "missing revenue" in log_text
+
+
+def test_auto_weights_no_normalization(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "get_api_key", lambda: "k")
+    monkeypatch.setattr(config, "get_model", lambda: "m")
+
+    def fake_recommend(api_key, model, samples, target):
+        return {
+            "weights": {
+                "price": 72,
+                "rating": 88,
+                "units_sold": 65,
+                "revenue": 50,
+                "desire": 40,
+                "competition": 30,
+                "oldness": 10,
+                "awareness": 20,
+            },
+            "justification": "",
+        }
+
+    monkeypatch.setattr(gpt, "recommend_winner_weights", fake_recommend)
+    sample = {
+        "price": 1,
+        "rating": 1,
+        "units_sold": 1,
+        "revenue": 1,
+        "desire": 1,
+        "competition": 1,
+        "oldness": 1,
+        "awareness": 1,
+        "target": 1,
+    }
+    body = json.dumps({"data_sample": [sample], "target": "target"})
+
+    class Dummy:
+        def __init__(self, body):
+            self.path = "/scoring/v2/auto-weights-gpt"
+            self.headers = {"Content-Length": str(len(body))}
+            self.rfile = io.BytesIO(body.encode("utf-8"))
+            self.wfile = io.BytesIO()
+
+        def _set_json(self, code=200):
+            self.status = code
+
+    h = Dummy(body)
+    web_app.RequestHandler.handle_scoring_v2_auto_weights_gpt(h)
+    resp = json.loads(h.wfile.getvalue().decode("utf-8"))
+    assert h.status == 200
+    assert sum(resp["weights"].values()) == 375
