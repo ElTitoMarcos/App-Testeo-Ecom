@@ -114,40 +114,46 @@ function renderWeightsUI(state){
   }
   list.innerHTML = '';
   factors.forEach((f,idx) => {
-    const priority = idx+1;
+    const priority = idx + 1;
     const li = document.createElement('li');
-    li.className = 'weight-card';
+    li.className = 'weight-item';
     li.dataset.key = f.key;
-    if(f.key === 'awareness'){
-      li.innerHTML = `<div class="priority-badge">#${priority}</div><div class="content"><div class="label">Awareness</div>
 
-    <div class="segmented-range">
-      <input id="awarenessSlider" class="weight-slider seg-awareness" type="range" min="0" max="100" step="1" />
-      <div class="ticks" aria-hidden="true">
-        <i style="left:20%"></i><i style="left:40%"></i><i style="left:60%"></i><i style="left:80%"></i>
-      </div>
-    </div>
-
-    <div class="awareness-labels">
-      <span>Unaware</span>
-      <span>Problem aware</span>
-      <span>Solution aware</span>
-      <span>Product aware</span>
-      <span>Most aware</span>
-    </div>
-
-    <div class="meta"><span class="weight-badge">peso: <span id="awarenessWeight"></span>/100</span></div>
-  </div>
-  <div class="drag-handle" title="Arrastra para reordenar">≡</div>`;
+    if (f.key === 'awareness') {
+      li.innerHTML = `
+        <div class="wi-head"><span class="wi-rank">#${priority}</span><span class="wi-title">Awareness</span><span class="wi-handle" aria-hidden="true">≡</span></div>
+        <div class="wi-slider">
+          <div class="segmented-range">
+            <input id="awarenessSlider" class="weight-slider seg-awareness" type="range" min="0" max="100" step="1" />
+            <div class="ticks" aria-hidden="true">
+              <i style="left:20%"></i><i style="left:40%"></i><i style="left:60%"></i><i style="left:80%"></i>
+            </div>
+          </div>
+          <div class="awareness-labels">
+            <span>Unaware</span>
+            <span>Problem aware</span>
+            <span>Solution aware</span>
+            <span>Product aware</span>
+            <span>Most aware</span>
+          </div>
+        </div>
+        <div class="wi-meta">
+          <span class="wi-min">${EXTREMES[f.key].left}</span>
+          <div class="wi-center">
+            <span class="wi-pill">peso: ${f.weight}/100</span>
+            <label class="wi-toggle"><input type="checkbox" class="wt-enabled" aria-label="Activar métrica" /></label>
+          </div>
+          <span class="wi-max">${EXTREMES[f.key].right}</span>
+        </div>`;
       const slider = li.querySelector('#awarenessSlider');
-      const weightEl = li.querySelector('#awarenessWeight');
+      const pill = li.querySelector('.wi-pill');
       const segs = Array.from(li.querySelectorAll('.awareness-labels span'));
       function updateAw(val){
         const v = Math.max(0, Math.min(100, parseInt(val,10) || 0));
         f.weight = v;
         cacheState.weights[f.key] = v;
         slider.value = v;
-        weightEl.textContent = v;
+        pill.textContent = `peso: ${v}/100`;
         const idx = Math.min(4, Math.floor(v/20));
         segs.forEach((el,i)=>el.classList.toggle('active', i===idx));
       }
@@ -156,33 +162,34 @@ function renderWeightsUI(state){
         updateAw(e.target.value);
         if(!isInitialRender) markDirty();
       });
-      const contentEl = li.querySelector('.content');
-      const toggle = document.createElement('div');
-      toggle.className = 'weight-toggle';
-      toggle.innerHTML = '<input type="checkbox" class="wt-enabled" aria-label="Activar métrica" />';
-      contentEl.appendChild(toggle);
       bindToggle(li, f.key, cacheState);
     } else {
-      li.innerHTML = `<div class="priority-badge">#${priority}</div><div class="content"><label for="weight-${f.key}" class="label">${f.label}</label><input id="weight-${f.key}" class="weight-range" type="range" min="0" max="100" step="1" value="${f.weight}"><div class="slider-extremes scale"><span class="extreme-left">${EXTREMES[f.key].left}</span><span class="extreme-right">${EXTREMES[f.key].right}</span></div><span class="weight-badge">peso: ${f.weight}/100</span></div><div class="drag-handle" aria-hidden>≡</div>`;
+      li.innerHTML = `
+        <div class="wi-head"><span class="wi-rank">#${priority}</span><span class="wi-title">${f.label}</span><span class="wi-handle" aria-hidden="true">≡</span></div>
+        <div class="wi-slider"><input id="weight-${f.key}" class="weight-range" type="range" min="0" max="100" step="1" value="${f.weight}"></div>
+        <div class="wi-meta">
+          <span class="wi-min">${EXTREMES[f.key].left}</span>
+          <div class="wi-center">
+            <span class="wi-pill">peso: ${f.weight}/100</span>
+            <label class="wi-toggle"><input type="checkbox" class="wt-enabled" aria-label="Activar métrica" /></label>
+          </div>
+          <span class="wi-max">${EXTREMES[f.key].right}</span>
+        </div>`;
       const range = li.querySelector('.weight-range');
+      const pill = li.querySelector('.wi-pill');
       range.addEventListener('input', e => {
         const v = Math.max(0, Math.min(100, parseInt(e.target.value,10) || 0));
         f.weight = v;
         cacheState.weights[f.key] = v;
         range.value = v;
-        li.querySelector('.weight-badge').textContent = `peso: ${f.weight}/100`;
+        pill.textContent = `peso: ${f.weight}/100`;
         if(!isInitialRender) markDirty();
       });
-      const contentEl = li.querySelector('.content');
-      const toggle = document.createElement('div');
-      toggle.className = 'weight-toggle';
-      toggle.innerHTML = '<input type="checkbox" class="wt-enabled" aria-label="Activar métrica" />';
-      contentEl.appendChild(toggle);
       bindToggle(li, f.key, cacheState);
     }
     list.appendChild(li);
   });
-  Sortable.create(list,{ handle:'.drag-handle', animation:150, onEnd:()=>{
+  Sortable.create(list,{ handle:'.wi-handle', animation:150, onEnd:()=>{
     const orderKeys = Array.from(list.children).map(li=>li.dataset.key);
     factors.sort((a,b)=>orderKeys.indexOf(a.key)-orderKeys.indexOf(b.key));
     cacheState.order = orderKeys;
