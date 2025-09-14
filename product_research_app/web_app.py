@@ -2595,7 +2595,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         ids = [int(x) for x in ids_param.split(",") if x.strip()]
 
         conn = ensure_db()
-        weights = winner_calc.load_winner_weights()
+        weights, order, enabled = winner_calc.load_winner_settings()
 
         if ids:
             placeholders = ",".join("?" for _ in ids)
@@ -2611,7 +2611,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         data: Dict[str, Any] = {}
         for row in rows:
-            res = winner_calc.compute_winner_score_v2(row, weights)
+            res = winner_calc.compute_winner_score_v2(row, weights, order, enabled)
             sf = res.get("score_float") or 0.0
             score_raw = max(0.0, min(1.0, sf)) * 100.0
             data[row["id"]] = {
