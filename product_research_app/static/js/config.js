@@ -388,22 +388,8 @@ async function adjustWeightsAI(){
     }
     if (!res.ok) throw new Error('Auto-weights request failed');
 
-    const out = await res.json(); // { weights:{}, weights_order:[...], method?... }
-    const intWeights = (out && out.weights) ? out.weights : {};
-    const newOrder = (out && Array.isArray(out.weights_order) && out.weights_order.length)
-      ? out.weights_order.slice()
-      : Object.keys(intWeights).sort((a,b) => (intWeights[b]||0) - (intWeights[a]||0));
-
-    // Persistir en backend y refrescar UI con lo guardado
-    const state = await SettingsCache.get();
-    const resSave = await fetch('/api/config/winner-weights', {
-      method:'PATCH', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ weights: intWeights, weights_order: newOrder, weights_enabled: state.enabled })
-    });
-    if (!resSave.ok) throw new Error('Persist weights failed');
-    const saved = await resSave.json();
-    SettingsCache.set(saved);
-    // renderWeightsUI reinstates slider helpers like enhanceRangeWithFloat
+    const out = await res.json(); // backend already persistió
+    SettingsCache.set(out);
     const fresh = await SettingsCache.get();
     if (typeof renderWeightsUI === 'function') renderWeightsUI(fresh);
 
