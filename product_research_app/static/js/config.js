@@ -1,5 +1,34 @@
 import * as api from './net.js';
 
+const SettingsCache = (() => {
+  let cache = null;
+  let inflight = null;
+
+  const norm = (cfg) => {
+    const weights = cfg?.weights || {};
+    const order = (Array.isArray(cfg?.weights_order) && cfg.weights_order.length)
+      ? cfg.weights_order.slice()
+      : Object.keys(weights);
+    const enabled = {};
+    for (const k of order) enabled[k] = cfg?.weights_enabled?.[k] ?? true;
+    return { order, weights, enabled };
+  };
+
+  const get = async () => {
+    if (cache) return cache;
+    if (inflight) return inflight;
+    inflight = fetch('/config', { cache: 'no-store' })
+      .then(r => r.json())
+      .then(cfg => (cache = norm(cfg)))
+      .finally(() => { inflight = null; });
+    return inflight;
+  };
+
+  const set = (next) => { cache = norm(next); };
+
+  return { get, set };
+})();
+
 const WEIGHT_FIELDS = [
   { key: 'price',        label: 'Price' },
   { key: 'rating',       label: 'Rating' },
@@ -27,6 +56,11 @@ const metricDefs = WEIGHT_FIELDS;
 const metricKeys = WEIGHT_KEYS;
 let factors = [];
 let userConfig = {};
+let cacheState = { order: [], weights: {}, enabled: {} };
+
+document.addEventListener('DOMContentLoaded', () => {
+  SettingsCache.get().catch(() => {});
+});
 
 function defaultFactors(){
   return WEIGHT_FIELDS.map(f => ({ ...f, weight:50, enabled:true }));
@@ -38,9 +72,46 @@ function markDirty(){
   saveTimer=setTimeout(saveSettings,700);
 }
 
-function renderWeightsUI(){
+function bindToggle(itemEl, field, state) {
+  const toggle = itemEl.querySelector('.wt-enabled');
+  if (!toggle) return;
+  const setDisabled = (off) => {
+    itemEl.classList.toggle('disabled', off);
+    itemEl.querySelectorAll('input[type="range"], input[type="number"]').forEach(el => el.disabled = off);
+  };
+  toggle.checked = !!state.enabled[field];
+  setDisabled(!toggle.checked);
+  toggle.addEventListener('change', (e) => {
+    const on = !!e.target.checked;
+    state.enabled[field] = on;
+    const factor = factors.find(f => f.key === field);
+    if (factor) factor.enabled = on;
+    setDisabled(!on);
+    if(!isInitialRender) markDirty();
+  });
+}
+
+function renderWeightsUI(state){
   const list = document.getElementById('weightsList');
   if(!list) return;
+  if(state){
+    cacheState = state;
+    const fieldList = (typeof WEIGHT_FIELDS !== 'undefined' && Array.isArray(WEIGHT_FIELDS)) ? WEIGHT_FIELDS : [];
+    const byKey = Object.fromEntries(fieldList.map(f => [f.key, f]));
+    factors = cacheState.order
+      .filter(k => byKey[k])
+      .map(k => ({
+        ...byKey[k],
+        weight: (cacheState.weights[k] !== undefined && !isNaN(cacheState.weights[k])) ? Math.round(Number(cacheState.weights[k])) : 50,
+        enabled: cacheState.enabled[k] !== undefined ? !!cacheState.enabled[k] : true
+      }));
+  } else {
+    cacheState = {
+      order: factors.map(f => f.key),
+      weights: Object.fromEntries(factors.map(f => [f.key, f.weight])),
+      enabled: Object.fromEntries(factors.map(f => [f.key, f.enabled !== false]))
+    };
+  }
   list.innerHTML = '';
   factors.forEach((f,idx) => {
     const priority = idx+1;
@@ -74,6 +145,7 @@ function renderWeightsUI(){
       function updateAw(val){
         const v = Math.max(0, Math.min(100, parseInt(val,10) || 0));
         f.weight = v;
+        cacheState.weights[f.key] = v;
         slider.value = v;
         weightEl.textContent = v;
         const idx = Math.min(4, Math.floor(v/20));
@@ -89,29 +161,14 @@ function renderWeightsUI(){
       toggle.className = 'weight-toggle';
       toggle.innerHTML = '<input type="checkbox" class="wt-enabled" aria-label="Activar métrica" />';
       contentEl.appendChild(toggle);
-      const cb = toggle.querySelector('input');
-      cb.checked = f.enabled !== false;
-      cb.addEventListener('change', e => {
-        const on = !!e.target.checked;
-        f.enabled = on;
-        for (const el of li.querySelectorAll('input[type="range"], input[type="number"]')) {
-          el.disabled = !on;
-        }
-        li.classList.toggle('disabled', !on);
-        if(!isInitialRender) markDirty();
-      });
-      if(!cb.checked){
-        for (const el of li.querySelectorAll('input[type="range"], input[type="number"]')) {
-          el.disabled = true;
-        }
-        li.classList.add('disabled');
-      }
+      bindToggle(li, f.key, cacheState);
     } else {
       li.innerHTML = `<div class="priority-badge">#${priority}</div><div class="content"><label for="weight-${f.key}" class="label">${f.label}</label><input id="weight-${f.key}" class="weight-range" type="range" min="0" max="100" step="1" value="${f.weight}"><div class="slider-extremes scale"><span class="extreme-left">${EXTREMES[f.key].left}</span><span class="extreme-right">${EXTREMES[f.key].right}</span></div><span class="weight-badge">peso: ${f.weight}/100</span></div><div class="drag-handle" aria-hidden>≡</div>`;
       const range = li.querySelector('.weight-range');
       range.addEventListener('input', e => {
         const v = Math.max(0, Math.min(100, parseInt(e.target.value,10) || 0));
         f.weight = v;
+        cacheState.weights[f.key] = v;
         range.value = v;
         li.querySelector('.weight-badge').textContent = `peso: ${f.weight}/100`;
         if(!isInitialRender) markDirty();
@@ -121,44 +178,36 @@ function renderWeightsUI(){
       toggle.className = 'weight-toggle';
       toggle.innerHTML = '<input type="checkbox" class="wt-enabled" aria-label="Activar métrica" />';
       contentEl.appendChild(toggle);
-      const cb = toggle.querySelector('input');
-      cb.checked = f.enabled !== false;
-      cb.addEventListener('change', e => {
-        const on = !!e.target.checked;
-        f.enabled = on;
-        for (const el of li.querySelectorAll('input[type="range"], input[type="number"]')) {
-          el.disabled = !on;
-        }
-        li.classList.toggle('disabled', !on);
-        if(!isInitialRender) markDirty();
-      });
-      if(!cb.checked){
-        for (const el of li.querySelectorAll('input[type="range"], input[type="number"]')) {
-          el.disabled = true;
-        }
-        li.classList.add('disabled');
-      }
+      bindToggle(li, f.key, cacheState);
     }
     list.appendChild(li);
   });
   Sortable.create(list,{ handle:'.drag-handle', animation:150, onEnd:()=>{
     const orderKeys = Array.from(list.children).map(li=>li.dataset.key);
     factors.sort((a,b)=>orderKeys.indexOf(a.key)-orderKeys.indexOf(b.key));
+    cacheState.order = orderKeys;
     renderWeightsUI();
     if(!isInitialRender) markDirty();
   }});
+  const root = document.getElementById('weightsCard');
+  if (root && !root.classList.contains('weights-section')) root.classList.add('weights-section');
+  document.querySelector('.weights-section')?.classList.add('compact');
   isInitialRender = false;
+  window.factors = factors;
 }
 
 function resetWeights(){
-  factors = defaultFactors();
-  renderWeightsUI();
+  const state = {
+    order: WEIGHT_FIELDS.map(f => f.key),
+    weights: Object.fromEntries(WEIGHT_FIELDS.map(f => [f.key, 50])),
+    enabled: Object.fromEntries(WEIGHT_FIELDS.map(f => [f.key, true]))
+  };
+  renderWeightsUI(state);
   markDirty();
 }
 
 async function saveSettings(){
   const payload = {
-    // usar "weights" (no "winner_weights") y persistir el orden visible
     weights: Object.fromEntries(
       factors.map(f => [f.key, Math.max(0, Math.min(100, Math.round(Number(f.weight))))])
     ),
@@ -169,11 +218,14 @@ async function saveSettings(){
     weights_order: factors.map(f => f.key)
   };
   try{
-    await fetch('/api/config/winner-weights', {
+    const res = await fetch('/api/config/winner-weights', {
       method:'PATCH',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify(payload)
     });
+    const data = await res.json().catch(()=>null);
+    if (data) SettingsCache.set(data);
+    else SettingsCache.set({ weights: payload.weights, weights_order: payload.order, weights_enabled: payload.weights_enabled });
     if (typeof reloadProductsLight === 'function') reloadProductsLight();
     else if (typeof reloadProducts === 'function') reloadProducts();
   }catch(err){
@@ -300,10 +352,12 @@ async function adjustWeightsAI(){
     }
 
     // Guardar {weights, order} y recargar desde servidor para reflejar lo persistido
-    await fetch('/api/config/winner-weights', {
+    const resSave = await fetch('/api/config/winner-weights', {
       method:'PATCH', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ weights: intWeights, order: newOrder })
     });
+    const saved = await resSave.json().catch(()=>null);
+    if (saved) SettingsCache.set(saved);
     if (typeof openConfigModal === 'function') await openConfigModal();
 
     if (typeof toast !== 'undefined' && toast.success){
@@ -318,38 +372,30 @@ async function adjustWeightsAI(){
 }
 
 
+function showSettingsModalShell(){
+  const list = document.getElementById('weightsList');
+  if (list) list.innerHTML = '';
+}
+
+function revealSettingsModalContent(){ /* no-op */ }
+
 async function hydrateSettingsModal(){
   try{
     isInitialRender = true;
-    const res = await fetch('/api/config/winner-weights');
-    const data = await res.json(); // backend: { weights, order, weights_enabled? }
-
-    const weights = (data && data.weights) ? data.weights : (data || {});
-    const order   = (data && Array.isArray(data.order) && data.order.length)
-      ? data.order
-      : (typeof WEIGHT_KEYS !== 'undefined' ? WEIGHT_KEYS : Object.keys(weights));
-    const enabled = (data && data.weights_enabled) ? data.weights_enabled : Object.fromEntries(Object.keys(weights).map(k => [k, true]));
-
-    const fieldList = (typeof WEIGHT_FIELDS !== 'undefined' && Array.isArray(WEIGHT_FIELDS)) ? WEIGHT_FIELDS : [];
-    const byKey = Object.fromEntries(fieldList.map(f => [f.key, f]));
-
-    window.factors = order
-      .filter(k => byKey[k])
-      .map(k => ({
-        ...byKey[k],
-        weight: (weights[k] !== undefined && !isNaN(weights[k])) ? Math.round(Number(weights[k])) : 50,
-        enabled: enabled[k] !== undefined ? !!enabled[k] : true
-      }));
-
-    renderWeightsUI();
-    console.debug('hydrateSettingsModal -> weights/order aplicados:', { weights, order, enabled });
+    const state = await SettingsCache.get();
+    renderWeightsUI(state);
+    console.debug('hydrateSettingsModal -> weights/order aplicados:', state);
   }catch(err){
     /* silencioso */
   }
 }
 
 async function openConfigModal(){
+  showSettingsModalShell();
   await hydrateSettingsModal();
+  document.querySelector('#configModal')?.classList.add('ready');
+  document.querySelector('#settings-modal')?.classList.add('ready');
+  revealSettingsModalContent();
   const resetBtn = document.getElementById('btnReset');
   if (resetBtn) resetBtn.onclick = resetWeights;
   const aiBtn = document.getElementById('btnAiWeights');
