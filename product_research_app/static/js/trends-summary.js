@@ -89,7 +89,6 @@ function renderTopCategoriesBar(data) {
   const top = [...(data.top_categories || data.categories || [])].slice(0, 10);
   const labels = top.map(x => x.path || x.category);
   const values = top.map(x => x.revenue);
-
   const ctx = document.getElementById('chart-top-categories');
   if (!ctx) return;
   if (ctx._chart) { ctx._chart.destroy(); }
@@ -263,6 +262,4 @@ document.addEventListener('click', function(e){
   e.preventDefault();
   showTrendsSection();
 });
-
 export {};
-
