@@ -894,8 +894,6 @@ class RequestHandler(BaseHTTPRequestHandler):
             qs = parse_qs(parsed.query)
             start_str = qs.get("start", [None])[0]
             end_str = qs.get("end", [None])[0]
-            from datetime import datetime
-
             def parse_date_str(val: str | None):
                 if not val:
                     return None
