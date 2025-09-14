@@ -32,7 +32,6 @@ def test_trends_no_data(tmp_path, monkeypatch):
     assert res["totals"]["units"] == 0
     assert res["totals"]["revenue"] == 0
 
-
 def test_trends_with_data_delta(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)
     monkeypatch.setattr(trends_service, "DB_PATH", tmp_path / "data.sqlite3")

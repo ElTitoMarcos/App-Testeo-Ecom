@@ -134,7 +134,7 @@ def get_trends_summary(start: datetime, end: datetime, filters: Optional[Dict[st
     price_count = 0
     rating_sum = 0.0
     rating_count = 0
-
+    
     for cat, data in cat_data.items():
         units = data["units"]
         revenue = data["revenue"]
