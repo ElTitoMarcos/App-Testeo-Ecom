@@ -91,6 +91,54 @@ function bindToggle(itemEl, field, state) {
   });
 }
 
+function enhanceRangeWithFloat(rangeEl, itemEl){
+  const THUMB = 16; // debe coincidir con el CSS del thumb
+  const floatEl = itemEl.querySelector('.wi-float');
+  if (!floatEl) return;
+
+  const setPercent = () => {
+    const min = +rangeEl.min || 0;
+    const max = +rangeEl.max || 100;
+    const val = +rangeEl.value || 0;
+    const p = ((val - min) * 100) / (max - min);
+    rangeEl.style.setProperty('--p', `${p}%`); // colorea el track
+    return p;
+  };
+
+  const placeFloat = () => {
+    const rect = rangeEl.getBoundingClientRect();
+    const p = parseFloat(getComputedStyle(rangeEl).getPropertyValue('--p'));
+    const usable = rect.width - THUMB;
+    const x = (p / 100) * usable + THUMB / 2;
+    floatEl.style.left = `${x}px`;
+    floatEl.textContent = `peso: ${Math.round(rangeEl.value)}/100`;
+  };
+
+  const showFloat = () => { floatEl.classList.add('show'); };
+  const hideFloatSoon = () => {
+    clearTimeout(hideFloatSoon._t);
+    hideFloatSoon._t = setTimeout(() => floatEl.classList.remove('show'), 700);
+  };
+
+  const updateAll = () => { setPercent(); placeFloat(); };
+
+  rangeEl.addEventListener('input', () => { updateAll(); showFloat(); });
+  rangeEl.addEventListener('pointerdown', () => { updateAll(); showFloat(); });
+  ['pointerup','blur','mouseleave'].forEach(ev =>
+    rangeEl.addEventListener(ev, hideFloatSoon)
+  );
+
+  updateAll();
+
+  const toggle = itemEl.querySelector('.wt-enabled');
+  if (toggle){
+    toggle.addEventListener('change', () => {
+      if (!toggle.checked) floatEl.classList.remove('show');
+      else { updateAll(); showFloat(); hideFloatSoon(); }
+    });
+  }
+}
+
 function renderWeightsUI(state){
   const list = document.getElementById('weightsList');
   if(!list) return;
@@ -129,6 +177,7 @@ function renderWeightsUI(state){
               <i style="left:20%"></i><i style="left:40%"></i><i style="left:60%"></i><i style="left:80%"></i>
             </div>
           </div>
+          <div class="wi-float" aria-hidden="true"></div>
           <div class="awareness-labels">
             <span>Unaware</span>
             <span>Problem aware</span>
@@ -166,7 +215,7 @@ function renderWeightsUI(state){
     } else {
       li.innerHTML = `
         <div class="wi-head"><span class="wi-rank">#${priority}</span><span class="wi-title">${f.label}</span><span class="wi-handle" aria-hidden="true">≡</span></div>
-        <div class="wi-slider"><input id="weight-${f.key}" class="weight-range" type="range" min="0" max="100" step="1" value="${f.weight}"></div>
+        <div class="wi-slider"><input id="weight-${f.key}" class="weight-range" type="range" min="0" max="100" step="1" value="${f.weight}"><div class="wi-float" aria-hidden="true"></div></div>
         <div class="wi-meta">
           <span class="wi-min">${EXTREMES[f.key].left}</span>
           <div class="wi-center">
@@ -188,6 +237,7 @@ function renderWeightsUI(state){
       bindToggle(li, f.key, cacheState);
     }
     list.appendChild(li);
+    enhanceRangeWithFloat(li.querySelector('input[type="range"]'), li);
   });
   Sortable.create(list,{ handle:'.wi-handle', animation:150, onEnd:()=>{
     const orderKeys = Array.from(list.children).map(li=>li.dataset.key);
