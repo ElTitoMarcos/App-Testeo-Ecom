@@ -408,3 +408,5 @@ window.loadWeights = hydrateSettingsModal;
 window.resetWeights = resetWeights;
 window.markDirty = markDirty;
 window.metricKeys = metricKeys;
+document.querySelector('#btnAiWeights')?.addEventListener('click', onClickAjustarPesosIA);
+window.adjustWeightsAI = onClickAjustarPesosIA;
