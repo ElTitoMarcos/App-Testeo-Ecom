@@ -151,6 +151,12 @@ def api_post_winner_weights_ai():
         current_app.logger.warning("recompute on ai save failed: %s", e)
 
     eff_int = compute_effective_int(weights, order)
+    current_app.logger.info(
+        "ai_raw=%s order=%s effective_int=%s",
+        weights,
+        order,
+        eff_int,
+    )
     resp = jsonify({
         "ok": True,
         "winner_weights": weights,
