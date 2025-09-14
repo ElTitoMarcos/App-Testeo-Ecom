@@ -114,8 +114,10 @@ def test_recommend_winner_weights_includes_awareness(monkeypatch):
     samples = [{"price": 10.0, "awareness": 0.75, "target": 5.0}]
     res = gpt.recommend_winner_weights("k", "m", samples, "target")
     weights = res["weights"]
-    assert set(weights) == {"price", "awareness"}
-    assert math.isclose(sum(weights.values()), 1.0)
+    assert set(weights.keys()) == set(ws.ALLOWED_FIELDS)
+    assert weights["price"] == 1
+    assert weights["awareness"] == 3
+    assert weights["revenue"] == 50
 
 
 def test_awareness_priority_and_closeness():
