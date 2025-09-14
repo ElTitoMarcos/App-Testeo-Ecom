@@ -175,7 +175,6 @@ def test_to_int_weights_clamps_and_orders():
     assert sum(ints.values()) == 375
     assert rng == "0_100"
 
-
 def test_effective_weights_and_order_from_ints():
     ws.prepare_oldness_bounds([])
     raw = {
@@ -201,7 +200,6 @@ def test_effective_weights_and_order_from_ints():
         "awareness",
         "oldness",
     ]
-
 
 def test_to_int_weights_missing_metric_warns(caplog):
     raw = {

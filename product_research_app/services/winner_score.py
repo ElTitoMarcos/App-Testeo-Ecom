@@ -263,7 +263,6 @@ def to_int_weights_0_100(
     order = [k for k, _ in sorted(ints.items(), key=lambda kv: (-kv[1], kv[0]))]
     return ints, order, range_detected
 
-
 def invalidate_weights_cache() -> None:
     global WEIGHTS_CACHE, ORDER_CACHE, ENABLED_CACHE, WEIGHTS_VERSION
     WEIGHTS_CACHE = None
