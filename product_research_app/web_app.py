@@ -36,7 +36,7 @@ import time
 import sqlite3
 import math
 import hashlib
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Dict, Any, List
 
 from . import database
@@ -68,6 +68,20 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DEBUG = bool(os.environ.get("DEBUG"))
+
+DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y")
+
+
+def _parse_date(s: str):
+    s = (s or "").strip()
+    if not s:
+        return None
+    for fmt in DATE_FORMATS:
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
 
 def ensure_db():
     try:
@@ -604,22 +618,52 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/trends/summary":
             params = parse_qs(parsed.query)
-            start_s = params.get("from", [""])[0]
-            end_s = params.get("to", [""])[0]
+            qs_from = params.get("from", [""])[0]
+            qs_to = params.get("to", [""])[0]
             filters_s = params.get("filters", [None])[0]
-            try:
-                start_dt = datetime.fromisoformat(start_s)
-                end_dt = datetime.fromisoformat(end_s)
-            except Exception:
-                self.send_error(400, "invalid range")
-                return
+
+            today = date.today()
+            d_from = _parse_date(qs_from)
+            d_to = _parse_date(qs_to)
+
+            if d_from is None and d_to is None:
+                d_to = today
+                d_from = today - timedelta(days=29)
+            elif d_from is None:
+                d_from = d_to - timedelta(days=29)
+            elif d_to is None:
+                d_to = d_from + timedelta(days=29)
+
+            if d_from > d_to:
+                d_from, d_to = d_to, d_from
+
+            start_dt = datetime.combine(d_from, datetime.min.time())
+            end_dt = datetime.combine(d_to + timedelta(days=1), datetime.min.time())
+
             filters = None
             if filters_s:
                 try:
                     filters = json.loads(filters_s)
                 except Exception:
                     filters = None
-            resp = trends_service.get_trends_summary(start_dt, end_dt, filters)
+            try:
+                resp = trends_service.get_trends_summary(start_dt, end_dt, filters)
+            except Exception:
+                resp = {
+                    "categories": [],
+                    "timeseries": [],
+                    "granularity": "day",
+                    "totals": {
+                        "unique_products": 0,
+                        "units": 0,
+                        "revenue": 0,
+                        "avg_price": 0,
+                        "avg_rating": 0,
+                        "rev_per_unit": 0,
+                        "delta_revenue_pct": 0,
+                        "delta_units_pct": 0,
+                    },
+                }
             self._set_json()
             self.wfile.write(json.dumps(resp).encode("utf-8"))
             return
