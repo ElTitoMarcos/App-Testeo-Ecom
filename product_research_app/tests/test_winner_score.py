@@ -72,26 +72,32 @@ def test_oldness_weight_direction():
     prod_new = {"first_seen": (today - timedelta(days=10)).isoformat()}
     ws.prepare_oldness_bounds([prod_old, prod_new])
 
-    res_old = ws.compute_winner_score_v2(prod_old, {"oldness": 100})
-    res_new = ws.compute_winner_score_v2(prod_new, {"oldness": 100})
+    res_old = ws.compute_winner_score_v2(prod_old, {"oldness": 100}, oldness_dir=1)
+    res_new = ws.compute_winner_score_v2(prod_new, {"oldness": 100}, oldness_dir=1)
     assert res_old["score"] > res_new["score"]
 
-    res_old_rev = ws.compute_winner_score_v2(prod_old, {"oldness": 0})
-    res_new_rev = ws.compute_winner_score_v2(prod_new, {"oldness": 0})
+    res_old_rev = ws.compute_winner_score_v2(prod_old, {"oldness": 100}, oldness_dir=-1)
+    res_new_rev = ws.compute_winner_score_v2(prod_new, {"oldness": 100}, oldness_dir=-1)
     assert res_new_rev["score"] > res_old_rev["score"]
 
-    res_old_neu = ws.compute_winner_score_v2(prod_old, {"oldness": 50})
-    res_new_neu = ws.compute_winner_score_v2(prod_new, {"oldness": 50})
+    res_old_neu = ws.compute_winner_score_v2(prod_old, {"oldness": 0}, oldness_dir=0)
+    res_new_neu = ws.compute_winner_score_v2(prod_new, {"oldness": 0}, oldness_dir=0)
     assert res_old_neu["score"] == res_new_neu["score"] == 0
 
+    eff = ws.compute_winner_score_v2(prod_old, {"oldness": 100}, oldness_dir=1)
+    assert eff["effective_weights"]["oldness"] == 1.0
+    for k in ws.ALLOWED_FIELDS:
+        if k != "oldness":
+            assert eff["effective_weights"][k] == 0.0
 
-def test_order_affects_score():
+
+def test_order_no_longer_affects_score():
     prod = {"price": 10.0, "rating": 5.0}
     ws.prepare_oldness_bounds([])
     weights = {"price": 50, "rating": 50}
     res_price_first = ws.compute_winner_score_v2(prod, weights, order=["price", "rating"])
     res_rating_first = ws.compute_winner_score_v2(prod, weights, order=["rating", "price"])
-    assert res_price_first["score"] != res_rating_first["score"]
+    assert res_price_first["score"] == res_rating_first["score"]
 
 
 def test_awareness_weight_impacts_score():
@@ -108,14 +114,14 @@ def test_awareness_weight_impacts_score():
 def test_recommend_winner_weights_includes_awareness(monkeypatch):
     # simulate GPT returning weights for price and awareness
     def fake_call(api_key, model, messages):
-        return {"choices": [{"message": {"content": '{"pesos": {"price": 1, "awareness": 3}}'}}]}
+        return {"choices": [{"message": {"content": '{"weights": {"price": 1, "awareness": 3}}'}}]}
 
     monkeypatch.setattr(gpt, "call_openai_chat", fake_call)
     samples = [{"price": 10.0, "awareness": 0.75, "target": 5.0}]
     res = gpt.recommend_winner_weights("k", "m", samples, "target")
     weights = res["weights"]
     assert set(weights) == {"price", "awareness"}
-    assert math.isclose(sum(weights.values()), 1.0)
+    assert weights["awareness"] == 3
 
 
 def test_awareness_priority_and_closeness():
@@ -143,23 +149,91 @@ def test_disabled_weight_excluded_from_score():
     assert res["effective_weights"]["price"] == 0.0
 
 
-def test_to_int_weights_uses_hamilton_method():
+def test_to_int_weights_clamps_and_orders():
     raw = {
-        "price": 0.35,
-        "rating": 0.25,
-        "units_sold": 0.15,
-        "revenue": 0.15,
-        "desire": 0.07,
-        "competition": 0.03,
+        "price": 72,
+        "rating": 88,
+        "units_sold": 65,
+        "revenue": 50,
+        "desire": 40,
+        "competition": 30,
+        "oldness": 10,
+        "awareness": 20,
     }
-    ints, order = ws.to_int_weights_0_100(raw, {"weights": {}, "weights_enabled": {}})
-    assert ints == {
-        "price": 35,
-        "rating": 25,
-        "units_sold": 15,
-        "revenue": 15,
-        "desire": 7,
-        "competition": 3,
+    ints, order, rng = ws.to_int_weights_0_100(raw, {})
+    assert ints == raw
+    assert order == [
+        "rating",
+        "price",
+        "units_sold",
+        "revenue",
+        "desire",
+        "competition",
+        "awareness",
+        "oldness",
+    ]
+    assert sum(ints.values()) == 375
+    assert rng == "0_100"
+
+
+def test_effective_weights_and_order_from_ints():
+    ws.prepare_oldness_bounds([])
+    raw = {
+        "price": 72,
+        "rating": 88,
+        "units_sold": 65,
+        "revenue": 50,
+        "desire": 40,
+        "competition": 30,
+        "oldness": 10,
+        "awareness": 20,
     }
-    assert sum(ints.values()) == 100
-    assert order[0] == "price" and order[-1] == "competition"
+    res = ws.compute_winner_score_v2({}, raw)
+    assert res["effective_weights"]["rating"] == pytest.approx(0.88)
+    assert res["effective_weights"]["oldness"] == pytest.approx(0.10)
+    assert res["order"] == [
+        "rating",
+        "price",
+        "units_sold",
+        "revenue",
+        "desire",
+        "competition",
+        "awareness",
+        "oldness",
+    ]
+
+
+def test_to_int_weights_missing_metric_warns(caplog):
+    raw = {
+        "price": 72,
+        "rating": 88,
+        "units_sold": 65,
+        "desire": 40,
+        "competition": 30,
+        "oldness": 10,
+        "awareness": 20,
+    }
+    with caplog.at_level("WARNING"):
+        ints, order, rng = ws.to_int_weights_0_100(raw, {})
+    assert ints["revenue"] == 0
+    assert any("missing weight for revenue" in rec.message for rec in caplog.records)
+    assert set(ints.keys()) == set(ws.ALLOWED_FIELDS)
+    assert rng == "0_100"
+
+
+def test_to_int_weights_scales_from_zero_to_one():
+    raw = {
+        "price": 0.72,
+        "rating": 0.88,
+        "units_sold": 0.65,
+        "revenue": 0.50,
+        "desire": 0.40,
+        "competition": 0.30,
+        "oldness": 0.10,
+        "awareness": 0.20,
+    }
+    ints, order, rng = ws.to_int_weights_0_100(raw, {})
+    assert ints["price"] == 72
+    assert ints["revenue"] == 50
+    assert order[0] == "rating"
+    assert rng == "0_1"

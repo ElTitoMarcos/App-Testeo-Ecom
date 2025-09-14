@@ -1046,21 +1046,17 @@ def recommend_winner_weights(
 ) -> Dict[str, Any]:
     """Ask GPT to propose Winner Score weights with justification."""
 
-    fields = sorted({k for s in samples for k in s.keys() if k != success_key})
-    if not fields:
-        fields = list(winner_calc.ALLOWED_FIELDS)
+    fields = list(winner_calc.ALLOWED_FIELDS)
     if not samples:
-        return {
-            "weights": {k: 1.0 / len(fields) for k in fields},
-            "justification": "",
-        }
+        return {"weights": {k: 0 for k in fields}, "justification": ""}
 
     sample_json = json.dumps(samples[:20], ensure_ascii=False)
     prompt = (
-        "Eres un optimizador de modelos para e-commerce. Tengo una tabla de productos con las ocho "
-        f"variables de Winner Score y un valor de éxito real '{success_key}'. "
-        "Quiero pesos normalizados (suma=1) que maximicen la correlación entre el score total y el éxito. "
-        "Devuelve JSON con { 'pesos': {variable: peso}, 'justificacion': 'texto breve' }.\nMuestra:\n"
+        "Eres un optimizador de modelos para e-commerce. Tengo una tabla de productos con las siguientes métricas: "
+        "price, rating, units_sold, revenue, desire, competition, oldness, awareness y un valor de éxito real "
+        f"'{success_key}'. "
+        "Asigna pesos independientes entre 0 y 100 para cada métrica. Prohibido normalizar o ajustar para que la suma sea 100. "
+        "Devuelve únicamente un JSON estricto con este esquema: {\"weights\":{\"price\":0-100,\"rating\":0-100,\"units_sold\":0-100,\"revenue\":0-100,\"desire\":0-100,\"competition\":0-100,\"oldness\":0-100,\"awareness\":0-100},\"rationale\":\"texto opcional\"}.\nMuestra:\n"
         + sample_json
     )
     messages = [
@@ -1073,17 +1069,15 @@ def recommend_winner_weights(
         parsed = json.loads(content)
         if not isinstance(parsed, dict):
             raise ValueError("Respuesta no es un objeto JSON")
-        weights_raw = parsed.get("pesos") or parsed.get("weights") or {}
-        justification = parsed.get("justificacion") or parsed.get("justification") or ""
+        weights_raw = parsed.get("weights") or parsed.get("pesos") or {}
+        justification = parsed.get("rationale") or parsed.get("justificacion") or parsed.get("justification") or ""
     except Exception:
-        return {
-            "weights": {k: 1.0 / len(fields) for k in fields},
-            "justification": "",
-        }
+        return {"weights": {k: 0 for k in fields}, "justification": ""}
 
-    total = 0.0
     cleaned: Dict[str, float] = {}
     for key in fields:
+        if key not in weights_raw:
+            continue
         try:
             val = float(weights_raw.get(key, 0.0))
             if val < 0:
@@ -1091,14 +1085,7 @@ def recommend_winner_weights(
         except Exception:
             val = 0.0
         cleaned[key] = val
-        total += val
-    if total <= 0:
-        return {
-            "weights": {k: 1.0 / len(fields) for k in fields},
-            "justification": justification,
-        }
-    normalized = {k: v / total for k, v in cleaned.items()}
-    return {"weights": normalized, "justification": justification}
+    return {"weights": cleaned, "justification": justification}
 
 
 def summarize_top_products(api_key: str, model: str, products: List[Dict[str, Any]]) -> str:

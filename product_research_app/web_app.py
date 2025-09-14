@@ -603,15 +603,14 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/api/config/winner-weights":
             from .services.config import (
                 get_winner_weights_raw,
-                get_winner_order_raw,
                 get_weights_enabled_raw,
                 compute_effective_int,
             )
 
             raw = get_winner_weights_raw()
-            order = get_winner_order_raw()
             enabled = get_weights_enabled_raw()
             raw_eff = {k: (raw.get(k, 0) if enabled.get(k, True) else 0) for k in raw}
+            order = [k for k, _ in sorted(raw_eff.items(), key=lambda kv: (-kv[1], kv[0]))]
             eff_int = compute_effective_int(raw_eff, order)
             logger.info("weights_effective_int=%s order=%s", eff_int, order)
             resp = {
@@ -2447,40 +2446,38 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         try:
             result = gpt.recommend_winner_weights(api_key, model, samples, target)
-            weights = winner_calc.sanitize_weights(result.get("weights", {}))
+            weights_raw = result.get("weights", {})
             notes = result.get("justification", "")
         except Exception as exc:
             self._set_json(500)
             self.wfile.write(json.dumps({"error": str(exc)}).encode('utf-8'))
             return
-        prev_settings = winner_calc.load_settings()
-        prev_cfg = {
-            "weights": {
-                k: int(v) for k, v in (prev_settings.get("winner_weights") or {}).items()
-            },
-            "weights_enabled": {
-                k: bool(v)
-                for k, v in (prev_settings.get("weights_enabled") or {}).items()
-            },
-        }
-        enabled_map = prev_cfg.get("weights_enabled") or {}
-        enabled_keys = [k for k, on in enabled_map.items() if on]
-        raw_enabled = {k: weights.get(k, 0.0) for k in enabled_keys if k in weights} or weights
-        ints_enabled, order = winner_calc.to_int_weights_0_100(raw_enabled, prev_cfg)
-        prev_all = prev_cfg.get("weights") or {}
-        final_weights = prev_all.copy()
-        for k, v in ints_enabled.items():
-            final_weights[k] = v
+        ints, order, rng = winner_calc.to_int_weights_0_100(weights_raw, {})  # NOTE: IA 0–1 autoescalada a 0–100; guardia anti-cero; revenue incluido.
         logger.info(
-            "ai_raw=%s enabled_only=%s ints=%s order=%s sum=%s",
-            weights,
-            raw_enabled,
-            ints_enabled,
+            "ai_incoming=%s range_detected=%s weights_effective_int=%s order=%s",
+            weights_raw,
+            rng,
+            ints,
             order,
-            sum(ints_enabled.values()),
         )
+        if sum(ints.values()) == 0:
+            logger.warning("ai_weights_rejected_all_zero")
+            self._set_json()
+            self.wfile.write(
+                json.dumps({"status": "rejected_all_zero", "kept_previous": True}).encode("utf-8")
+            )
+            return
+        prev_settings = winner_calc.load_settings()
+        prev_enabled = prev_settings.get("weights_enabled") or {}
+        winner_calc.save_winner_weights_raw(
+            {"weights": ints, "order": order, "weights_enabled": prev_enabled}
+        )
+        try:
+            winner_calc.recompute_scores_for_all_products(scope="all")
+        except Exception as exc:
+            logger.warning("auto-weights recompute failed: %s", exc)
         resp = {
-            "weights": final_weights,
+            "weights": ints,
             "weights_order": order,
             "order": order,
             "method": "gpt",
@@ -2653,7 +2650,13 @@ class RequestHandler(BaseHTTPRequestHandler):
         ids = [int(x) for x in ids_param.split(",") if x.strip()]
 
         conn = ensure_db()
-        weights, order, enabled = winner_calc.load_winner_settings()
+        weights, _, enabled = winner_calc.load_winner_settings()
+        ints, _, _ = winner_calc.to_int_weights_0_100(weights, {})
+        ints = {k: (ints.get(k, 0) if enabled.get(k, True) else 0) for k in winner_calc.ALLOWED_FIELDS}
+        order = [k for k, _ in sorted(ints.items(), key=lambda kv: (-kv[1], kv[0]))]
+        cfg = config.load_config()
+        pref = cfg.get("oldness_preference", "newer")
+        dir_old = winner_calc._oldness_dir_from_pref(pref)
 
         if ids:
             placeholders = ",".join("?" for _ in ids)
@@ -2669,7 +2672,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         data: Dict[str, Any] = {}
         for row in rows:
-            res = winner_calc.compute_winner_score_v2(row, weights, order, enabled)
+            res = winner_calc.compute_winner_score_v2(row, ints, order, enabled, dir_old)
             sf = res.get("score_float") or 0.0
             score_raw = max(0.0, min(1.0, sf)) * 100.0
             data[row["id"]] = {

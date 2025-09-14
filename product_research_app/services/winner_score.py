@@ -180,18 +180,15 @@ WEIGHTS_VERSION: int = 0
 
 
 def compute_effective_weights(weights: dict[str, int | float], order: list[str]) -> dict[str, float]:
-    order = list(order)
-    if "awareness" in weights and "awareness" not in order:
-        order.append("awareness")
-    n = len(order)
-    if n == 0:
-        return {}
-    sum_ranks = n * (n + 1) / 2.0
-    pri = {k: (n - i) for i, k in enumerate(order)}
-    pri_factor = {k: pri[k] / (sum_ranks / n) for k in order}
-    eff = {k: float(weights.get(k, 0)) * pri_factor[k] for k in order}
-    s = sum(eff.values()) or 1.0
-    return {k: v / s for k, v in eff.items()}
+    """Map integer weights 0..100 to float ratios 0..1 without normalization."""
+
+    out: dict[str, float] = {}
+    for k in order:
+        out[k] = float(weights.get(k, 0)) / 100.0  # NOTE: pesos 0–100 → ratios 0–1 con división float; sin normalización global.
+    for k in weights:
+        if k not in out:
+            out[k] = float(weights.get(k, 0)) / 100.0
+    return out
 
 def sanitize_weights(weights: dict | None) -> dict:
     w = (weights or {}).copy()
@@ -202,64 +199,69 @@ def sanitize_weights(weights: dict | None) -> dict:
     return {k: v / s for k, v in w.items()}
 
 
-def to_int_weights_0_100(raw: dict[str, float], prev_cfg: dict) -> tuple[dict[str, int], list[str]]:
-    """Scale arbitrary weights to 0-100 integers using Hamilton apportionment.
+def to_int_weights_0_100(
+    raw: dict[str, float], prev_cfg: dict | None = None
+) -> tuple[dict[str, int], list[str], str]:
+    """Convert raw weights to clamped integers 0-100 without normalization.
 
-    ``raw`` may contain any non-negative values (normalized or not).  ``prev_cfg``
-    should provide previous ``{"weights": ..., "weights_enabled": ...}`` so that
-    missing keys can fall back to prior configuration.
-    """
+    The function accepts aliased keys and detects if the incoming values are
+    within 0-1, auto-scaling them to 0-100 before clamping.
+    """  # NOTE: IA 0–1 autoescalada a 0–100; guardia anti-cero; revenue incluido.
 
-    vals = {
-        k: (
-            0.0
-            if v is None or not isinstance(v, (int, float)) or v < 0
-            else float(v)
-        )
-        for k, v in raw.items()
+    ALIASES = {
+        "price": "price",
+        "rating": "rating",
+        "units_sold": "units_sold",
+        "unit_sold": "units_sold",
+        "unitsSold": "units_sold",
+        "revenue": "revenue",
+        "sales": "revenue",
+        "turnover": "revenue",
+        "desire": "desire",
+        "competition": "competition",
+        "oldness": "oldness",
+        "age": "oldness",
+        "awareness": "awareness",
+        "brand_awareness": "awareness",
     }
-    if not vals or all(v == 0 for v in vals.values()):
-        prev_w = {k: int(v) for k, v in (prev_cfg.get("weights") or {}).items()}
-        if prev_w:
-            order = sorted(prev_w, key=lambda k: prev_w[k], reverse=True)
-            return prev_w, order
-        fields = list((prev_cfg.get("weights") or {}).keys()) or list(vals.keys())
-        if not fields:
-            fields = [
-                "price",
-                "rating",
-                "units_sold",
-                "revenue",
-                "desire",
-                "competition",
-            ]
-        base = {k: 1.0 for k in fields}
-        return _hamilton_0_100(base)
+    CANON = [
+        "price",
+        "rating",
+        "units_sold",
+        "revenue",
+        "desire",
+        "competition",
+        "oldness",
+        "awareness",
+    ]
 
-    return _hamilton_0_100(vals)
+    weights_raw: dict[str, float] = {}
+    for k, v in (raw or {}).items():
+        ck = ALIASES.get(k, k)
+        if ck not in CANON:
+            continue
+        try:
+            weights_raw[ck] = float(v)
+        except Exception:
+            continue
 
+    mx = max(weights_raw.values(), default=0.0)
+    range_detected = "0_1" if 0.0 <= mx <= 1.0 else "0_100"
+    scale = 100.0 if range_detected == "0_1" else 1.0
 
-def _hamilton_0_100(vals: dict[str, float]) -> tuple[dict[str, int], list[str]]:
-    total = sum(vals.values())
-    if total <= 0:
-        n = len(vals) or 1
-        q, r = divmod(100, n)
-        ints = {k: q for k in vals.keys()}
-        for k in sorted(vals.keys())[:r]:
-            ints[k] += 1
-        order = sorted(ints, key=lambda k: ints[k], reverse=True)
-        return ints, order
-    shares = {k: (v / total) * 100.0 for k, v in vals.items()}
-    floors = {k: int(shares[k] // 1) for k in shares}
-    leftover = 100 - sum(floors.values())
-    frac_sorted = sorted(
-        shares.items(), key=lambda kv: (kv[1] - int(kv[1]), kv[0]), reverse=True
-    )
-    ints = floors.copy()
-    for i in range(leftover):
-        ints[frac_sorted[i % len(frac_sorted)][0]] += 1
-    order = sorted(ints, key=lambda k: ints[k], reverse=True)
-    return ints, order
+    ints: dict[str, int] = {}
+    for key in CANON:
+        if key not in weights_raw:
+            logger.warning("missing weight for %s, defaulting to 0", key)
+            val = 0.0
+        else:
+            val = weights_raw[key]
+        val = int(round(val * scale))
+        val = max(0, min(100, val))
+        ints[key] = val
+
+    order = [k for k, _ in sorted(ints.items(), key=lambda kv: (-kv[1], kv[0]))]
+    return ints, order, range_detected
 
 
 def invalidate_weights_cache() -> None:
@@ -587,14 +589,13 @@ def _norm_identity(v: float) -> float:
     return clamp(v)
 
 
-def _oldness_pref_and_weight(cfg_weights: dict[str, float]) -> tuple[float, float]:
-    # Entrada UI 0..100 (la misma barra que ves en el modal)
-    v = float(cfg_weights.get("oldness", 50))
-    # Intensidad 0..1 (50 => 0, 0/100 => 1)
-    intensity = abs(v - 50.0) / 50.0
-    # Dirección: -1 recientes, +1 antiguos (50 => 0)
-    direction = (v - 50.0) / 50.0
-    return direction, intensity
+def _oldness_dir_from_pref(pref: str) -> float:
+    pref = (pref or "").strip().lower()
+    if pref == "older":
+        return 1.0
+    if pref == "newer":
+        return -1.0
+    return 0.0
 
 
 NORMALIZERS: Dict[str, Callable[[float], float]] = {
@@ -611,9 +612,10 @@ NORMALIZERS: Dict[str, Callable[[float], float]] = {
 
 def compute_winner_score_v2(
     product_row: Any,
-    user_weights: Dict[str, float],
+    weights_int: Dict[str, float],
     order: Optional[list[str]] = None,
     enabled: Optional[Dict[str, bool]] = None,
+    oldness_dir: float = 0.0,
 ) -> Dict[str, Any]:
     """Compute Winner Score using available features only."""
 
@@ -625,42 +627,38 @@ def compute_winner_score_v2(
             continue
         raw_vals[name] = val
 
-    w_aw = user_weights.get("awareness", 50)
+    w_aw = weights_int.get("awareness", 0)
     raw_vals["awareness"] = awareness_feature_value(product_row, w_aw)
 
     present = list(raw_vals.keys())
     missing_fields = [f for f in ALLOWED_FIELDS if f not in present]
     disabled_fields = [f for f in ALLOWED_FIELDS if enabled and not enabled.get(f, True)]
 
-    dir_old, w_old_intensity = _oldness_pref_and_weight(user_weights)
-
     norms: Dict[str, float] = {}
     for k, v in raw_vals.items():
         n = NORMALIZERS[k](v)
-        if k == "oldness" and dir_old < 0:
+        if k == "oldness" and oldness_dir < 0:
             n = 1.0 - n
         norms[k] = n
 
-    weights_for_priority: Dict[str, int] = {}
-    for k in ALLOWED_FIELDS:
-        base = int(round(user_weights.get(k, 0)))
-        on = enabled.get(k, True) if enabled else True
-        weights_for_priority[k] = base if on else 0
-    weights_for_priority["oldness"] = (
-        int(round(w_old_intensity * 100))
-        if (enabled.get("oldness", True) if enabled else True)
-        else 0
-    )
     if order is None:
-        order = list(weights_for_priority.keys())
-    eff_all = compute_effective_weights(weights_for_priority, order)
-    eff_weights = {k: eff_all.get(k, 0.0) for k in norms.keys()}
+        order = [k for k, _ in sorted(weights_int.items(), key=lambda kv: (-kv[1], kv[0]))]
 
+    weights_ratio: Dict[str, float] = {}
+    for k in ALLOWED_FIELDS:
+        base = float(weights_int.get(k, 0))
+        if enabled and not enabled.get(k, True):
+            base = 0.0
+        weights_ratio[k] = base / 100.0  # NOTE: pesos 0–100 → ratios 0–1 con división float; sin normalización global.
+
+    eff_weights = {k: weights_ratio.get(k, 0.0) for k in norms.keys()}
     sum_filtered = sum(eff_weights.values())
-    score_float = sum(eff_weights.get(k, 0.0) * norms[k] for k in norms)
+    score_float = 0.0
+    if sum_filtered > 0:
+        score_float = sum(eff_weights.get(k, 0.0) * norms[k] for k in norms) / sum_filtered
     score_int = int(round(score_float * 100))
 
-    eff_all_full = {k: eff_all.get(k, 0.0) for k in ALLOWED_FIELDS}
+    eff_all_full = {k: weights_ratio.get(k, 0.0) for k in ALLOWED_FIELDS}
     return {
         "score": score_int,
         "score_float": score_float,
@@ -695,19 +693,27 @@ def generate_winner_scores(
     """
 
     if weights is None:
-        weights, order, enabled = load_winner_settings()
+        weights, _, enabled = load_winner_settings()
     else:
-        order = get_winner_order_raw()
         from .config import get_weights_enabled_raw
 
         enabled = get_weights_enabled_raw()
 
-    dir_old, w_old_intensity = _oldness_pref_and_weight(weights)
-    oldness_ui = float(weights.get("oldness", 50))
+    ints, _, _ = to_int_weights_0_100(weights, {})
+    ints = {k: (ints.get(k, 0) if enabled.get(k, True) else 0) for k in ALLOWED_FIELDS}
+    order = [k for k, _ in sorted(ints.items(), key=lambda kv: (-kv[1], kv[0]))]
+    ratios = {k: ints[k] / 100.0 for k in ALLOWED_FIELDS}
+    logger.info("weights_effective_int=%s effective_weights=%s order=%s", ints, ratios, order)
+
+    cfg = load_config()
+    pref = cfg.get("oldness_preference", "newer")
+    dir_old = _oldness_dir_from_pref(pref)
+    oldness_ui = 0.0 if pref == "newer" else 100.0 if pref == "older" else 50.0
+    w_old_intensity = ratios.get("oldness", 0.0)
     dir_old_label = "+1" if dir_old >= 0 else "-1"
 
     weights_hash_all = hashlib.sha1(
-        json.dumps(weights, sort_keys=True).encode("utf-8")
+        json.dumps(ints, sort_keys=True).encode("utf-8")
     ).hexdigest()[:8]
     weights_hash_eff = ""
 
@@ -734,7 +740,7 @@ def generate_winner_scores(
     for row in rows:
         pid = row["id"]
         old_score = row["winner_score"]
-        res = compute_winner_score_v2(row, weights, order, enabled)
+        res = compute_winner_score_v2(row, ints, order, enabled, dir_old)
         sf = res.get("score_float") or 0.0
         present = set(res.get("present_fields", []))
         missing = set(res.get("missing_fields", []))
