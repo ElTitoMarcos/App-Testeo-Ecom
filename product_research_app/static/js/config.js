@@ -394,25 +394,21 @@ async function adjustWeightsAI(){
       ? out.weights_order.slice()
       : Object.keys(intWeights).sort((a,b) => (intWeights[b]||0) - (intWeights[a]||0));
 
-    // Aplicar en UI
-    if (Array.isArray(window.factors) && window.factors.length){
-      const byKey = Object.fromEntries(window.factors.map(f => [f.key, f]));
-      window.factors = newOrder.filter(k => byKey[k]).map(k => ({ ...byKey[k], weight: intWeights[k] ?? byKey[k].weight }));
-      if (typeof renderWeightsUI === 'function') renderWeightsUI();
-    }
-
-    // Guardar {weights, order} y recargar desde servidor para reflejar lo persistido
+    // Persistir en backend y refrescar UI con lo guardado
     const state = await SettingsCache.get();
     const resSave = await fetch('/api/config/winner-weights', {
       method:'PATCH', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ weights: intWeights, weights_order: newOrder, weights_enabled: state.enabled })
     });
-    const saved = await resSave.json().catch(()=>null);
-    if (saved) SettingsCache.set(saved);
-    if (typeof openConfigModal === 'function') await openConfigModal();
+    if (!resSave.ok) throw new Error('Persist weights failed');
+    const saved = await resSave.json();
+    SettingsCache.set(saved);
+    // renderWeightsUI reinstates slider helpers like enhanceRangeWithFloat
+    const fresh = await SettingsCache.get();
+    if (typeof renderWeightsUI === 'function') renderWeightsUI(fresh);
 
     if (typeof toast !== 'undefined' && toast.success){
-      const method = (out && out.method) ? out.method : 'auto';
+      const method = (out && out.method) ? out.method : 'gpt';
       toast.success(`Pesos ajustados por IA (${method}) con ${data_sample.length} muestras`);
     }
   }catch(err){
