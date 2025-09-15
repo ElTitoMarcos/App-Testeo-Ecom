@@ -9,6 +9,7 @@ const toNumber = (raw) => {
   return isNaN(v) ? NaN : v * mul;
 };
 
+const normLevel = (s) => (s || '').toLowerCase().replace(/[\s-]/g, '');
 const toPercent = (raw) => {
   const n = toNumber(raw);
   return isNaN(n) ? NaN : n;
@@ -27,6 +28,13 @@ const parseIdQuery = (txt) => {
 
 const val = (id) => document.getElementById(id)?.value?.trim() ?? '';
 
+const awarenessLabel = (value) => {
+  if (!value) return '';
+  const select = document.getElementById('f-awareness');
+  if (!select) return value;
+  const option = Array.from(select.options).find(opt => opt.value === value);
+  return option?.textContent?.trim() || value;
+};
 export function readFilters(){
   return {
     ids: parseIdQuery(val('f-id')),
@@ -45,7 +53,7 @@ export function readFilters(){
     dateTo: val('f-date-to'),
     rangeText: val('f-range-text').toLowerCase(),
     desireMag: val('f-desire-mag'),
-    awareness: val('f-awareness'),
+    awareness: normLevel(val('f-awareness')), // ya viene normalizado del select
     competition: val('f-competition'),
     scoreMin: toNumber(val('f-score-min')),
     scoreMax: toNumber(val('f-score-max')),
@@ -119,7 +127,9 @@ export function applyFilters(products, filters){
     if ((f.dateFrom || f.dateTo) && !inDate(F.date(p), f.dateFrom, f.dateTo)) return false;
     if (f.rangeText && !F.range(p).includes(f.rangeText)) return false;
     if (f.desireMag && F.desireMag(p) !== f.desireMag) return false;
-    if (f.awareness && F.awareness(p) !== f.awareness) return false;
+    if (f.awareness) {
+      if (normLevel(F.awareness(p)) !== f.awareness) return false;
+    }
     if (f.competition && F.competition(p) !== f.competition) return false;
     return true;
   });
@@ -274,7 +284,7 @@ function buildActiveChips(filters){
     });
   }
   if (filters.awareness) {
-    pushChip(`Awareness: ${filters.awareness}`, () => {
+    pushChip(`Awareness: ${awarenessLabel(filters.awareness)}`, () => {
       const el = document.getElementById('f-awareness');
       if (el) el.value = '';
     });
