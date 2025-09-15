@@ -1,76 +1,113 @@
-// Generador de insights heurísticos (sin GPT)
-function localInsights(categories) {
-  if (!categories || !categories.length) return ['Sin datos de categorías.'];
+function num(v) { return Number(v || 0); }
+const fmtEu = (v) => {
+  if (!isFinite(v)) return '-';
+  if (v >= 1e6) return '€' + (v / 1e6).toFixed(2).replace('.', ',') + ' M';
+  if (v >= 1e3) return '€' + (v / 1e3).toFixed(1).replace('.', ',') + ' K';
+  return '€' + v.toFixed(2).replace('.', ',');
+};
+const fmtUnits = (v) => {
+  v = num(v);
+  if (v >= 1e6) return (v / 1e6).toFixed(2).replace('.', ',') + ' M';
+  if (v >= 1e3) return (v / 1e3).toFixed(1).replace('.', ',') + ' K';
+  return v.toLocaleString('es-ES');
+};
+const qtile = (arr, q) => {
+  if (!arr.length) return 0;
+  const a = [...arr].sort((x, y) => x - y);
+  const i = (a.length - 1) * q;
+  const lo = Math.floor(i);
+  const hi = Math.ceil(i);
+  if (lo === hi) return a[lo];
+  return a[lo] * (hi - i) + a[hi] * (i - lo);
+};
 
-  const sortedRev = [...categories].sort((a, b) => Number(b.revenue || 0) - Number(a.revenue || 0));
-  const totalRevenue = sortedRev.reduce((s, r) => s + Number(r.revenue || 0), 0) || 1;
-  const top3 = sortedRev
+function topN(list, key, n = 3) {
+  return [...list].sort((a, b) => num(b[key]) - num(a[key])).slice(0, n);
+}
+
+function extraordinaryProducts(products) {
+  const prices = products.map((p) => num(p.price)).filter(Boolean);
+  const units = products.map((p) => num(p.units_sold || p.units)).filter(Boolean);
+  const ratings = products.map((p) => num(p.rating)).filter(Boolean);
+
+  const p75 = qtile(prices, 0.75);
+  const u75 = qtile(units, 0.75);
+  const r85 = qtile(ratings, 0.85);
+
+  const priceyAndSell = products
+    .filter((p) => num(p.price) >= p75 && num(p.units_sold || p.units) >= u75)
     .slice(0, 3)
-    .map((c) => `${c.path || c.name} (${(100 * Number(c.revenue || 0) / totalRevenue).toFixed(1)}%)`);
+    .map((p) => `${p.name} (${fmtEu(num(p.revenue))})`);
 
-  const avgPrice = categories.reduce((s, c) => s + Number(c.price || 0), 0) / categories.length || 0;
-  const highPrice = [...categories]
-    .sort((a, b) => Number(b.price || 0) - Number(a.price || 0))
+  const fanFavs = products
+    .filter((p) => num(p.rating) >= Math.max(4.6, r85) && num(p.units_sold || p.units) >= u75)
     .slice(0, 3)
-    .map((c) => `${c.path || c.name} (€${Number(c.price || 0).toFixed(2).replace('.', ',')})`);
+    .map((p) => `${p.name} (${num(p.rating).toFixed(2).replace('.', ',')}★)`);
 
-  return [
-    `Top 3 por ingresos: ${top3.join(' · ')}`,
-    `Precio medio ponderado aprox: €${avgPrice.toFixed(2).replace('.', ',')}`,
-    `Categorías con precio medio más alto: ${highPrice.join(' · ')}`
-  ];
+  return { priceyAndSell, fanFavs };
+}
+
+function categoryBullets(categories) {
+  if (!categories || !categories.length) return ['Sin datos de categorías agregadas.'];
+  const totalRevenue = categories.reduce((s, x) => s + num(x.revenue), 0) || 1;
+  const topRev = topN(categories, 'revenue', 3)
+    .filter((c) => num(c.revenue) > 0)
+    .map((c) => {
+      const pct = ((100 * num(c.revenue)) / totalRevenue).toFixed(1).replace('.', ',');
+      return `${c.path || c.name} (${pct}%)`;
+    });
+
+  if (!topRev.length) return ['Sin datos de ingresos por categoría.'];
+  return [`Top categorías por ingresos: ${topRev.join(' · ')}`];
+}
+
+function productBullets(products) {
+  if (!products || !products.length) return ['Sin datos de productos destacados.'];
+  const prepared = products.map((p) => ({
+    ...p,
+    name: p.name || p.title || p.product_name || 'Producto',
+    revenue: num(p.revenue),
+    units_sold: num(p.units_sold ?? p.units ?? p.quantity ?? p.total_units),
+    units: num(p.units ?? p.units_sold ?? p.quantity ?? p.total_units),
+    price: num(p.price),
+    rating: num(p.rating)
+  }));
+
+  const topByRevenue = topN(prepared, 'revenue', 3)
+    .filter((p) => p.revenue > 0)
+    .map((p) => `${p.name} (${fmtEu(p.revenue)})`);
+  const topByUnits = topN(prepared, 'units_sold', 3)
+    .filter((p) => p.units_sold > 0)
+    .map((p) => `${p.name} (${fmtUnits(p.units_sold)} uds)`);
+
+  const xtra = extraordinaryProducts(prepared);
+  const bullets = [];
+  if (topByRevenue.length) bullets.push(`Productos top por ingresos: ${topByRevenue.join(' · ')}`);
+  if (topByUnits.length) bullets.push(`Productos top por unidades: ${topByUnits.join(' · ')}`);
+  if (xtra.priceyAndSell.length) bullets.push(`Caros y venden mucho: ${xtra.priceyAndSell.join(' · ')}`);
+  if (xtra.fanFavs.length) bullets.push(`Favoritos por valoración y ventas: ${xtra.fanFavs.join(' · ')}`);
+
+  return bullets.length ? bullets : ['Sin datos de productos destacados.'];
 }
 
 function writeInsights(lines) {
   const box = document.getElementById('insightsContent');
   if (!box) return;
-  box.innerHTML = '<ul>' + lines.map((l) => `<li>${l}</li>`).join('') + '</ul>';
+  const trimmed = lines.filter(Boolean).slice(0, 6);
+  box.innerHTML = '<ul>' + trimmed.map((l) => `<li>${l}</li>`).join('') + '</ul>';
 }
 
-function buildGptPrompt(categories) {
-  const top = [...categories].sort((a, b) => Number(b.revenue || 0) - Number(a.revenue || 0)).slice(0, 10);
-  const bullets = top.map(
-    (c) =>
-      `- ${c.path || c.name}: ingresos=${Number(c.revenue || 0)}, unidades=${Number(c.units || 0)}, precio_medio=${Number(
-        c.price || 0
-      )}, rating=${Number(c.rating || 0)}`
-  );
-  return `Analiza estas categorías (ecommerce). Resume oportunidades, riesgos y quick wins en 6 viñetas concisas, priorizando ROI:\n${bullets.join(
-    '\n'
-  )}`;
+function getData() {
+  const agg = window.__latestTrendsData?.categoriesAgg || [];
+  const all = window.__latestTrendsData?.allProducts || [];
+  return { agg, all };
 }
 
-async function trySendToExistingGpt(prompt) {
-  // 1) Intenta encontrar input/botón existentes en la UI
-  const input = [...document.querySelectorAll('input,textarea')].find((el) => /gpt/i.test(el.placeholder || ''));
-  const sendBtn = [...document.querySelectorAll('button')].find((b) => /enviar consulta a gpt/i.test(b.textContent || ''));
-
-  if (input && sendBtn) {
-    input.value = prompt;
-    sendBtn.click();
-    return true;
-  }
-
-  // 2) Si no hay UI accesible, copia al portapapeles
-  try {
-    await navigator.clipboard.writeText(prompt);
-    toast?.info?.('Prompt copiado. Pégalo en tu módulo GPT.'); // si existe toast()
-  } catch (_) {}
-  return false;
-}
-
-function getCategoriesAgg() {
-  return window.__latestTrendsData?.categoriesAgg || [];
-}
-
-document.addEventListener('click', async (ev) => {
-  if (ev.target?.id === 'btnLocalInsights') {
-    writeInsights(localInsights(getCategoriesAgg()));
-  }
-  if (ev.target?.id === 'btnGptInsights') {
-    const prompt = buildGptPrompt(getCategoriesAgg());
-    await trySendToExistingGpt(prompt);
-  }
+document.addEventListener('click', (ev) => {
+  if (ev.target?.id !== 'btnLocalInsights') return;
+  const { agg, all } = getData();
+  const lines = [...categoryBullets(agg), ...productBullets(all)];
+  writeInsights(lines);
 });
 
 export {};

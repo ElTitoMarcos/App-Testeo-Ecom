@@ -8,6 +8,13 @@ const fmt = {
   percent: (p) => (p * 100).toFixed(1).replace('.', ',') + '%'
 };
 
+const chartOptsStable = {
+  responsive: true,
+  maintainAspectRatio: false,
+  resizeDelay: 200,
+  animation: { duration: 0 }
+};
+
 let topCategoriesChart = null;
 let paretoChart = null;
 
@@ -119,6 +126,27 @@ function normalizeCategories(list) {
   });
 }
 
+function normalizeProducts(list) {
+  if (!Array.isArray(list)) return [];
+  return list.map((item) => {
+    const name = item.name || item.title || item.product_name || '';
+    const revenue = toNumber(item.revenue ?? item.total_revenue ?? item.sales ?? item.turnover);
+    const units = toNumber(item.units ?? item.quantity ?? item.total_units ?? item.sum_units);
+    const unitsSold = toNumber(item.units_sold ?? item.unitsSold ?? item.sold_units ?? item.sales_units ?? units);
+    const price = toNumber(item.price ?? item.avg_price ?? item.average_price);
+    const rating = toNumber(item.rating ?? item.avg_rating ?? item.average_rating);
+    return {
+      ...item,
+      name,
+      revenue,
+      units,
+      units_sold: unitsSold,
+      price,
+      rating
+    };
+  });
+}
+
 function fmtMoney(v) {
   const n = Number(v);
   if (!Number.isFinite(n) || n === 0) return '0';
@@ -151,8 +179,8 @@ function fmtMoney(v) {
 }
 
 function renderTopCategoriesBar(categoriesAgg) {
-  const ctx = document.getElementById('topCategoriesChart');
-  if (!ctx) return;
+  const canvas = document.getElementById('topCategoriesChart');
+  if (!canvas) return;
   const top = (Array.isArray(categoriesAgg) ? categoriesAgg : []).slice(0, 10);
   const labels = top.map((x) => x.path || x.category || x.name || '');
   const values = top.map((x) => Number(x.revenue) || 0);
@@ -162,7 +190,7 @@ function renderTopCategoriesBar(categoriesAgg) {
     topCategoriesChart = null;
   }
 
-  topCategoriesChart = new Chart(ctx, {
+  topCategoriesChart = new Chart(canvas, {
     type: 'bar',
     data: {
       labels,
@@ -174,8 +202,8 @@ function renderTopCategoriesBar(categoriesAgg) {
       ]
     },
     options: {
+      ...chartOptsStable,
       indexAxis: 'y',
-      maintainAspectRatio: false,
       plugins: {
         legend: { display: false },
         tooltip: {
@@ -199,7 +227,6 @@ function buildParetoData(categories, N = 15) {
     .filter((r) => r.revenue > 0)
     .sort((a, b) => b.revenue - a.revenue)
     .slice(0, N);
-
   const total = rows.reduce((s, r) => s + r.revenue, 0) || 1;
   let acc = 0;
   const labels = [];
@@ -219,7 +246,6 @@ function renderRightPareto(categoriesAgg) {
   if (!el) return;
   const ctx = el.getContext('2d');
   const { labels, bars, cumu } = buildParetoData(Array.isArray(categoriesAgg) ? categoriesAgg : [], 15);
-
   if (paretoChart) paretoChart.destroy();
 
   paretoChart = new Chart(ctx, {
@@ -245,8 +271,7 @@ function renderRightPareto(categoriesAgg) {
       ]
     },
     options: {
-      maintainAspectRatio: false,
-      responsive: true,
+      ...chartOptsStable,
       plugins: {
         legend: { display: true },
         tooltip: {
@@ -306,7 +331,8 @@ function fillTrendsTable(categoriesAgg) {
 // Llama a esta función desde tu flujo principal tras obtener datos
 export function renderTrends(categoriesAgg, allProducts) {
   const normalized = normalizeCategories(Array.isArray(categoriesAgg) ? categoriesAgg : []);
-  const products = Array.isArray(allProducts) ? allProducts : getAllProductsSnapshot();
+  const productsSource = Array.isArray(allProducts) ? allProducts : getAllProductsSnapshot();
+  const products = normalizeProducts(productsSource);
   window.__latestTrendsData = { categoriesAgg: normalized, allProducts: products };
   renderTopCategoriesBar(normalized);
   renderRightPareto(normalized);
@@ -314,6 +340,9 @@ export function renderTrends(categoriesAgg, allProducts) {
 }
 
 export function mountTrendsToggle() {
+  if (window.__trendsToggleMounted) return;
+  window.__trendsToggleMounted = true;
+
   document.addEventListener(
     'click',
     (ev) => {
@@ -323,21 +352,31 @@ export function mountTrendsToggle() {
       const container = document.getElementById('section-trends');
       const sec1 = document.getElementById('trends');
       const sec2 = document.getElementById('trends-bottom');
-      const opening = container ? container.hasAttribute('hidden') : false;
+      const opening = sec1 ? sec1.hasAttribute('hidden') : true;
 
       if (opening) {
         container?.removeAttribute('hidden');
         sec1?.removeAttribute('hidden');
         sec2?.removeAttribute('hidden');
         ensureDefaultDates();
+
         if (window.__latestTrendsData) {
           const data = window.__latestTrendsData.categoriesAgg || [];
-          renderTopCategoriesBar(data);
-          renderRightPareto(data);
+          if (!topCategoriesChart) {
+            renderTopCategoriesBar(data);
+          }
+          if (!paretoChart) {
+            renderRightPareto(data);
+          }
           fillTrendsTable(data);
         } else {
           fetchTrends();
         }
+
+        requestAnimationFrame(() => {
+          paretoChart?.resize();
+          topCategoriesChart?.resize?.();
+        });
         sec1?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       } else {
         container?.setAttribute('hidden', '');

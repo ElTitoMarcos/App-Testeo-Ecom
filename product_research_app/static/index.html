@@ -166,14 +166,14 @@ body.dark .skeleton{background:#333;}
   <div id="trends-status"></div>
   <section id="trends" class="trends-grid" hidden>
     <div class="card" id="top-left">
-      <canvas id="topCategoriesChart"></canvas>
+      <canvas id="topCategoriesChart" class="chart-canvas"></canvas>
     </div>
 
     <div class="card" id="top-right">
       <div class="chart-header">
         <h4>Pareto de ingresos (Top 15)</h4>
       </div>
-      <canvas id="paretoRevenueChart"></canvas>
+      <canvas id="paretoRevenueChart" class="chart-canvas"></canvas>
     </div>
   </section>
 
@@ -197,7 +197,6 @@ body.dark .skeleton{background:#333;}
     <aside class="card" id="trendsInsights">
       <div class="insights-toolbar">
         <button id="btnLocalInsights" class="btn btn--sm">Generar insights (local)</button>
-        <button id="btnGptInsights" class="btn btn--sm">Pedir a GPT</button>
       </div>
       <div id="insightsContent" class="insights-content">
         <p class="muted">Aquí aparecerán hallazgos relevantes sobre las categorías (tendencias, outliers, pareto…).</p>
