@@ -731,3 +731,96 @@ def test_weights_eff_stable_when_touching_missing_metric(tmp_path, monkeypatch):
     assert resp2["weights_all"] != hash_all1
     assert resp2["weights_eff"] != hash_eff1
     assert resp2["diag"]["sum_filtered"] > sum1
+
+
+def test_trends_endpoint_respects_visible_ids(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(web_app, "ensure_db", lambda: conn)
+
+    pid_alpha = database.insert_product(
+        conn,
+        name="Alpha",
+        description="",
+        category="Alpha",
+        price=12.0,
+        currency=None,
+        image_url="",
+        source="",
+        extra={"revenue": 120.0, "units_sold": 6},
+        product_id=1,
+    )
+    pid_beta = database.insert_product(
+        conn,
+        name="Beta",
+        description="",
+        category="Beta",
+        price=15.0,
+        currency=None,
+        image_url="",
+        source="",
+        extra={"revenue": 50.0},
+        product_id=2,
+    )
+    pid_gamma = database.insert_product(
+        conn,
+        name="Gamma",
+        description="",
+        category="Gamma",
+        price=30.0,
+        currency=None,
+        image_url="",
+        source="",
+        extra={"units_sold": 2},
+        product_id=3,
+    )
+
+    conn.execute(
+        "UPDATE products SET import_date = ? WHERE id = ?",
+        ("2024-01-15T00:00:00", pid_alpha),
+    )
+    conn.execute(
+        "UPDATE products SET import_date = ? WHERE id = ?",
+        ("2024-02-10T00:00:00", pid_beta),
+    )
+    conn.execute(
+        "UPDATE products SET import_date = ? WHERE id = ?",
+        ("2024-02-20T00:00:00", pid_gamma),
+    )
+    conn.commit()
+
+    class Dummy:
+        _parse_trend_extra = staticmethod(web_app.RequestHandler._parse_trend_extra)
+        _to_float = staticmethod(web_app.RequestHandler._to_float)
+        _parse_trend_date = staticmethod(web_app.RequestHandler._parse_trend_date)
+        _format_currency = staticmethod(web_app.RequestHandler._format_currency)
+
+        def __init__(self, body: str):
+            self.path = "/api/trends"
+            self.headers = {"Content-Length": str(len(body))}
+            self.rfile = io.BytesIO(body.encode("utf-8"))
+            self.wfile = io.BytesIO()
+
+        def _set_json(self, code=200):
+            self.status = code
+
+    filtered = Dummy(json.dumps({"ids": [pid_beta]}))
+    web_app.RequestHandler.handle_trends(filtered)
+    filtered_payload = json.loads(filtered.wfile.getvalue().decode("utf-8"))
+    assert filtered.status == 200
+    assert filtered_payload["revenue_by_category"]["labels"] == ["Beta"]
+    assert filtered_payload["revenue_by_category"]["values"] == [50.0]
+    assert filtered_payload["trend_over_time"]["labels"] == ["2024-02"]
+    assert filtered_payload["notes"][0].endswith("visibles")
+    assert filtered_payload["top_categories"] == ["Beta (50.00 €)"]
+    assert filtered_payload["top_products"] == ["Beta (50.00 €)"]
+
+    all_handler = Dummy(json.dumps({}))
+    web_app.RequestHandler.handle_trends(all_handler)
+    all_payload = json.loads(all_handler.wfile.getvalue().decode("utf-8"))
+    assert all_handler.status == 200
+    assert set(all_payload["revenue_by_category"]["labels"]) == {"Alpha", "Beta", "Gamma"}
+    assert all_payload["notes"][0].endswith("productos")
+    assert "2024-01" in all_payload["trend_over_time"]["labels"]
+    assert "2024-02" in all_payload["trend_over_time"]["labels"]
+    assert all_payload["top_categories"][0].startswith("Alpha")
+    assert all_payload["top_products"][0].startswith("Alpha")

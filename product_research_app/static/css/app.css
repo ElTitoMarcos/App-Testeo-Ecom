@@ -40,6 +40,32 @@ table {
   margin-top: 0;
 }
 
+.table-wrapper,
+.data-table-wrapper {
+  overflow-x: visible !important;
+}
+
+.table,
+.data-table {
+  table-layout: fixed;
+  width: 100%;
+}
+
+.table th,
+.table td,
+.data-table th,
+.data-table td {
+  white-space: normal !important;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  line-height: 1.25;
+}
+
+th.col-category,
+td.col-category {
+  max-width: 320px;
+}
+
 .table-toolbar {
   position: sticky;
   top: var(--header-h, 60px);
@@ -106,6 +132,28 @@ body.dark .drawer.right {
 body.dark .legend-btn {
     background: #1F2A44;
     border: 1px solid #34456B;
+}
+
+.trends-panel {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  padding: 12px;
+}
+
+.trends-panel.hidden {
+  display: none;
+}
+
+.trends-panel canvas {
+  width: 100%;
+  min-height: 260px;
+}
+
+.insights-box {
+  white-space: pre-wrap;
+  font-size: 0.95rem;
+  line-height: 1.35;
 }
 
 .bar-btn {

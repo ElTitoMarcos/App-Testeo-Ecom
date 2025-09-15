@@ -37,7 +37,7 @@ import sqlite3
 import math
 import hashlib
 from datetime import date, datetime, timedelta
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 
 from . import database
 from . import config
@@ -1201,6 +1201,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/api/analyze/titles":
             self.handle_analyze_titles()
             return
+        if path == "/api/trends":
+            self.handle_trends()
+            return
         if path == "/api/auth/set-key":
             length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(length).decode('utf-8')
@@ -1493,6 +1496,219 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(resp).encode('utf-8'))
             return
         self.send_error(404)
+
+    def handle_trends(self):
+        """Compute trend aggregates for the current product selection."""
+
+        length = int(self.headers.get("Content-Length", 0))
+        raw_body = self.rfile.read(length).decode("utf-8") if length else ""
+        try:
+            payload = json.loads(raw_body) if raw_body else {}
+        except Exception:
+            payload = {}
+
+        raw_ids = payload.get("ids") if isinstance(payload, dict) else []
+        ids: List[int] = []
+        if isinstance(raw_ids, list):
+            for value in raw_ids:
+                try:
+                    iv = int(str(value).strip())
+                except (TypeError, ValueError):
+                    continue
+                ids.append(iv)
+
+        conn = ensure_db()
+        cur = conn.cursor()
+        if ids:
+            placeholders = ",".join("?" for _ in ids)
+            query = (
+                "SELECT id, name, category, price, import_date, date_range, extra "
+                f"FROM products WHERE id IN ({placeholders})"
+            )
+            rows = cur.execute(query, tuple(ids)).fetchall()
+        else:
+            rows = cur.execute(
+                "SELECT id, name, category, price, import_date, date_range, extra FROM products"
+            ).fetchall()
+
+        from collections import defaultdict
+
+        revenue_by_category_map: Dict[str, float] = defaultdict(float)
+        revenue_by_month: Dict[str, float] = defaultdict(float)
+        products_revenue: List[Tuple[str, float]] = []
+
+        for row in rows:
+            extra = self._parse_trend_extra(row["extra"])
+            revenue = self._to_float(extra.get("revenue"))
+            if revenue is None:
+                revenue = self._to_float(extra.get("Revenue($)"))
+            if revenue is None:
+                units = self._to_float(extra.get("units_sold") or extra.get("Item Sold"))
+                price_extra = self._to_float(extra.get("price") or extra.get("Price"))
+                price_val = row["price"] if row["price"] is not None else price_extra
+                if price_val is not None and units is not None:
+                    revenue = float(price_val) * float(units)
+            if revenue is None:
+                revenue = 0.0
+
+            category = (row["category"] or "").strip() or "Sin categoría"
+            revenue_by_category_map[category] += float(revenue)
+
+            name = (row["name"] or "").strip() or f"Producto {row['id']}"
+            products_revenue.append((name, float(revenue)))
+
+            date_candidates = [
+                row["import_date"],
+                extra.get("launch_date"),
+                extra.get("date"),
+                extra.get("Date"),
+                extra.get("first_seen"),
+                extra.get("firstSeen"),
+                row["date_range"],
+                extra.get("date_range"),
+            ]
+            dt = None
+            for candidate in date_candidates:
+                dt = self._parse_trend_date(candidate)
+                if dt:
+                    break
+            if dt:
+                key = f"{dt.year:04d}-{dt.month:02d}"
+                revenue_by_month[key] += float(revenue)
+
+        top_categories = sorted(
+            revenue_by_category_map.items(), key=lambda item: item[1], reverse=True
+        )
+        chart_categories = top_categories[:10]
+        revenue_by_category = {
+            "labels": [label for label, _ in chart_categories],
+            "values": [round(value, 2) for _, value in chart_categories],
+        }
+
+        month_labels = sorted(revenue_by_month.keys())
+        trend_over_time = {
+            "labels": month_labels,
+            "values": [round(revenue_by_month[label], 2) for label in month_labels],
+        }
+
+        top_categories_insight = [
+            f"{label} ({self._format_currency(value)})"
+            for label, value in top_categories[:5]
+            if value > 0
+        ]
+        top_products_insight = [
+            f"{name} ({self._format_currency(value)})"
+            for name, value in sorted(products_revenue, key=lambda item: item[1], reverse=True)[:5]
+            if value > 0
+        ]
+
+        notes = [
+            "Tendencias calculadas sobre productos visibles"
+            if ids
+            else "Tendencias calculadas sobre todos los productos"
+        ]
+        if not rows:
+            notes.append("No se encontraron productos para generar tendencias.")
+
+        resp = {
+            "revenue_by_category": revenue_by_category,
+            "trend_over_time": trend_over_time,
+            "top_categories": top_categories_insight,
+            "top_products": top_products_insight,
+            "notes": notes,
+        }
+
+        self._set_json()
+        self.wfile.write(json.dumps(resp).encode("utf-8"))
+
+    @staticmethod
+    def _parse_trend_extra(raw: Any) -> Dict[str, Any]:
+        if isinstance(raw, dict):
+            return raw
+        if isinstance(raw, (bytes, bytearray)):
+            try:
+                raw = raw.decode("utf-8")
+            except Exception:
+                raw = raw.decode("latin-1", "ignore")
+        if isinstance(raw, str):
+            raw = raw.strip()
+            if not raw:
+                return {}
+            try:
+                return json.loads(raw)
+            except Exception:
+                return {}
+        return {}
+
+    @staticmethod
+    def _to_float(value: Any) -> float | None:
+        if value in (None, "", "null", "None"):
+            return None
+        if isinstance(value, (int, float)):
+            try:
+                return float(value)
+            except Exception:
+                return None
+        if isinstance(value, str):
+            s = value.strip()
+            if not s:
+                return None
+            s = s.replace(" ", "").replace(",", ".")
+            s = re.sub(r"[^0-9.+-]", "", s)
+            if s.count(".") > 1:
+                parts = s.split(".")
+                s = "".join(parts[:-1]) + "." + parts[-1]
+            try:
+                return float(s)
+            except Exception:
+                return None
+        return None
+
+    @staticmethod
+    def _parse_trend_date(value: Any) -> datetime | None:
+        if not value:
+            return None
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, date):
+            return datetime.combine(value, datetime.min.time())
+        if isinstance(value, (bytes, bytearray)):
+            try:
+                value = value.decode("utf-8")
+            except Exception:
+                value = value.decode("latin-1", "ignore")
+        if isinstance(value, str):
+            s = value.strip()
+            if not s:
+                return None
+            for sep in ("~", " to ", " a ", " – ", " — ", " - "):
+                if sep in s:
+                    s = s.split(sep)[0].strip()
+                    break
+            if not s:
+                return None
+            norm = s.replace("Z", "+00:00")
+            candidates = [norm]
+            if " " in norm:
+                candidates.append(norm.split(" ")[0])
+            if "T" in norm:
+                candidates.append(norm.split("T")[0])
+            for cand in candidates:
+                try:
+                    return datetime.fromisoformat(cand)
+                except ValueError:
+                    pass
+            for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%m-%d-%Y", "%Y/%m/%d", "%d/%m/%Y", "%m/%d/%Y"):
+                try:
+                    return datetime.strptime(s, fmt)
+                except ValueError:
+                    continue
+            return None
+        return None
+
+    @staticmethod
+    def _format_currency(value: float) -> str:
+        return f"{float(value):.2f} €"
 
     def handle_analyze_titles(self):
         """Endpoint for Title Analyzer.
