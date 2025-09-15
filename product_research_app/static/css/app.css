@@ -1052,13 +1052,9 @@ th.col-desire, td.col-desire { width: 360px; max-width: 360px; }
   font-size:14px;
 }
 
-/* Asegura que el tooltip pueda sobresalir de la tarjeta */
-.card{
-  position: relative;
-  overflow: visible;
-}
+/* Botón de ayuda y tooltip (portal en body) */
+#trends, #trends-bottom, .trends-grid, .card { overflow: visible; }
 
-/* Botón de ayuda con tooltip puro CSS */
 .chart-help{
   width:22px;
   height:22px;
@@ -1076,53 +1072,48 @@ th.col-desire, td.col-desire { width: 360px; max-width: 360px; }
   justify-content:center;
   cursor:help;
   position:relative;
-  z-index: 1000;
+  z-index: 10;
 }
-.chart-help:hover::after{
-  content: attr(data-tip);
-  position:absolute;
-  left: 50%;
-  right: auto;
-  transform: translateX(-50%);
-  top: 28px;
 
-  min-width: 300px;
-  max-width: 520px;
+#floating-help-tooltip{
+  position: fixed;
+  top: 0;
+  left: 0;
+  transform: translate(-9999px, -9999px);
+  max-width: min(520px, calc(100vw - 24px));
+  min-width: 280px;
   padding: 10px 12px;
   border-radius: 10px;
-
   background:#0f1223;
   color:#e9ecff;
   font-size: 13px;
   line-height: 1.45;
-
   border:1px solid #24294a;
   box-shadow: 0 10px 28px rgba(0,0,0,.45);
-
   white-space: normal;
-  word-wrap: break-word;
+  word-break: break-word;
   pointer-events: none;
-  z-index: 99999;
+  z-index: 2147483647;
+  opacity: 0;
+  transition: opacity .12s ease, transform .12s ease;
 }
-.chart-help:hover::before{
-  content:"";
-  position:absolute;
-  left: 50%;
-  transform: translateX(-50%) rotate(45deg);
-  top: 22px;
-  width:10px;
-  height:10px;
+
+#floating-help-tooltip .arrow{
+  position: absolute;
+  width: 10px;
+  height: 10px;
   background:#0f1223;
+  transform: rotate(45deg);
   border-left:1px solid #24294a;
   border-top:1px solid #24294a;
-  z-index: 10001;
 }
 
-@media (max-width: 1200px){
-  .chart-help:hover::after{
-    min-width: 260px;
-    max-width: 420px;
-  }
+#floating-help-tooltip.bottom .arrow{ top: -6px; }
+#floating-help-tooltip.top .arrow{ bottom: -6px; }
+
+#floating-help-tooltip.show{
+  opacity: 1;
+  transform: translate(0,0);
 }
 
 /* Altura fija y estabilidad de charts: evita que queden ocultos */
