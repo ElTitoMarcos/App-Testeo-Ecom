@@ -24,31 +24,62 @@ function ensureTrendSectionVisible(shouldShow) {
   trendsSection.hidden = !shouldShow;
 }
 
-if (btnVerTendencias && tendenciasPanel) {
+const initiallyVisible = Boolean(tendenciasPanel && !tendenciasPanel.classList.contains('hidden') && !(trendsSection?.hidden ?? false));
+if (btnVerTendencias) {
   btnVerTendencias.setAttribute('aria-controls', 'tendenciasPanel');
-  const initiallyVisible = !tendenciasPanel.classList.contains('hidden') && !(trendsSection?.hidden ?? false);
   btnVerTendencias.classList.toggle('active', initiallyVisible);
   btnVerTendencias.setAttribute('aria-expanded', initiallyVisible.toString());
-  ensureTrendSectionVisible(initiallyVisible);
-
-  btnVerTendencias.addEventListener('click', async () => {
-    const hidden = tendenciasPanel.classList.toggle('hidden');
-    btnVerTendencias.classList.toggle('active', !hidden);
-    btnVerTendencias.setAttribute('aria-expanded', (!hidden).toString());
-    ensureTrendSectionVisible(!hidden);
-    if (!hidden) {
-      try {
-        await ensureTrendsData();
-      } catch (err) {
-        console.error(err);
-      }
-      setTimeout(() => {
-        window.leftChart?.resize();
-        window.rightChart?.resize();
-      }, 0);
-    }
-  });
 }
+ensureTrendSectionVisible(initiallyVisible);
+
+(function attachTrendsToggle() {
+  const run = () => {
+    document.addEventListener('click', async (event) => {
+      const trigger = event.target.closest('#btnVerTendencias, [data-action="toggle-trends"]');
+      if (!trigger) return;
+      event.preventDefault();
+
+      const panel = document.getElementById('tendenciasPanel');
+      if (!panel) {
+        console.warn('[Trends] No se encontró #tendenciasPanel');
+        return;
+      }
+
+      const hidden = panel.classList.toggle('hidden');
+
+      document.querySelectorAll('#btnVerTendencias, [data-action="toggle-trends"]').forEach((btn) => {
+        btn.classList.toggle('active', !hidden);
+        if (btn.id === 'btnVerTendencias') {
+          btn.setAttribute('aria-expanded', (!hidden).toString());
+        }
+      });
+
+      ensureTrendSectionVisible(!hidden);
+
+      if (!hidden) {
+        if (typeof ensureTrendsData === 'function') {
+          try {
+            await ensureTrendsData();
+          } catch (err) {
+            console.debug('[Trends] ensureTrendsData:', err);
+          }
+        }
+        try {
+          window.leftChart && window.leftChart.resize();
+          window.rightChart && window.rightChart.resize();
+        } catch (err) {
+          console.debug('[Trends] resize charts:', err);
+        }
+      }
+    });
+  };
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', run);
+  } else {
+    run();
+  }
+})();
 
 function ensureMetricChips(anchorSelector, metrics, onChange) {
   const anchor = document.querySelector(anchorSelector);

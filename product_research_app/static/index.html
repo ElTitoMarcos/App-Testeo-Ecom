@@ -100,7 +100,7 @@ body.dark .skeleton{background:#333;}
       <input type="file" id="fileInput" style="display:none;" />
       <button id="uploadBtn" title="Subir archivo">📤</button>
       <button id="refreshBtn" title="Actualizar lista">🔄</button>
-      <button id="btnVerTendencias" title="Ver tendencias">📊</button>
+      <button id="btnVerTendencias" data-action="toggle-trends" type="button" title="Ver tendencias">📊</button>
       <button id="darkToggle" title="Modo oscuro">🌙</button>
       <button id="configBtn" title="Configuración avanzada">⚙️</button>
     </div>
@@ -254,7 +254,7 @@ body.dark .skeleton{background:#333;}
 <script src="/static/js/winner_score.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
-<script type="module" src="/static/js/trends-summary.js"></script>
+<script type="module" src="/static/js/trends-summary.js" defer></script>
 <script type="module">
 import * as api from "/static/js/net.js";
 import * as groupsService from "/static/js/groups-service.js";
