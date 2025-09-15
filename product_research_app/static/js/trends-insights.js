@@ -11,8 +11,12 @@ const fmtUnits = (v) => {
   if (v >= 1e3) return (v / 1e3).toFixed(1).replace('.', ',') + ' K';
   return v.toLocaleString('es-ES');
 };
-const SEP = ' - - - ';
-function joinSep(list){ return list.filter(Boolean).join(SEP); }
+const pct = (value, total) => {
+  const totalNum = Number(total);
+  const val = num(value);
+  const pctVal = totalNum > 0 ? (100 * val) / totalNum : 0;
+  return pctVal.toFixed(1).replace('.', ',') + '%';
+};
 const qtile = (arr, q) => {
   if (!arr.length) return 0;
   const a = [...arr].sort((x, y) => x - y);
@@ -45,22 +49,20 @@ function extraordinaryProducts(products) {
   return { priceyAndSell, fanFavs };
 }
 
-function categoryBullets(categories){
+function buildCategoryList(categories){
   if (!categories?.length) return [];
-  const total = categories.reduce((s,c)=> s + num(c.revenue), 0) || 1;
-  const topRev = [...categories]
-    .sort((a,b)=> num(b.revenue) - num(a.revenue))
-    .slice(0,3)
-    .map(c => {
-      const pct = ((100 * num(c.revenue)) / total).toFixed(1).replace('.', ',');
-      return `${c.path || c.name} (${pct}%)`;
-    })
+  const total = categories.reduce((sum, c) => sum + num(c.revenue), 0);
+  return [...categories]
+    .sort((a, b) => num(b.revenue) - num(a.revenue))
+    .slice(0, 3)
+    .map((c) => `${c.path || c.name} (${pct(c.revenue, total)})`)
     .filter(Boolean);
-  return topRev.length ? [`Top categorías por ingresos: ${joinSep(topRev)}`] : [];
 }
 
-function productBullets(products){
-  if (!products?.length) return [];
+function buildProductLists(products){
+  if (!products?.length) {
+    return { prodTopRev: [], prodTopUnits: [], priceyAndSell: [], fanFavs: [] };
+  }
   const prepared = products.map((p) => ({
     ...p,
     name: p.name || p.title || p.product_name || 'Producto',
@@ -72,48 +74,59 @@ function productBullets(products){
   }));
 
   const topByRevenue = [...prepared]
-    .sort((a,b)=> b.revenue - a.revenue)
-    .slice(0,3)
-    .filter((p) => p.revenue > 0)
-    .map((p) => `${p.name} (${fmtEu(p.revenue)})`);
+    .sort((a, b) => b.revenue - a.revenue)
+    .slice(0, 3)
+    .filter((p) => p.revenue > 0);
   const topByUnits = [...prepared]
-    .sort((a,b)=> b.units_sold - a.units_sold)
-    .slice(0,3)
-    .filter((p) => p.units_sold > 0)
-    .map((p) => `${p.name} (${fmtUnits(p.units_sold)} uds)`);
+    .sort((a, b) => b.units_sold - a.units_sold)
+    .slice(0, 3)
+    .filter((p) => p.units_sold > 0);
   const { priceyAndSell, fanFavs } = extraordinaryProducts(prepared);
 
-  const out = [];
-  if (topByRevenue.length) out.push(`Productos top por ingresos: ${joinSep(topByRevenue)}`);
-  if (topByUnits.length)   out.push(`Productos top por unidades: ${joinSep(topByUnits)}`);
-  if (priceyAndSell.length) out.push(`Caros y venden mucho: ${joinSep(priceyAndSell)}`);
-  if (fanFavs.length)       out.push(`Favoritos por valoración y ventas: ${joinSep(fanFavs)}`);
-  return out;
+  return {
+    prodTopRev: topByRevenue.map((p) => `${p.name} (${fmtEu(p.revenue)})`),
+    prodTopUnits: topByUnits.map((p) => `${p.name} (${fmtUnits(p.units_sold)} uds)`),
+    priceyAndSell,
+    fanFavs
+  };
 }
 
-// writeInsights: 4–6 viñetas máximo (sin bullets anidados)
-function writeInsights(lines){
+function renderBlock(title, items){
+  if (!items?.length) return '';
+  const lis = items.map((t) => `<li>${t}</li>`).join('');
+  return `<div class="insight-block"><div class="insight-title">${title}</div><ul>${lis}</ul></div>`;
+}
+
+function writeInsightsBlocks({ catTop = [], prodTopRev = [], prodTopUnits = [], priceyAndSell = [], fanFavs = [] }){
   const box = document.getElementById('insightsContent');
   if (!box) return;
-  const trimmed = lines.filter(Boolean).slice(0, 6);
-  if (!trimmed.length){
-    box.innerHTML = '<p class="muted">Sin datos para generar insights.</p>';
-    return;
-  }
-  box.innerHTML = '<ul>' + trimmed.map((l) => `<li>${l}</li>`).join('') + '</ul>';
+  const html =
+    renderBlock('Top categorías por ingresos:', catTop) +
+    renderBlock('Productos top por ingresos:', prodTopRev) +
+    renderBlock('Productos top por unidades:', prodTopUnits) +
+    renderBlock('Caros y venden mucho:', priceyAndSell) +
+    renderBlock('Favoritos por valoración y ventas:', fanFavs);
+  box.innerHTML = html || '<p class="muted">Sin datos para generar insights.</p>';
 }
 
 function getData() {
-  const agg = window.__latestTrendsData?.categoriesAgg || [];
-  const all = window.__latestTrendsData?.allProducts || [];
-  return { agg, all };
+  const scope = window.__latestTrendsData;
+  if (scope?.categoriesAgg?.length || scope?.allProducts?.length) {
+    return scope;
+  }
+  if (typeof window.computeTrendsScope === 'function') {
+    return window.computeTrendsScope();
+  }
+  return { categoriesAgg: [], allProducts: [] };
 }
 
 document.addEventListener('click', (ev) => {
   if (ev.target?.id !== 'btnLocalInsights') return;
-  const { agg, all } = getData();
-  const lines = [...categoryBullets(agg), ...productBullets(all)];
-  writeInsights(lines);
+  const { categoriesAgg, allProducts } = getData();
+  const catTop = buildCategoryList(categoriesAgg);
+  const { prodTopRev, prodTopUnits, priceyAndSell, fanFavs } = buildProductLists(allProducts);
+  const blocks = { catTop, prodTopRev, prodTopUnits, priceyAndSell, fanFavs };
+  writeInsightsBlocks(blocks);
 });
 
 export {};
