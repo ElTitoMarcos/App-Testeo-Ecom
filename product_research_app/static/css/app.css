@@ -1052,6 +1052,12 @@ th.col-desire, td.col-desire { width: 360px; max-width: 360px; }
   font-size:14px;
 }
 
+/* Asegura que el tooltip pueda sobresalir de la tarjeta */
+.card{
+  position: relative;
+  overflow: visible;
+}
+
 /* Botón de ayuda con tooltip puro CSS */
 .chart-help{
   width:22px;
@@ -1070,39 +1076,56 @@ th.col-desire, td.col-desire { width: 360px; max-width: 360px; }
   justify-content:center;
   cursor:help;
   position:relative;
+  z-index: 1000;
 }
 .chart-help:hover::after{
   content: attr(data-tip);
   position:absolute;
-  right:0;
-  top:28px;
-  z-index:10;
-  max-width:340px;
-  padding:8px 10px;
-  border-radius:8px;
+  left: 50%;
+  right: auto;
+  transform: translateX(-50%);
+  top: 28px;
+
+  min-width: 300px;
+  max-width: 520px;
+  padding: 10px 12px;
+  border-radius: 10px;
+
   background:#0f1223;
   color:#e9ecff;
-  font-size:12px;
-  line-height:1.35;
+  font-size: 13px;
+  line-height: 1.45;
+
   border:1px solid #24294a;
-  box-shadow:0 4px 18px rgba(0,0,0,.35);
-  white-space:normal;
+  box-shadow: 0 10px 28px rgba(0,0,0,.45);
+
+  white-space: normal;
+  word-wrap: break-word;
+  pointer-events: none;
+  z-index: 99999;
 }
 .chart-help:hover::before{
   content:"";
   position:absolute;
-  right:6px;
-  top:22px;
-  width:8px;
-  height:8px;
-  transform: rotate(45deg);
+  left: 50%;
+  transform: translateX(-50%) rotate(45deg);
+  top: 22px;
+  width:10px;
+  height:10px;
   background:#0f1223;
   border-left:1px solid #24294a;
   border-top:1px solid #24294a;
+  z-index: 10001;
+}
+
+@media (max-width: 1200px){
+  .chart-help:hover::after{
+    min-width: 260px;
+    max-width: 420px;
+  }
 }
 
 /* Altura fija y estabilidad de charts: evita que queden ocultos */
-.card { position: relative; }
 .chart-wrap{
   position: relative;
   width: 100%;
