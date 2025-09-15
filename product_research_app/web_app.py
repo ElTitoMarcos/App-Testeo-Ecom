@@ -40,10 +40,12 @@ from datetime import date, datetime, timedelta
 from typing import Dict, Any, List
 
 from . import database
+from .db import get_db
 from . import config
 from .services import ai_columns
 from .services import winner_score as winner_calc
 from .services import trends_service
+from .services.importer_fast import fast_import, fast_import_records
 from . import gpt
 from . import title_analyzer
 from .utils.db import row_to_dict, rget
@@ -72,6 +74,14 @@ DEBUG = bool(os.environ.get("DEBUG"))
 DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y")
 
 
+_DB_INIT = False
+_DB_INIT_PATH: str | None = None
+_DB_INIT_LOCK = threading.Lock()
+
+IMPORT_STATUS: Dict[str, Dict[str, Any]] = {}
+_IMPORT_STATUS_LOCK = threading.Lock()
+
+
 def _parse_date(s: str):
     s = (s or "").strip()
     if not s:
@@ -84,24 +94,45 @@ def _parse_date(s: str):
     return None
 
 def ensure_db():
-    try:
-        conn = database.get_connection(DB_PATH)
-        database.initialize_database(conn)
-    except Exception:
-        logger.exception("Database initialization failed")
-        raise
-    # Remove any legacy dummy products (IDs 1, 2, 3 or names that suggest test rows)
-    try:
-        cur = conn.cursor()
-        # Remove known dummy/test products by name or id
-        cur.execute(
-            "DELETE FROM products WHERE id IN (1,2,3) OR lower(name) LIKE '%test%' OR lower(name) LIKE '%prueba%'"
-        )
-        conn.commit()
-    except Exception:
-        pass
-    logger.info("Database ready at %s", DB_PATH)
+    global _DB_INIT, _DB_INIT_PATH
+
+    target_path = str(DB_PATH)
+    conn = get_db(target_path)
+    if not _DB_INIT or _DB_INIT_PATH != target_path:
+        with _DB_INIT_LOCK:
+            if not _DB_INIT or _DB_INIT_PATH != target_path:
+                try:
+                    database.initialize_database(conn)
+                except Exception:
+                    logger.exception("Database initialization failed")
+                    raise
+                try:
+                    cur = conn.cursor()
+                    cur.execute(
+                        "DELETE FROM products WHERE id IN (1,2,3) OR lower(name) LIKE '%test%' OR lower(name) LIKE '%prueba%'"
+                    )
+                    conn.commit()
+                except Exception:
+                    pass
+                logger.info("Database ready at %s", DB_PATH)
+                _DB_INIT = True
+                _DB_INIT_PATH = target_path
     return conn
+
+
+def _update_import_status(task_id: str, **updates) -> Dict[str, Any]:
+    with _IMPORT_STATUS_LOCK:
+        state = IMPORT_STATUS.setdefault(task_id, {})
+        state.update(updates)
+        return dict(state)
+
+
+def _get_import_status(task_id: str) -> Dict[str, Any] | None:
+    with _IMPORT_STATUS_LOCK:
+        status = IMPORT_STATUS.get(task_id)
+        if status is None:
+            return None
+        return dict(status)
 
 
 def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> str:
@@ -704,10 +735,20 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/_import_status":
             params = parse_qs(parsed.query)
+            task_id_param = params.get("task_id", [""])[0]
+            if not task_id_param:
+                self.safe_write(lambda: self.send_json({"state": "unknown"}))
+                return
+            status = _get_import_status(task_id_param)
+            if status:
+                if "task_id" not in status:
+                    status["task_id"] = task_id_param
+                self.safe_write(lambda: self.send_json(status))
+                return
             try:
-                task_id = int(params.get("task_id", ["0"])[0])
+                task_id = int(task_id_param)
             except Exception:
-                self.safe_write(lambda: self.send_json({"error": "invalid task_id"}, status=400))
+                self.safe_write(lambda: self.send_json({"state": "unknown"}))
                 return
             conn = ensure_db()
             row = database.get_import_job(conn, task_id)
@@ -733,7 +774,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 data["winner_score_updated"] = data.get("winner_score_updated", 0)
                 self.safe_write(lambda: self.send_json(data))
             else:
-                self.safe_write(lambda: self.send_json({"error": "not found"}, status=404))
+                self.safe_write(lambda: self.send_json({"state": "unknown"}))
             return
         if path in ("/products", "/api/products"):
             # Return a list of products including extra metadata for UI display
@@ -1616,6 +1657,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(resp)
 
+
     def handle_upload(self):
         filename, data = self._parse_multipart_file()
         if not filename or data is None:
@@ -1634,551 +1676,120 @@ class RequestHandler(BaseHTTPRequestHandler):
             threading.Thread(target=_process_import_job, args=(job_id, tmp_path, filename), daemon=True).start()
             self.safe_write(lambda: self.send_json({"task_id": job_id}, status=202))
             return
-        conn = ensure_db()
-        inserted = 0
-        inserted_ids = []
-        try:
-            # helper to find a column key ignoring spaces and punctuation
-            def find_key(keys, patterns):
-                for k in keys:
-                    sanitized = ''.join(ch.lower() for ch in k if ch.isalnum())
-                    for p in patterns:
-                        if p in sanitized:
-                            return k
-                return None
-            if ext == ".csv":
-                import csv
-                text = data.decode('utf-8', errors='ignore')
-                reader = csv.DictReader(text.splitlines())
-                headers = reader.fieldnames or []
-                # find matching columns
-                name_col = find_key(headers, ["name", "nombre", "productname", "product", "title"])
-                desc_col = find_key(headers, ["description", "descripcion", "desc"])
-                cat_col = find_key(headers, ["category", "categoria", "cat"])
-                price_col = find_key(headers, ["price", "precio", "cost", "unitprice"])
-                curr_col = find_key(headers, ["currency", "moneda"])
-                img_col = find_key(headers, ["image", "imagen", "img", "picture", "imgurl"])
-                desire_col = find_key(headers, ["desire", "deseo"])
-                desire_mag_col = find_key(headers, ["desiremagnitude", "desiremag", "magnituddeseo"])
-                awareness_col = find_key(headers, ["awarenesslevel", "awareness", "nivelconsciencia"])
-                competition_col = find_key(headers, ["competitionlevel", "competition", "saturacionmercado"])
-                # collect names for potential simplification
-                rows_data = []
-                names_list = []
-                for row in reader:
-                    name = (row.get(name_col) or '').strip() if name_col else None
-                    if not name:
-                        continue
-                    names_list.append(name)
-                    rows_data.append(row)
-                # call OpenAI to simplify names once per file
-                name_map = {}
-                api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
-                model = config.get_model()
-                if api_key and model and names_list:
-                    try:
-                        name_map = gpt.simplify_product_names(api_key, model, names_list)
-                    except Exception:
-                        name_map = {}
-                for row in rows_data:
-                    original_name = (row.get(name_col) or '').strip() if name_col else None
-                    if not original_name:
-                        continue
-                    simplified = name_map.get(original_name) or original_name
-                    description = (row.get(desc_col) or '').strip() if desc_col else None
-                    category = (row.get(cat_col) or '').strip() if cat_col else None
-                    price = None
-                    if price_col and row.get(price_col):
-                        try:
-                            price = float(str(row.get(price_col)).replace(',', '.'))
-                        except ValueError:
-                            price = None
-                    currency = (row.get(curr_col) or '').strip() if curr_col else None
-                    image_url = (row.get(img_col) or '').strip() if img_col else None
-                    desire = (row.get(desire_col) or '').strip() if desire_col else None
-                    desire = desire or None
-                    desire_mag = (row.get(desire_mag_col) or '').strip() if desire_mag_col else None
-                    desire_mag = desire_mag or None
-                    awareness = (row.get(awareness_col) or '').strip() if awareness_col else None
-                    awareness = awareness or None
-                    competition = (row.get(competition_col) or '').strip() if competition_col else None
-                    competition = competition or None
-                    extra_cols = {
-                        k: v
-                        for k, v in row.items()
-                        if k
-                        not in {
-                            name_col,
-                            desc_col,
-                            cat_col,
-                            price_col,
-                            curr_col,
-                            img_col,
-                            desire_col,
-                            desire_mag_col,
-                            awareness_col,
-                            competition_col,
-                        }
-                        and k.lower() not in {"product name", "source", "decision"}
-                    }
-                    # mark if duplicate
-                    dupe = database.find_product_by_name(conn, simplified)
-                    if simplified != original_name:
-                        extra_cols['original_name'] = original_name
-                    if dupe:
-                        extra_cols['duplicate_of'] = dupe['id']
-                    pid = database.insert_product(
-                        conn,
-                        name=simplified,
-                        description=description,
-                        category=category,
-                        price=price,
-                        currency=currency,
-                        image_url=image_url,
-                        source=filename,
-                        desire=desire,
-                        desire_magnitude=desire_mag,
-                        awareness_level=awareness,
-                        competition_level=competition,
-                        extra=extra_cols,
-                    )
-                    inserted += 1
-                    inserted_ids.append(pid)
-            elif ext == ".json":
-                items = json.loads(data.decode('utf-8', errors='ignore'))
-                if isinstance(items, list):
-                    # collect names for simplification
-                    names_list = []
-                    processed = []
-                    for item in items:
-                        if not isinstance(item, dict):
-                            continue
-                        keys = list(item.keys())
-                        name_key = find_key(keys, ["name", "nombre", "productname", "product", "title"])
-                        if not name_key:
-                            continue
-                        name = item.get(name_key)
-                        if not name:
-                            continue
-                        names_list.append(str(name).strip())
-                        processed.append((item, name_key))
-                    # call GPT to simplify names once per file
-                    name_map = {}
-                    api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
-                    model = config.get_model()
-                    weights_map = config.get_weights()
-                    if api_key and model and names_list:
-                        try:
-                            name_map = gpt.simplify_product_names(api_key, model, names_list)
-                        except Exception:
-                            name_map = {}
-                    for item, name_key in processed:
-                        original_name = str(item.get(name_key)).strip()
-                        simplified = name_map.get(original_name) or original_name
-                        keys = list(item.keys())
-                        desc_key = find_key(keys, ["description", "descripcion", "desc"])
-                        category_key = find_key(keys, ["category", "categoria", "cat"])
-                        price_key = find_key(keys, ["price", "precio", "cost", "unitprice"])
-                        currency_key = find_key(keys, ["currency", "moneda"])
-                        image_key = find_key(keys, ["image", "imagen", "img", "picture", "imgurl"])
-                        description = item.get(desc_key) if desc_key else None
-                        category = item.get(category_key) if category_key else None
-                        price = None
-                        if price_key and item.get(price_key):
-                            try:
-                                price = float(str(item.get(price_key)).replace(',', '.'))
-                            except Exception:
-                                price = None
-                        currency = item.get(currency_key) if currency_key else None
-                        image_url = item.get(image_key) if image_key else None
-                        desire = item.get("desire") or item.get("desire_text")
-                        desire_mag = item.get("desire_magnitude") or item.get("magnitud_deseo")
-                        awareness = item.get("awareness_level") or item.get("nivel_consciencia")
-                        competition = item.get("competition_level") or item.get("saturacion_mercado")
-                        extra = {
-                            k: v
-                            for k, v in item.items()
-                            if k
-                            not in {
-                                name_key,
-                                desc_key,
-                                category_key,
-                                price_key,
-                                currency_key,
-                                image_key,
-                                "desire",
-                                "desire_text",
-                                "desire_magnitude",
-                                "awareness_level",
-                                "competition_level",
-                                "magnitud_deseo",
-                                "nivel_consciencia",
-                                "saturacion_mercado",
-                                "source",
-                                "decision",
-                            }
-                        }
-                        if simplified != original_name:
-                            extra['original_name'] = original_name
-                        dupe = database.find_product_by_name(conn, simplified)
-                        if dupe:
-                            extra['duplicate_of'] = dupe['id']
-                        pid = database.insert_product(
-                            conn,
-                            name=simplified,
-                            description=str(description).strip() if description else None,
-                            category=str(category).strip() if category else None,
-                            price=price,
-                            currency=str(currency).strip() if currency else None,
-                            image_url=str(image_url).strip() if image_url else None,
-                            source=filename,
-                            desire=desire,
-                            desire_magnitude=desire_mag,
-                            awareness_level=awareness,
-                            competition_level=competition,
-                            extra=extra,
-                        )
-                        inserted += 1
-                        inserted_ids.append(pid)
-            elif False and ext in (".xlsx", ".xls"):
-                # legacy xlsx processing (handled asynchronously earlier)
+
+        if ext == ".csv":
+            ensure_db()
+            task_id = str(int(time.time() * 1000))
+            _update_import_status(
+                task_id,
+                state="queued",
+                stage="queued",
+                done=0,
+                total=0,
+                error=None,
+                imported=0,
+                filename=filename,
+            )
+            csv_bytes = data
+
+            def run_csv():
+                _update_import_status(task_id, state="running", stage="running", started_at=time.time())
                 try:
-                    import zipfile
-                    import xml.etree.ElementTree as ET
-                    from io import BytesIO
+                    def cb(**kwargs):
+                        _update_import_status(task_id, **kwargs)
 
-                    def parse_xlsx(binary: bytes):
-                        """Parse a minimal XLSX file into a list of dicts using the first worksheet.
-
-                        Supports shared strings and inline strings.  Skips leading empty rows.
-                        """
-                        with zipfile.ZipFile(BytesIO(binary)) as z:
-                            shared = []
-                            if 'xl/sharedStrings.xml' in z.namelist():
-                                ss_root = ET.fromstring(z.read('xl/sharedStrings.xml'))
-                                for si in ss_root.findall('.//{*}si'):
-                                    text = ''.join((t.text or '') for t in si.findall('.//{*}t'))
-                                    shared.append(text)
-                            sheet_name = None
-                            for name in z.namelist():
-                                if name.startswith('xl/worksheets/sheet') and name.endswith('.xml'):
-                                    sheet_name = name
-                                    break
-                            if not sheet_name:
-                                return []
-                            root = ET.fromstring(z.read(sheet_name))
-                            rows = []
-                            for row in root.findall('.//{*}row'):
-                                values = []
-                                last_col_idx = 0
-                                for c in row.findall('{*}c'):
-                                    cell_ref = c.attrib.get('r', '')
-                                    letters = ''.join(ch for ch in cell_ref if ch.isalpha())
-                                    col_idx = 0
-                                    for ch in letters:
-                                        col_idx = col_idx * 26 + (ord(ch.upper()) - ord('A') + 1)
-                                    while last_col_idx < col_idx - 1:
-                                        values.append('')
-                                        last_col_idx += 1
-                                    val = ''
-                                    cell_type = c.attrib.get('t')
-                                    if cell_type == 's':
-                                        v = c.find('{*}v')
-                                        if v is not None:
-                                            try:
-                                                idx = int(v.text)
-                                                val = shared[idx] if idx < len(shared) else ''
-                                            except Exception:
-                                                val = ''
-                                    elif cell_type == 'inlineStr':
-                                        tnode = c.find('{*}is/{*}t')
-                                        val = tnode.text if tnode is not None else ''
-                                    else:
-                                        v = c.find('{*}v')
-                                        val = v.text if v is not None else ''
-                                    values.append(val)
-                                    last_col_idx = col_idx
-                                rows.append(values)
-                            # drop leading empty rows
-                            while rows and all(not cell for cell in rows[0]):
-                                rows.pop(0)
-                            if not rows:
-                                return []
-                            headers = rows[0]
-                            records = []
-                            for r in rows[1:]:
-                                rec = {}
-                                for i, h in enumerate(headers):
-                                    rec[h] = r[i] if i < len(r) else ''
-                                records.append(rec)
-                            return records
-                    records = parse_xlsx(data)
-                    # collect names for simplification
-                    items_list = []
-                    names_list = []
-                    for item in records:
-                        if not isinstance(item, dict):
-                            continue
-                        keys = list(item.keys())
-                        name_key = find_key(keys, ["name", "nombre", "productname", "product", "title"])
-                        if not name_key:
-                            continue
-                        name = item.get(name_key)
-                        if not name:
-                            continue
-                        names_list.append(str(name).strip())
-                        items_list.append((item, name_key))
-                    # call GPT to simplify names
-                    name_map = {}
-                    api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
-                    model = config.get_model()
-                    weights_map = config.get_weights()
-                    if api_key and model and names_list:
-                        try:
-                            name_map = gpt.simplify_product_names(api_key, model, names_list)
-                        except Exception:
-                            name_map = {}
-                    metric_vals = {k: [] for k in gpt.NUMERIC_FIELD_MAP}
-                    for item, _ in items_list:
-                        for m in gpt.NUMERIC_FIELD_MAP:
-                            v = item.get(m)
-                            if v is None or v == "":
-                                continue
-                            try:
-                                f = float(str(v).replace(',', '.'))
-                            except Exception:
-                                continue
-                            metric_vals[m].append(f)
-                    metric_ranges = {
-                        m: (min(vals), max(vals))
-                        for m, vals in metric_vals.items()
-                        if vals
-                    }
-                    for item, name_key in items_list:
-                        original_name = str(item.get(name_key)).strip()
-                        simplified = name_map.get(original_name) or original_name
-                        keys = list(item.keys())
-                        desc_key = find_key(keys, ["description", "descripcion", "desc"])
-                        category_key = find_key(keys, ["category", "categoria", "cat"])
-                        price_key = find_key(keys, ["price", "precio", "cost", "unitprice"])
-                        currency_key = find_key(keys, ["currency", "moneda"])
-                        image_key = find_key(keys, ["image", "imagen", "img", "picture", "imgurl"])
-                        description = item.get(desc_key) if desc_key else None
-                        category = item.get(category_key) if category_key else None
-                        price = None
-                        if price_key and item.get(price_key):
-                            try:
-                                price = float(str(item.get(price_key)).replace(',', '.'))
-                            except Exception:
-                                price = None
-                        currency = item.get(currency_key) if currency_key else None
-                        image_url = item.get(image_key) if image_key else None
-                        desire = item.get("desire") or item.get("desire_text")
-                        desire_mag = item.get("desire_magnitude") or item.get("magnitud_deseo")
-                        awareness = item.get("awareness_level") or item.get("nivel_consciencia")
-                        competition = item.get("competition_level") or item.get("saturacion_mercado")
-                        extra = {
-                            k: v
-                            for k, v in item.items()
-                            if k
-                            not in {
-                                name_key,
-                                desc_key,
-                                category_key,
-                                price_key,
-                                currency_key,
-                                image_key,
-                                "desire",
-                                "desire_text",
-                                "desire_magnitude",
-                                "awareness_level",
-                                "competition_level",
-                                "magnitud_deseo",
-                                "nivel_consciencia",
-                                "saturacion_mercado",
-                                "source",
-                                "decision",
-                            }
-                        }
-                        if simplified != original_name:
-                            extra['original_name'] = original_name
-                        dupe = database.find_product_by_name(conn, simplified)
-                        if dupe:
-                            extra['duplicate_of'] = dupe['id']
-                        pid = database.insert_product(
-                            conn,
-                            name=str(simplified).strip(),
-                            description=str(description).strip() if description else None,
-                            category=str(category).strip() if category else None,
-                            price=price,
-                            currency=str(currency).strip() if currency else None,
-                            image_url=str(image_url).strip() if image_url else None,
-                            source=filename,
-                            desire=desire,
-                            desire_magnitude=desire_mag,
-                            awareness_level=awareness,
-                            competition_level=competition,
-                            extra=extra,
-                        )
-                        if weights_map:
-                            scores, justifs, sources = gpt.compute_numeric_scores(extra, metric_ranges)
-                            need = [f for f in WINNER_SCORE_FIELDS if f not in scores]
-                            if need and api_key and model:
-                                try:
-                                    resp = gpt.evaluate_winner_score(
-                                        api_key,
-                                        model,
-                                        {
-                                            "title": simplified,
-                                            "description": description,
-                                            "category": category,
-                                            "metrics": extra,
-                                        },
-                                    )
-                                    rs = resp.get("scores", {})
-                                    js = resp.get("justifications", {})
-                                    for f in need:
-                                        scores[f] = rs.get(f, 3)
-                                        justifs[f] = js.get(f, "")
-                                        sources[f] = "gpt"
-                                except Exception:
-                                    pass
-                            if scores:
-                                weighted = sum(
-                                    scores.get(f, 3) * weights_map.get(f, 0.0)
-                                    for f in WINNER_SCORE_FIELDS
-                                )
-                                raw_score = weighted * 8.0
-                                pct = ((raw_score - 8.0) / 32.0) * 100.0
-                                pct = max(0, min(100, round(pct)))
-                                breakdown = {
-                                    "scores": scores,
-                                    "justifications": justifs,
-                                    "weights": weights_map,
-                                    "sources": sources,
-                                }
-                                database.insert_score(
-                                    conn,
-                                    product_id=pid,
-                                    model=model or "",
-                                    total_score=0,
-                                    momentum=0,
-                                    saturation=0,
-                                    differentiation=0,
-                                    social_proof=0,
-                                    margin=0,
-                                    logistics=0,
-                                    summary="",
-                                    explanations={},
-                                    winner_score_raw=raw_score,
-                                    winner_score=pct,
-                                    winner_score_breakdown=breakdown,
-                                )
-                        inserted += 1
-                        inserted_ids.append(pid)
+                    count = fast_import(csv_bytes, status_cb=cb, source=filename)
+                    snapshot = _get_import_status(task_id) or {}
+                    done_val = int(snapshot.get("done", 0) or 0)
+                    if done_val < count:
+                        done_val = count
+                    total_val = int(snapshot.get("total", 0) or 0)
+                    if total_val < done_val:
+                        total_val = done_val
+                    _update_import_status(
+                        task_id,
+                        state="done",
+                        stage="done",
+                        done=done_val,
+                        total=total_val,
+                        imported=count,
+                        finished_at=time.time(),
+                    )
                 except Exception as exc:
-                    self._set_json(500)
-                    self._safe_write(json.dumps({"error": f"Error al procesar XLSX: {exc}"}).encode('utf-8'))
-                    return
-            else:
-                # treat as image; save temporarily and attempt to extract products using GPT vision
-                tmp_dir = APP_DIR / 'uploads'
-                tmp_dir.mkdir(exist_ok=True)
-                tmp_path = tmp_dir / filename
-                with open(tmp_path, 'wb') as f:
-                    f.write(data)
-                inserted = 0
-                # attempt automatic extraction if API key and vision model configured
-                api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
-                model = config.get_model()
-                if api_key and model:
-                    try:
-                        # call vision extraction
-                        products = gpt.extract_products_from_image(api_key, model, str(tmp_path))
-                        for item in products:
-                            name = item.get('name')
-                            if not name:
-                                continue
-                            desc = item.get('description')
-                            cat = item.get('category')
-                            price = item.get('price')
-                            price_val = None
-                            if price:
-                                try:
-                                    price_val = float(str(price).replace(',', '.'))
-                                except Exception:
-                                    price_val = None
-                            pid = database.insert_product(
-                                conn,
-                                name=name,
-                                description=desc,
-                                category=cat,
-                                price=price_val,
-                                currency=None,
-                                image_url=str(tmp_path),
-                                source=filename,
-                                extra={},
-                            )
-                            inserted += 1
-                            inserted_ids.append(pid)
-                    except Exception:
-                        # ignore extraction errors
-                        inserted = 0
-                # respond with info about image and inserted count
-                self._set_json()
-                self._safe_write(json.dumps({"uploaded_image": f"/uploads/{filename}", "inserted": inserted}).encode('utf-8'))
-                return
-        except Exception as exc:
-            self._set_json(500)
-            self._safe_write(json.dumps({"error": str(exc)}).encode('utf-8'))
+                    logger.exception("Fast CSV import failed: filename=%s", filename)
+                    _update_import_status(
+                        task_id,
+                        state="error",
+                        stage="error",
+                        error=str(exc),
+                        finished_at=time.time(),
+                    )
+
+            threading.Thread(target=run_csv, daemon=True).start()
+            self.safe_write(lambda: self.send_json({"task_id": task_id}, status=202))
             return
-        # Calculate Winner Score for newly inserted products
-        if inserted_ids:
-            conn_ws = ensure_db()
-            products_all = [row_to_dict(r) for r in database.list_products(conn_ws)]
-            ranges = winner_calc.compute_ranges(products_all)
-            weights_cfg = config.get_weights()
-            total_w = sum(weights_cfg.values()) or 1.0
-            weights = {k: v / total_w for k, v in weights_cfg.items()}
-            for pid in inserted_ids:
-                prod = row_to_dict(database.get_product(conn_ws, pid))
-                if not prod:
-                    continue
-                missing: list[str] = []
-                used: list[str] = []
-                pct_val = winner_calc.score_product(prod, weights, ranges, missing, used)
-                fallback = not used or pct_val is None or (isinstance(pct_val, float) and math.isnan(pct_val))
-                pct = 50 if fallback else max(0, min(100, round(pct_val * 100)))
-                database.insert_score(
-                    conn_ws,
-                    product_id=pid,
-                    model='winner_score',
-                    total_score=0,
-                    momentum=0,
-                    saturation=0,
-                    differentiation=0,
-                    social_proof=0,
-                    margin=0,
-                    logistics=0,
-                    summary='',
-                    explanations={},
-                    winner_score=pct,
-                    commit=False,
-                )
-            conn_ws.commit()
-        if inserted_ids and config.is_auto_fill_ia_on_import_enabled():
-            cfg_cost = config.get_ai_cost_config()
+
+        if ext == ".json":
             try:
-                ai_columns.fill_ai_columns(
-                    inserted_ids,
-                    model=cfg_cost.get("model"),
-                    batch_mode=len(inserted_ids) >= cfg_cost.get("useBatchWhenCountGte", 300),
-                    cost_cap_usd=cfg_cost.get("costCapUSD"),
-                )
-            except Exception:
-                logger.info("No se pudieron completar las columnas con IA: revisa la API.")
-        self._set_json()
-        self._safe_write(json.dumps({"ok": True, "imported": len(inserted_ids)}).encode('utf-8'))
+                payload = json.loads(data.decode("utf-8", errors="ignore"))
+            except Exception as exc:
+                self.safe_write(lambda: self.send_json({"error": "invalid_json", "detail": str(exc)}, status=400))
+                return
+            if not isinstance(payload, list):
+                self.safe_write(lambda: self.send_json({"error": "invalid_json"}, status=400))
+                return
+            records = [item for item in payload if isinstance(item, dict)]
+            ensure_db()
+            task_id = str(int(time.time() * 1000))
+            _update_import_status(
+                task_id,
+                state="queued",
+                stage="queued",
+                done=0,
+                total=len(records),
+                error=None,
+                imported=0,
+                filename=filename,
+            )
+
+            def run_json():
+                _update_import_status(task_id, state="running", stage="running", started_at=time.time())
+                try:
+                    def cb(**kwargs):
+                        _update_import_status(task_id, **kwargs)
+
+                    count = fast_import_records(records, status_cb=cb, source=filename)
+                    snapshot = _get_import_status(task_id) or {}
+                    done_val = int(snapshot.get("done", 0) or 0)
+                    if done_val < count:
+                        done_val = count
+                    total_val = int(snapshot.get("total", len(records)) or 0)
+                    if total_val < done_val:
+                        total_val = done_val
+                    _update_import_status(
+                        task_id,
+                        state="done",
+                        stage="done",
+                        done=done_val,
+                        total=total_val,
+                        imported=count,
+                        finished_at=time.time(),
+                    )
+                except Exception as exc:
+                    logger.exception("Fast JSON import failed: filename=%s", filename)
+                    _update_import_status(
+                        task_id,
+                        state="error",
+                        stage="error",
+                        error=str(exc),
+                        finished_at=time.time(),
+                    )
+
+            threading.Thread(target=run_json, daemon=True).start()
+            self.safe_write(lambda: self.send_json({"task_id": task_id}, status=202))
+            return
+
+        self.safe_write(lambda: self.send_json({"error": "unsupported_format"}, status=400))
 
     def handle_evaluate_all(self):
         conn = ensure_db()
