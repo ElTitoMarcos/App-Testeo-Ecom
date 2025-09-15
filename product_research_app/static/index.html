@@ -262,13 +262,85 @@ body.dark .skeleton{background:#333;}
     <h3>Filtros</h3>
     <button id="closeFilters">×</button>
   </div>
-  <div style="display:flex; flex-direction:column; gap:8px;">
-    <label>Precio mín<br><input type="number" id="filterPriceMin"></label>
-    <label>Precio máx<br><input type="number" id="filterPriceMax"></label>
-    <label>Fecha desde<br><input type="date" id="filterDateMin"></label>
-    <label>Fecha hasta<br><input type="date" id="filterDateMax"></label>
-    <label>Rating mín<br><input type="number" id="filterRatingMin" step="0.1" min="0" max="5"></label>
-    <label>Categoría<br><input type="text" id="filterCategory"></label>
+  <div class="filters-grid">
+    <!-- ID -->
+    <label>ID</label>
+    <input id="f-id" placeholder="e.g. 1,3-7">
+
+    <!-- Categoría -->
+    <label>Categoría</label>
+    <input id="f-category" placeholder="contiene…">
+
+    <!-- Price -->
+    <label>Precio mín</label>
+    <input id="f-price-min" inputmode="decimal" placeholder="€">
+    <label>Precio máx</label>
+    <input id="f-price-max" inputmode="decimal" placeholder="€">
+
+    <!-- Rating -->
+    <label>Rating mín</label>
+    <input id="f-rating-min" inputmode="decimal" placeholder="0–5">
+    <label>Rating máx</label>
+    <input id="f-rating-max" inputmode="decimal" placeholder="0–5">
+
+    <!-- Unidades vendidas -->
+    <label>Unidades mín</label>
+    <input id="f-units-min" inputmode="numeric" placeholder="K/M ok">
+    <label>Unidades máx</label>
+    <input id="f-units-max" inputmode="numeric" placeholder="K/M ok">
+
+    <!-- Ingresos -->
+    <label>Ingresos mín</label>
+    <input id="f-revenue-min" inputmode="decimal" placeholder="€ K/M ok">
+    <label>Ingresos máx</label>
+    <input id="f-revenue-max" inputmode="decimal" placeholder="€ K/M ok">
+
+    <!-- Tasa de conversión -->
+    <label>Conv. mín</label>
+    <input id="f-conv-min" inputmode="decimal" placeholder="%">
+    <label>Conv. máx</label>
+    <input id="f-conv-max" inputmode="decimal" placeholder="%">
+
+    <!-- Fecha lanzamiento -->
+    <label>Fecha desde</label>
+    <input id="f-date-from" type="date">
+    <label>Fecha hasta</label>
+    <input id="f-date-to" type="date">
+
+    <!-- Rango Fechas (columna texto) -->
+    <label>Rango Fechas</label>
+    <input id="f-range-text" placeholder="contiene…">
+
+    <!-- Desire magnitude -->
+    <label>Desire magnitude</label>
+    <select id="f-desire-mag">
+      <option value="">Cualquiera</option>
+      <option>Low</option><option>Medium</option><option>High</option>
+    </select>
+
+    <!-- Awareness level -->
+    <label>Awareness level</label>
+    <select id="f-awareness">
+      <option value="">Cualquiera</option>
+      <option value="unaware">Unaware</option>
+      <option value="problemaware">Problem-Aware</option>
+      <option value="solutionaware">Solution-Aware</option>
+      <option value="productaware">Product-Aware</option>
+      <option value="mostaware">Most Aware</option>
+    </select>
+
+    <!-- Competition level -->
+    <label>Competition level</label>
+    <select id="f-competition">
+      <option value="">Cualquiera</option>
+      <option>Low</option><option>Medium</option><option>High</option>
+    </select>
+
+    <!-- Winner Score -->
+    <label>Winner Score mín</label>
+    <input id="f-score-min" inputmode="numeric" placeholder="0–100">
+    <label>Winner Score máx</label>
+    <input id="f-score-max" inputmode="numeric" placeholder="0–100">
   </div>
   <div style="display:flex; gap:8px; margin-top:12px;">
     <button id="applyFilters" style="flex:1;">Aplicar</button>
@@ -295,6 +367,7 @@ body.dark .skeleton{background:#333;}
 <script type="module" src="/static/js/table-sort.js" defer></script>
 <script type="module" src="/static/js/help-tooltip.js" defer></script>
 <script type="module">
+import { applyFilters, readFilters } from '/static/js/filters-panel.js';
 import * as api from "/static/js/net.js";
 import * as groupsService from "/static/js/groups-service.js";
 const { fetchJson } = api;
@@ -376,6 +449,19 @@ let products = [];
 let sortField = null;
 let sortDir = 1;
 let sortType = 'string';
+
+function ensureAppState(){
+  window.appState = window.appState || {};
+  return window.appState;
+}
+
+function getActiveFilters(){
+  const state = ensureAppState();
+  if (state.filters) return state.filters;
+  const filters = readFilters();
+  state.filters = filters;
+  return filters;
+}
 function updateResultsBadge(total) {
   const meta = document.getElementById('listMeta');
   if (!meta) return;
@@ -387,6 +473,12 @@ window.updateResultsBadge = updateResultsBadge;
 window.allProducts = allProducts;
 window.products = products;
 const gridRoot = document.getElementById('productTable');
+
+document.addEventListener('filters-changed', (e) => {
+  if (e && e.detail) ensureAppState().filters = e.detail;
+  selection.clear();
+  renderTable();
+});
 
 function ecMakeMeasurer() {
   const el = document.createElement('span');
@@ -617,7 +709,7 @@ function isTrending(name) {
   return words.some(w => trendingWords.includes(w));
 }
 
-async function fetchProducts(preserve=true) {
+async function fetchProducts() {
   const prevSel = new Set(selection);
   const data = await fetchJson('/products');
   if(data.length && data[0].desire !== undefined && window.ensureColumnVisible){
@@ -629,14 +721,8 @@ async function fetchProducts(preserve=true) {
   sortField = 'id';
   sortDir = 1;
   sortType = 'number';
-  products = [...allProducts];
   window.allProducts = allProducts;
-  window.products = products;
-  if (typeof filtersState !== 'undefined' && preserve) {
-    applyFiltersFromState();
-  } else {
-    renderTable();
-  }
+  renderTable();
   const visibleIds = new Set(products.map(p => String(p.id)));
   selection.clear();
   for (const id of prevSel) {
@@ -653,6 +739,12 @@ async function reloadRows(ids){ await fetchProducts(); }
 function renderTable() {
   const headerRow = document.getElementById('headerRow');
   const tbody = document.querySelector('#productTable tbody');
+  const baseList = Array.isArray(allProducts) ? allProducts : [];
+  const filters = getActiveFilters();
+  const filtered = applyFilters(baseList, filters);
+  products = Array.isArray(filtered) ? [...filtered] : [];
+  sortProducts();
+  window.products = products;
   // Build header if empty
   if (!headerRow.hasChildNodes()) {
     // Add select column header (no label)
@@ -686,8 +778,7 @@ function renderTable() {
   tbody.innerHTML = '';
   const visibleProducts = Array.isArray(products) ? [...products] : [];
   window.__visibleProducts = visibleProducts;
-  const allSource = Array.isArray(allProducts) && allProducts.length ? allProducts : visibleProducts;
-  window.__allProducts = allSource;
+  window.__allProducts = baseList && baseList.length ? baseList : visibleProducts;
   document.dispatchEvent(new CustomEvent('visible-products-changed', {
     detail: { count: visibleProducts.length }
   }));
@@ -1404,11 +1495,8 @@ async function applyGroupFilter(id){
     currentGroupFilter = id;
     const data = await fetchJson('/list/' + id);
     allProducts = data;
-    products = [...allProducts];
     window.allProducts = allProducts;
-    window.products = products;
     selection.clear();
-    updateMasterState();
     renderTable();
     // refresh lists to highlight active group
     loadLists();
@@ -1435,6 +1523,6 @@ window.startProgress = startProgress;
 window.parseDate = parseDate;
 </script>
 <script type="module" src="/static/js/completar-ia.js"></script>
-<script src="/static/js/filters.js"></script>
+<script type="module" src="/static/js/filters-panel.js" defer></script>
 </body>
 </html>
