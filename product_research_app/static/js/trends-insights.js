@@ -11,6 +11,8 @@ const fmtUnits = (v) => {
   if (v >= 1e3) return (v / 1e3).toFixed(1).replace('.', ',') + ' K';
   return v.toLocaleString('es-ES');
 };
+const SEP = ' - - - ';
+function joinSep(list){ return list.filter(Boolean).join(SEP); }
 const qtile = (arr, q) => {
   if (!arr.length) return 0;
   const a = [...arr].sort((x, y) => x - y);
@@ -20,10 +22,6 @@ const qtile = (arr, q) => {
   if (lo === hi) return a[lo];
   return a[lo] * (hi - i) + a[hi] * (i - lo);
 };
-
-function topN(list, key, n = 3) {
-  return [...list].sort((a, b) => num(b[key]) - num(a[key])).slice(0, n);
-}
 
 function extraordinaryProducts(products) {
   const prices = products.map((p) => num(p.price)).filter(Boolean);
@@ -47,22 +45,22 @@ function extraordinaryProducts(products) {
   return { priceyAndSell, fanFavs };
 }
 
-function categoryBullets(categories) {
-  if (!categories || !categories.length) return ['Sin datos de categorías agregadas.'];
-  const totalRevenue = categories.reduce((s, x) => s + num(x.revenue), 0) || 1;
-  const topRev = topN(categories, 'revenue', 3)
-    .filter((c) => num(c.revenue) > 0)
-    .map((c) => {
-      const pct = ((100 * num(c.revenue)) / totalRevenue).toFixed(1).replace('.', ',');
+function categoryBullets(categories){
+  if (!categories?.length) return [];
+  const total = categories.reduce((s,c)=> s + num(c.revenue), 0) || 1;
+  const topRev = [...categories]
+    .sort((a,b)=> num(b.revenue) - num(a.revenue))
+    .slice(0,3)
+    .map(c => {
+      const pct = ((100 * num(c.revenue)) / total).toFixed(1).replace('.', ',');
       return `${c.path || c.name} (${pct}%)`;
-    });
-
-  if (!topRev.length) return ['Sin datos de ingresos por categoría.'];
-  return [`Top categorías por ingresos: ${topRev.join(' · ')}`];
+    })
+    .filter(Boolean);
+  return topRev.length ? [`Top categorías por ingresos: ${joinSep(topRev)}`] : [];
 }
 
-function productBullets(products) {
-  if (!products || !products.length) return ['Sin datos de productos destacados.'];
+function productBullets(products){
+  if (!products?.length) return [];
   const prepared = products.map((p) => ({
     ...p,
     name: p.name || p.title || p.product_name || 'Producto',
@@ -73,27 +71,35 @@ function productBullets(products) {
     rating: num(p.rating)
   }));
 
-  const topByRevenue = topN(prepared, 'revenue', 3)
+  const topByRevenue = [...prepared]
+    .sort((a,b)=> b.revenue - a.revenue)
+    .slice(0,3)
     .filter((p) => p.revenue > 0)
     .map((p) => `${p.name} (${fmtEu(p.revenue)})`);
-  const topByUnits = topN(prepared, 'units_sold', 3)
+  const topByUnits = [...prepared]
+    .sort((a,b)=> b.units_sold - a.units_sold)
+    .slice(0,3)
     .filter((p) => p.units_sold > 0)
     .map((p) => `${p.name} (${fmtUnits(p.units_sold)} uds)`);
+  const { priceyAndSell, fanFavs } = extraordinaryProducts(prepared);
 
-  const xtra = extraordinaryProducts(prepared);
-  const bullets = [];
-  if (topByRevenue.length) bullets.push(`Productos top por ingresos: ${topByRevenue.join(' · ')}`);
-  if (topByUnits.length) bullets.push(`Productos top por unidades: ${topByUnits.join(' · ')}`);
-  if (xtra.priceyAndSell.length) bullets.push(`Caros y venden mucho: ${xtra.priceyAndSell.join(' · ')}`);
-  if (xtra.fanFavs.length) bullets.push(`Favoritos por valoración y ventas: ${xtra.fanFavs.join(' · ')}`);
-
-  return bullets.length ? bullets : ['Sin datos de productos destacados.'];
+  const out = [];
+  if (topByRevenue.length) out.push(`Productos top por ingresos: ${joinSep(topByRevenue)}`);
+  if (topByUnits.length)   out.push(`Productos top por unidades: ${joinSep(topByUnits)}`);
+  if (priceyAndSell.length) out.push(`Caros y venden mucho: ${joinSep(priceyAndSell)}`);
+  if (fanFavs.length)       out.push(`Favoritos por valoración y ventas: ${joinSep(fanFavs)}`);
+  return out;
 }
 
-function writeInsights(lines) {
+// writeInsights: 4–6 viñetas máximo (sin bullets anidados)
+function writeInsights(lines){
   const box = document.getElementById('insightsContent');
   if (!box) return;
   const trimmed = lines.filter(Boolean).slice(0, 6);
+  if (!trimmed.length){
+    box.innerHTML = '<p class="muted">Sin datos para generar insights.</p>';
+    return;
+  }
   box.innerHTML = '<ul>' + trimmed.map((l) => `<li>${l}</li>`).join('') + '</ul>';
 }
 

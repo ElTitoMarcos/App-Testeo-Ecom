@@ -1036,24 +1036,18 @@ th.col-desire, td.col-desire { width: 360px; max-width: 360px; }
 #top-right {
   display: flex;
   flex-direction: column;
-  contain: layout paint size;
+  contain: layout paint size; /* rompe bucles de resize */
 }
 
-/* Evita el estiramiento infinito: canvas con altura fija */
-.chart-canvas {
-  display: block;
-  width: 100% !important;
-  height: var(--h, 420px) !important;
+/* Altura fija y estabilidad de charts: evita que queden ocultos */
+.card { position: relative; }
+.chart-canvas{
+  display:block;
+  width:100% !important;
+  height:var(--h,420px) !important;  /* altura explícita */
 }
-
-/* Asigna alturas concretas por gráfico */
-#topCategoriesChart {
-  --h: 360px;
-}
-
-#paretoRevenueChart {
-  --h: 420px;
-}
+#topCategoriesChart{ --h:360px; }
+#paretoRevenueChart{ --h:420px; }
 
 .two-col {
   display: grid;
@@ -1068,59 +1062,44 @@ th.col-desire, td.col-desire { width: 360px; max-width: 360px; }
   }
 }
 
-/* Tabla compacta (ya existía) */
-.table--compact {
-  font-size: 12.5px;
+/* Tabla compacta sin scroll horizontal */
+.table--compact{
+  font-size:12.5px;
+  overflow:hidden;               /* corta scroll horizontal del contenedor */
+}
+.table--compact thead th{
+  position:sticky; top:0; z-index:2;
+  background:#0f1223; cursor:pointer; user-select:none;
+  padding:8px 10px; white-space:nowrap;
+}
+.table--compact tbody{
+  display:block;
+  max-height:320px;
+  overflow-y:auto;
+  overflow-x:hidden;             /* <- quita el slider horizontal */
+  scrollbar-gutter: stable both-edges; /* alinea thead/tbody con scrollbar */
+}
+.table--compact thead, .table--compact tbody tr{
+  display:table; width:100%; table-layout:fixed;
+}
+.table--compact td{
+  padding:6px 10px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;            /* por defecto en celdas normales */
+}
+/* Categorías en varias líneas (wrap) */
+.table--compact td:first-child{
+  white-space:normal !important;
+  word-break:break-word;
+  line-height:1.25;
 }
 
-.table--compact thead th {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  background: #0f1223;
-  cursor: pointer;
-  user-select: none;
-  padding: 8px 10px;
-  white-space: nowrap;
-}
-
-.table--compact tbody {
-  display: block;
-  max-height: 320px;
-  overflow: auto;
-}
-
-.table--compact thead,
-.table--compact tbody tr {
-  display: table;
-  width: 100%;
-  table-layout: fixed;
-}
-
-.table--compact td {
-  padding: 6px 10px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.table--compact tbody tr:nth-child(even) {
-  background: #0c0f1d;
-}
-
-.table--compact tbody tr:hover {
-  background: #0f1430;
-}
-
-th[aria-sort="ascending"]::after {
-  content: " ▲";
-  opacity: 0.6;
-}
-
-th[aria-sort="descending"]::after {
-  content: " ▼";
-  opacity: 0.6;
-}
+/* zebra + hover + indicadores de orden (se mantienen) */
+.table--compact tbody tr:nth-child(even){ background:#0c0f1d; }
+.table--compact tbody tr:hover{ background:#0f1430; }
+th[aria-sort="ascending"]::after{ content:" ▲"; opacity:.6; }
+th[aria-sort="descending"]::after{ content:" ▼"; opacity:.6; }
 
 /* Insights */
 .insights-toolbar {
