@@ -166,14 +166,29 @@ body.dark .skeleton{background:#333;}
   <div id="trends-status"></div>
   <section id="trends" class="trends-grid" hidden>
     <div class="card" id="top-left">
-      <canvas id="topCategoriesChart" class="chart-canvas"></canvas>
+      <div class="chart-header">
+        <h4>Top categorías</h4>
+        <button class="chart-help" aria-label="Ayuda gráfico top categorías"
+                data-tip="Barras: valor de la métrica seleccionada para cada categoría (ordenadas de mayor a menor). Eje: escala lineal. Pasa el ratón para ver el detalle.">
+          i
+        </button>
+      </div>
+      <div class="chart-wrap chart-wrap--sm">
+        <canvas id="topCategoriesChart"></canvas>
+      </div>
     </div>
 
     <div class="card" id="top-right">
       <div class="chart-header">
         <h4>Pareto de ingresos (Top 15)</h4>
+        <button class="chart-help" aria-label="Ayuda gráfico pareto"
+                data-tip="Barras: ingresos por categoría (ordenadas desc). Línea: % acumulado (eje derecho) que muestra qué porcentaje del total se alcanza al sumar desde la categoría más alta. Eje izquierdo: € ingresos. Eje derecho: porcentaje.">
+          i
+        </button>
       </div>
-      <canvas id="paretoRevenueChart" class="chart-canvas"></canvas>
+      <div class="chart-wrap">
+        <canvas id="paretoRevenueChart"></canvas>
+      </div>
     </div>
   </section>
 
@@ -668,8 +683,15 @@ function renderTable() {
   }
   // Clear body
   tbody.innerHTML = '';
+  const visibleProducts = Array.isArray(products) ? [...products] : [];
+  window.__visibleProducts = visibleProducts;
+  const allSource = Array.isArray(allProducts) && allProducts.length ? allProducts : visibleProducts;
+  window.__allProducts = allSource;
+  document.dispatchEvent(new CustomEvent('visible-products-changed', {
+    detail: { count: visibleProducts.length }
+  }));
   // Render rows
-    products.forEach(item => {
+  products.forEach(item => {
     const tr = document.createElement('tr');
     if (item.isDuplicate) {
       tr.classList.add('is-duplicate');
