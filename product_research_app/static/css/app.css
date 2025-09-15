@@ -233,6 +233,7 @@ td.price-col {
   border: 1px solid #222642;
   border-radius: 10px;
   padding: 12px;
+  position: relative;
 }
 
 .table tbody tr.is-duplicate {
@@ -1022,6 +1023,7 @@ th.col-desire, td.col-desire { width: 360px; max-width: 360px; }
 }
 
 
+/* Layout tendencias */
 .trends-grid {
   display: grid;
   grid-template-columns: 0.9fr 1.1fr;
@@ -1032,24 +1034,41 @@ th.col-desire, td.col-desire { width: 360px; max-width: 360px; }
 
 #top-left,
 #top-right {
-  min-height: 360px;
   display: flex;
   flex-direction: column;
+  contain: layout paint size;
 }
 
-#top-right {
-  min-height: 420px;
+/* Evita el estiramiento infinito: canvas con altura fija */
+.chart-canvas {
+  display: block;
+  width: 100% !important;
+  height: var(--h, 420px) !important;
 }
 
-#top-left canvas,
-#top-right canvas {
-  flex: 1 1 auto;
+/* Asigna alturas concretas por gráfico */
+#topCategoriesChart {
+  --h: 360px;
 }
 
-.compact-wrap {
-  padding: 0;
+#paretoRevenueChart {
+  --h: 420px;
 }
 
+.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+@media (max-width: 960px) {
+  .trends-grid,
+  .two-col {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Tabla compacta (ya existía) */
 .table--compact {
   font-size: 12.5px;
 }
@@ -1067,7 +1086,7 @@ th.col-desire, td.col-desire { width: 360px; max-width: 360px; }
 
 .table--compact tbody {
   display: block;
-  max-height: 340px;
+  max-height: 320px;
   overflow: auto;
 }
 
@@ -1076,10 +1095,6 @@ th.col-desire, td.col-desire { width: 360px; max-width: 360px; }
   display: table;
   width: 100%;
   table-layout: fixed;
-}
-
-.table--compact tr {
-  height: auto;
 }
 
 .table--compact td {
@@ -1105,4 +1120,37 @@ th[aria-sort="ascending"]::after {
 th[aria-sort="descending"]::after {
   content: " ▼";
   opacity: 0.6;
+}
+
+/* Insights */
+.insights-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.insights-content {
+  font-size: 13px;
+  line-height: 1.45;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.muted {
+  opacity: 0.7;
+}
+
+/* Cards */
+.card {
+  background: #121426;
+  border: 1px solid #222642;
+  border-radius: 10px;
+  padding: 12px;
+  position: relative;
+}
+
+.chart-header h4 {
+  margin: 0 0 8px 0;
+  font-weight: 600;
+  font-size: 14px;
 }

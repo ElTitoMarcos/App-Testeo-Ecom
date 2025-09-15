@@ -103,7 +103,7 @@ body.dark .skeleton{background:#333;}
       <input type="file" id="fileInput" style="display:none;" />
       <button id="uploadBtn" title="Subir archivo">📤</button>
       <button id="refreshBtn" title="Actualizar lista">🔄</button>
-      <button id="btn-ver-tendencias" title="Ver tendencias">📊</button>
+      <button id="btn-ver-tendencias" title="Ver tendencias" data-action="toggle-trends">📊</button>
       <button id="darkToggle" title="Modo oscuro">🌙</button>
       <button id="configBtn" title="Configuración avanzada">⚙️</button>
     </div>
@@ -164,29 +164,45 @@ body.dark .skeleton{background:#333;}
     <button id="btn-aplicar-tendencias" aria-label="Aplicar filtros">Aplicar</button>
   </div>
   <div id="trends-status"></div>
-  <section id="trends" class="trends-grid">
-    <div id="top-left" class="card">
-      <canvas id="topCategoriesChart"></canvas>
+  <section id="trends" class="trends-grid" hidden>
+    <div class="card" id="top-left">
+      <canvas id="topCategoriesChart" class="chart-canvas"></canvas>
     </div>
-    <div id="top-right" class="card">
-      <canvas id="priceIncomeScatter"></canvas>
+
+    <div class="card" id="top-right">
+      <div class="chart-header">
+        <h4>Pareto de ingresos (Top 15)</h4>
+      </div>
+      <canvas id="paretoRevenueChart" class="chart-canvas"></canvas>
     </div>
   </section>
-  <div class="card compact-wrap">
-    <table id="trendsTable" class="table table--compact">
-      <thead>
-        <tr>
-          <th data-key="path" data-type="text">Categorías</th>
-          <th data-key="products" data-type="num">Productos</th>
-          <th data-key="units" data-type="num">Unidades</th>
-          <th data-key="revenue" data-type="num">Ingresos</th>
-          <th data-key="price" data-type="num">Precio</th>
-          <th data-key="rating" data-type="num">Rating</th>
-        </tr>
-      </thead>
-      <tbody></tbody>
-    </table>
-  </div>
+
+  <section id="trends-bottom" class="two-col" hidden>
+    <div class="card">
+      <table id="trendsTable" class="table table--compact">
+        <thead>
+          <tr>
+            <th data-key="path" data-type="text">Categorías</th>
+            <th data-key="products" data-type="num">Productos</th>
+            <th data-key="units" data-type="num">Unidades</th>
+            <th data-key="revenue" data-type="num">Ingresos</th>
+            <th data-key="price" data-type="num">Precio</th>
+            <th data-key="rating" data-type="num">Rating</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <aside class="card" id="trendsInsights">
+      <div class="insights-toolbar">
+        <button id="btnLocalInsights" class="btn btn--sm">Generar insights (local)</button>
+      </div>
+      <div id="insightsContent" class="insights-content">
+        <p class="muted">Aquí aparecerán hallazgos relevantes sobre las categorías (tendencias, outliers, pareto…).</p>
+      </div>
+    </aside>
+  </section>
 </section>
 
 <section id="section-products">
@@ -260,6 +276,7 @@ body.dark .skeleton{background:#333;}
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script type="module" src="/static/js/trends-summary.js"></script>
+<script type="module" src="/static/js/trends-insights.js" defer></script>
 <script type="module" src="/static/js/table-sort.js" defer></script>
 <script type="module">
 import * as api from "/static/js/net.js";

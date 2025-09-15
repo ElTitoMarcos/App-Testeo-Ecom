@@ -1,6 +1,34 @@
-import { fmtInt, fmtPrice, fmtFloat2 } from './format.js';
+const fmt = {
+  money: (v) => {
+    if (!isFinite(v)) return v;
+    if (v >= 1e6) return '€ ' + (v / 1e6).toFixed(2).replace('.', ',') + ' M';
+    if (v >= 1e3) return '€ ' + (v / 1e3).toFixed(1).replace('.', ',') + ' K';
+    return '€ ' + v.toFixed(2).replace('.', ',');
+  },
+  percent: (p) => (p * 100).toFixed(1).replace('.', ',') + '%'
+};
 
-let priceIncomeChart;
+const chartOptsStable = {
+  responsive: true,
+  maintainAspectRatio: false,
+  resizeDelay: 200,
+  animation: { duration: 0 }
+};
+
+let topCategoriesChart = null;
+let paretoChart = null;
+
+const $desde = document.querySelector('#fecha-desde');
+const $hasta = document.querySelector('#fecha-hasta');
+const $btnAplicar = document.querySelector('#btn-aplicar-tendencias');
+const $status = document.querySelector('#trends-status');
+
+if ($btnAplicar) {
+  $btnAplicar.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    fetchTrends();
+  });
+}
 
 function toISOFromDDMMYYYY(v) {
   const s = (v || '').trim();
@@ -9,6 +37,7 @@ function toISOFromDDMMYYYY(v) {
   const [, dd, mm, yyyy] = m;
   return `${yyyy}-${mm}-${dd}`;
 }
+
 function formatDDMMYYYY(d) {
   const dd = String(d.getDate()).padStart(2, '0');
   const mm = String(d.getMonth() + 1).padStart(2, '0');
@@ -16,7 +45,109 @@ function formatDDMMYYYY(d) {
   return `${dd}/${mm}/${yyyy}`;
 }
 
-function fmtMoney(v){
+function ensureDefaultDates() {
+  try {
+    const today = new Date();
+    const from = new Date(today);
+    from.setDate(today.getDate() - 29);
+    if ($desde && !$desde.value) $desde.value = formatDDMMYYYY(from);
+    if ($hasta && !$hasta.value) $hasta.value = formatDDMMYYYY(today);
+  } catch (_) {}
+}
+
+async function fetchTrends() {
+  ensureDefaultDates();
+  try {
+    if ($status) $status.textContent = 'Cargando...';
+    const fISO = $desde ? toISOFromDDMMYYYY($desde.value) : null;
+    const tISO = $hasta ? toISOFromDDMMYYYY($hasta.value) : null;
+    const url = new URL('/api/trends/summary', window.location.origin);
+    if (fISO) url.searchParams.set('from', fISO);
+    if (tISO) url.searchParams.set('to', tISO);
+    const res = await fetch(url.toString(), { credentials: 'same-origin' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const json = await res.json();
+    handleTrendsResponse(json);
+  } catch (e) {
+    (window.toast?.error || alert).call(window.toast || window, 'No se pudieron cargar las tendencias.');
+  } finally {
+    if ($status) $status.textContent = '';
+  }
+}
+
+function handleTrendsResponse(summary) {
+  if (!summary) return;
+  const categoriesRaw = summary.categoriesAgg || summary.top_categories || summary.categories || [];
+  renderTrends(categoriesRaw, getAllProductsSnapshot());
+}
+
+function getAllProductsSnapshot() {
+  const arr = window.allProducts;
+  return Array.isArray(arr) ? arr : [];
+}
+
+function toNumber(value) {
+  if (value == null || value === '') return 0;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+  if (typeof value === 'string') {
+    const text = value
+      .replace(/[€$]/g, '')
+      .replace(/\s+/g, '')
+      .replace(/\./g, '')
+      .replace(/,/g, '.');
+    const num = Number(text);
+    return Number.isFinite(num) ? num : 0;
+  }
+  const num = Number(value);
+  return Number.isFinite(num) ? num : 0;
+}
+
+function normalizeCategories(list) {
+  if (!Array.isArray(list)) return [];
+  return list.map((item) => {
+    const path = item.path || item.category || item.name || '';
+    const name = item.name || path;
+    const revenue = toNumber(item.revenue ?? item.total_revenue ?? item.sum_revenue ?? item.value);
+    const units = toNumber(item.units ?? item.total_units ?? item.sum_units ?? item.quantity);
+    const productsRaw = item.products ?? item.products_count ?? item.unique_products ?? item.count;
+    const products = Number.isFinite(Number(productsRaw)) ? Number(productsRaw) : 0;
+    const price = toNumber(item.price ?? item.avg_price ?? item.average_price);
+    const rating = toNumber(item.rating ?? item.avg_rating ?? item.average_rating);
+    return {
+      ...item,
+      path,
+      name,
+      revenue,
+      units,
+      products,
+      price,
+      rating
+    };
+  });
+}
+
+function normalizeProducts(list) {
+  if (!Array.isArray(list)) return [];
+  return list.map((item) => {
+    const name = item.name || item.title || item.product_name || '';
+    const revenue = toNumber(item.revenue ?? item.total_revenue ?? item.sales ?? item.turnover);
+    const units = toNumber(item.units ?? item.quantity ?? item.total_units ?? item.sum_units);
+    const unitsSold = toNumber(item.units_sold ?? item.unitsSold ?? item.sold_units ?? item.sales_units ?? units);
+    const price = toNumber(item.price ?? item.avg_price ?? item.average_price);
+    const rating = toNumber(item.rating ?? item.avg_rating ?? item.average_rating);
+    return {
+      ...item,
+      name,
+      revenue,
+      units,
+      units_sold: unitsSold,
+      price,
+      rating
+    };
+  });
+}
+
+function fmtMoney(v) {
   const n = Number(v);
   if (!Number.isFinite(n) || n === 0) return '0';
   const abs = Math.abs(n);
@@ -42,126 +173,37 @@ function fmtMoney(v){
   }
   const formatted = scaled.toLocaleString('es-ES', {
     minimumFractionDigits,
-    maximumFractionDigits,
+    maximumFractionDigits
   });
   return `${formatted}${suffix}`.trim();
 }
 
-function buildScatterData(allProducts){
-  if (!Array.isArray(allProducts)) return [];
-  const parseValue = (value) => {
-    if (value == null) return null;
-    if (typeof value === 'number') {
-      return Number.isFinite(value) ? value : null;
-    }
-    const text = String(value)
-      .replace(/[€$]/g, '')
-      .replace(/\s+/g, '')
-      .replace(/\./g, '')
-      .replace(/,/g, '.');
-    const num = Number(text);
-    return Number.isFinite(num) ? num : null;
-  };
-  return allProducts
-    .map(item => {
-      if (!item) return null;
-      const priceRaw = item.price ?? item.avg_price ?? (item.extras && (item.extras['Avg. Unit Price($)'] ?? item.extras['Avg Unit Price($)'] ?? item.extras['Avg. Unit Price'] ?? item.extras.price));
-      const revenueRaw = item.revenue ?? (item.extras && (item.extras['Revenue($)'] ?? item.extras['Revenue'] ?? item.extras.revenue));
-      const price = parseValue(priceRaw);
-      const revenue = parseValue(revenueRaw);
-      if (!Number.isFinite(price) || !Number.isFinite(revenue) || price <= 0 || revenue <= 0) {
-        return null;
-      }
-      const name = item.name || item.path || item.category || '';
-      return { x: price, y: revenue, _name: name };
-    })
-    .filter(Boolean);
-}
+function renderTopCategoriesBar(categoriesAgg) {
+  const canvas = document.getElementById('topCategoriesChart');
+  if (!canvas) return;
+  const top = (Array.isArray(categoriesAgg) ? categoriesAgg : []).slice(0, 10);
+  const labels = top.map((x) => x.path || x.category || x.name || '');
+  const values = top.map((x) => Number(x.revenue) || 0);
 
-const $desde = document.querySelector('#fecha-desde');
-const $hasta = document.querySelector('#fecha-hasta');
-const $btnAplicar = document.querySelector('#btn-aplicar-tendencias');
-let currentData = null;
-
-if ($btnAplicar) {
-  $btnAplicar.addEventListener('click', function(ev){
-    ev.preventDefault();
-    if (typeof fetchTrends === 'function') fetchTrends();
-  });
-}
-
-async function fetchTrends(){
-  const $status = document.querySelector('#trends-status');
-  try {
-    if ($status) $status.textContent = 'Cargando...';
-    const fISO = $desde ? toISOFromDDMMYYYY($desde.value) : null;
-    const tISO = $hasta ? toISOFromDDMMYYYY($hasta.value) : null;
-    const url = new URL('/api/trends/summary', window.location.origin);
-    if (fISO) url.searchParams.set('from', fISO);
-    if (tISO) url.searchParams.set('to', tISO);
-    const res = await fetch(url.toString(), { credentials: 'same-origin' });
-    if (!res.ok) throw new Error('HTTP '+res.status);
-    const json = await res.json();
-    currentData = json;
-    renderTrends(json);
-    renderCategoriasTable(json);
-  } catch(e){
-    (window.toast?.error || alert).call(window.toast||window, 'No se pudieron cargar las tendencias.');
-  } finally {
-    if ($status) $status.textContent = '';
+  if (topCategoriesChart) {
+    topCategoriesChart.destroy();
+    topCategoriesChart = null;
   }
-}
 
-function renderTrends(summary){
-  if(!summary) return;
-  renderTopCategoriesBar(summary);
-  const products = Array.isArray(window.allProducts) ? window.allProducts : [];
-  renderPriceIncomeScatter(products);
-}
-
-function renderCategoriasTable(data){
-  const tbody = document.querySelector('#trendsTable tbody');
-  if(!tbody) return;
-  const rows = [...(data.top_categories || data.categories || [])];
-  let html = '';
-  rows.forEach(c => {
-    const productos = c.products_count || c.products || c.unique_products || 0;
-    const unidades = c.units || 0;
-    const ingresos = c.revenue || 0;
-    const precio = c.avg_price || 0;
-    const rating = c.avg_rating || 0;
-    const path = c.path || c.category || '';
-    html += `<tr>`
-      + `<td>${path}</td>`
-      + `<td>${fmtInt(productos)}</td>`
-      + `<td>${fmtInt(unidades)}</td>`
-      + `<td>€ ${fmtMoney(ingresos)}</td>`
-      + `<td>€ ${fmtPrice(precio)}</td>`
-      + `<td>${fmtFloat2(rating)}</td>`
-      + `</tr>`;
-  });
-  tbody.innerHTML = html;
-  const thead = document.querySelector('#trendsTable thead');
-  thead?.querySelectorAll('th[aria-sort]').forEach(th => th.removeAttribute('aria-sort'));
-}
-
-function renderTopCategoriesBar(data) {
-  const top = [...(data.top_categories || data.categories || [])].slice(0, 10);
-  const labels = top.map(x => x.path || x.category);
-  const values = top.map(x => x.revenue);
-  const ctx = document.getElementById('topCategoriesChart');
-  if (!ctx) return;
-  if (ctx._chart) { ctx._chart.destroy(); }
-
-  ctx._chart = new Chart(ctx, {
+  topCategoriesChart = new Chart(canvas, {
     type: 'bar',
     data: {
       labels,
-      datasets: [{ data: values, borderWidth: 0 }]
+      datasets: [
+        {
+          data: values,
+          borderWidth: 0
+        }
+      ]
     },
     options: {
+      ...chartOptsStable,
       indexAxis: 'y',
-      maintainAspectRatio: false,
       plugins: {
         legend: { display: false },
         tooltip: {
@@ -171,157 +213,183 @@ function renderTopCategoriesBar(data) {
         }
       },
       scales: {
-        x: { grid: { display: false }, ticks: { callback: (v)=> fmtMoney(v) } },
+        x: { grid: { display: false }, ticks: { callback: (v) => fmtMoney(v) } },
         y: { grid: { display: false } }
       }
     }
   });
 }
 
-function renderPriceIncomeScatter(products){
-  const canvas = document.getElementById('priceIncomeScatter');
-  if (!canvas) return;
-  const points = buildScatterData(products);
-  if (priceIncomeChart) {
-    priceIncomeChart.destroy();
-    priceIncomeChart = null;
-  }
-  if (!points.length) {
-    return;
-  }
+// Devuelve las top N categorías por ingresos con acumulado
+function buildParetoData(categories, N = 15) {
+  const rows = categories
+    .map((c) => ({ name: c.path || c.name, revenue: Number(c.revenue || 0) }))
+    .filter((r) => r.revenue > 0)
+    .sort((a, b) => b.revenue - a.revenue)
+    .slice(0, N);
 
-  priceIncomeChart = new Chart(canvas, {
-    type: 'scatter',
+  const total = rows.reduce((s, r) => s + r.revenue, 0) || 1;
+  let acc = 0;
+  const labels = [];
+  const bars = [];
+  const cumu = [];
+  rows.forEach((r) => {
+    labels.push(r.name);
+    bars.push(r.revenue);
+    acc += r.revenue;
+    cumu.push((acc / total) * 100);
+  });
+  return { labels, bars, cumu };
+}
+
+function renderRightPareto(categoriesAgg) {
+  const el = document.getElementById('paretoRevenueChart');
+  if (!el) return;
+  const ctx = el.getContext('2d');
+  const { labels, bars, cumu } = buildParetoData(Array.isArray(categoriesAgg) ? categoriesAgg : [], 15);
+
+  if (paretoChart) paretoChart.destroy();
+
+  paretoChart = new Chart(ctx, {
     data: {
+      labels,
       datasets: [
         {
-          data: points,
-          label: '',
-          pointBackgroundColor: '#6c8cff',
-          pointBorderColor: '#6c8cff',
-          pointRadius: 2.5,
-          pointHoverRadius: 6,
-          pointHitRadius: 8,
+          type: 'bar',
+          label: 'Ingresos',
+          data: bars,
+          yAxisID: 'y',
+          borderWidth: 0
+        },
+        {
+          type: 'line',
+          label: '% acumulado',
+          data: cumu,
+          yAxisID: 'y1',
+          tension: 0.25,
+          pointRadius: 0,
+          pointHitRadius: 6
         }
       ]
     },
     options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      layout: { padding: 8 },
+      ...chartOptsStable,
       plugins: {
-        legend: { display: false },
+        legend: { display: true },
         tooltip: {
-          displayColors: false,
           callbacks: {
-            title(items) {
-              const raw = items?.[0]?.raw || {};
-              const price = Number(raw.x);
-              const revenue = Number(raw.y);
-              return `€ ${fmtMoney(price)} · ${fmtMoney(revenue)}`;
-            },
-            label(ctx) {
-              const raw = ctx.raw || {};
-              return raw._name || '';
+            label: (ctx) => {
+              if (ctx.dataset.type === 'line') return '% acumulado: ' + ctx.formattedValue + '%';
+              return 'Ingresos: ' + fmt.money(ctx.raw);
             }
           }
         }
       },
       scales: {
-        x: {
-          type: 'logarithmic',
-          title: { display: true, text: 'Precio' },
-          ticks: {
-            callback(value) {
-              const num = Number(value);
-              return num > 0 ? `€ ${fmtMoney(num)}` : '';
-            }
-          },
-          grid: { color: 'rgba(255,255,255,0.05)' }
-        },
         y: {
-          type: 'logarithmic',
-          title: { display: true, text: 'Ingresos' },
+          beginAtZero: true,
           ticks: {
-            callback(value) {
-              const num = Number(value);
-              return num > 0 ? `€ ${fmtMoney(num)}` : '';
-            }
-          },
-          grid: { color: 'rgba(255,255,255,0.08)' }
+            callback: (v) => fmt.money(v)
+          }
+        },
+        y1: {
+          beginAtZero: true,
+          position: 'right',
+          grid: { drawOnChartArea: false },
+          min: 0,
+          max: 100,
+          ticks: { callback: (v) => v + '%' }
+        },
+        x: { ticks: { autoSkip: true, maxRotation: 0 } }
+      }
+    }
+  });
+}
+
+// Ajusta fillTrendsTable para usar SOLO categoriesAgg (sin productos)
+function fillTrendsTable(categoriesAgg) {
+  const tbody = document.querySelector('#trendsTable tbody');
+  if (!tbody) return;
+  const frag = document.createDocumentFragment();
+
+  categoriesAgg.forEach((c) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${c.path || c.name || ''}</td>
+      <td>${c.products ?? ''}</td>
+      <td>${Number(c.units || 0).toLocaleString('es-ES')}</td>
+      <td>${fmt.money(Number(c.revenue || 0))}</td>
+      <td>${Number(c.price || 0).toFixed(2).replace('.', ',')}</td>
+      <td>${Number(c.rating || 0).toFixed(2).replace('.', ',')}</td>
+    `;
+    frag.appendChild(tr);
+  });
+
+  tbody.replaceChildren(frag);
+  const thead = document.querySelector('#trendsTable thead');
+  thead?.querySelectorAll('th[aria-sort]').forEach((th) => th.removeAttribute('aria-sort'));
+}
+
+// Llama a esta función desde tu flujo principal tras obtener datos
+export function renderTrends(categoriesAgg, allProducts) {
+  const normalized = normalizeCategories(Array.isArray(categoriesAgg) ? categoriesAgg : []);
+  const productsSource = Array.isArray(allProducts) ? allProducts : getAllProductsSnapshot();
+  const products = normalizeProducts(productsSource);
+  window.__latestTrendsData = { categoriesAgg: normalized, allProducts: products };
+  renderTopCategoriesBar(normalized);
+  renderRightPareto(normalized);
+  fillTrendsTable(normalized);
+}
+
+export function mountTrendsToggle() {
+  if (window.__trendsToggleMounted) return;
+  window.__trendsToggleMounted = true;
+
+  document.addEventListener(
+    'click',
+    (ev) => {
+      const btn = ev.target.closest('[data-action="toggle-trends"]');
+      if (!btn) return;
+
+      const container = document.getElementById('section-trends');
+      const sec1 = document.getElementById('trends');
+      const sec2 = document.getElementById('trends-bottom');
+      const opening = sec1 ? sec1.hasAttribute('hidden') : true;
+
+      if (opening) {
+        container?.removeAttribute('hidden');
+        sec1?.removeAttribute('hidden');
+        sec2?.removeAttribute('hidden');
+        ensureDefaultDates();
+
+        if (window.__latestTrendsData) {
+          const data = window.__latestTrendsData.categoriesAgg || [];
+          if (!topCategoriesChart) {
+            renderTopCategoriesBar(data);
+          }
+          if (!paretoChart) {
+            renderRightPareto(data);
+          }
+          fillTrendsTable(data);
+        } else {
+          fetchTrends();
         }
-      }
-    }
-  });
-}
 
-const scheduleScatterUpdate = typeof queueMicrotask === 'function'
-  ? queueMicrotask
-  : (cb) => Promise.resolve().then(cb);
+        requestAnimationFrame(() => {
+          paretoChart?.resize();
+          topCategoriesChart?.resize?.();
+        });
 
-try {
-  const initial = Array.isArray(window.allProducts) ? window.allProducts : [];
-  let allProductsValue = initial;
-  Object.defineProperty(window, 'allProducts', {
-    configurable: true,
-    get() {
-      return allProductsValue;
-    },
-    set(value) {
-      allProductsValue = value;
-      scheduleScatterUpdate(() => {
-        const arr = Array.isArray(value) ? value : [];
-        renderPriceIncomeScatter(arr);
-      });
-    }
-  });
-  if (initial.length) {
-    scheduleScatterUpdate(() => renderPriceIncomeScatter(initial));
-  }
-} catch (err) {
-  // ignore if property cannot be redefined
-}
-
-function showTrendsSection(){
-  const $trends = document.querySelector('#section-trends');
-  const $list = document.querySelector('#section-products');
-  if ($trends) $trends.hidden = false;
-  if ($list) $list.hidden = true;
-
-  const $desde = document.querySelector('#fecha-desde');
-  const $hasta = document.querySelector('#fecha-hasta');
-  try {
-    const today = new Date();
-    const from = new Date(today); from.setDate(today.getDate() - 29);
-    if ($desde && !$desde.value) $desde.value = formatDDMMYYYY(from);
-    if ($hasta && !$hasta.value) $hasta.value = formatDDMMYYYY(today);
-  } catch(_) {}
-
-  if (typeof fetchTrends === 'function') {
-    fetchTrends();
-  } else {
-    (async function(){
-      const url = new URL('/api/trends/summary', window.location.origin);
-      const res = await fetch(url.toString(), { credentials:'same-origin' });
-      if (res.ok) {
-        const json = await res.json();
-        if (typeof renderTrends === 'function') renderTrends(json);
+        sec1?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       } else {
-        (window.toast?.error || alert).call(window.toast||window, 'No se pudieron cargar las tendencias.');
+        container?.setAttribute('hidden', '');
+        sec1?.setAttribute('hidden', '');
+        sec2?.setAttribute('hidden', '');
       }
-    })();
-  }
-
-  const firstChart = document.querySelector('#top-left, #topCategoriesChart');
-  if (firstChart && typeof firstChart.scrollIntoView === 'function') {
-    firstChart.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }
+    },
+    { passive: true }
+  );
 }
 
-document.addEventListener('click', function(e){
-  const btn = e.target.closest('#btn-ver-tendencias, .btn-ver-tendencias, [data-action="show-trends"]');
-  if (!btn) return;
-  e.preventDefault();
-  showTrendsSection();
-});
-export {};
+mountTrendsToggle();
+
