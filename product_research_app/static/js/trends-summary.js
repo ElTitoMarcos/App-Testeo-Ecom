@@ -227,7 +227,6 @@ function buildParetoData(categories, N = 15) {
     .filter((r) => r.revenue > 0)
     .sort((a, b) => b.revenue - a.revenue)
     .slice(0, N);
-
   const total = rows.reduce((s, r) => s + r.revenue, 0) || 1;
   let acc = 0;
   const labels = [];
@@ -247,7 +246,6 @@ function renderRightPareto(categoriesAgg) {
   if (!el) return;
   const ctx = el.getContext('2d');
   const { labels, bars, cumu } = buildParetoData(Array.isArray(categoriesAgg) ? categoriesAgg : [], 15);
-
   if (paretoChart) paretoChart.destroy();
 
   paretoChart = new Chart(ctx, {
@@ -379,7 +377,6 @@ export function mountTrendsToggle() {
           paretoChart?.resize();
           topCategoriesChart?.resize?.();
         });
-
         sec1?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       } else {
         container?.setAttribute('hidden', '');
