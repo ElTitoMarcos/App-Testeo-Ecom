@@ -93,7 +93,7 @@ body.dark .drawer.right {
   border-left: 1px solid #243150;
 }
 
-.hidden { display: none; }
+.hidden { display: none !important; }
 .col-hidden{ display:none; }
 
 .legend-btn {
@@ -1026,7 +1026,7 @@ th.col-desire, td.col-desire { width: 360px; max-width: 360px; }
 /* BEGIN: TRENDS COMPACT */
 .trends-grid {
   display: grid;
-  grid-template-columns: 1fr 1.25fr;
+  grid-template-columns: 1fr 1.2fr;
   gap: 12px;
 }
 
@@ -1036,7 +1036,20 @@ th.col-desire, td.col-desire { width: 360px; max-width: 360px; }
 }
 
 .chart--right {
-  height: 440px;
+  height: 460px;
+}
+
+.temporalidad-bar {
+  display:flex;
+  align-items:center;
+  gap:10px;
+  margin: 8px 0 4px;
+  opacity: .9;
+}
+
+.temporalidad-bar label {
+  font-size: 12px;
+  opacity: .8;
 }
 
 .trends-table-wrap {
@@ -1056,7 +1069,7 @@ th.col-desire, td.col-desire { width: 360px; max-width: 360px; }
   position: sticky;
   top: 0;
   z-index: 1;
-  background: var(--panel, #0d1021);
+  background: var(--tbl-head, #0d1021);
   padding: 6px 8px;
   white-space: nowrap;
 }
@@ -1067,6 +1080,7 @@ th.col-desire, td.col-desire { width: 360px; max-width: 360px; }
   text-overflow: ellipsis;
   overflow: hidden;
   line-height: 1.2;
+  height: 36px;
 }
 
 .table-compact tbody tr:nth-child(even) {
