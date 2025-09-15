@@ -166,14 +166,18 @@ body.dark .skeleton{background:#333;}
   <div id="trends-status"></div>
   <section id="trends" class="trends-grid" hidden>
     <div class="card" id="top-left">
-      <canvas id="topCategoriesChart" class="chart-canvas"></canvas>
+      <div class="chart-wrap chart-wrap--sm">
+        <canvas id="topCategoriesChart"></canvas>
+      </div>
     </div>
 
     <div class="card" id="top-right">
       <div class="chart-header">
         <h4>Pareto de ingresos (Top 15)</h4>
       </div>
-      <canvas id="paretoRevenueChart" class="chart-canvas"></canvas>
+      <div class="chart-wrap">
+        <canvas id="paretoRevenueChart"></canvas>
+      </div>
     </div>
   </section>
 
@@ -668,8 +672,15 @@ function renderTable() {
   }
   // Clear body
   tbody.innerHTML = '';
+  const visibleProducts = Array.isArray(products) ? [...products] : [];
+  window.__visibleProducts = visibleProducts;
+  const allSource = Array.isArray(allProducts) && allProducts.length ? allProducts : visibleProducts;
+  window.__allProducts = allSource;
+  document.dispatchEvent(new CustomEvent('visible-products-changed', {
+    detail: { count: visibleProducts.length }
+  }));
   // Render rows
-    products.forEach(item => {
+  products.forEach(item => {
     const tr = document.createElement('tr');
     if (item.isDuplicate) {
       tr.classList.add('is-duplicate');
