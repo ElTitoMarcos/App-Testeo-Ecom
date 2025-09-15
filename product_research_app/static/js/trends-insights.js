@@ -104,15 +104,20 @@ function writeInsights(lines){
 }
 
 function getData() {
-  const agg = window.__latestTrendsData?.categoriesAgg || [];
-  const all = window.__latestTrendsData?.allProducts || [];
-  return { agg, all };
+  const scope = window.__latestTrendsData;
+  if (scope?.categoriesAgg?.length || scope?.allProducts?.length) {
+    return scope;
+  }
+  if (typeof window.computeTrendsScope === 'function') {
+    return window.computeTrendsScope();
+  }
+  return { categoriesAgg: [], allProducts: [] };
 }
 
 document.addEventListener('click', (ev) => {
   if (ev.target?.id !== 'btnLocalInsights') return;
-  const { agg, all } = getData();
-  const lines = [...categoryBullets(agg), ...productBullets(all)];
+  const { categoriesAgg, allProducts } = getData();
+  const lines = [...categoryBullets(categoriesAgg), ...productBullets(allProducts)];
   writeInsights(lines);
 });
 

@@ -1036,18 +1036,22 @@ th.col-desire, td.col-desire { width: 360px; max-width: 360px; }
 #top-right {
   display: flex;
   flex-direction: column;
-  contain: layout paint size; /* rompe bucles de resize */
+  contain: content;
 }
 
 /* Altura fija y estabilidad de charts: evita que queden ocultos */
 .card { position: relative; }
-.chart-canvas{
-  display:block;
-  width:100% !important;
-  height:var(--h,420px) !important;  /* altura explícita */
+.chart-wrap{
+  position: relative;
+  width: 100%;
+  height: 420px;
 }
-#topCategoriesChart{ --h:360px; }
-#paretoRevenueChart{ --h:420px; }
+.chart-wrap--sm{ height: 360px; }
+.chart-wrap > canvas{
+  width: 100% !important;
+  height: 100% !important;
+  display: block;
+}
 
 .two-col {
   display: grid;
@@ -1065,7 +1069,7 @@ th.col-desire, td.col-desire { width: 360px; max-width: 360px; }
 /* Tabla compacta sin scroll horizontal */
 .table--compact{
   font-size:12.5px;
-  overflow:hidden;               /* corta scroll horizontal del contenedor */
+  overflow:hidden;
 }
 .table--compact thead th{
   position:sticky; top:0; z-index:2;
@@ -1076,8 +1080,8 @@ th.col-desire, td.col-desire { width: 360px; max-width: 360px; }
   display:block;
   max-height:320px;
   overflow-y:auto;
-  overflow-x:hidden;             /* <- quita el slider horizontal */
-  scrollbar-gutter: stable both-edges; /* alinea thead/tbody con scrollbar */
+  overflow-x:hidden;
+  scrollbar-gutter: stable both-edges;
 }
 .table--compact thead, .table--compact tbody tr{
   display:table; width:100%; table-layout:fixed;
@@ -1086,7 +1090,7 @@ th.col-desire, td.col-desire { width: 360px; max-width: 360px; }
   padding:6px 10px;
   overflow:hidden;
   text-overflow:ellipsis;
-  white-space:nowrap;            /* por defecto en celdas normales */
+  white-space:nowrap;
 }
 /* Categorías en varias líneas (wrap) */
 .table--compact td:first-child{
