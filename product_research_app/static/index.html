@@ -71,9 +71,7 @@ body.dark .skeleton{background:#333;}
 
 /* Fila de gráficos */
 .trends-row {
-  display: grid;
-  grid-template-columns: 2fr 1.2fr;
-  gap: 16px;
+  display: block;
   margin-top: 8px;
 }
 
@@ -82,7 +80,6 @@ body.dark .skeleton{background:#333;}
 #section-trends .card.lg { min-height: 380px; }
 #section-trends .card.md { min-height: 380px; }
 #section-trends .card-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
-#chart-top-categories, #chart-pareto { width:100%; height:320px !important; }
 
 /* Tabla compacta */
 .table.compact th, .table.compact td { padding: 8px 10px; }
@@ -165,30 +162,34 @@ body.dark .skeleton{background:#333;}
   </div>
   <div id="trends-status"></div>
   <div class="trends-row">
-    <div id="card-top-categories" class="card lg">
-      <canvas id="chart-top-categories"></canvas>
-    </div>
-    <div id="card-pareto" class="card md">
-      <div class="card-header">
-        <span>Pareto de ingresos (Top 10)</span>
-        <button id="btn-log-trends" class="mini">Log</button>
+    <div class="trends-grid">
+      <div id="card-top-categories" class="card lg">
+        <div id="chart-left" class="chart"></div>
       </div>
-      <canvas id="chart-pareto"></canvas>
+      <div id="card-pareto" class="card md">
+        <div class="card-header">
+          <span>Pareto de ingresos (Top 10)</span>
+          <button id="btn-log-trends" class="mini">Log</button>
+        </div>
+        <div id="chart-right" class="chart chart--right"></div>
+      </div>
     </div>
   </div>
-  <table id="tbl-categorias" class="table compact">
-    <thead>
-      <tr>
-        <th data-sort-key="categoria" role="button">Categorías</th>
-        <th data-sort-key="productos" role="button">Productos</th>
-        <th data-sort-key="unidades" role="button">Unidades</th>
-        <th data-sort-key="ingresos" role="button">Ingresos</th>
-        <th data-sort-key="precio" role="button">Precio</th>
-        <th data-sort-key="rating" role="button">Rating</th>
-      </tr>
-    </thead>
-    <tbody></tbody>
-  </table>
+  <div class="trends-table-wrap">
+    <table id="trendTable" class="table table-compact">
+      <thead>
+        <tr>
+          <th class="sortable" data-key="categoria">Categorías <span class="sort-caret">↕</span></th>
+          <th class="sortable" data-key="productos">Productos <span class="sort-caret">↕</span></th>
+          <th class="sortable" data-key="unidades">Unidades <span class="sort-caret">↕</span></th>
+          <th class="sortable" data-key="ingresos">Ingresos <span class="sort-caret">↕</span></th>
+          <th class="sortable" data-key="precio">Precio <span class="sort-caret">↕</span></th>
+          <th class="sortable" data-key="rating">Rating <span class="sort-caret">↕</span></th>
+        </tr>
+      </thead>
+      <tbody><!-- mantiene el renderizado existente de filas --></tbody>
+    </table>
+  </div>
 </section>
 
 <section id="section-products">
@@ -260,7 +261,7 @@ body.dark .skeleton{background:#333;}
 <script type="module" src="/static/js/manage-groups.js"></script>
 <script src="/static/js/winner_score.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <script type="module" src="/static/js/trends-summary.js"></script>
 <script type="module">
 import * as api from "/static/js/net.js";
