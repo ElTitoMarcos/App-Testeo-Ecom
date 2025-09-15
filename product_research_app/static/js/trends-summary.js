@@ -289,7 +289,10 @@ function renderRightPareto(categoriesAgg) {
             max: 100,
             ticks: { callback: (v) => v + '%' }
           },
-          x: { ticks: { autoSkip: true, maxRotation: 0 } }
+          x: {
+            ticks: { display: false },
+            grid: { display: false }
+          }
         }
       }
     });
