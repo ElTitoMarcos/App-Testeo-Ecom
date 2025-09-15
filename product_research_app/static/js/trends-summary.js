@@ -1,340 +1,445 @@
 import { fmtInt, fmtPrice, fmtFloat2 } from './format.js';
 
-function toISOFromDDMMYYYY(v) {
-  const s = (v || '').trim();
-  const m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-  if (!m) return null;
-  const [, dd, mm, yyyy] = m;
-  return `${yyyy}-${mm}-${dd}`;
-}
-function formatDDMMYYYY(d) {
-  const dd = String(d.getDate()).padStart(2, '0');
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const yyyy = d.getFullYear();
-  return `${dd}/${mm}/${yyyy}`;
-}
-
-function formatMoney(v){
-  if (v == null) return '0';
-  const n = Number(v) || 0;
-  return n.toLocaleString('es-ES', { maximumFractionDigits: 0 });
-}
-
-const $desde = document.querySelector('#fecha-desde');
-const $hasta = document.querySelector('#fecha-hasta');
-const $btnAplicar = document.querySelector('#btn-aplicar-tendencias');
-const btnLog = document.getElementById('btn-log-trends');
-
-let currentData = null;
-let paretoLog = false;
 const echarts = window.echarts;
-let topCategoriesChart = null;
-let paretoChart = null;
-let chartsResizeBound = false;
+const toast = window.toast;
 
-function bindChartsResize() {
-  if (chartsResizeBound) return;
-  window.addEventListener('resize', () => {
-    if (topCategoriesChart) topCategoriesChart.resize();
-    if (paretoChart) paretoChart.resize();
+const state = {
+  categories: [],
+  granularity: '',
+  loaded: false,
+};
+
+let loadPromise = null;
+(function initTrendsToggle(){
+  const onReady = (fn) => (document.readyState === 'loading')
+    ? document.addEventListener('DOMContentLoaded', fn, {once:true})
+    : fn();
+
+  onReady(() => {
+    // Selectores robustos
+    const btn   = document.querySelector('#btnVerTendencias, [data-action="toggle-trends"]');
+    const sect  = document.getElementById('section-trends');     // <section id="section-trends" hidden>
+    const panel = document.getElementById('tendenciasPanel');    // contenedor interno
+
+    if (!btn || !sect) {
+      console.warn('[Trends] Falta btnVerTendencias o #section-trends');
+      return;
+    }
+
+    // Asegura clase utilitaria para fallback
+    try {
+      const hasHidden = !!Array.from(document.styleSheets)
+        .some(s => Array.from(s.cssRules||[]).some(r => r.selectorText === '.hidden'));
+      if (!hasHidden) {
+        const style = document.createElement('style');
+        style.textContent = '.hidden{display:none!important}';
+        document.head.appendChild(style);
+      }
+    } catch {}
+
+    const show = () => {
+      sect.removeAttribute('hidden');   // <- la clave
+      sect.classList.remove('hidden');
+      btn.classList.add('active');
+      if (panel) panel.classList.remove('hidden');
+      btn.setAttribute('aria-expanded', 'true');
+      try {
+        const promise = typeof ensureTrendsData === 'function' ? ensureTrendsData() : null;
+        if (promise?.catch) promise.catch(() => {});
+      } catch (err) {
+        console.debug('[Trends] ensureTrendsData:', err);
+      }
+      // Forzar re-layout y resize de gráficos si ya existen
+      requestAnimationFrame(() => {
+        window.leftChart  && window.leftChart.resize?.();
+        window.rightChart && window.rightChart.resize?.();
+      });
+    };
+
+    const hide = () => {
+      sect.setAttribute('hidden', '');  // <- se oculta de nuevo
+      sect.classList.add('hidden');
+      if (panel) panel.classList.add('hidden');
+      btn.classList.remove('active');
+      btn.setAttribute('aria-expanded', 'false');
+    };
+
+    // Estado inicial opcional: cerrado si tiene hidden
+    btn.classList.toggle('active', !sect.hasAttribute('hidden'));
+    if (panel) panel.classList.toggle('hidden', sect.hasAttribute('hidden'));
+    btn.setAttribute('aria-expanded', sect.hasAttribute('hidden') ? 'false' : 'true');
+
+    // Delegación + prevención de submit accidental
+    document.addEventListener('click', (e) => {
+      const trigger = e.target.closest('#btnVerTendencias, [data-action="toggle-trends"]');
+      if (!trigger) return;
+      e.preventDefault();
+      sect.hasAttribute('hidden') ? show() : hide();
+    }, false);
   });
-  chartsResizeBound = true;
-}
+})();
 
-if ($btnAplicar) {
-  $btnAplicar.addEventListener('click', function(ev){
-    ev.preventDefault();
-    if (typeof fetchTrends === 'function') fetchTrends();
-  });
-}
-
-btnLog?.addEventListener('click', (ev) => {
-  ev.preventDefault();
-  paretoLog = !paretoLog;
-  renderPareto(currentData);
-});
-
-async function fetchTrends(){
-  const $status = document.querySelector('#trends-status');
-  try {
-    if ($status) $status.textContent = 'Cargando...';
-    const fISO = $desde ? toISOFromDDMMYYYY($desde.value) : null;
-    const tISO = $hasta ? toISOFromDDMMYYYY($hasta.value) : null;
-    const url = new URL('/api/trends/summary', window.location.origin);
-    if (fISO) url.searchParams.set('from', fISO);
-    if (tISO) url.searchParams.set('to', tISO);
-    const res = await fetch(url.toString(), { credentials: 'same-origin' });
-    if (!res.ok) throw new Error('HTTP '+res.status);
-    const json = await res.json();
-    currentData = json;
-    renderTrends(json);
-    renderCategoriasTable(json);
-  } catch(e){
-    (window.toast?.error || alert).call(window.toast||window, 'No se pudieron cargar las tendencias.');
-  } finally {
-    if ($status) $status.textContent = '';
+function ensureMetricChips(anchorSelector, metrics, onChange) {
+  const anchor = document.querySelector(anchorSelector);
+  if (!anchor) return;
+  let bar = anchor.previousElementSibling;
+  if (!bar || !bar.classList?.contains('metric-chips')) {
+    bar = document.createElement('div');
+    bar.className = 'metric-chips';
+    Object.assign(bar.style, { display: 'flex', gap: '6px', margin: '0 0 6px 0' });
+    anchor.parentNode?.insertBefore(bar, anchor);
   }
-}
-
-function renderTrends(summary){
-  if(!summary) return;
-  renderTopCategoriesBar(summary);
-  renderPareto(summary);
-}
-
-function renderCategoriasTable(data){
-  const tbody = document.querySelector('#trendTable tbody');
-  if (!tbody) return;
-  const rows = [...(data.top_categories || data.categories || [])];
-  const toNumber = (value) => {
-    const n = Number(value);
-    return Number.isFinite(n) ? n : 0;
-  };
-  let html = '';
-  rows.forEach(c => {
-    const categoria = c.path || c.category || '';
-    const productos = toNumber(c.products_count ?? c.products ?? c.unique_products ?? 0);
-    const unidades = toNumber(c.units ?? 0);
-    const ingresos = toNumber(c.revenue ?? 0);
-    const precio = toNumber(c.avg_price ?? 0);
-    const rating = toNumber(c.avg_rating ?? 0);
-    html += `<tr>`
-      + `<td>${categoria}</td>`
-      + `<td data-raw="${productos}">${fmtInt(productos)}</td>`
-      + `<td data-raw="${unidades}">${fmtInt(unidades)}</td>`
-      + `<td data-raw="${ingresos}">${formatMoney(ingresos)}</td>`
-      + `<td data-raw="${precio}">${fmtPrice(precio)}</td>`
-      + `<td data-raw="${rating}">${fmtFloat2(rating)}</td>`
-      + `</tr>`;
+  bar.innerHTML = '';
+  metrics.forEach((metric, index) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = metric[0].toUpperCase() + metric.slice(1);
+    btn.className = 'chip';
+    btn.dataset.metric = metric;
+    btn.addEventListener('click', () => {
+      bar.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
+      btn.classList.add('active');
+      onChange(metric);
+    });
+    if (index === 0) btn.classList.add('active');
+    bar.appendChild(btn);
   });
-  tbody.innerHTML = html;
-  const table = document.getElementById('trendTable');
-  if (table) {
-    table.querySelectorAll('th.sortable .sort-caret').forEach(el => {
-      el.textContent = '↕';
-    });
-    table.querySelectorAll('th.sortable').forEach(th => {
-      if (typeof th._resetSort === 'function') th._resetSort();
-    });
-  }
 }
 
-function renderTopCategoriesBar(data) {
+function initLeftChart(dataByCategory) {
   if (!echarts) return;
-  const top = [...(data.top_categories || data.categories || [])].slice(0, 10);
-  const labels = top.map(x => x.path || x.category);
-  const values = top.map(x => Number(x.revenue) || 0);
-  const chartDom = document.getElementById('chart-left');
-  if (!chartDom) return;
+  const dom = document.getElementById('chart-left');
+  if (!dom) return;
+  const chart = echarts.getInstanceByDom(dom) || echarts.init(dom, null, { renderer: 'canvas' });
+  window.leftChart = chart;
 
-  if (!topCategoriesChart) {
-    topCategoriesChart = echarts.init(chartDom, null, { renderer: 'canvas' });
+  const truncate = (s, n = 42) => (s?.length ?? 0) > n ? `${s.slice(0, n - 1)}…` : (s || '');
+  let currentMetric = 'ingresos';
+
+  const metricLabels = {
+    ingresos: 'Ingresos',
+    unidades: 'Unidades',
+    precio: 'Precio',
+    rating: 'Rating',
+  };
+
+  const metricFormatters = {
+    ingresos: (v) => fmtInt(v),
+    unidades: (v) => fmtInt(v),
+    precio: (v) => fmtPrice(v),
+    rating: (v) => fmtFloat2(v),
+  };
+
+  const getSeries = () => dataByCategory
+    .map(row => ({
+      name: row.categoria,
+      full: row.categoria,
+      value: Number(row[currentMetric]) || 0,
+    }))
+    .sort((a, b) => b.value - a.value)
+    .slice(0, 20);
+
+  function render() {
+    const rows = getSeries();
+    const labels = rows.map(r => truncate(r.name));
+    const values = rows.map(r => r.value);
+    const formatter = metricFormatters[currentMetric] ?? (v => v);
+
+    chart.setOption({
+      backgroundColor: 'transparent',
+      grid: { top: 40, right: 20, bottom: 10, left: 260, containLabel: false },
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'shadow' },
+        formatter: (points) => {
+          const item = points?.[0];
+          if (!item) return '';
+          const row = rows[item.dataIndex];
+          return `${row.full}<br/>${metricLabels[currentMetric]}: ${formatter(values[item.dataIndex])}`;
+        },
+      },
+      xAxis: {
+        type: 'value',
+        axisLabel: { fontSize: 11, formatter: (value) => formatter(value) },
+      },
+      yAxis: {
+        type: 'category',
+        data: labels,
+        axisLabel: { fontSize: 11, margin: 8 },
+        axisTick: { show: false },
+      },
+      series: [
+        {
+          type: 'bar',
+          data: values,
+          barWidth: 14,
+          emphasis: { focus: 'series' },
+        },
+      ],
+    }, true);
   }
+
+  ensureMetricChips('#chart-left', ['ingresos', 'unidades', 'precio', 'rating'], (metric) => {
+    currentMetric = metric;
+    render();
+  });
+
+  render();
+  bindChartResize(dom, chart);
+}
+
+function initRightChart(points) {
+  if (!echarts) return;
+  const dom = document.getElementById('chart-right');
+  if (!dom) return;
+  const chart = echarts.getInstanceByDom(dom) || echarts.init(dom, null, { renderer: 'canvas' });
+  window.rightChart = chart;
+
+  const scatterData = points
+    .map(point => ({
+      categoria: point.categoria,
+      precio: Number(point.precio) || 0,
+      ingresos: Number(point.ingresos) || 0,
+    }))
+    .filter(point => Number.isFinite(point.precio) && Number.isFinite(point.ingresos));
 
   const option = {
     backgroundColor: 'transparent',
-    grid: { top: 30, right: 30, bottom: 20, left: 140, containLabel: true },
+    grid: { top: 50, right: 20, bottom: 70, left: 60, containLabel: true },
     tooltip: {
-      trigger: 'axis',
-      axisPointer: { type: 'shadow' },
+      trigger: 'item',
       formatter: (params) => {
-        const item = params && params[0];
-        if (!item) return '';
-        return `${item.name}<br>${item.marker} Ingresos: ${formatMoney(item.value)}`;
-      }
+        const data = params.data;
+        if (!data) return '';
+        return `${data.categoria}<br/>Precio: ${fmtPrice(data.precio)}<br/>Ingresos: ${fmtInt(data.ingresos)}`;
+      },
     },
-    xAxis: {
-      type: 'value',
-      splitLine: { show: false },
-      axisLabel: {
-        fontSize: 12,
-        formatter: (value) => formatMoney(value)
-      }
-    },
-    yAxis: {
-      type: 'category',
-      inverse: true,
-      data: labels,
-      axisLabel: { interval: 0, fontSize: 12 },
-      axisTick: { show: false }
-    },
+    xAxis: { type: 'value', name: 'Precio', axisLabel: { fontSize: 11, formatter: (value) => fmtPrice(value) } },
+    yAxis: { type: 'value', name: 'Ingresos', axisLabel: { fontSize: 11, formatter: (value) => fmtInt(value) } },
+    dataZoom: [
+      { type: 'slider', xAxisIndex: 0, height: 18, bottom: 18 },
+      { type: 'inside', xAxisIndex: 0 },
+    ],
     series: [
       {
-        name: 'Ingresos',
-        type: 'bar',
-        barWidth: '55%',
-        data: values,
-        itemStyle: { borderRadius: [0, 6, 6, 0] },
-        emphasis: { focus: 'series' }
-      }
-    ]
+        type: 'scatter',
+        symbolSize: 10,
+        data: scatterData.map(item => ({ value: [item.precio, item.ingresos], ...item })),
+        emphasis: { focus: 'series' },
+      },
+    ],
   };
 
-  topCategoriesChart.setOption(option, true);
-  bindChartsResize();
+  chart.setOption(option, true);
+  document.querySelector('#temporalidad-helper')?.classList.add('visible');
+  bindChartResize(dom, chart);
 }
 
-function renderPareto(data) {
-  if (!data || !echarts) return;
-  const src = [...(data.top_categories || data.categories || [])];
-  src.sort((a, b) => (Number(b.revenue) || 0) - (Number(a.revenue) || 0));
-  const top = src.slice(0, 10);
+function bindChartResize(dom, chart) {
+  if (!dom || !chart) return;
+  if (dom.__resizeHandler) return;
+  const handler = () => chart.resize();
+  dom.__resizeHandler = handler;
+  window.addEventListener('resize', handler);
+}
 
-  const labels = top.map(x => x.path || x.category);
-  const ingresos = top.map(x => Number(x.revenue) || 0);
-  const total = ingresos.reduce((sum, value) => sum + value, 0) || 1;
-  let acc = 0;
-  const acumuladoPct = ingresos.map(v => {
-    acc += v;
-    const pct = (acc / total) * 100;
-    return Number.isFinite(pct) ? +pct.toFixed(1) : 0;
+function toNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function adaptCategories(list) {
+  if (!Array.isArray(list)) return [];
+  return list.map(item => {
+    const categoria = item.path ?? item.category ?? '';
+    const productos = toNumber(item.products_count ?? item.products ?? item.unique_products);
+    const unidades = toNumber(item.units);
+    const ingresos = toNumber(item.revenue);
+    const precio = toNumber(item.avg_price ?? item.price);
+    const rating = toNumber(item.avg_rating ?? item.rating);
+    return { categoria, productos, unidades, ingresos, precio, rating };
+  }).sort((a, b) => b.ingresos - a.ingresos);
+}
+
+function renderTrendTable(rows) {
+  const table = document.getElementById('trendTable');
+  if (!table) return;
+  const tbody = table.querySelector('tbody');
+  if (!tbody) return;
+
+  tbody.textContent = '';
+  const frag = document.createDocumentFragment();
+
+  rows.forEach(row => {
+    const tr = document.createElement('tr');
+
+    const tdCategoria = document.createElement('td');
+    tdCategoria.textContent = row.categoria;
+    if (row.categoria?.length > 60) tdCategoria.title = row.categoria;
+    tr.appendChild(tdCategoria);
+
+    const tdProductos = document.createElement('td');
+    tdProductos.textContent = fmtInt(row.productos);
+    tdProductos.setAttribute('data-raw', String(row.productos));
+    tr.appendChild(tdProductos);
+
+    const tdUnidades = document.createElement('td');
+    tdUnidades.textContent = fmtInt(row.unidades);
+    tdUnidades.setAttribute('data-raw', String(row.unidades));
+    tr.appendChild(tdUnidades);
+
+    const tdIngresos = document.createElement('td');
+    tdIngresos.textContent = fmtInt(row.ingresos);
+    tdIngresos.setAttribute('data-raw', String(row.ingresos));
+    tr.appendChild(tdIngresos);
+
+    const tdPrecio = document.createElement('td');
+    tdPrecio.textContent = fmtPrice(row.precio);
+    tdPrecio.setAttribute('data-raw', String(row.precio));
+    tr.appendChild(tdPrecio);
+
+    const tdRating = document.createElement('td');
+    tdRating.textContent = fmtFloat2(row.rating);
+    tdRating.setAttribute('data-raw', String(row.rating));
+    tr.appendChild(tdRating);
+
+    frag.appendChild(tr);
   });
 
-  const paretoDom = document.getElementById('chart-right');
-  if (!paretoDom) return;
+  tbody.appendChild(frag);
 
-  if (!paretoChart) {
-    paretoChart = echarts.init(paretoDom, null, { renderer: 'canvas' });
-  }
-
-  const barData = ingresos.map(v => (paretoLog && v <= 0 ? null : v));
-  const yAxisLeft = {
-    type: paretoLog ? 'log' : 'value',
-    name: 'Ingresos',
-    axisLabel: {
-      fontSize: 12,
-      formatter: (value) => formatMoney(value)
-    }
-  };
-  if (!paretoLog) yAxisLeft.min = 0;
-
-  const paretoOption = {
-    backgroundColor: 'transparent',
-    grid: { top: 50, right: 40, bottom: 90, left: 60, containLabel: true },
-    tooltip: {
-      trigger: 'axis',
-      axisPointer: { type: 'shadow' },
-      formatter: (params) => {
-        if (!Array.isArray(params) || params.length === 0) return '';
-        const lines = [params[0].name];
-        params.forEach(item => {
-          if (item.seriesName === 'Ingresos') {
-            lines.push(`${item.marker} ${item.seriesName}: ${formatMoney(item.value)}`);
-          } else {
-            const pct = Number(item.value) || 0;
-            lines.push(`${item.marker} ${item.seriesName}: ${pct.toLocaleString('es-ES', { maximumFractionDigits: 1 })}%`);
-          }
-        });
-        return lines.join('<br>');
-      }
-    },
-    legend: { top: 8, textStyle: { fontSize: 12 } },
-    dataZoom: [
-      { type: 'slider', xAxisIndex: 0, height: 16, bottom: 50 },
-      { type: 'inside', xAxisIndex: 0 }
-    ],
-    xAxis: {
-      type: 'category',
-      data: labels,
-      axisLabel: { interval: 0, rotate: 28, fontSize: 11, margin: 12 },
-      axisTick: { alignWithLabel: true }
-    },
-    yAxis: [
-      yAxisLeft,
-      {
-        type: 'value',
-        name: '% acumulado',
-        min: 0,
-        max: 100,
-        position: 'right',
-        axisLabel: { formatter: '{value} %', fontSize: 12 }
-      }
-    ],
-    series: [
-      { name: 'Ingresos', type: 'bar', barWidth: '55%', data: barData, emphasis: { focus: 'series' } },
-      { name: '% acumulado', type: 'line', yAxisIndex: 1, smooth: true, symbolSize: 6, lineStyle: { width: 3 }, data: acumuladoPct }
-    ]
-  };
-
-  paretoChart.setOption(paretoOption, true);
-  bindChartsResize();
+  table.querySelectorAll('th.sortable').forEach(th => {
+    th.querySelector('.sort-caret')?.textContent = '↕';
+    th.setAttribute('aria-sort', 'none');
+    if (typeof th._resetSort === 'function') th._resetSort();
+  });
 }
 
-// BEGIN: TABLE SORT
+function toSortKey(value) {
+  if (typeof value === 'number') return value;
+  const raw = String(value ?? '').trim();
+  if (!raw) return '';
+  const normalized = raw.replace(/\s+/g, '').replace(/\./g, '').replace(',', '.');
+  const num = Number(normalized);
+  return Number.isFinite(num) ? num : raw.toLowerCase();
+}
+
 (function makeTableSortable() {
   const table = document.getElementById('trendTable');
   if (!table) return;
-
   const tbody = table.querySelector('tbody');
-  const getCell = (row, idx) => row.children[idx];
-  const getValue = (cell) => cell?.getAttribute('data-raw') ?? cell?.innerText?.trim() ?? '';
+  if (!tbody) return;
 
-  const toComparable = (v) => {
-    const s = String(v).replace(/\./g, '').replace(',', '.'); // 1.234,56 -> 1234.56
-    const n = Number(s);
-    return Number.isFinite(n) ? n : String(v).toLowerCase();
-  };
-
-  table.querySelectorAll('th.sortable').forEach((th, idx) => {
+  table.querySelectorAll('th.sortable').forEach((th, index) => {
     let asc = true;
+    th.setAttribute('aria-sort', 'none');
+    th._resetSort = () => {
+      asc = true;
+      th.setAttribute('aria-sort', 'none');
+    };
+
     th.addEventListener('click', () => {
       const rows = Array.from(tbody.querySelectorAll('tr'));
+      const direction = asc ? 1 : -1;
+
       rows.sort((a, b) => {
-        const va = toComparable(getValue(getCell(a, idx)));
-        const vb = toComparable(getValue(getCell(b, idx)));
-        if (typeof va === 'number' && typeof vb === 'number') return asc ? va - vb : vb - va;
-        return asc ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
+        const cellA = a.children[index];
+        const cellB = b.children[index];
+        const valA = toSortKey(cellA?.getAttribute('data-raw') ?? cellA?.textContent ?? '');
+        const valB = toSortKey(cellB?.getAttribute('data-raw') ?? cellB?.textContent ?? '');
+        if (typeof valA === 'number' && typeof valB === 'number') {
+          return direction * (valA - valB);
+        }
+        return direction * String(valA).localeCompare(String(valB));
       });
-      table.querySelectorAll('th.sortable .sort-caret').forEach(el => el.textContent = '↕');
-      const caret = th.querySelector('.sort-caret'); if (caret) caret.textContent = asc ? '↑' : '↓';
-      rows.forEach(r => tbody.appendChild(r));
+
+      table.querySelectorAll('th.sortable').forEach(other => {
+        if (other === th) return;
+        other.querySelector('.sort-caret')?.textContent = '↕';
+        other.setAttribute('aria-sort', 'none');
+        if (typeof other._resetSort === 'function') other._resetSort();
+      });
+
+      th.querySelector('.sort-caret')?.textContent = asc ? '↑' : '↓';
+      th.setAttribute('aria-sort', asc ? 'ascending' : 'descending');
+
+      rows.forEach(row => tbody.appendChild(row));
       asc = !asc;
     });
-    th._resetSort = () => { asc = true; };
   });
 })();
-// END: TABLE SORT
 
-function showTrendsSection(){
-  const $trends = document.querySelector('#section-trends');
-  const $list = document.querySelector('#section-products');
-  if ($trends) $trends.hidden = false;
-  if ($list) $list.hidden = true;
-
-  const $desde = document.querySelector('#fecha-desde');
-  const $hasta = document.querySelector('#fecha-hasta');
+function formatTemporalDate(isoDate) {
+  if (!isoDate) return '';
   try {
-    const today = new Date();
-    const from = new Date(today); from.setDate(today.getDate() - 29);
-    if ($desde && !$desde.value) $desde.value = formatDDMMYYYY(from);
-    if ($hasta && !$hasta.value) $hasta.value = formatDDMMYYYY(today);
-  } catch(_) {}
-
-  if (typeof fetchTrends === 'function') {
-    fetchTrends();
-  } else {
-    (async function(){
-      const url = new URL('/api/trends/summary', window.location.origin);
-      const res = await fetch(url.toString(), { credentials:'same-origin' });
-      if (res.ok) {
-        const json = await res.json();
-        if (typeof renderTrends === 'function') renderTrends(json);
-      } else {
-        (window.toast?.error || alert).call(window.toast||window, 'No se pudieron cargar las tendencias.');
-      }
-    })();
-  }
-
-  const firstChart = document.querySelector('#chart-left, #card-top-categories');
-  if (firstChart && typeof firstChart.scrollIntoView === 'function') {
-    firstChart.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    const date = new Date(isoDate);
+    if (Number.isNaN(date.getTime())) return '';
+    const dd = String(date.getDate()).padStart(2, '0');
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    const yyyy = date.getFullYear();
+    return `${dd}/${mm}/${yyyy}`;
+  } catch (err) {
+    return '';
   }
 }
 
-document.addEventListener('click', function(e){
-  const btn = e.target.closest('#btn-ver-tendencias, .btn-ver-tendencias, [data-action="show-trends"]');
-  if (!btn) return;
-  e.preventDefault();
-  showTrendsSection();
-});
+function updateTemporalidad(summary) {
+  const helper = document.getElementById('temporalidad-helper');
+  if (!helper) return;
+
+  const timeseries = Array.isArray(summary?.timeseries) ? summary.timeseries : [];
+  const first = timeseries[0]?.date;
+  const last = timeseries[timeseries.length - 1]?.date;
+  const rangeText = first && last ? `${formatTemporalDate(first)} → ${formatTemporalDate(last)}` : '';
+  const granularity = summary?.granularity;
+  const granularityLabel = granularity === 'week' ? 'Semanal' : granularity === 'day' ? 'Diaria' : '';
+
+  const parts = [];
+  if (rangeText) parts.push(rangeText);
+  if (granularityLabel) parts.push(`Granularidad: ${granularityLabel}`);
+  helper.textContent = parts.join(' · ') || 'Temporalidad';
+  helper.classList.add('visible');
+}
+
+async function fetchAndRenderTrends() {
+  const response = await fetch('/api/trends/summary', { credentials: 'same-origin' });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const summary = await response.json();
+  const categories = adaptCategories(summary.categories ?? summary.top_categories ?? []);
+  state.categories = categories;
+  state.granularity = summary.granularity ?? '';
+  state.loaded = true;
+
+  renderTrendTable(categories);
+  initLeftChart(categories);
+  initRightChart(categories);
+  updateTemporalidad(summary);
+  return categories;
+}
+
+async function ensureTrendsData() {
+  if (state.loaded) return state.categories;
+  if (!loadPromise) {
+    loadPromise = fetchAndRenderTrends().catch((err) => {
+      state.loaded = false;
+      const message = 'No se pudieron cargar las tendencias.';
+      if (toast?.error) toast.error(message); else alert(message);
+      throw err;
+    }).finally(() => {
+      loadPromise = null;
+    });
+  }
+  return loadPromise;
+}
+
+const trendsSection = document.getElementById('section-trends');
+if (trendsSection && !trendsSection.hasAttribute('hidden')) {
+  try {
+    const maybePromise = ensureTrendsData();
+    if (maybePromise?.catch) maybePromise.catch(() => {});
+  } catch (err) {
+    console.debug('[Trends] ensureTrendsData init:', err);
+  }
+}
+
 export {};
