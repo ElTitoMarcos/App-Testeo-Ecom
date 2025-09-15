@@ -13,8 +13,8 @@ body.dark { background: #1a1b2e; color:#eaeaea; }
 header { padding:20px; text-align:center; background: linear-gradient(90deg, #0062ff, #00c8ff); color:#fff; box-shadow:0 2px 5px rgba(0,0,0,0.3); }
 body.dark header { background: linear-gradient(90deg, #2e2e78, #6547a6); }
 .container { max-width: 1200px; margin: 0 auto; padding: 10px; }
-.card { background:#fff; border-radius:8px; box-shadow:0 0 10px rgba(0,0,0,0.1); padding:15px; margin-bottom:15px; }
-body.dark .card { background:#262a51; box-shadow:0 0 10px rgba(0,0,0,0.4); }
+.card { background:#121426; border:1px solid #222642; border-radius:10px; padding:12px; margin-bottom:15px; }
+body.dark .card { background:#121426; border-color:#222642; }
 /* Controls */
 #controls { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
 button { padding:8px 14px; border:none; border-radius:4px; cursor:pointer; background: linear-gradient(90deg,#0062ff,#00c8ff); color:#fff; font-weight:600; box-shadow:0 3px 5px rgba(0,0,0,0.2); transition:opacity 0.2s; }
@@ -82,7 +82,7 @@ body.dark .skeleton{background:#333;}
 #section-trends .card.lg { min-height: 380px; }
 #section-trends .card.md { min-height: 380px; }
 #section-trends .card-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
-#chart-top-categories, #chart-pareto { width:100%; height:320px !important; }
+#topCategoriesChart, #priceIncomeScatter { width:100%; height:100%; }
 
 /* Tabla compacta */
 .table.compact th, .table.compact td { padding: 8px 10px; }
@@ -164,31 +164,29 @@ body.dark .skeleton{background:#333;}
     <button id="btn-aplicar-tendencias" aria-label="Aplicar filtros">Aplicar</button>
   </div>
   <div id="trends-status"></div>
-  <div class="trends-row">
-    <div id="card-top-categories" class="card lg">
-      <canvas id="chart-top-categories"></canvas>
+  <section id="trends" class="trends-grid">
+    <div id="top-left" class="card">
+      <canvas id="topCategoriesChart"></canvas>
     </div>
-    <div id="card-pareto" class="card md">
-      <div class="card-header">
-        <span>Pareto de ingresos (Top 10)</span>
-        <button id="btn-log-trends" class="mini">Log</button>
-      </div>
-      <canvas id="chart-pareto"></canvas>
+    <div id="top-right" class="card">
+      <canvas id="priceIncomeScatter"></canvas>
     </div>
+  </section>
+  <div class="card compact-wrap">
+    <table id="trendsTable" class="table table--compact">
+      <thead>
+        <tr>
+          <th data-key="path" data-type="text">Categorías</th>
+          <th data-key="products" data-type="num">Productos</th>
+          <th data-key="units" data-type="num">Unidades</th>
+          <th data-key="revenue" data-type="num">Ingresos</th>
+          <th data-key="price" data-type="num">Precio</th>
+          <th data-key="rating" data-type="num">Rating</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
   </div>
-  <table id="tbl-categorias" class="table compact">
-    <thead>
-      <tr>
-        <th data-sort-key="categoria" role="button">Categorías</th>
-        <th data-sort-key="productos" role="button">Productos</th>
-        <th data-sort-key="unidades" role="button">Unidades</th>
-        <th data-sort-key="ingresos" role="button">Ingresos</th>
-        <th data-sort-key="precio" role="button">Precio</th>
-        <th data-sort-key="rating" role="button">Rating</th>
-      </tr>
-    </thead>
-    <tbody></tbody>
-  </table>
 </section>
 
 <section id="section-products">
@@ -262,6 +260,7 @@ body.dark .skeleton{background:#333;}
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script type="module" src="/static/js/trends-summary.js"></script>
+<script type="module" src="/static/js/table-sort.js" defer></script>
 <script type="module">
 import * as api from "/static/js/net.js";
 import * as groupsService from "/static/js/groups-service.js";
