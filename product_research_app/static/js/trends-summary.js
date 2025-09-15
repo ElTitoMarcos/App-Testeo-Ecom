@@ -1,5 +1,7 @@
 import { fmtInt, fmtPrice, fmtFloat2 } from './format.js';
 
+let priceIncomeChart;
+
 function toISOFromDDMMYYYY(v) {
   const s = (v || '').trim();
   const m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
@@ -14,19 +16,72 @@ function formatDDMMYYYY(d) {
   return `${dd}/${mm}/${yyyy}`;
 }
 
-function formatMoney(v){
-  if (v == null) return '0';
-  const n = Number(v) || 0;
-  return n.toLocaleString('es-ES', { maximumFractionDigits: 0 });
+function fmtMoney(v){
+  const n = Number(v);
+  if (!Number.isFinite(n) || n === 0) return '0';
+  const abs = Math.abs(n);
+  let divisor = 1;
+  let suffix = '';
+  if (abs >= 1e6) {
+    divisor = 1e6;
+    suffix = ' M';
+  } else if (abs >= 1e3) {
+    divisor = 1e3;
+    suffix = ' K';
+  }
+  const scaled = n / divisor;
+  let minimumFractionDigits = 0;
+  let maximumFractionDigits = 0;
+  if (divisor > 1) {
+    minimumFractionDigits = 2;
+    maximumFractionDigits = 2;
+  } else if (Math.abs(scaled) < 10) {
+    maximumFractionDigits = 2;
+  } else if (Math.abs(scaled) < 100) {
+    maximumFractionDigits = 1;
+  }
+  const formatted = scaled.toLocaleString('es-ES', {
+    minimumFractionDigits,
+    maximumFractionDigits,
+  });
+  return `${formatted}${suffix}`.trim();
+}
+
+function buildScatterData(allProducts){
+  if (!Array.isArray(allProducts)) return [];
+  const parseValue = (value) => {
+    if (value == null) return null;
+    if (typeof value === 'number') {
+      return Number.isFinite(value) ? value : null;
+    }
+    const text = String(value)
+      .replace(/[€$]/g, '')
+      .replace(/\s+/g, '')
+      .replace(/\./g, '')
+      .replace(/,/g, '.');
+    const num = Number(text);
+    return Number.isFinite(num) ? num : null;
+  };
+  return allProducts
+    .map(item => {
+      if (!item) return null;
+      const priceRaw = item.price ?? item.avg_price ?? (item.extras && (item.extras['Avg. Unit Price($)'] ?? item.extras['Avg Unit Price($)'] ?? item.extras['Avg. Unit Price'] ?? item.extras.price));
+      const revenueRaw = item.revenue ?? (item.extras && (item.extras['Revenue($)'] ?? item.extras['Revenue'] ?? item.extras.revenue));
+      const price = parseValue(priceRaw);
+      const revenue = parseValue(revenueRaw);
+      if (!Number.isFinite(price) || !Number.isFinite(revenue) || price <= 0 || revenue <= 0) {
+        return null;
+      }
+      const name = item.name || item.path || item.category || '';
+      return { x: price, y: revenue, _name: name };
+    })
+    .filter(Boolean);
 }
 
 const $desde = document.querySelector('#fecha-desde');
 const $hasta = document.querySelector('#fecha-hasta');
 const $btnAplicar = document.querySelector('#btn-aplicar-tendencias');
-const btnLog = document.getElementById('btn-log-trends');
-
 let currentData = null;
-let paretoLog = false;
 
 if ($btnAplicar) {
   $btnAplicar.addEventListener('click', function(ev){
@@ -34,12 +89,6 @@ if ($btnAplicar) {
     if (typeof fetchTrends === 'function') fetchTrends();
   });
 }
-
-btnLog?.addEventListener('click', (ev) => {
-  ev.preventDefault();
-  paretoLog = !paretoLog;
-  renderPareto(currentData);
-});
 
 async function fetchTrends(){
   const $status = document.querySelector('#trends-status');
@@ -66,11 +115,12 @@ async function fetchTrends(){
 function renderTrends(summary){
   if(!summary) return;
   renderTopCategoriesBar(summary);
-  renderPareto(summary);
+  const products = Array.isArray(window.allProducts) ? window.allProducts : [];
+  renderPriceIncomeScatter(products);
 }
 
 function renderCategoriasTable(data){
-  const tbody = document.querySelector('#tbl-categorias tbody');
+  const tbody = document.querySelector('#trendsTable tbody');
   if(!tbody) return;
   const rows = [...(data.top_categories || data.categories || [])];
   let html = '';
@@ -80,16 +130,26 @@ function renderCategoriasTable(data){
     const ingresos = c.revenue || 0;
     const precio = c.avg_price || 0;
     const rating = c.avg_rating || 0;
-    html += `<tr><td>${c.path || c.category || ''}</td><td>${fmtInt(productos)}</td><td>${fmtInt(unidades)}</td><td>${formatMoney(ingresos)}</td><td>${fmtPrice(precio)}</td><td>${fmtFloat2(rating)}</td></tr>`;
+    const path = c.path || c.category || '';
+    html += `<tr>`
+      + `<td>${path}</td>`
+      + `<td>${fmtInt(productos)}</td>`
+      + `<td>${fmtInt(unidades)}</td>`
+      + `<td>€ ${fmtMoney(ingresos)}</td>`
+      + `<td>€ ${fmtPrice(precio)}</td>`
+      + `<td>${fmtFloat2(rating)}</td>`
+      + `</tr>`;
   });
   tbody.innerHTML = html;
+  const thead = document.querySelector('#trendsTable thead');
+  thead?.querySelectorAll('th[aria-sort]').forEach(th => th.removeAttribute('aria-sort'));
 }
 
 function renderTopCategoriesBar(data) {
   const top = [...(data.top_categories || data.categories || [])].slice(0, 10);
   const labels = top.map(x => x.path || x.category);
   const values = top.map(x => x.revenue);
-  const ctx = document.getElementById('chart-top-categories');
+  const ctx = document.getElementById('topCategoriesChart');
   if (!ctx) return;
   if (ctx._chart) { ctx._chart.destroy(); }
 
@@ -106,119 +166,121 @@ function renderTopCategoriesBar(data) {
         legend: { display: false },
         tooltip: {
           callbacks: {
-            label: (tt) => `Ingresos: ${formatMoney(tt.parsed.x)}`
+            label: (tt) => `Ingresos: ${fmtMoney(tt.parsed.x)}`
           }
         }
       },
       scales: {
-        x: { grid: { display: false }, ticks: { callback: (v)=> formatMoney(v) } },
+        x: { grid: { display: false }, ticks: { callback: (v)=> fmtMoney(v) } },
         y: { grid: { display: false } }
       }
     }
   });
 }
 
-function renderPareto(data) {
-  if (!data) return;
-  const src = [...(data.top_categories || data.categories || [])];
-  src.sort((a,b) => (b.revenue||0) - (a.revenue||0));
-  const top = src.slice(0, 10);
+function renderPriceIncomeScatter(products){
+  const canvas = document.getElementById('priceIncomeScatter');
+  if (!canvas) return;
+  const points = buildScatterData(products);
+  if (priceIncomeChart) {
+    priceIncomeChart.destroy();
+    priceIncomeChart = null;
+  }
+  if (!points.length) {
+    return;
+  }
 
-  const labels = top.map(x => x.path || x.category);
-  const ingresos = top.map(x => x.revenue || 0);
-  const total = ingresos.reduce((s,n)=>s+n, 0) || 1;
-  let acc = 0;
-  const acumuladoPct = ingresos.map(v => { acc += v; return +(acc/total*100).toFixed(1); });
-
-  const ctx = document.getElementById('chart-pareto');
-  if (!ctx) return;
-  if (ctx._chart) { ctx._chart.destroy(); }
-
-  ctx._chart = new Chart(ctx, {
+  priceIncomeChart = new Chart(canvas, {
+    type: 'scatter',
     data: {
-      labels,
       datasets: [
         {
-          type: 'bar',
-          label: 'Ingresos',
-          data: ingresos,
-          yAxisID: 'y',
-          borderWidth: 0
-        },
-        {
-          type: 'line',
-          label: '% acumulado',
-          data: acumuladoPct,
-          yAxisID: 'y1',
-          tension: 0.3,
-          pointRadius: 2
+          data: points,
+          label: '',
+          pointBackgroundColor: '#6c8cff',
+          pointBorderColor: '#6c8cff',
+          pointRadius: 2.5,
+          pointHoverRadius: 6,
+          pointHitRadius: 8,
         }
       ]
     },
     options: {
+      responsive: true,
       maintainAspectRatio: false,
+      layout: { padding: 8 },
       plugins: {
-        legend: { display: true },
+        legend: { display: false },
         tooltip: {
+          displayColors: false,
           callbacks: {
-            label: (tt) => tt.datasetIndex === 0
-              ? `Ingresos: ${formatMoney(tt.parsed.y)}`
-              : `% acumulado: ${tt.parsed.y}%`
+            title(items) {
+              const raw = items?.[0]?.raw || {};
+              const price = Number(raw.x);
+              const revenue = Number(raw.y);
+              return `€ ${fmtMoney(price)} · ${fmtMoney(revenue)}`;
+            },
+            label(ctx) {
+              const raw = ctx.raw || {};
+              return raw._name || '';
+            }
           }
         }
       },
       scales: {
-        y:  { position: 'left', type: paretoLog ? 'logarithmic' : 'linear', grid: { display:false }, ticks: { callback: (v)=> formatMoney(v) } },
-        y1: { position: 'right', grid: { display:false }, min: 0, max: 100, ticks: { callback: (v)=> v + '%' } },
-        x:  { grid: { display:false } }
+        x: {
+          type: 'logarithmic',
+          title: { display: true, text: 'Precio' },
+          ticks: {
+            callback(value) {
+              const num = Number(value);
+              return num > 0 ? `€ ${fmtMoney(num)}` : '';
+            }
+          },
+          grid: { color: 'rgba(255,255,255,0.05)' }
+        },
+        y: {
+          type: 'logarithmic',
+          title: { display: true, text: 'Ingresos' },
+          ticks: {
+            callback(value) {
+              const num = Number(value);
+              return num > 0 ? `€ ${fmtMoney(num)}` : '';
+            }
+          },
+          grid: { color: 'rgba(255,255,255,0.08)' }
+        }
       }
     }
   });
 }
 
-(function enableSortableCategorias(){
-  const table = document.getElementById('tbl-categorias');
-  if (!table) return;
-  const thead = table.querySelector('thead');
-  const tbody = table.querySelector('tbody');
-  if (!thead || !tbody) return;
+const scheduleScatterUpdate = typeof queueMicrotask === 'function'
+  ? queueMicrotask
+  : (cb) => Promise.resolve().then(cb);
 
-  const parseNumber = (s) => {
-    if (s == null) return NaN;
-    const t = String(s).replace(/\./g,'').replace(/,/g,'.').replace(/[^\d.-]/g,'').trim();
-    const n = parseFloat(t);
-    return isNaN(n) ? NaN : n;
-  };
-
-  const getCellValue = (tr, idx) => tr.children[idx]?.textContent?.trim() || '';
-
-  thead.addEventListener('click', (e) => {
-    const th = e.target.closest('th[data-sort-key]');
-    if (!th) return;
-    const idx = Array.from(th.parentNode.children).indexOf(th);
-
-    thead.querySelectorAll('th').forEach(h => h.classList.remove('sort-asc','sort-desc'));
-    const asc = !th.classList.contains('sort-asc');
-    th.classList.add(asc ? 'sort-asc' : 'sort-desc');
-
-    const rows = Array.from(tbody.querySelectorAll('tr'));
-    const numeric = ['Productos','Unidades','Ingresos','Precio','Rating']
-      .includes(th.textContent.trim());
-
-    rows.sort((a,b) => {
-      const va = getCellValue(a, idx);
-      const vb = getCellValue(b, idx);
-      if (numeric) {
-        const na = parseNumber(va);
-        const nb = parseNumber(vb);
-        return asc ? (na-nb) : (nb-na);
-      }
-      return asc ? va.localeCompare(vb) : vb.localeCompare(va);
-    });
-
-    rows.forEach(r => tbody.appendChild(r));
+try {
+  const initial = Array.isArray(window.allProducts) ? window.allProducts : [];
+  let allProductsValue = initial;
+  Object.defineProperty(window, 'allProducts', {
+    configurable: true,
+    get() {
+      return allProductsValue;
+    },
+    set(value) {
+      allProductsValue = value;
+      scheduleScatterUpdate(() => {
+        const arr = Array.isArray(value) ? value : [];
+        renderPriceIncomeScatter(arr);
+      });
+    }
   });
-})();
+  if (initial.length) {
+    scheduleScatterUpdate(() => renderPriceIncomeScatter(initial));
+  }
+} catch (err) {
+  // ignore if property cannot be redefined
+}
 
 function showTrendsSection(){
   const $trends = document.querySelector('#section-trends');
@@ -250,7 +312,7 @@ function showTrendsSection(){
     })();
   }
 
-  const firstChart = document.querySelector('#chart-top-categories, #card-top-categories');
+  const firstChart = document.querySelector('#top-left, #topCategoriesChart');
   if (firstChart && typeof firstChart.scrollIntoView === 'function') {
     firstChart.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }

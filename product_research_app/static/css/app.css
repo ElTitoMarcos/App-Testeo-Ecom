@@ -229,11 +229,10 @@ td.price-col {
 }
 
 .card {
-  background: #0F1424;
-  border: 1px solid #34456B;
-  border-radius: 16px;
-  box-shadow: 0 8px 24px rgba(0,0,0,0.45);
-  padding: 16px;
+  background: #121426;
+  border: 1px solid #222642;
+  border-radius: 10px;
+  padding: 12px;
 }
 
 .table tbody tr.is-duplicate {
@@ -1022,3 +1021,88 @@ th.col-desire, td.col-desire { width: 360px; max-width: 360px; }
   resize: vertical;
 }
 
+
+.trends-grid {
+  display: grid;
+  grid-template-columns: 0.9fr 1.1fr;
+  gap: 12px;
+  align-items: stretch;
+  margin-bottom: 12px;
+}
+
+#top-left,
+#top-right {
+  min-height: 360px;
+  display: flex;
+  flex-direction: column;
+}
+
+#top-right {
+  min-height: 420px;
+}
+
+#top-left canvas,
+#top-right canvas {
+  flex: 1 1 auto;
+}
+
+.compact-wrap {
+  padding: 0;
+}
+
+.table--compact {
+  font-size: 12.5px;
+}
+
+.table--compact thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #0f1223;
+  cursor: pointer;
+  user-select: none;
+  padding: 8px 10px;
+  white-space: nowrap;
+}
+
+.table--compact tbody {
+  display: block;
+  max-height: 340px;
+  overflow: auto;
+}
+
+.table--compact thead,
+.table--compact tbody tr {
+  display: table;
+  width: 100%;
+  table-layout: fixed;
+}
+
+.table--compact tr {
+  height: auto;
+}
+
+.table--compact td {
+  padding: 6px 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.table--compact tbody tr:nth-child(even) {
+  background: #0c0f1d;
+}
+
+.table--compact tbody tr:hover {
+  background: #0f1430;
+}
+
+th[aria-sort="ascending"]::after {
+  content: " ▲";
+  opacity: 0.6;
+}
+
+th[aria-sort="descending"]::after {
+  content: " ▼";
+  opacity: 0.6;
+}
