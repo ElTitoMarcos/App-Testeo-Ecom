@@ -10,7 +10,6 @@ const toNumber = (raw) => {
 };
 
 const normLevel = (s) => (s || '').toLowerCase().replace(/[\s-]/g, '');
-
 const toPercent = (raw) => {
   const n = toNumber(raw);
   return isNaN(n) ? NaN : n;
@@ -36,7 +35,6 @@ const awarenessLabel = (value) => {
   const option = Array.from(select.options).find(opt => opt.value === value);
   return option?.textContent?.trim() || value;
 };
-
 export function readFilters(){
   return {
     ids: parseIdQuery(val('f-id')),
