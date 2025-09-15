@@ -100,7 +100,7 @@ body.dark .skeleton{background:#333;}
       <input type="file" id="fileInput" style="display:none;" />
       <button id="uploadBtn" title="Subir archivo">📤</button>
       <button id="refreshBtn" title="Actualizar lista">🔄</button>
-      <button id="btn-ver-tendencias" title="Ver tendencias">📊</button>
+      <button id="btnVerTendencias" title="Ver tendencias">📊</button>
       <button id="darkToggle" title="Modo oscuro">🌙</button>
       <button id="configBtn" title="Configuración avanzada">⚙️</button>
     </div>
@@ -155,41 +155,33 @@ body.dark .skeleton{background:#333;}
   <div id="history" style="margin-top:10px;"></div>
 </div>
 <section id="section-trends" hidden>
-  <div id="trendHeader">
-    <label>Desde: <input type="text" id="fecha-desde"></label>
-    <label>Hasta: <input type="text" id="fecha-hasta"></label>
-    <button id="btn-aplicar-tendencias" aria-label="Aplicar filtros">Aplicar</button>
-  </div>
-  <div id="trends-status"></div>
-  <div class="trends-row">
+  <section id="tendenciasPanel">
     <div class="trends-grid">
-      <div id="card-top-categories" class="card lg">
-        <div id="chart-left" class="chart"></div>
-      </div>
-      <div id="card-pareto" class="card md">
-        <div class="card-header">
-          <span>Pareto de ingresos (Top 10)</span>
-          <button id="btn-log-trends" class="mini">Log</button>
-        </div>
-        <div id="chart-right" class="chart chart--right"></div>
-      </div>
+      <div id="chart-left" class="chart"></div>
+      <div id="chart-right" class="chart chart--right"></div>
     </div>
-  </div>
-  <div class="trends-table-wrap">
-    <table id="trendTable" class="table table-compact">
-      <thead>
-        <tr>
-          <th class="sortable" data-key="categoria">Categorías <span class="sort-caret">↕</span></th>
-          <th class="sortable" data-key="productos">Productos <span class="sort-caret">↕</span></th>
-          <th class="sortable" data-key="unidades">Unidades <span class="sort-caret">↕</span></th>
-          <th class="sortable" data-key="ingresos">Ingresos <span class="sort-caret">↕</span></th>
-          <th class="sortable" data-key="precio">Precio <span class="sort-caret">↕</span></th>
-          <th class="sortable" data-key="rating">Rating <span class="sort-caret">↕</span></th>
-        </tr>
-      </thead>
-      <tbody><!-- mantiene el renderizado existente de filas --></tbody>
-    </table>
-  </div>
+
+    <div class="temporalidad-bar">
+      <label>Temporalidad</label>
+      <div id="temporalidad-helper"></div>
+    </div>
+
+    <div class="trends-table-wrap">
+      <table id="trendTable" class="table-compact">
+        <thead>
+          <tr>
+            <th class="sortable" data-key="categoria">Categorías <span class="sort-caret">↕</span></th>
+            <th class="sortable" data-key="productos">Productos <span class="sort-caret">↕</span></th>
+            <th class="sortable" data-key="unidades">Unidades <span class="sort-caret">↕</span></th>
+            <th class="sortable" data-key="ingresos">Ingresos <span class="sort-caret">↕</span></th>
+            <th class="sortable" data-key="precio">Precio <span class="sort-caret">↕</span></th>
+            <th class="sortable" data-key="rating">Rating <span class="sort-caret">↕</span></th>
+          </tr>
+        </thead>
+        <tbody><!-- filas existentes --></tbody>
+      </table>
+    </div>
+  </section>
 </section>
 
 <section id="section-products">

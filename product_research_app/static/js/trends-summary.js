@@ -332,7 +332,7 @@ function showTrendsSection(){
 }
 
 document.addEventListener('click', function(e){
-  const btn = e.target.closest('#btn-ver-tendencias, .btn-ver-tendencias, [data-action="show-trends"]');
+  const btn = e.target.closest('#btnVerTendencias, #btn-ver-tendencias, .btn-ver-tendencias, [data-action="show-trends"]');
   if (!btn) return;
   e.preventDefault();
   showTrendsSection();
