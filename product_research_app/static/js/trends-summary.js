@@ -440,6 +440,11 @@ if (trendsSection && !trendsSection.hasAttribute('hidden')) {
   } catch (err) {
     console.debug('[Trends] ensureTrendsData init:', err);
   }
+  return loadPromise;
+}
+
+if (tendenciasPanel && !tendenciasPanel.classList.contains('hidden') && !(trendsSection?.hidden ?? false)) {
+  ensureTrendsData().catch(() => {});
 }
 
 export {};
