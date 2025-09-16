@@ -78,6 +78,9 @@ def init_app_config() -> None:
     if "weightsUpdatedAt" not in cfg:
         cfg["weightsUpdatedAt"] = int(time.time())
         changed = True
+    if "weightsVersion" not in cfg:
+        cfg["weightsVersion"] = 0
+        changed = True
     if changed:
         save_config(cfg)
 
@@ -134,6 +137,7 @@ def update_winner_settings(
     cfg["weights_order"] = order
     cfg["weights_enabled"] = enabled
     cfg["weightsUpdatedAt"] = int(time.time())
+    cfg["weightsVersion"] = int(cfg.get("weightsVersion", 0)) + 1
     save_config(cfg)
     return weights, order, enabled
 

@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "autoFillIAOnImport": True,
+    "auto_adjust_weights": True,
     "aiBatch": {
         "BATCH_SIZE": 10,
         "MAX_CONCURRENCY": 2,
@@ -242,7 +243,11 @@ def update_weight(key: str, value: float) -> None:
 
 def get_weights_version() -> int:
     cfg = load_config()
-    try:
-        return int(cfg.get("weightsUpdatedAt", 0))
-    except Exception:
-        return 0
+    for key in ("weightsVersion", "weightsUpdatedAt"):
+        try:
+            value = int(cfg.get(key, 0))
+            if value:
+                return value
+        except Exception:
+            continue
+    return 0

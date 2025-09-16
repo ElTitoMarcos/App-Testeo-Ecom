@@ -144,6 +144,8 @@ def test_handle_ai_run_post_import(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "get_api_key", lambda: "sk-test")
     monkeypatch.setattr(config, "get_model", lambda: "gpt-test")
 
+    weight_prompts: list = []
+
     pid_a = database.insert_product(
         conn,
         name="ProdA",
@@ -258,13 +260,28 @@ def test_run_post_import_auto(tmp_path, monkeypatch):
         return ok, {}, {"total_tokens": 0}, 0.1
 
     winner_calls = []
+    weight_prompts: list = []
 
     def fake_generate_winner_scores(conn_arg, product_ids=None, weights=None, debug=False):
         ids = list(product_ids or [])
         winner_calls.append(ids)
+        assert weights is not None
+        assert set(weights) == set(winner_score.ALLOWED_FIELDS)
         return {"processed": len(ids), "updated": len(ids)}
 
     monkeypatch.setattr(gpt, "generate_batch_columns", fake_generate_batch_columns)
+    monkeypatch.setattr(
+        gpt,
+        "recommend_weights_from_aggregates",
+        lambda api_key, model, aggregates: (
+            weight_prompts.append(aggregates)
+            or {
+                "weights": {k: 10 for k in winner_score.ALLOWED_FIELDS},
+                "order": list(winner_score.ALLOWED_FIELDS),
+                "notes": "ok",
+            }
+        ),
+    )
     monkeypatch.setattr(winner_score, "generate_winner_scores", fake_generate_winner_scores)
 
     task_id = "task-auto"
@@ -286,6 +303,7 @@ def test_run_post_import_auto(tmp_path, monkeypatch):
     assert progress["desire"]["processed"] == 2
     assert progress["imputacion"]["processed"] == 2
     assert progress["winner_score"]["processed"] == 2
+    assert weight_prompts and weight_prompts[0]["total_products"] == 2
 
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) FROM ai_task_queue WHERE state='done'")

@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Optional, Sequence
 
 from .. import config, database, gpt
+from ..services import aggregates as aggregates_service
+from ..services import config as winner_config
 from ..services import winner_score
 from ..utils.db import row_to_dict, rget
 
@@ -52,7 +54,8 @@ class _RunnerContext:
     model: Optional[str]
     include_image: bool
     max_attempts: int
-
+    winner_weights_ready: bool = False
+    winner_weights_lock: threading.Lock = field(default_factory=threading.Lock)
 
 def register_progress_callback(import_task_id: str, callback: Optional[_ProgressCallback]) -> None:
     """Register or remove a progress callback for an import."""
@@ -326,8 +329,9 @@ def _process_winner_batch(rows: Sequence[Mapping[str, object]], context: _Runner
                 allow_retry=False,
                 context=context,
             )
+        weights = _ensure_winner_weights(conn, product_ids, context)
         try:
-            winner_score.generate_winner_scores(conn, product_ids=product_ids)
+            winner_score.generate_winner_scores(conn, product_ids=product_ids, weights=weights)
             task_ids = [int(row["id"]) for row in rows]
             database.complete_ai_tasks(conn, task_ids)
             for row in rows:
@@ -350,6 +354,77 @@ def _process_winner_batch(rows: Sequence[Mapping[str, object]], context: _Runner
             pass
     return result
 
+def _ensure_winner_weights(
+    conn,
+    product_ids: Sequence[int],
+    context: _RunnerContext,
+) -> Optional[Dict[str, int]]:
+    """Ensure Winner Score weights are ready, optionally auto-adjusting them."""
+
+    with context.winner_weights_lock:
+        if context.winner_weights_ready:
+            return winner_config.get_winner_weights_raw()
+
+        cfg = config.load_config()
+        auto_adjust = bool(cfg.get("auto_adjust_weights", True))
+        existing = cfg.get("winner_weights")
+        has_existing = isinstance(existing, dict) and bool(existing)
+
+        if has_existing and not auto_adjust:
+            context.winner_weights_ready = True
+            return winner_config.get_winner_weights_raw()
+
+        if not product_ids:
+            context.winner_weights_ready = True
+            return winner_config.get_winner_weights_raw()
+
+        if not auto_adjust:
+            context.winner_weights_ready = True
+            return winner_config.get_winner_weights_raw()
+
+        if not context.api_key:
+            logger.info("Skipping winner weight auto-adjust: missing API credentials")
+            context.winner_weights_ready = True
+            return winner_config.get_winner_weights_raw()
+
+        aggregates = aggregates_service.compute_dataset_aggregates(
+            conn, scope_ids=product_ids
+        )
+        if not aggregates.get("total_products"):
+            context.winner_weights_ready = True
+            return winner_config.get_winner_weights_raw()
+
+        try:
+            with _GPT_CALL_SEMAPHORE:
+                suggestion = gpt.recommend_weights_from_aggregates(
+                    context.api_key,
+                    "gpt-4o",
+                    aggregates,
+                )
+        except Exception as exc:  # pragma: no cover - network guarded
+            logger.warning("Winner weight auto-adjust failed: %s", exc)
+            context.winner_weights_ready = True
+            return winner_config.get_winner_weights_raw()
+
+        weights = suggestion.get("weights") if isinstance(suggestion, dict) else None
+        order = suggestion.get("order") if isinstance(suggestion, dict) else None
+        if not isinstance(weights, dict) or not weights:
+            logger.info("Winner weight suggestion missing payload; keeping existing weights")
+            context.winner_weights_ready = True
+            return winner_config.get_winner_weights_raw()
+
+        try:
+            weights_final, _, _ = winner_config.update_winner_settings(
+                weights_in=weights,
+                order_in=order,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("Persisting winner weight suggestion failed: %s", exc)
+            context.winner_weights_ready = True
+            return winner_config.get_winner_weights_raw()
+
+        context.winner_weights_ready = True
+        return weights_final
 
 def _record_batch_failure(
     conn,
