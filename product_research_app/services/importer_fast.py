@@ -3,6 +3,8 @@ import io
 from datetime import datetime
 from typing import Iterable, Mapping, Sequence
 
+from product_research_app.utils.timing import TimingTracker
+
 from product_research_app.db import get_db
 from product_research_app.database import json_dump
 
@@ -269,31 +271,137 @@ def prepare_rows(records: Iterable[Mapping[str, object]], source: str | None = N
     return _prepare_rows(records, source=source)
 
 
+def _quote_identifier(identifier: str) -> str:
+    return f'"{identifier.replace("\"", "\"\"")}"'
+
+
+def _apply_pragmas(conn):
+    originals = {
+        "journal_mode": conn.execute("PRAGMA journal_mode").fetchone()[0],
+        "synchronous": conn.execute("PRAGMA synchronous").fetchone()[0],
+        "temp_store": conn.execute("PRAGMA temp_store").fetchone()[0],
+        "cache_size": conn.execute("PRAGMA cache_size").fetchone()[0],
+    }
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=OFF;")
+    conn.execute("PRAGMA temp_store=MEMORY;")
+    conn.execute("PRAGMA cache_size=-64000;")
+    return originals
+
+
+def _restore_pragmas(conn, originals):
+    if not originals:
+        return
+    journal_mode = str(originals.get("journal_mode", "")).upper()
+    if journal_mode:
+        conn.execute(f"PRAGMA journal_mode={journal_mode};")
+    synchronous = originals.get("synchronous")
+    # synchronous se restablece al valor original porque se baja a OFF durante
+    # la importación masiva para priorizar el rendimiento.
+    if synchronous is not None:
+        conn.execute(f"PRAGMA synchronous={synchronous};")
+    temp_store = originals.get("temp_store")
+    if temp_store is not None:
+        conn.execute(f"PRAGMA temp_store={temp_store};")
+    cache_size = originals.get("cache_size")
+    if cache_size is not None:
+        conn.execute(f"PRAGMA cache_size={cache_size};")
+
+
+def _drop_secondary_indexes(conn):
+    cur = conn.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name='products' AND sql NOT NULL"
+    )
+    statements: list[str] = []
+    for name, sql in cur.fetchall():
+        if not sql:
+            continue
+        conn.execute(f"DROP INDEX IF EXISTS {_quote_identifier(name)}")
+        statements.append(sql)
+    return statements
+
+
+def _rebuild_secondary_indexes(conn, statements: list[str]):
+    for statement in statements:
+        if not statement:
+            continue
+        conn.execute(statement)
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_products_id ON products(id)")
+
+
 def _bulk_insert(rows, status_cb):
-    db = get_db()
-    db.execute("PRAGMA journal_mode=WAL;")
-    db.execute("PRAGMA synchronous=NORMAL;")
-    db.execute("PRAGMA temp_store=MEMORY;")
-    db.execute("PRAGMA cache_size=-20000;")
-    db.execute("BEGIN IMMEDIATE;")
+    conn = get_db()
+    timings = TimingTracker()
+    total = len(rows)
+    status_cb(stage="prepare", done=0, total=total, timings=timings.snapshot())
+    if total == 0:
+        return 0
+
+    originals = _apply_pragmas(conn)
+    index_statements: list[str] = []
+    rebuild_pending = False
     try:
-        total = len(rows)
-        status_cb(stage="prepare", done=0, total=total)
-        batch = 1000
-        for idx in range(0, total, batch):
-            chunk = rows[idx: idx + batch]
-            if not chunk:
-                continue
-            db.executemany(UPSERT_SQL, chunk)
-            status_cb(stage="insert", done=min(idx + len(chunk), total), total=total)
-        db.execute("COMMIT;")
-        status_cb(stage="commit", done=total, total=total)
+        with timings.measure("drop_indexes"):
+            index_statements = _drop_secondary_indexes(conn)
+        rebuild_pending = True
+
+        done = 0
+        if total > 50000:
+            chunk_size = 50000
+            while done < total:
+                chunk = rows[done : done + chunk_size]
+                if not chunk:
+                    break
+                conn.execute("BEGIN IMMEDIATE;")
+                try:
+                    with timings.measure("bulk_insert"):
+                        conn.executemany(UPSERT_SQL, chunk)
+                    conn.execute("COMMIT;")
+                except Exception:
+                    conn.execute("ROLLBACK;")
+                    raise
+                done += len(chunk)
+                status_cb(
+                    stage="insert",
+                    done=min(done, total),
+                    total=total,
+                    timings=timings.snapshot(),
+                )
+        else:
+            conn.execute("BEGIN IMMEDIATE;")
+            try:
+                batch = 1000
+                for idx in range(0, total, batch):
+                    chunk = rows[idx : idx + batch]
+                    if not chunk:
+                        continue
+                    with timings.measure("bulk_insert"):
+                        conn.executemany(UPSERT_SQL, chunk)
+                    done = idx + len(chunk)
+                    status_cb(
+                        stage="insert",
+                        done=min(done, total),
+                        total=total,
+                        timings=timings.snapshot(),
+                    )
+                conn.execute("COMMIT;")
+            except Exception:
+                conn.execute("ROLLBACK;")
+                raise
+
+        with timings.measure("rebuild_indexes"):
+            _rebuild_secondary_indexes(conn, index_statements)
+        rebuild_pending = False
+        status_cb(stage="commit", done=total, total=total, timings=timings.snapshot())
         return total
-    except Exception:
-        db.execute("ROLLBACK;")
-        raise
     finally:
-        db.execute("PRAGMA synchronous=NORMAL;")
+        if rebuild_pending and index_statements:
+            try:
+                with timings.measure("rebuild_indexes"):
+                    _rebuild_secondary_indexes(conn, index_statements)
+            except Exception:
+                pass
+        _restore_pragmas(conn, originals)
 
 
 def fast_import(csv_bytes: bytes, status_cb=lambda **_: None, source: str | None = None):
