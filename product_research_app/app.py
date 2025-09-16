@@ -54,7 +54,6 @@ _STATE_ALIASES = {
     "FAILED": "ERROR",
 }
 
-
 def _truthy(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -93,7 +92,6 @@ def _normalize_product_ids(values: Iterable[Any]) -> list[int]:
         seen.add(num)
         normalized.append(num)
     return normalized
-
 
 def _chunked(iterable: Iterable[int], size: int) -> Iterator[list[int]]:
     iterator = iter(iterable)
@@ -150,7 +148,6 @@ def _count_existing_ids(candidates: set[int]) -> int:
             total += int(row[0])
     return total
 
-
 def _enqueue_post_import_tasks(
     task_id: str, product_ids: Iterable[int], task_types: Iterable[str]
 ) -> Dict[str, int]:
@@ -177,7 +174,6 @@ def _enqueue_post_import_tasks(
             len(ids),
         )
     return counts
-
 
 def _round_ms(delta: float) -> int:
     return max(int(round(delta * 1000)), 0)
@@ -335,7 +331,6 @@ def _update_status(task_id: str, **updates: Any) -> Dict[str, Any]:
         elif new_state in {"DONE", "ERROR"}:
             updates.setdefault("_started_monotonic", status.get("_started_monotonic"))
             updates.setdefault("eta_ms", 0)
-
         status.update(updates)
 
         if status.get("total", 0) < status.get("processed", 0):
@@ -505,6 +500,23 @@ def upload():
                 if post_phase is not None:
                     record_phase(post_phase)
 
+            post_phase: Dict[str, Any] | None = None
+            try:
+                with phase("post_import_queue") as ph:
+                    post_phase = ph
+                    post_counts = _enqueue_post_import_tasks(
+                        task_id, product_ids, post_import_tasks
+                    )
+                    post_ready = bool(product_ids and post_import_tasks)
+                    _update_status(
+                        task_id,
+                        post_import_ready=post_ready,
+                        post_import_tasks=list(post_import_tasks),
+                    )
+            finally:
+                if post_phase is not None:
+                    record_phase(post_phase)
+
             def do_opt():
                 t0 = time.time()
                 try:
@@ -614,6 +626,130 @@ def import_status():
             response[optional_key] = status[optional_key]
 
     return response
+
+
+@app.post("/api/ai/run_post_import")
+def run_post_import_tasks():
+    payload = request.get_json(silent=True) or {}
+    raw_tasks = payload.get("tasks") or []
+    if not isinstance(raw_tasks, (list, tuple, set)):
+        raw_tasks = [raw_tasks]
+    normalized = _normalize_post_import_tasks(raw_tasks)
+    if not normalized:
+        return {"error": "invalid_tasks"}, 400
+
+    try:
+        limit_val = int(payload.get("limit", 200))
+    except Exception:
+        limit_val = 200
+    limit_val = max(1, min(limit_val, 1000))
+
+    alias_map = {
+        task_type: _POST_IMPORT_CANONICAL_TO_ALIAS.get(task_type, task_type)
+        for task_type in normalized
+    }
+
+    drained: Dict[str, List[int]] = {}
+    drained_counts: Dict[str, int] = {}
+    for task_type in normalized:
+        ids = dequeue_batch(task_type, limit_val)
+        drained[task_type] = ids
+        drained_counts[task_type] = len(ids)
+
+    union_ids = sorted({pid for ids in drained.values() for pid in ids})
+    ai_result: Dict[str, Any] = {}
+    pending_ids: list[int] = []
+
+    if union_ids:
+        try:
+            ai_result = ai_columns.fill_ai_columns(union_ids)
+        except Exception as exc:
+            for task_type, ids in drained.items():
+                if ids:
+                    enqueue_post_import(task_type, ids)
+            logger.exception(
+                "run_post_import failed tasks=%s limit=%s", normalized, limit_val
+            )
+            return {"error": str(exc)}, 500
+
+        pending_ids = _normalize_product_ids(ai_result.get("pending_ids") or [])
+        if pending_ids:
+            for task_type in normalized:
+                enqueue_post_import(task_type, pending_ids)
+    else:
+        ai_result = {
+            "ok": {},
+            "ko": {},
+            "counts": {
+                "n_importados": 0,
+                "n_para_ia": 0,
+                "n_procesados": 0,
+                "n_omitidos_por_valor_existente": 0,
+                "n_reintentados": 0,
+                "n_error_definitivo": 0,
+                "truncated": False,
+                "cost_estimated_usd": 0.0,
+            },
+            "pending_ids": [],
+        }
+
+    processed_ids = set(
+        _normalize_product_ids((ai_result.get("ok") or {}).keys())
+    )
+    failed_ids = set(
+        _normalize_product_ids((ai_result.get("ko") or {}).keys())
+    )
+
+    results: Dict[str, Dict[str, int]] = {}
+    for task_type in normalized:
+        alias = alias_map[task_type]
+        ids = drained.get(task_type, [])
+        processed = sum(1 for pid in ids if pid in processed_ids)
+        failed = sum(1 for pid in ids if pid in failed_ids and pid not in processed_ids)
+        pending = max(len(ids) - processed - failed, 0)
+        results[alias] = {
+            "requested": len(ids),
+            "processed": processed,
+            "failed": failed,
+            "pending": pending,
+        }
+
+    remaining: Dict[str, int] = {}
+    has_more = False
+    conn = get_db()
+    for task_type in normalized:
+        alias = alias_map[task_type]
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM ai_task_queue WHERE task_type = ?",
+                (task_type,),
+            ).fetchone()
+            count = int(row[0]) if row and row[0] is not None else 0
+        except Exception:
+            count = 0
+        remaining[alias] = count
+        if count:
+            has_more = True
+    if pending_ids:
+        has_more = True
+
+    logger.info(
+        "run_post_import tasks=%s limit=%s drained=%s processed=%s has_more=%s pending_ids=%s",
+        normalized,
+        limit_val,
+        drained_counts,
+        ai_result.get("counts", {}),
+        has_more,
+        len(pending_ids),
+    )
+
+    return {
+        "ok": True,
+        "results": results,
+        "details": ai_result,
+        "has_more": has_more,
+        "remaining": remaining,
+    }
 
 
 @app.post("/api/ai/run_post_import")
