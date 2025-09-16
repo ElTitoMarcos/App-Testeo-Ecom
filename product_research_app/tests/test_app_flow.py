@@ -84,7 +84,6 @@ def test_import_unified_inserts_rows(tmp_path, monkeypatch):
         assert p.get("winner_score") == 0
         assert p.get("source") == "products.xlsx"
 
-
 def test_enqueue_post_import_tasks_dedupes(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)
     ids = [
