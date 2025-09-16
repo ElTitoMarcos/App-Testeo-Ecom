@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Optional, Sequence
 
-from .. import config, database, gpt
+from .. import config, database, gpt, settings
 from ..services import aggregates as aggregates_service
 from ..services import config as winner_config
 from ..services import winner_score
@@ -54,8 +54,25 @@ class _RunnerContext:
     model: Optional[str]
     include_image: bool
     max_attempts: int
+    max_calls_per_import: int = 0
+    calls_used: Dict[str, int] = field(default_factory=dict)
     winner_weights_ready: bool = False
     winner_weights_lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def remaining_calls(self, import_id: str) -> int:
+        if self.max_calls_per_import <= 0 or not import_id:
+            return 1_000_000
+        used = self.calls_used.get(import_id, 0)
+        return max(self.max_calls_per_import - used, 0)
+
+    def consume_call(self, import_id: str, count: int = 1) -> bool:
+        if not import_id or self.max_calls_per_import <= 0:
+            return True
+        remaining = self.remaining_calls(import_id)
+        if remaining < count:
+            return False
+        self.calls_used[import_id] = self.calls_used.get(import_id, 0) + count
+        return True
 
 def register_progress_callback(import_task_id: str, callback: Optional[_ProgressCallback]) -> None:
     """Register or remove a progress callback for an import."""
@@ -93,22 +110,35 @@ def run_auto(tasks: set[str], *, batch_size: int = 200, max_parallel: int = 3) -
     try:
         batch_size = int(batch_size)
     except Exception:
-        batch_size = 200
-    batch_size = max(1, min(batch_size, 200))
+        batch_size = settings.AI_MAX_BATCH_SIZE
+    min_batch = max(1, settings.AI_MIN_BATCH_SIZE)
+    max_batch = max(min_batch, settings.AI_MAX_BATCH_SIZE)
+    batch_size = max(min_batch, min(batch_size, max_batch))
 
     try:
         max_parallel = int(max_parallel)
     except Exception:
-        max_parallel = 3
-    max_parallel = max(1, min(max_parallel, 8))
+        max_parallel = settings.AI_MAX_PARALLEL
+    max_parallel = max(1, min(max_parallel, settings.AI_MAX_PARALLEL))
 
     api_key = config.get_api_key() or None
     model = config.get_model() or "gpt-4o-mini"
     include_image = config.include_image_in_ai()
 
-    context = _RunnerContext(api_key=api_key, model=model, include_image=include_image, max_attempts=_MAX_ATTEMPTS)
+    context = _RunnerContext(
+        api_key=api_key,
+        model=model,
+        include_image=include_image,
+        max_attempts=_MAX_ATTEMPTS,
+        max_calls_per_import=settings.AI_MAX_CALLS_PER_IMPORT,
+    )
 
-    progress: Dict[str, Dict[str, Dict[str, int]]] = defaultdict(lambda: {name: {"requested": 0, "processed": 0, "failed": 0} for name in _TASK_ORDER})
+    progress: Dict[str, Dict[str, Dict[str, int]]] = defaultdict(
+        lambda: {
+            name: {"requested": 0, "processed": 0, "failed": 0, "skipped": 0}
+            for name in _TASK_ORDER
+        }
+    )
     errors: Dict[str, List[str]] = defaultdict(list)
     seen_task_ids: set[int] = set()
 
@@ -118,23 +148,22 @@ def run_auto(tasks: set[str], *, batch_size: int = 200, max_parallel: int = 3) -
     try:
         for task_type in ordered_tasks:
             while True:
-                pending = database.fetch_pending_ai_tasks(
+                pending_rows = database.fetch_pending_ai_tasks(
                     conn,
                     task_types=[task_type],
                     limit=batch_size * max_parallel,
                 )
-                if not pending:
+                if not pending_rows:
                     break
 
                 if task_type in _GPT_TASKS and (not context.api_key or not context.model):
-                    logger.warning("AI runner skipping %s tasks due to missing API configuration", task_type)
+                    logger.warning(
+                        "AI runner skipping %s tasks due to missing API configuration",
+                        task_type,
+                    )
 
-                task_ids = [int(row["id"]) for row in pending]
-                database.mark_ai_tasks_in_progress(conn, task_ids)
-
-                batches: List[List[Mapping[str, object]]] = []
-                current: List[Mapping[str, object]] = []
-                for row in pending:
+                groups: Dict[str, List[Mapping[str, object]]] = {}
+                for row in pending_rows:
                     row_dict = dict(row)
                     import_id = str(row_dict.get("import_task_id") or "")
                     entry = progress[import_id][task_type]
@@ -142,15 +171,44 @@ def run_auto(tasks: set[str], *, batch_size: int = 200, max_parallel: int = 3) -
                     if task_id not in seen_task_ids:
                         seen_task_ids.add(task_id)
                         entry["requested"] += 1
-                    current.append(row_dict)
-                    if len(current) >= batch_size:
-                        batches.append(current)
-                        current = []
-                if current:
-                    batches.append(current)
+                    groups.setdefault(import_id, []).append(row_dict)
+
+                batches: List[List[Mapping[str, object]]] = []
+                process_task_ids: List[int] = []
+                skipped_task_ids: List[int] = []
+                skipped_imports: set[str] = set()
+
+                for import_id, rows_for_import in groups.items():
+                    chunks = [
+                        rows_for_import[i : i + batch_size]
+                        for i in range(0, len(rows_for_import), batch_size)
+                    ]
+                    if not chunks:
+                        continue
+                    if context.max_calls_per_import > 0 and import_id:
+                        remaining_calls = context.remaining_calls(import_id)
+                        allowed_count = min(len(chunks), remaining_calls)
+                    else:
+                        allowed_count = len(chunks)
+                    for idx, chunk in enumerate(chunks):
+                        if idx < allowed_count and context.consume_call(import_id):
+                            batches.append(chunk)
+                            process_task_ids.extend(int(row["id"]) for row in chunk)
+                        else:
+                            skipped_task_ids.extend(int(row["id"]) for row in chunk)
+                            progress[import_id][task_type]["skipped"] += len(chunk)
+                            skipped_imports.add(import_id)
+
+                if skipped_task_ids:
+                    database.skip_ai_tasks(conn, skipped_task_ids, "budget_exhausted")
+                    for import_id in skipped_imports:
+                        _notify_progress(import_id, task_type, progress[import_id][task_type])
 
                 if not batches:
                     continue
+
+                if process_task_ids:
+                    database.mark_ai_tasks_in_progress(conn, process_task_ids)
 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max_parallel) as executor:
                     futures = [executor.submit(_process_batch, task_type, batch, context) for batch in batches]
@@ -175,7 +233,10 @@ def run_auto(tasks: set[str], *, batch_size: int = 200, max_parallel: int = 3) -
     summary: Dict[str, Dict[str, object]] = {}
     for import_id, task_map in progress.items():
         has_activity = any(
-            entry["requested"] or entry["processed"] or entry["failed"]
+            entry["requested"]
+            or entry["processed"]
+            or entry["failed"]
+            or entry.get("skipped")
             for entry in task_map.values()
         )
         if not has_activity:
