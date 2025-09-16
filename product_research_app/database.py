@@ -904,6 +904,37 @@ def fetch_pending_ai_tasks(
     return cur.fetchall()
 
 
+def fetch_pending_ai_tasks_for_import(
+    conn: sqlite3.Connection,
+    *,
+    import_task_id: str,
+    task_types: Optional[Sequence[str]] = None,
+    limit: int = 50,
+) -> List[sqlite3.Row]:
+    """Return pending AI tasks filtered by import identifier."""
+
+    if not import_task_id or limit <= 0:
+        return []
+    where = ["state='pending'", "import_task_id=?"]
+    params: List[Any] = [str(import_task_id)]
+    if task_types:
+        normalized = [t for t in task_types if t]
+        if not normalized:
+            return []
+        placeholders = ",".join(["?"] * len(normalized))
+        where.append(f"task_type IN ({placeholders})")
+        params.extend(normalized)
+    sql = (
+        "SELECT id, task_type, product_id, import_task_id, attempts, created_at, updated_at "
+        f"FROM ai_task_queue WHERE {' AND '.join(where)} "
+        "ORDER BY created_at ASC, id ASC LIMIT ?"
+    )
+    params.append(limit)
+    cur = conn.cursor()
+    cur.execute(sql, params)
+    return cur.fetchall()
+
+
 def mark_ai_tasks_in_progress(conn: sqlite3.Connection, task_ids: Sequence[int]) -> None:
     if not task_ids:
         return
@@ -942,6 +973,22 @@ def fail_ai_tasks(conn: sqlite3.Connection, task_ids: Sequence[int], error: str)
         f"UPDATE ai_task_queue SET state='error', error=?, updated_at=? "
         f"WHERE id IN ({placeholders})",
         (error[:512], now, *[int(tid) for tid in task_ids]),
+    )
+    conn.commit()
+
+
+def requeue_ai_tasks(conn: sqlite3.Connection, task_ids: Sequence[int]) -> None:
+    """Return the specified tasks to the pending queue for retry."""
+
+    if not task_ids:
+        return
+    now = datetime.utcnow().isoformat()
+    placeholders = ",".join(["?"] * len(task_ids))
+    cur = conn.cursor()
+    cur.execute(
+        f"UPDATE ai_task_queue SET state='pending', error=NULL, updated_at=?, started_at=NULL, finished_at=NULL "
+        f"WHERE id IN ({placeholders})",
+        (now, *[int(tid) for tid in task_ids]),
     )
     conn.commit()
 
