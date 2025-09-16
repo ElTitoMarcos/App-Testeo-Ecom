@@ -81,7 +81,6 @@ def _normalize_product_ids(values: Iterable[Any]) -> list[int]:
         normalized.append(num)
     return normalized
 
-
 def _chunked(iterable: Iterable[int], size: int) -> Iterator[list[int]]:
     iterator = iter(iterable)
     while True:
@@ -137,7 +136,6 @@ def _count_existing_ids(candidates: set[int]) -> int:
             total += int(row[0])
     return total
 
-
 def _enqueue_post_import_tasks(
     task_id: str, product_ids: Iterable[int], task_types: Iterable[str]
 ) -> Dict[str, int]:
@@ -164,7 +162,6 @@ def _enqueue_post_import_tasks(
             len(ids),
         )
     return counts
-
 
 def _round_ms(delta: float) -> int:
     return max(int(round(delta * 1000)), 0)
@@ -267,7 +264,6 @@ def _update_status(task_id: str, **updates: Any) -> Dict[str, Any]:
                 )
             except Exception:
                 updates["post_import_tasks"] = []
-
         status.update(updates)
         if status.get("total", 0) < status.get("done", 0):
             status["total"] = status.get("done", 0)
@@ -301,6 +297,31 @@ def upload():
         post_import_tasks=list(post_import_tasks),
         post_import_ready=False,
     )
+
+    phase_records: list[Dict[str, int]] = []
+
+    def record_phase(info: Dict[str, Any]) -> None:
+        name = str(info.get("name", ""))
+        try:
+            ms_val = int(info.get("ms", 0))
+        except Exception:
+            ms_val = 0
+        phase_records.append({"name": name, "ms": ms_val})
+        _update_status(task_id, phases=[dict(item) for item in phase_records])
+
+    total_start = time.perf_counter()
+    csv_bytes = b""
+    read_phase: Dict[str, Any] | None = None
+    try:
+        with phase("read_file") as ph:
+            read_phase = ph
+            csv_bytes = file.read()
+    finally:
+        if read_phase is not None:
+            record_phase(read_phase)
+
+    file_size = len(csv_bytes or b"")
+    _update_status(task_id, file_size_bytes=file_size)
 
     phase_records: list[Dict[str, int]] = []
 

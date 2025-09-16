@@ -174,7 +174,6 @@ def _as_int(value: object) -> int | None:
     except Exception:
         return None
 
-
 def _resolve_numeric_columns(fieldnames: Iterable[str | None]) -> dict[str, str]:
     sanitized: dict[str, str] = {}
     for name in fieldnames:
@@ -321,7 +320,6 @@ def _rows_from_csv(csv_bytes: bytes) -> list[tuple]:
         _vectorized_type_cast(records, resolved)
 
     return _prepare_rows(records)
-
 
 def _ensure_products_schema(conn) -> None:
     conn.execute(PRODUCTS_TABLE_SQL)
