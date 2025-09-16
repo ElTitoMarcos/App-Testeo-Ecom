@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from product_research_app import db, web_app, database, config, gpt
+from product_research_app.ai import runner
 from product_research_app.services import importer_fast, importer_unified, winner_score
 from product_research_app.services import config as cfg_service
 from product_research_app.utils.db import row_to_dict
@@ -29,6 +30,7 @@ def setup_env(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "config.json")
     monkeypatch.setattr(cfg_service, "DB_PATH", tmp_path / "data.sqlite3")
+    monkeypatch.setattr(runner, "DB_PATH", tmp_path / "data.sqlite3")
     cfg_service.init_app_config()
     conn = web_app.ensure_db()
 
@@ -292,6 +294,61 @@ def test_run_post_import_auto(tmp_path, monkeypatch):
     prod_a = row_to_dict(database.get_product(conn, pid_a))
     assert prod_a.get("desire") == f"Auto Desire {pid_a}"
     assert winner_calls and set(winner_calls[0]) == {pid_a, pid_b}
+
+def test_runner_retries_batches(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "get_api_key", lambda: "sk-test")
+    monkeypatch.setattr(config, "get_model", lambda: "gpt-test")
+
+    pid = database.insert_product(
+        conn,
+        name="RetryProd",
+        description="",
+        category="Home",
+        price=15.0,
+        currency="USD",
+        image_url="",
+        source="",
+        extra={},
+        product_id=1,
+    )
+
+    import_id = "task-retry"
+    database.enqueue_ai_tasks(conn, "desire", [pid], import_task_id=import_id)
+
+    calls = {"count": 0}
+
+    def flaky_generate(api_key, model, items):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("boom")
+        return {
+            str(items[0]["id"]): {
+                "desire": "Recovered",
+                "desire_magnitude": "High",
+                "awareness_level": "Most Aware",
+                "competition_level": "Low",
+            }
+        }, {}, {}, 0.1
+
+    monkeypatch.setattr(gpt, "generate_batch_columns", flaky_generate)
+
+    summary = runner.run_auto({"desire"}, batch_size=1, max_parallel=1)
+    assert calls["count"] >= 2
+    assert import_id in summary
+    desire_progress = summary[import_id]["tasks"]["desire"]
+    assert desire_progress["processed"] == 1
+    assert desire_progress["failed"] == 1
+    assert not summary[import_id]["errors"]
+
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT state, attempts FROM ai_task_queue WHERE import_task_id=?",
+        (import_id,),
+    )
+    row = cur.fetchone()
+    assert row[0] == "done"
+    assert int(row[1]) >= 2
 
 def test_scoring_v2_generate_cases(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)

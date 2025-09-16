@@ -976,6 +976,22 @@ def fail_ai_tasks(conn: sqlite3.Connection, task_ids: Sequence[int], error: str)
     )
     conn.commit()
 
+
+def requeue_ai_tasks(conn: sqlite3.Connection, task_ids: Sequence[int]) -> None:
+    """Return the specified tasks to the pending queue for retry."""
+
+    if not task_ids:
+        return
+    now = datetime.utcnow().isoformat()
+    placeholders = ",".join(["?"] * len(task_ids))
+    cur = conn.cursor()
+    cur.execute(
+        f"UPDATE ai_task_queue SET state='pending', error=NULL, updated_at=?, started_at=NULL, finished_at=NULL "
+        f"WHERE id IN ({placeholders})",
+        (now, *[int(tid) for tid in task_ids]),
+    )
+    conn.commit()
+
 def find_product_by_name(conn: sqlite3.Connection, name: str) -> Optional[sqlite3.Row]:
     """
     Find a product by its name, case‑insensitively.  Returns the row if found or None.
