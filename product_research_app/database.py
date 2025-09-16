@@ -20,7 +20,7 @@ import json
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 def get_connection(db_path: Path) -> sqlite3.Connection:
@@ -325,6 +325,38 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         cur.execute("ALTER TABLE import_jobs ADD COLUMN winner_score_updated INTEGER DEFAULT 0")
     except Exception:
         pass
+    # AI task queue to defer GPT processing after imports
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_task_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_type TEXT NOT NULL,
+            product_id INTEGER NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            error TEXT,
+            import_task_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE,
+            UNIQUE(task_type, product_id)
+        )
+        """
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ai_task_queue_state ON ai_task_queue(state)"
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_task_queue_task_state
+        ON ai_task_queue(task_type, state)
+        """
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ai_task_queue_product ON ai_task_queue(product_id)"
+    )
     conn.commit()
 
 
@@ -740,6 +772,178 @@ def json_dump(obj: Any) -> str:
 
     return json.dumps(obj or {}, ensure_ascii=False)
 
+
+
+
+def consume_import_token(conn: sqlite3.Connection, token: str) -> List[int]:
+    """Return product IDs tagged with ``token`` and remove the marker."""
+
+    if not token:
+        return []
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, COALESCE(extra, '{}') AS extra
+        FROM products
+        WHERE json_extract(extra, '$._import_token') = ?
+        """,
+        (token,),
+    )
+    rows = cur.fetchall()
+    if not rows:
+        return []
+    ids: List[int] = []
+    updated = False
+    for row in rows:
+        pid = int(row["id"])
+        ids.append(pid)
+        try:
+            payload = json.loads(row["extra"] or "{}")
+        except Exception:
+            payload = {}
+        if "_import_token" in payload:
+            payload.pop("_import_token", None)
+            cur.execute(
+                "UPDATE products SET extra = json(?) WHERE id = ?",
+                (json_dump(payload), pid),
+            )
+            updated = True
+    if updated:
+        conn.commit()
+    return ids
+
+
+def get_products_by_ids(conn: sqlite3.Connection, ids: Sequence[int]) -> List[sqlite3.Row]:
+    """Fetch products by ID, preserving the requested order."""
+
+    if not ids:
+        return []
+    placeholders = ",".join(["?"] * len(ids))
+    cur = conn.cursor()
+    cur.execute(
+        f"SELECT * FROM products WHERE id IN ({placeholders})",
+        tuple(int(i) for i in ids),
+    )
+    rows = cur.fetchall()
+    order = {int(pid): idx for idx, pid in enumerate(ids)}
+    return sorted(rows, key=lambda r: order.get(int(r["id"]), len(order)))
+
+
+def enqueue_ai_tasks(
+    conn: sqlite3.Connection,
+    task_type: str,
+    product_ids: Sequence[int],
+    *,
+    import_task_id: Optional[str] = None,
+) -> int:
+    """Add tasks to the AI queue, deduplicating by ``(task_type, product_id)``."""
+
+    if not product_ids:
+        return 0
+    now = datetime.utcnow().isoformat()
+    rows: List[Tuple[str, int, Optional[str], str, str]] = []
+    seen: set[int] = set()
+    for pid in product_ids:
+        try:
+            num = int(pid)
+        except Exception:
+            continue
+        if num in seen:
+            continue
+        seen.add(num)
+        rows.append((task_type, num, import_task_id, now, now))
+    if not rows:
+        return 0
+    cur = conn.cursor()
+    cur.executemany(
+        """
+        INSERT INTO ai_task_queue (task_type, product_id, import_task_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(task_type, product_id) DO UPDATE SET
+            state='pending',
+            import_task_id=COALESCE(excluded.import_task_id, ai_task_queue.import_task_id),
+            error=NULL,
+            attempts=0,
+            updated_at=excluded.updated_at,
+            started_at=NULL,
+            finished_at=NULL
+        """,
+        rows,
+    )
+    conn.commit()
+    return len(rows)
+
+
+def fetch_pending_ai_tasks(
+    conn: sqlite3.Connection,
+    *,
+    task_types: Optional[Sequence[str]] = None,
+    limit: int = 50,
+) -> List[sqlite3.Row]:
+    """Return pending AI tasks filtered by type."""
+
+    if limit <= 0:
+        return []
+    where = ["state='pending'"]
+    params: List[Any] = []
+    if task_types:
+        normalized = [t for t in task_types if t]
+        if not normalized:
+            return []
+        placeholders = ",".join(["?"] * len(normalized))
+        where.append(f"task_type IN ({placeholders})")
+        params.extend(normalized)
+    sql = (
+        "SELECT id, task_type, product_id, import_task_id, attempts, created_at, updated_at "
+        f"FROM ai_task_queue WHERE {' AND '.join(where)} "
+        "ORDER BY created_at ASC, id ASC LIMIT ?"
+    )
+    params.append(limit)
+    cur = conn.cursor()
+    cur.execute(sql, params)
+    return cur.fetchall()
+
+
+def mark_ai_tasks_in_progress(conn: sqlite3.Connection, task_ids: Sequence[int]) -> None:
+    if not task_ids:
+        return
+    now = datetime.utcnow().isoformat()
+    placeholders = ",".join(["?"] * len(task_ids))
+    cur = conn.cursor()
+    cur.execute(
+        f"UPDATE ai_task_queue SET state='processing', attempts=attempts+1, started_at=?, updated_at=? "
+        f"WHERE id IN ({placeholders})",
+        (now, now, *[int(tid) for tid in task_ids]),
+    )
+    conn.commit()
+
+
+def complete_ai_tasks(conn: sqlite3.Connection, task_ids: Sequence[int]) -> None:
+    if not task_ids:
+        return
+    now = datetime.utcnow().isoformat()
+    placeholders = ",".join(["?"] * len(task_ids))
+    cur = conn.cursor()
+    cur.execute(
+        f"UPDATE ai_task_queue SET state='done', finished_at=?, updated_at=? "
+        f"WHERE id IN ({placeholders})",
+        (now, now, *[int(tid) for tid in task_ids]),
+    )
+    conn.commit()
+
+
+def fail_ai_tasks(conn: sqlite3.Connection, task_ids: Sequence[int], error: str) -> None:
+    if not task_ids:
+        return
+    now = datetime.utcnow().isoformat()
+    placeholders = ",".join(["?"] * len(task_ids))
+    cur = conn.cursor()
+    cur.execute(
+        f"UPDATE ai_task_queue SET state='error', error=?, updated_at=? "
+        f"WHERE id IN ({placeholders})",
+        (error[:512], now, *[int(tid) for tid in task_ids]),
+    )
+    conn.commit()
 
 def find_product_by_name(conn: sqlite3.Connection, name: str) -> Optional[sqlite3.Row]:
     """

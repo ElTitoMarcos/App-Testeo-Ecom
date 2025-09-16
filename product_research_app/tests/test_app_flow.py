@@ -9,12 +9,13 @@ from urllib.parse import urlparse
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from product_research_app import web_app, database, config
-from product_research_app.services import winner_score
+from product_research_app import db, web_app, database, config, gpt
+from product_research_app.services import importer_fast, importer_unified, winner_score
 from product_research_app.services import config as cfg_service
 from product_research_app.utils.db import row_to_dict
 
 def setup_env(tmp_path, monkeypatch):
+    db.close_db()
     monkeypatch.setattr(web_app, "DB_PATH", tmp_path / "data.sqlite3")
     monkeypatch.setattr(web_app, "LOG_DIR", tmp_path / "logs")
     monkeypatch.setattr(web_app, "LOG_PATH", tmp_path / "logs" / "app.log")
@@ -29,7 +30,14 @@ def setup_env(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "config.json")
     monkeypatch.setattr(cfg_service, "DB_PATH", tmp_path / "data.sqlite3")
     cfg_service.init_app_config()
-    return web_app.ensure_db()
+    conn = web_app.ensure_db()
+
+    def _fake_get_db(path="", write=False):
+        return conn
+
+    monkeypatch.setattr(db, "get_db", _fake_get_db)
+    monkeypatch.setattr(importer_fast, "get_db", _fake_get_db)
+    return conn
 
 def make_xlsx(path: Path, rows: List[List[object]]):
     from openpyxl import Workbook
@@ -59,7 +67,7 @@ def test_app_startup(tmp_path, monkeypatch):
     cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='scores'")
     assert cur.fetchone() is not None
 
-def test_import_generates_scores(tmp_path, monkeypatch):
+def test_import_unified_inserts_rows(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)
     xlsx = tmp_path / "products.xlsx"
     make_xlsx(
@@ -69,12 +77,119 @@ def test_import_generates_scores(tmp_path, monkeypatch):
             ["Prod2", 20, 3.0, 50, 500, "2024-03-01~2024-04-01", 2, 7, 0.2, "Medium", "Medium"],
         ],
     )
-    job_id = database.create_import_job(conn, str(xlsx))
-    web_app._process_import_job(job_id, xlsx, "products.xlsx")
+    importer_unified.run_import(xlsx.read_bytes(), "products.xlsx", status_cb=lambda **_: None)
     products = [row_to_dict(r) for r in database.list_products(conn)]
     assert len(products) == 2
     for p in products:
-        assert 0 <= p.get("winner_score", 0) <= 100
+        assert p.get("winner_score") == 0
+        assert p.get("source") == "products.xlsx"
+
+
+def test_enqueue_post_import_tasks_dedupes(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    ids = [
+        database.insert_product(
+            conn,
+            name=f"Prod{idx}",
+            description="",
+            category="",
+            price=None,
+            currency=None,
+            image_url="",
+            source="",
+            extra={},
+            product_id=idx,
+        )
+        for idx in range(1, 4)
+    ]
+    summary = web_app._enqueue_post_import_tasks(
+        "task-xyz",
+        ids + ids[:1],
+        ["desire", "imputacion", "desire", "winner_score", "ignored"],
+    )
+    assert set(summary.keys()) == {"desire", "imputacion", "winner_score"}
+    cur = conn.cursor()
+    cur.execute("SELECT task_type, COUNT(*) FROM ai_task_queue GROUP BY task_type")
+    rows = {row[0]: row[1] for row in cur.fetchall()}
+    assert rows.get("desire") == len(ids)
+    assert rows.get("imputacion") == len(ids)
+    assert rows.get("winner_score") == len(ids)
+
+
+def test_handle_ai_run_post_import(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "get_api_key", lambda: "sk-test")
+    monkeypatch.setattr(config, "get_model", lambda: "gpt-test")
+
+    pid_a = database.insert_product(
+        conn,
+        name="ProdA",
+        description="",
+        category="Home",
+        price=10.0,
+        currency="USD",
+        image_url="",
+        source="",
+        extra={"rating": 4.2, "units_sold": 120, "revenue": 5000, "conversion_rate": 0.12},
+        product_id=1,
+    )
+    pid_b = database.insert_product(
+        conn,
+        name="ProdB",
+        description="",
+        category="Kitchen",
+        price=20.0,
+        currency="USD",
+        image_url="",
+        source="",
+        extra={"rating": 3.5, "units_sold": 80, "revenue": 3000, "conversion_rate": 0.08},
+        product_id=2,
+    )
+    database.enqueue_ai_tasks(conn, "desire", [pid_a, pid_b], import_task_id="task")
+    database.enqueue_ai_tasks(conn, "imputacion", [pid_a, pid_b], import_task_id="task")
+
+    def fake_generate_batch_columns(api_key, model, items):
+        ok = {
+            str(item["id"]): {
+                "desire": f"Desire {item['id']}",
+                "desire_magnitude": "High",
+                "awareness_level": "Most Aware",
+                "competition_level": "Low",
+            }
+            for item in items
+        }
+        return ok, {}, {"total_tokens": 123}, 0.5
+
+    monkeypatch.setattr(gpt, "generate_batch_columns", fake_generate_batch_columns)
+
+    body = json.dumps({"limit": 10}).encode("utf-8")
+
+    class Dummy:
+        def __init__(self, payload: bytes):
+            self.headers = {"Content-Length": str(len(payload))}
+            self.rfile = io.BytesIO(payload)
+            self.wfile = io.BytesIO()
+            self.path = "/api/ai/run_post_import"
+
+        def _set_json(self, code=200):
+            self.status = code
+
+    handler = Dummy(body)
+    web_app.RequestHandler.handle_ai_run_post_import(handler)
+    resp = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert resp["ok"] is True
+    assert resp["processed"] == 4
+    assert resp["completed"] == 4
+    assert resp["failed"] == 0
+    assert resp["pending_left"] == 0
+    assert set(resp.get("product_ids", [])) == {pid_a, pid_b}
+
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM ai_task_queue WHERE state='done'")
+    assert cur.fetchone()[0] == 4
+    prod_a = row_to_dict(database.get_product(conn, pid_a))
+    assert prod_a.get("desire") == f"Desire {pid_a}"
+    assert prod_a.get("desire_magnitude") == "High"
 
 def test_scoring_v2_generate_cases(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)
@@ -497,8 +612,7 @@ def test_import_new_batch_preserves_existing_scores(tmp_path, monkeypatch):
 
     xlsx = tmp_path / "batch.xlsx"
     make_xlsx(xlsx, [["New", 10, 4.5, 100, 1000, 50, 3, 5, 0.3, "High", "Low"]])
-    job_id = database.create_import_job(conn, str(xlsx))
-    web_app._process_import_job(job_id, xlsx, "batch.xlsx")
+    importer_unified.run_import(xlsx.read_bytes(), "batch.xlsx", status_cb=lambda **_: None)
 
     prod_old = database.get_product(conn, pid)
     assert prod_old["winner_score"] == 10
@@ -506,7 +620,7 @@ def test_import_new_batch_preserves_existing_scores(tmp_path, monkeypatch):
     rows = cur.fetchall()
     assert rows
     for _id, score in rows:
-        assert score is not None and score > 0
+        assert score == 0
 
 
 def test_recalculate_selected_and_all(tmp_path, monkeypatch):
