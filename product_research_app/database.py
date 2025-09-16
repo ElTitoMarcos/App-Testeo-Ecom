@@ -904,6 +904,37 @@ def fetch_pending_ai_tasks(
     return cur.fetchall()
 
 
+def fetch_pending_ai_tasks_for_import(
+    conn: sqlite3.Connection,
+    *,
+    import_task_id: str,
+    task_types: Optional[Sequence[str]] = None,
+    limit: int = 50,
+) -> List[sqlite3.Row]:
+    """Return pending AI tasks filtered by import identifier."""
+
+    if not import_task_id or limit <= 0:
+        return []
+    where = ["state='pending'", "import_task_id=?"]
+    params: List[Any] = [str(import_task_id)]
+    if task_types:
+        normalized = [t for t in task_types if t]
+        if not normalized:
+            return []
+        placeholders = ",".join(["?"] * len(normalized))
+        where.append(f"task_type IN ({placeholders})")
+        params.extend(normalized)
+    sql = (
+        "SELECT id, task_type, product_id, import_task_id, attempts, created_at, updated_at "
+        f"FROM ai_task_queue WHERE {' AND '.join(where)} "
+        "ORDER BY created_at ASC, id ASC LIMIT ?"
+    )
+    params.append(limit)
+    cur = conn.cursor()
+    cur.execute(sql, params)
+    return cur.fetchall()
+
+
 def mark_ai_tasks_in_progress(conn: sqlite3.Connection, task_ids: Sequence[int]) -> None:
     if not task_ids:
         return

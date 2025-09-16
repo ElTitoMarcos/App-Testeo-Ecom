@@ -20,6 +20,7 @@ Then open http://host:port in a browser.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import io
@@ -39,7 +40,7 @@ import sqlite3
 import math
 import hashlib
 from datetime import date, datetime, timedelta
-from typing import Dict, Any, List
+from typing import Dict, Any, Iterable, List, Mapping, Optional, Sequence
 
 from . import database
 from .db import get_db
@@ -87,6 +88,7 @@ _IMPORT_STATUS_LOCK = threading.Lock()
 
 
 POST_IMPORT_TASKS_ALLOWED = {"desire", "imputacion", "winner_score"}
+AI_PROGRESS_TASKS = ("desire", "imputacion", "winner_score")
 DEFAULT_POST_IMPORT_TASKS = ("desire", "imputacion")
 
 
@@ -154,6 +156,62 @@ def _enqueue_post_import_tasks(
     return summary
 
 
+def _coerce_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except Exception:
+        try:
+            return int(float(value or 0))
+        except Exception:
+            return 0
+
+
+def _normalize_ai_progress(progress: Optional[Mapping[str, Mapping[str, Any]]]) -> Dict[str, Dict[str, int]]:
+    normalized: Dict[str, Dict[str, int]] = {}
+    for task_name in AI_PROGRESS_TASKS:
+        entry = progress.get(task_name) if progress else None
+        normalized[task_name] = {
+            "requested": _coerce_int((entry or {}).get("requested")),
+            "processed": _coerce_int((entry or {}).get("processed")),
+            "failed": _coerce_int((entry or {}).get("failed")),
+        }
+    return normalized
+
+
+def _empty_ai_progress() -> Dict[str, Dict[str, int]]:
+    return _normalize_ai_progress({})
+
+
+def _get_post_import_task_flags() -> Dict[str, bool]:
+    cfg = config.load_config()
+    flags = {name: True for name in AI_PROGRESS_TASKS}
+
+    raw_flags: Mapping[str, Any] | None = None
+    if isinstance(cfg.get("postImportTasks"), Mapping):
+        raw_flags = cfg.get("postImportTasks")  # type: ignore[assignment]
+    elif isinstance(cfg.get("post_import_tasks"), Mapping):
+        raw_flags = cfg.get("post_import_tasks")  # type: ignore[assignment]
+
+    if raw_flags:
+        for key, value in raw_flags.items():
+            norm = _normalize_post_import_task(key)
+            if not norm:
+                continue
+            flags[norm] = bool(value)
+
+    if not config.is_auto_fill_ia_on_import_enabled():
+        for key in flags.keys():
+            flags[key] = False
+
+    return flags
+
+
+def _resolve_enabled_post_import_tasks() -> List[str]:
+    flags = _get_post_import_task_flags()
+    ordered = [name for name in AI_PROGRESS_TASKS if flags.get(name, False)]
+    return ordered
+
+
 def _parse_date(s: str):
     s = (s or "").strip()
     if not s:
@@ -204,8 +262,228 @@ def _get_import_status(task_id: str) -> Dict[str, Any] | None:
         status = IMPORT_STATUS.get(task_id)
         if status is None:
             return None
-        return dict(status)
+        result = dict(status)
+        result["ai_progress"] = _normalize_ai_progress(result.get("ai_progress"))
+        result.setdefault("post_import_ready", False)
+        return result
 
+
+def _run_post_import_auto(task_id: str, product_ids: Sequence[int]) -> None:
+    product_list = [int(pid) for pid in _dedupe_preserve_order(list(product_ids or [])) if str(pid).strip()]
+    progress = _empty_ai_progress()
+    try:
+        enabled_tasks = _resolve_enabled_post_import_tasks()
+        if not enabled_tasks or not product_list:
+            _update_import_status(
+                task_id,
+                ai_progress=copy.deepcopy(progress),
+                state="DONE",
+                stage="done",
+                post_import_ready=False,
+            )
+            return
+
+        summary = _enqueue_post_import_tasks(task_id, product_list, enabled_tasks)
+        if summary:
+            _update_import_status(
+                task_id,
+                post_import={
+                    "tasks": summary,
+                    "product_count": len(product_list),
+                },
+            )
+        for name in AI_PROGRESS_TASKS:
+            progress[name]["requested"] = _coerce_int(summary.get(name))
+
+        _update_import_status(task_id, ai_progress=copy.deepcopy(progress))
+
+        conn = ensure_db()
+        batch_cfg = config.get_ai_batch_config()
+        try:
+            batch_size = int(batch_cfg.get("BATCH_SIZE", 10) or 10)
+        except Exception:
+            batch_size = 10
+        batch_size = max(1, min(batch_size, 200))
+
+        api_key = config.get_api_key() or os.environ.get("OPENAI_API_KEY")
+        model = config.get_model()
+
+        error_message: Optional[str] = None
+
+        while True:
+            pending = database.fetch_pending_ai_tasks_for_import(
+                conn,
+                import_task_id=task_id,
+                task_types=enabled_tasks,
+                limit=batch_size,
+            )
+            if not pending:
+                break
+
+            task_ids = [int(row["id"]) for row in pending]
+            database.mark_ai_tasks_in_progress(conn, task_ids)
+
+            column_rows = [row for row in pending if row["task_type"] in {"desire", "imputacion"}]
+            winner_rows = [row for row in pending if row["task_type"] == "winner_score"]
+
+            if column_rows:
+                if not api_key or not model:
+                    error_message = "openai_unavailable"
+                    database.fail_ai_tasks(
+                        conn,
+                        [row["id"] for row in column_rows],
+                        "openai_unavailable",
+                    )
+                    for row in column_rows:
+                        progress[row["task_type"]]["failed"] += 1
+                else:
+                    product_id_order = _dedupe_preserve_order(
+                        [int(row["product_id"]) for row in column_rows]
+                    )
+                    products = database.get_products_by_ids(conn, product_id_order)
+                    if not products:
+                        database.fail_ai_tasks(
+                            conn,
+                            [row["id"] for row in column_rows],
+                            "missing_products",
+                        )
+                        for row in column_rows:
+                            progress[row["task_type"]]["failed"] += 1
+                    else:
+                        items: List[Dict[str, Any]] = []
+                        for prod in products:
+                            product = row_to_dict(prod)
+                            try:
+                                extra = json.loads(rget(product, "extra") or "{}")
+                            except Exception:
+                                extra = {}
+                            pid = rget(product, "id")
+                            items.append(
+                                {
+                                    "id": pid,
+                                    "name": rget(product, "name"),
+                                    "category": rget(product, "category"),
+                                    "price": rget(product, "price"),
+                                    "rating": extra.get("rating"),
+                                    "units_sold": extra.get("units_sold"),
+                                    "revenue": extra.get("revenue"),
+                                    "conversion_rate": extra.get("conversion_rate"),
+                                    "launch_date": extra.get("launch_date"),
+                                    "date_range": rget(product, "date_range") or extra.get("date_range"),
+                                    "image_url": rget(product, "image_url") or extra.get("image_url"),
+                                }
+                            )
+                        try:
+                            ok_map, ko_map, usage, duration = gpt.generate_batch_columns(
+                                api_key,
+                                model,
+                                items,
+                            )
+                        except gpt.InvalidJSONError:
+                            error_message = "invalid_json"
+                            database.fail_ai_tasks(
+                                conn,
+                                [row["id"] for row in column_rows],
+                                "invalid_json",
+                            )
+                            for row in column_rows:
+                                progress[row["task_type"]]["failed"] += 1
+                        except Exception as exc:
+                            msg = str(exc) or exc.__class__.__name__
+                            error_message = msg
+                            database.fail_ai_tasks(
+                                conn,
+                                [row["id"] for row in column_rows],
+                                msg[:512],
+                            )
+                            for row in column_rows:
+                                progress[row["task_type"]]["failed"] += 1
+                        else:
+                            successes: List[int] = []
+                            failures: List[int] = []
+                            for row in column_rows:
+                                pid = int(row["product_id"])
+                                tid = int(row["id"])
+                                entry = ok_map.get(str(pid))
+                                if entry:
+                                    updates = {
+                                        "desire": entry.get("desire"),
+                                        "desire_magnitude": entry.get("desire_magnitude"),
+                                        "awareness_level": entry.get("awareness_level"),
+                                        "competition_level": entry.get("competition_level"),
+                                        "ai_columns_completed_at": datetime.utcnow().isoformat(),
+                                    }
+                                    clean_updates = {
+                                        k: v
+                                        for k, v in updates.items()
+                                        if v not in (None, "")
+                                    }
+                                    if clean_updates:
+                                        database.update_product(conn, pid, **clean_updates)
+                                    successes.append(tid)
+                                    progress[row["task_type"]]["processed"] += 1
+                                else:
+                                    failures.append(tid)
+                                    progress[row["task_type"]]["failed"] += 1
+                            if successes:
+                                database.complete_ai_tasks(conn, successes)
+                            if failures:
+                                database.fail_ai_tasks(
+                                    conn,
+                                    failures,
+                                    "missing_result",
+                                )
+                _update_import_status(task_id, ai_progress=copy.deepcopy(progress))
+
+            if winner_rows:
+                winner_ids = _dedupe_preserve_order(
+                    [int(row["product_id"]) for row in winner_rows]
+                )
+                try:
+                    if winner_ids:
+                        winner_calc.generate_winner_scores(conn, product_ids=winner_ids)
+                    database.complete_ai_tasks(
+                        conn,
+                        [row["id"] for row in winner_rows],
+                    )
+                    for _ in winner_rows:
+                        progress["winner_score"]["processed"] += 1
+                except Exception as exc:
+                    msg = str(exc) or "winner_score_error"
+                    error_message = msg
+                    database.fail_ai_tasks(
+                        conn,
+                        [row["id"] for row in winner_rows],
+                        msg[:512],
+                    )
+                    for _ in winner_rows:
+                        progress["winner_score"]["failed"] += 1
+                _update_import_status(task_id, ai_progress=copy.deepcopy(progress))
+
+        final_state = "ERROR" if error_message else "DONE"
+        final_stage = "ai_post" if error_message else "done"
+        updates: Dict[str, Any] = {
+            "state": final_state,
+            "stage": final_stage,
+            "post_import_ready": False,
+            "ai_progress": copy.deepcopy(progress),
+        }
+        if error_message:
+            updates["error"] = error_message
+        else:
+            updates["error"] = None
+        _update_import_status(task_id, **updates)
+    except Exception as exc:
+        logger.exception("Post-import automation failed: task_id=%s", task_id)
+        progress_snapshot = copy.deepcopy(progress)
+        _update_import_status(
+            task_id,
+            state="ERROR",
+            stage="ai_post",
+            error=str(exc),
+            post_import_ready=False,
+            ai_progress=progress_snapshot,
+        )
 
 def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> str:
     """Return desire value from known sources.
@@ -499,6 +777,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 )
                 data["imported"] = data.get("rows_imported", 0)
                 data["winner_score_updated"] = data.get("winner_score_updated", 0)
+                data["ai_progress"] = _normalize_ai_progress(data.get("ai_counts"))
+                data.setdefault("post_import_ready", False)
                 self.safe_write(lambda: self.send_json(data))
             else:
                 self.safe_write(lambda: self.send_json({"state": "unknown"}))
@@ -1407,13 +1687,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                 error=None,
                 imported=0,
                 filename=filename,
+                post_import_ready=False,
+                ai_progress=_empty_ai_progress(),
             )
             file_bytes = data
             import_token = f"{task_id}-{uuid.uuid4().hex}"
-            post_import_defaults: List[str] = []
-            if config.is_auto_fill_ia_on_import_enabled():
-                post_import_defaults.extend(DEFAULT_POST_IMPORT_TASKS)
-
             def run_import_task():
                 _update_import_status(task_id, state="running", stage="running", started_at=time.time())
                 product_ids: List[int] = []
@@ -1446,20 +1724,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                     conn = ensure_db()
                     product_ids = database.consume_import_token(conn, import_token)
                     consumed_token = True
-                    if post_import_defaults and product_ids:
-                        summary = _enqueue_post_import_tasks(
-                            task_id,
-                            product_ids,
-                            list(post_import_defaults),
-                        )
-                        if summary:
-                            _update_import_status(
-                                task_id,
-                                post_import={
-                                    "tasks": summary,
-                                    "product_count": len(product_ids),
-                                },
-                            )
                     snapshot = _get_import_status(task_id) or {}
                     done_val = int(snapshot.get("done", 0) or 0)
                     if done_val < count:
@@ -1469,21 +1733,29 @@ class RequestHandler(BaseHTTPRequestHandler):
                         total_val = done_val
                     _update_import_status(
                         task_id,
-                        state="done",
-                        stage="done",
+                        state="RUNNING",
+                        stage="ai_post",
                         done=done_val,
                         total=total_val,
                         imported=count,
                         finished_at=time.time(),
+                        post_import_ready=True,
+                        ai_progress=_empty_ai_progress(),
                     )
+                    threading.Thread(
+                        target=_run_post_import_auto,
+                        args=(task_id, list(product_ids)),
+                        daemon=True,
+                    ).start()
                 except Exception as exc:
                     logger.exception("Unified import failed: filename=%s", filename)
                     _update_import_status(
                         task_id,
-                        state="error",
+                        state="ERROR",
                         stage="error",
                         error=str(exc),
                         finished_at=time.time(),
+                        post_import_ready=False,
                     )
                 finally:
                     if not consumed_token:
@@ -1521,13 +1793,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                 error=None,
                 imported=0,
                 filename=filename,
+                post_import_ready=False,
+                ai_progress=_empty_ai_progress(),
             )
 
             import_token = f"{task_id}-{uuid.uuid4().hex}"
-            post_import_defaults: List[str] = []
-            if config.is_auto_fill_ia_on_import_enabled():
-                post_import_defaults.extend(DEFAULT_POST_IMPORT_TASKS)
-
             def run_json():
                 _update_import_status(task_id, state="running", stage="running", started_at=time.time())
                 product_ids: List[int] = []
@@ -1567,20 +1837,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                     conn = ensure_db()
                     product_ids = database.consume_import_token(conn, import_token)
                     consumed_token = True
-                    if post_import_defaults and product_ids:
-                        summary = _enqueue_post_import_tasks(
-                            task_id,
-                            product_ids,
-                            list(post_import_defaults),
-                        )
-                        if summary:
-                            _update_import_status(
-                                task_id,
-                                post_import={
-                                    "tasks": summary,
-                                    "product_count": len(product_ids),
-                                },
-                            )
                     snapshot = _get_import_status(task_id) or {}
                     done_val = int(snapshot.get("done", 0) or 0)
                     if done_val < count:
@@ -1590,21 +1846,29 @@ class RequestHandler(BaseHTTPRequestHandler):
                         total_val = done_val
                     _update_import_status(
                         task_id,
-                        state="done",
-                        stage="done",
+                        state="RUNNING",
+                        stage="ai_post",
                         done=done_val,
                         total=total_val,
                         imported=count,
                         finished_at=time.time(),
+                        post_import_ready=True,
+                        ai_progress=_empty_ai_progress(),
                     )
+                    threading.Thread(
+                        target=_run_post_import_auto,
+                        args=(task_id, list(product_ids)),
+                        daemon=True,
+                    ).start()
                 except Exception as exc:
                     logger.exception("Unified JSON import failed: filename=%s", filename)
                     _update_import_status(
                         task_id,
-                        state="error",
+                        state="ERROR",
                         stage="error",
                         error=str(exc),
                         finished_at=time.time(),
+                        post_import_ready=False,
                     )
                 finally:
                     if not consumed_token:
