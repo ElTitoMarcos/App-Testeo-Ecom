@@ -97,7 +97,6 @@ SECONDARY_INDEXES: dict[str, str] = {
     "idx_products_date": "CREATE INDEX IF NOT EXISTS idx_products_date ON products(dateAdded);",
 }
 
-
 def _normalize_key(value: str) -> str:
     return "".join(ch for ch in value.lower() if ch.isalnum())
 
@@ -180,7 +179,6 @@ def _as_int(value: object) -> int | None:
         return int(round(num))
     except Exception:
         return None
-
 
 def _resolve_numeric_columns(fieldnames: Iterable[str | None]) -> dict[str, str]:
     sanitized: dict[str, str] = {}
@@ -329,7 +327,6 @@ def _rows_from_csv(csv_bytes: bytes) -> list[tuple]:
 
     return _prepare_rows(records)
 
-
 def _ensure_products_schema(conn) -> None:
     conn.execute(PRODUCTS_TABLE_SQL)
     existing = {
@@ -344,7 +341,6 @@ def _ensure_products_schema(conn) -> None:
 def _ensure_unique_index(conn) -> None:
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_products_id ON products(id);")
 
-
 def _drop_secondary_indexes(conn) -> None:
     for name in SECONDARY_INDEXES:
         conn.execute(f"DROP INDEX IF EXISTS {name};")
@@ -353,7 +349,6 @@ def _drop_secondary_indexes(conn) -> None:
 def _recreate_secondary_indexes(conn) -> None:
     for sql in SECONDARY_INDEXES.values():
         conn.execute(sql)
-
 
 def _apply_pragmas(conn) -> dict[str, object]:
     original: dict[str, object] = {}
@@ -450,7 +445,6 @@ def _import_rows(
 
     return total
 
-
 def fast_import_adaptive(
     csv_bytes: bytes,
     status_cb=lambda **_: None,
@@ -475,7 +469,6 @@ def fast_import_adaptive(
     _optimize.product_ids = product_ids  # type: ignore[attr-defined]
     return _optimize
 
-
 def fast_import(
     csv_bytes,
     status_cb=lambda **_: None,
@@ -493,7 +486,6 @@ def fast_import(
         raise
     return int(getattr(optimize, "rows_imported", 0) or 0)
 
-
 def fast_import_records(
     records: Iterable[Mapping[str, object]],
     status_cb=lambda **_: None,
@@ -504,4 +496,3 @@ def fast_import_records(
         records = list(records)
     rows = _prepare_rows(records)
     return _import_rows(rows, status_cb, phase_recorder=phase_recorder)
-

@@ -54,7 +54,6 @@ _STATE_ALIASES = {
     "FAILED": "ERROR",
 }
 
-
 def _truthy(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -93,7 +92,6 @@ def _normalize_product_ids(values: Iterable[Any]) -> list[int]:
         seen.add(num)
         normalized.append(num)
     return normalized
-
 
 def _chunked(iterable: Iterable[int], size: int) -> Iterator[list[int]]:
     iterator = iter(iterable)
@@ -150,7 +148,6 @@ def _count_existing_ids(candidates: set[int]) -> int:
             total += int(row[0])
     return total
 
-
 def _enqueue_post_import_tasks(
     task_id: str, product_ids: Iterable[int], task_types: Iterable[str]
 ) -> Dict[str, int]:
@@ -177,7 +174,6 @@ def _enqueue_post_import_tasks(
             len(ids),
         )
     return counts
-
 
 def _round_ms(delta: float) -> int:
     return max(int(round(delta * 1000)), 0)
@@ -335,7 +331,7 @@ def _update_status(task_id: str, **updates: Any) -> Dict[str, Any]:
         elif new_state in {"DONE", "ERROR"}:
             updates.setdefault("_started_monotonic", status.get("_started_monotonic"))
             updates.setdefault("eta_ms", 0)
-
+            
         status.update(updates)
 
         if status.get("total", 0) < status.get("processed", 0):
@@ -738,7 +734,6 @@ def run_post_import_tasks():
         "has_more": has_more,
         "remaining": remaining,
     }
-
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=8000, threaded=True, use_reloader=False)
