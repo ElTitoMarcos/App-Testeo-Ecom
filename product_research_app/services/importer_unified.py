@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import warnings
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -44,7 +45,14 @@ def import_xlsx(bytes_data: bytes, *, source: str, status_cb: StatusCallback) ->
         _safe_emit(status_cb, stage="parse_xlsx", done=0, total=0)
         raise RuntimeError("pandas is required for XLSX imports")
     _safe_emit(status_cb, stage="parse_xlsx", done=0, total=0)
-    df = pd.read_excel(io.BytesIO(bytes_data), dtype=str)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Workbook contains no default style, apply openpyxl's default",
+            category=UserWarning,
+            module="openpyxl.styles.stylesheet",
+        )
+        df = pd.read_excel(io.BytesIO(bytes_data), dtype=str)
     if df.empty:
         _safe_emit(status_cb, stage="parse_xlsx", done=0, total=0)
         return []

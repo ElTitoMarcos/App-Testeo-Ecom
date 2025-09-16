@@ -26,6 +26,7 @@ import os
 import io
 import re
 import logging
+import warnings
 import unicodedata
 import uuid
 import requests
@@ -1649,7 +1650,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                 except Exception:
                     self.send_error(500, 'openpyxl is required for XLSX files')
                     return
-                wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True)
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        message="Workbook contains no default style, apply openpyxl's default",
+                        category=UserWarning,
+                        module="openpyxl.styles.stylesheet",
+                    )
+                    wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True)
                 ws = wb.active
                 rows = ws.iter_rows(values_only=True)
                 try:
