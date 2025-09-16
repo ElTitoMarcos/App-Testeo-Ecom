@@ -81,7 +81,6 @@ def _normalize_product_ids(values: Iterable[Any]) -> list[int]:
         normalized.append(num)
     return normalized
 
-
 def _chunked(iterable: Iterable[int], size: int) -> Iterator[list[int]]:
     iterator = iter(iterable)
     while True:
@@ -137,7 +136,6 @@ def _count_existing_ids(candidates: set[int]) -> int:
             total += int(row[0])
     return total
 
-
 def _enqueue_post_import_tasks(
     task_id: str, product_ids: Iterable[int], task_types: Iterable[str]
 ) -> Dict[str, int]:
@@ -164,7 +162,6 @@ def _enqueue_post_import_tasks(
             len(ids),
         )
     return counts
-
 
 def _round_ms(delta: float) -> int:
     return max(int(round(delta * 1000)), 0)

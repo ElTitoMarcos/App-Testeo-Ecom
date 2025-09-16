@@ -97,7 +97,6 @@ SECONDARY_INDEXES: dict[str, str] = {
     "idx_products_date": "CREATE INDEX IF NOT EXISTS idx_products_date ON products(dateAdded);",
 }
 
-
 def _normalize_key(value: str) -> str:
     return "".join(ch for ch in value.lower() if ch.isalnum())
 
@@ -180,7 +179,6 @@ def _as_int(value: object) -> int | None:
         return int(round(num))
     except Exception:
         return None
-
 
 def _resolve_numeric_columns(fieldnames: Iterable[str | None]) -> dict[str, str]:
     sanitized: dict[str, str] = {}
@@ -329,7 +327,6 @@ def _rows_from_csv(csv_bytes: bytes) -> list[tuple]:
 
     return _prepare_rows(records)
 
-
 def _ensure_products_schema(conn) -> None:
     conn.execute(PRODUCTS_TABLE_SQL)
     existing = {
@@ -344,7 +341,6 @@ def _ensure_products_schema(conn) -> None:
 def _ensure_unique_index(conn) -> None:
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_products_id ON products(id);")
 
-
 def _drop_secondary_indexes(conn) -> None:
     for name in SECONDARY_INDEXES:
         conn.execute(f"DROP INDEX IF EXISTS {name};")
@@ -353,7 +349,6 @@ def _drop_secondary_indexes(conn) -> None:
 def _recreate_secondary_indexes(conn) -> None:
     for sql in SECONDARY_INDEXES.values():
         conn.execute(sql)
-
 
 def _apply_pragmas(conn) -> dict[str, object]:
     original: dict[str, object] = {}
@@ -391,17 +386,20 @@ def _restore_pragmas(conn, original: dict[str, object]) -> None:
     sync = original.get("synchronous")
     if sync is not None:
         conn.execute(f"PRAGMA synchronous={sync};")
-
     temp_store = original.get("temp_store")
     if temp_store is not None:
         conn.execute(f"PRAGMA temp_store={temp_store};")
 
     fk = original.get("foreign_keys")
     if fk in (0, 1):
+      
         conn.execute(f"PRAGMA foreign_keys={'ON' if fk else 'OFF'};")
     else:
         conn.execute("PRAGMA foreign_keys=ON;")
 
+    conn = get_db()
+    _ensure_products_schema(conn)
+    _ensure_unique_index(conn)
 
 def _import_rows(
     rows: Sequence[tuple],
@@ -420,7 +418,6 @@ def _import_rows(
             _drop_secondary_indexes(conn)
         if phase_recorder is not None:
             phase_recorder(info)
-
     original_pragmas = _apply_pragmas(conn)
     try:
         rows_imported = 0
@@ -449,7 +446,6 @@ def _import_rows(
             phase_recorder(info)
 
     return total
-
 
 def fast_import_adaptive(
     csv_bytes: bytes,
@@ -493,7 +489,6 @@ def fast_import(
         raise
     return int(getattr(optimize, "rows_imported", 0) or 0)
 
-
 def fast_import_records(
     records: Iterable[Mapping[str, object]],
     status_cb=lambda **_: None,
@@ -504,4 +499,3 @@ def fast_import_records(
         records = list(records)
     rows = _prepare_rows(records)
     return _import_rows(rows, status_cb, phase_recorder=phase_recorder)
-
