@@ -40,6 +40,7 @@ import time
 import sqlite3
 import math
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from typing import Dict, Any, Iterable, List, Mapping, Optional, Sequence
 
@@ -53,6 +54,7 @@ from .services.importer_unified import (
     run_import as unified_run_import,
 )
 from . import gpt
+from . import settings
 from . import title_analyzer
 from .ai import runner
 from .utils.db import row_to_dict, rget
@@ -92,6 +94,25 @@ _IMPORT_STATUS_LOCK = threading.Lock()
 POST_IMPORT_TASKS_ALLOWED = {"desire", "imputacion", "winner_score"}
 AI_PROGRESS_TASKS = ("desire", "imputacion", "winner_score")
 DEFAULT_POST_IMPORT_TASKS = ("desire", "imputacion")
+
+
+def _create_post_import_executor(max_workers: int) -> ThreadPoolExecutor:
+    workers = max(1, int(max_workers or 1))
+
+    def _daemon_thread_factory(*args, **kwargs):
+        thread = threading.Thread(*args, **kwargs)
+        thread.daemon = True
+        return thread
+
+    executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="post-import")
+    try:
+        executor._thread_factory = _daemon_thread_factory  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    return executor
+
+
+_POST_IMPORT_EXECUTOR = _create_post_import_executor(settings.AI_MAX_PARALLEL)
 
 
 def _normalize_post_import_task(name: Any) -> str | None:
@@ -176,6 +197,7 @@ def _normalize_ai_progress(progress: Optional[Mapping[str, Mapping[str, Any]]]) 
             "requested": _coerce_int((entry or {}).get("requested")),
             "processed": _coerce_int((entry or {}).get("processed")),
             "failed": _coerce_int((entry or {}).get("failed")),
+            "skipped": _coerce_int((entry or {}).get("skipped")),
         }
     return normalized
 
@@ -300,19 +322,27 @@ def _run_post_import_auto(task_id: str, product_ids: Sequence[int]) -> None:
         for name in AI_PROGRESS_TASKS:
             progress[name]["requested"] = _coerce_int(summary.get(name))
 
-        _update_import_status(task_id, ai_progress=copy.deepcopy(progress))
+        _update_import_status(
+            task_id,
+            state="RUNNING",
+            stage="ai_post",
+            post_import_ready=True,
+            ai_progress=copy.deepcopy(progress),
+        )
 
         batch_cfg = config.get_ai_batch_config()
         try:
-            batch_size = int(batch_cfg.get("BATCH_SIZE", 200) or 200)
+            raw_batch = int(batch_cfg.get("BATCH_SIZE", settings.AI_MAX_BATCH_SIZE) or settings.AI_MAX_BATCH_SIZE)
         except Exception:
-            batch_size = 200
-        batch_size = max(1, min(batch_size, 200))
+            raw_batch = settings.AI_MAX_BATCH_SIZE
+        min_batch = max(1, settings.AI_MIN_BATCH_SIZE)
+        max_batch = max(min_batch, settings.AI_MAX_BATCH_SIZE)
+        batch_size = max(min_batch, min(raw_batch, max_batch))
         try:
-            max_parallel = int(batch_cfg.get("MAX_CONCURRENCY", 3) or 3)
+            raw_parallel = int(batch_cfg.get("MAX_CONCURRENCY", settings.AI_MAX_PARALLEL) or settings.AI_MAX_PARALLEL)
         except Exception:
-            max_parallel = 3
-        max_parallel = max(1, min(max_parallel, 8))
+            raw_parallel = settings.AI_MAX_PARALLEL
+        max_parallel = max(1, min(raw_parallel, settings.AI_MAX_PARALLEL))
 
         progress_lock = threading.Lock()
 
@@ -322,7 +352,7 @@ def _run_post_import_auto(task_id: str, product_ids: Sequence[int]) -> None:
             with progress_lock:
                 entry = progress.setdefault(
                     task_type,
-                    {"requested": 0, "processed": 0, "failed": 0},
+                    {"requested": 0, "processed": 0, "failed": 0, "skipped": 0},
                 )
                 if "requested" in totals:
                     entry["requested"] = max(
@@ -335,6 +365,10 @@ def _run_post_import_auto(task_id: str, product_ids: Sequence[int]) -> None:
                 entry["failed"] = _coerce_int(
                     totals.get("failed", entry.get("failed", 0))
                 )
+                if "skipped" in totals:
+                    entry["skipped"] = _coerce_int(
+                        totals.get("skipped", entry.get("skipped", 0))
+                    )
                 _update_import_status(task_id, ai_progress=copy.deepcopy(progress))
 
         runner.register_progress_callback(task_id, _on_progress)
@@ -351,13 +385,14 @@ def _run_post_import_auto(task_id: str, product_ids: Sequence[int]) -> None:
         for task_name, totals in (import_summary.get("tasks") or {}).items():
             entry = progress.setdefault(
                 task_name,
-                {"requested": 0, "processed": 0, "failed": 0},
+                {"requested": 0, "processed": 0, "failed": 0, "skipped": 0},
             )
             entry["requested"] = max(
                 entry.get("requested", 0), _coerce_int(totals.get("requested"))
             )
             entry["processed"] = _coerce_int(totals.get("processed", entry.get("processed", 0)))
             entry["failed"] = _coerce_int(totals.get("failed", entry.get("failed", 0)))
+            entry["skipped"] = _coerce_int(totals.get("skipped", entry.get("skipped", 0)))
 
         errors = [
             str(msg)
@@ -391,127 +426,25 @@ def _run_post_import_auto(task_id: str, product_ids: Sequence[int]) -> None:
             ai_progress=progress_snapshot,
         )
 
-def _run_post_import_auto(task_id: str, product_ids: Sequence[int]) -> None:
-    product_list = [
-        int(pid)
-        for pid in _dedupe_preserve_order(list(product_ids or []))
-        if str(pid).strip()
-    ]
-    progress = _empty_ai_progress()
+
+def _submit_post_import_task(task_id: str, product_ids: Sequence[int]) -> None:
+    if not settings.AI_AUTO_ENABLED:
+        return
+    ids = list(product_ids or [])
+    if not ids:
+        return
+    delay = max(0, settings.AI_COALESCE_MS) / 1000.0
+
+    def _job() -> None:
+        if delay > 0:
+            time.sleep(delay)
+        _run_post_import_auto(task_id, ids)
+
     try:
-        enabled_tasks = _resolve_enabled_post_import_tasks()
-        if not enabled_tasks or not product_list:
-            _update_import_status(
-                task_id,
-                ai_progress=copy.deepcopy(progress),
-                state="DONE",
-                stage="done",
-                post_import_ready=False,
-            )
-            return
+        _POST_IMPORT_EXECUTOR.submit(_job)
+    except Exception:
+        threading.Thread(target=_job, daemon=True).start()
 
-        summary = _enqueue_post_import_tasks(task_id, product_list, enabled_tasks)
-        if summary:
-            _update_import_status(
-                task_id,
-                post_import={
-                    "tasks": summary,
-                    "product_count": len(product_list),
-                },
-            )
-        for name in AI_PROGRESS_TASKS:
-            progress[name]["requested"] = _coerce_int(summary.get(name))
-
-        _update_import_status(task_id, ai_progress=copy.deepcopy(progress))
-
-        batch_cfg = config.get_ai_batch_config()
-        try:
-            batch_size = int(batch_cfg.get("BATCH_SIZE", 200) or 200)
-        except Exception:
-            batch_size = 200
-        batch_size = max(1, min(batch_size, 200))
-        try:
-            max_parallel = int(batch_cfg.get("MAX_CONCURRENCY", 3) or 3)
-        except Exception:
-            max_parallel = 3
-        max_parallel = max(1, min(max_parallel, 8))
-
-        progress_lock = threading.Lock()
-
-        def _on_progress(import_task_id: str, task_type: str, totals: Mapping[str, int]) -> None:
-            if import_task_id != task_id:
-                return
-            with progress_lock:
-                entry = progress.setdefault(
-                    task_type,
-                    {"requested": 0, "processed": 0, "failed": 0},
-                )
-                if "requested" in totals:
-                    entry["requested"] = max(
-                        entry.get("requested", 0),
-                        _coerce_int(totals.get("requested")),
-                    )
-                entry["processed"] = _coerce_int(
-                    totals.get("processed", entry.get("processed", 0))
-                )
-                entry["failed"] = _coerce_int(
-                    totals.get("failed", entry.get("failed", 0))
-                )
-                _update_import_status(task_id, ai_progress=copy.deepcopy(progress))
-
-        runner.register_progress_callback(task_id, _on_progress)
-        try:
-            result = runner.run_auto(
-                set(enabled_tasks),
-                batch_size=batch_size,
-                max_parallel=max_parallel,
-            )
-        finally:
-            runner.unregister_progress_callback(task_id)
-
-        import_summary = result.get(task_id, {})
-        for task_name, totals in (import_summary.get("tasks") or {}).items():
-            entry = progress.setdefault(
-                task_name,
-                {"requested": 0, "processed": 0, "failed": 0},
-            )
-            entry["requested"] = max(
-                entry.get("requested", 0), _coerce_int(totals.get("requested"))
-            )
-            entry["processed"] = _coerce_int(totals.get("processed", entry.get("processed", 0)))
-            entry["failed"] = _coerce_int(totals.get("failed", entry.get("failed", 0)))
-
-        errors = [
-            str(msg)
-            for msg in (import_summary.get("errors") or [])
-            if msg
-        ]
-
-        final_state = "ERROR" if errors else "DONE"
-        final_stage = "ai_post" if errors else "done"
-        updates: Dict[str, Any] = {
-            "state": final_state,
-            "stage": final_stage,
-            "post_import_ready": False,
-            "ai_progress": copy.deepcopy(progress),
-        }
-        if errors:
-            updates["error"] = "; ".join(dict.fromkeys(errors))
-        else:
-            updates["error"] = None
-        _update_import_status(task_id, **updates)
-    except Exception as exc:
-        runner.unregister_progress_callback(task_id)
-        logger.exception("Post-import automation failed: task_id=%s", task_id)
-        progress_snapshot = copy.deepcopy(progress)
-        _update_import_status(
-            task_id,
-            state="ERROR",
-            stage="ai_post",
-            error=str(exc),
-            post_import_ready=False,
-            ai_progress=progress_snapshot,
-        )
 
 def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> str:
     """Return desire value from known sources.
@@ -1768,20 +1701,16 @@ class RequestHandler(BaseHTTPRequestHandler):
                         total_val = done_val
                     _update_import_status(
                         task_id,
-                        state="RUNNING",
-                        stage="ai_post",
+                        state="DONE",
+                        stage="db_done",
                         done=done_val,
                         total=total_val,
                         imported=count,
                         finished_at=time.time(),
-                        post_import_ready=True,
+                        post_import_ready=bool(product_ids),
                         ai_progress=_empty_ai_progress(),
                     )
-                    threading.Thread(
-                        target=_run_post_import_auto,
-                        args=(task_id, list(product_ids)),
-                        daemon=True,
-                    ).start()
+                    _submit_post_import_task(task_id, list(product_ids))
                 except Exception as exc:
                     logger.exception("Unified import failed: filename=%s", filename)
                     _update_import_status(
@@ -1881,20 +1810,16 @@ class RequestHandler(BaseHTTPRequestHandler):
                         total_val = done_val
                     _update_import_status(
                         task_id,
-                        state="RUNNING",
-                        stage="ai_post",
+                        state="DONE",
+                        stage="db_done",
                         done=done_val,
                         total=total_val,
                         imported=count,
                         finished_at=time.time(),
-                        post_import_ready=True,
+                        post_import_ready=bool(product_ids),
                         ai_progress=_empty_ai_progress(),
                     )
-                    threading.Thread(
-                        target=_run_post_import_auto,
-                        args=(task_id, list(product_ids)),
-                        daemon=True,
-                    ).start()
+                    _submit_post_import_task(task_id, list(product_ids))
                 except Exception as exc:
                     logger.exception("Unified JSON import failed: filename=%s", filename)
                     _update_import_status(
