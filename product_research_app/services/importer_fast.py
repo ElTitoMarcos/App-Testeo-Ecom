@@ -6,6 +6,7 @@ import re
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from product_research_app.db import get_db
+from product_research_app.utils.timing import phase
 
 
 PRODUCTS_TABLE_SQL = """
@@ -90,6 +91,11 @@ FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "dateAdded": ("dateAdded", "date_added", "added", "fecha"),
 }
 
+SECONDARY_INDEXES: dict[str, str] = {
+    "idx_products_category": "CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);",
+    "idx_products_store": "CREATE INDEX IF NOT EXISTS idx_products_store ON products(store);",
+    "idx_products_date": "CREATE INDEX IF NOT EXISTS idx_products_date ON products(dateAdded);",
+}
 
 def _normalize_key(value: str) -> str:
     return "".join(ch for ch in value.lower() if ch.isalnum())
@@ -335,6 +341,14 @@ def _ensure_products_schema(conn) -> None:
 def _ensure_unique_index(conn) -> None:
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_products_id ON products(id);")
 
+def _drop_secondary_indexes(conn) -> None:
+    for name in SECONDARY_INDEXES:
+        conn.execute(f"DROP INDEX IF EXISTS {name};")
+
+
+def _recreate_secondary_indexes(conn) -> None:
+    for sql in SECONDARY_INDEXES.values():
+        conn.execute(sql)
 
 def _apply_pragmas(conn) -> dict[str, object]:
     original: dict[str, object] = {}
@@ -372,19 +386,26 @@ def _restore_pragmas(conn, original: dict[str, object]) -> None:
     sync = original.get("synchronous")
     if sync is not None:
         conn.execute(f"PRAGMA synchronous={sync};")
-
     temp_store = original.get("temp_store")
     if temp_store is not None:
         conn.execute(f"PRAGMA temp_store={temp_store};")
 
     fk = original.get("foreign_keys")
     if fk in (0, 1):
+      
         conn.execute(f"PRAGMA foreign_keys={'ON' if fk else 'OFF'};")
     else:
         conn.execute("PRAGMA foreign_keys=ON;")
 
+    conn = get_db()
+    _ensure_products_schema(conn)
+    _ensure_unique_index(conn)
 
-def _import_rows(rows: Sequence[tuple], status_cb) -> int:
+def _import_rows(
+    rows: Sequence[tuple],
+    status_cb,
+    phase_recorder: Callable[[Mapping[str, int]], None] | None = None,
+) -> int:
     total = len(rows)
     status_cb(total=total)
 
@@ -392,6 +413,11 @@ def _import_rows(rows: Sequence[tuple], status_cb) -> int:
     _ensure_products_schema(conn)
     _ensure_unique_index(conn)
 
+    if rows:
+        with phase("drop_product_indexes") as info:
+            _drop_secondary_indexes(conn)
+        if phase_recorder is not None:
+            phase_recorder(info)
     original_pragmas = _apply_pragmas(conn)
     try:
         rows_imported = 0
@@ -413,10 +439,19 @@ def _import_rows(rows: Sequence[tuple], status_cb) -> int:
     finally:
         _restore_pragmas(conn, original_pragmas)
 
+    if rows:
+        with phase("rebuild_product_indexes") as info:
+            _recreate_secondary_indexes(conn)
+        if phase_recorder is not None:
+            phase_recorder(info)
+
     return total
 
-
-def fast_import_adaptive(csv_bytes: bytes, status_cb=lambda **_: None):
+def fast_import_adaptive(
+    csv_bytes: bytes,
+    status_cb=lambda **_: None,
+    phase_recorder: Callable[[Mapping[str, int]], None] | None = None,
+):
     if not isinstance(csv_bytes, (bytes, bytearray)):
         csv_bytes = bytes(csv_bytes)
 
@@ -427,7 +462,7 @@ def fast_import_adaptive(csv_bytes: bytes, status_cb=lambda **_: None):
         if isinstance(row, tuple) and row and row[0] is not None
     ]
 
-    rows_imported = _import_rows(rows, status_cb)
+    rows_imported = _import_rows(rows, status_cb, phase_recorder=phase_recorder)
 
     def _optimize():
         return None
@@ -437,18 +472,30 @@ def fast_import_adaptive(csv_bytes: bytes, status_cb=lambda **_: None):
     return _optimize
 
 
-def fast_import(csv_bytes, status_cb=lambda **_: None, source=None):
-    optimize = fast_import_adaptive(csv_bytes, status_cb=status_cb)
+def fast_import(
+    csv_bytes,
+    status_cb=lambda **_: None,
+    source=None,
+    phase_recorder: Callable[[Mapping[str, int]], None] | None = None,
+):
+    optimize = fast_import_adaptive(
+        csv_bytes,
+        status_cb=status_cb,
+        phase_recorder=phase_recorder,
+    )
     try:
         optimize()
     except Exception:
         raise
     return int(getattr(optimize, "rows_imported", 0) or 0)
 
-
-def fast_import_records(records: Iterable[Mapping[str, object]], status_cb=lambda **_: None, source=None):
+def fast_import_records(
+    records: Iterable[Mapping[str, object]],
+    status_cb=lambda **_: None,
+    source=None,
+    phase_recorder: Callable[[Mapping[str, int]], None] | None = None,
+):
     if not isinstance(records, Sequence):
         records = list(records)
     rows = _prepare_rows(records)
-    return _import_rows(rows, status_cb)
-
+    return _import_rows(rows, status_cb, phase_recorder=phase_recorder)
