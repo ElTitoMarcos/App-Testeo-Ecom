@@ -20,6 +20,13 @@ body.dark .card { background:#121426; border-color:#222642; }
 button { padding:8px 14px; border:none; border-radius:4px; cursor:pointer; background: linear-gradient(90deg,#0062ff,#00c8ff); color:#fff; font-weight:600; box-shadow:0 3px 5px rgba(0,0,0,0.2); transition:opacity 0.2s; }
 button:hover { opacity:0.85; }
 body.dark button { background: linear-gradient(90deg,#3a3cad,#7a53d6); color:#fff; }
+.post-import-controls { display:flex; flex-wrap:wrap; align-items:center; gap:10px; padding:10px 16px; background:rgba(255,255,255,0.6); border-bottom:1px solid rgba(0,0,0,0.08); }
+body.dark .post-import-controls { background:rgba(26,27,46,0.75); border-color:rgba(255,255,255,0.08); }
+.post-import-controls label { display:flex; align-items:center; gap:6px; font-size:0.85rem; font-weight:500; }
+.post-import-controls input[type="checkbox"] { accent-color:#0062ff; }
+body.dark .post-import-controls input[type="checkbox"] { accent-color:#7a53d6; }
+.post-import-indicator { font-size:0.85rem; min-height:1.2em; color:#2d3b66; }
+body.dark .post-import-indicator { color:#c5c9ff; }
 /* Chip style for filter toggle */
 #btnFilters { background:#e0f0ff; border:1px solid #0077cc; color:#0077cc; padding:6px 10px; border-radius:16px; font-size:14px; }
 body.dark #btnFilters { background:#2a2d5c; border-color:#7a53d6; color:#a9a9ff; }
@@ -37,6 +44,13 @@ tbody tr:hover {
 }
 #importBanner { background:rgba(122,83,214,0.2); color:#7a53d6; border:1px solid rgba(122,83,214,0.3); }
 body.dark #importBanner { background:rgba(122,83,214,0.2); color:#c9b9f3; border:1px solid rgba(122,83,214,0.4); }
+.import-progress { margin-top:6px; }
+.import-progress-bar { height:8px; border-radius:999px; background:rgba(0,0,0,0.12); overflow:hidden; }
+body.dark .import-progress-bar { background:rgba(255,255,255,0.18); }
+.import-progress-fill { height:100%; width:0%; background:linear-gradient(90deg,#0062ff,#00c8ff); transition:width 0.3s ease; }
+body.dark .import-progress-fill { background:linear-gradient(90deg,#3a3cad,#7a53d6); }
+.import-progress-label { font-size:0.8rem; margin-top:4px; display:block; color:#2d3b66; }
+body.dark .import-progress-label { color:#c5c9ff; }
 /* History & Details */
 #history details { margin-bottom:8px; }
 details summary { cursor:pointer; font-weight:600; color:#0062ff; }
@@ -126,7 +140,27 @@ body.dark .skeleton{background:#333;}
     </div>
   </div>
 </div>
-<div id="importBanner" style="display:none; padding:8px; text-align:center;"></div>
+<div id="importBanner" style="display:none; padding:8px; text-align:center;">
+  <div id="importBannerMessage"></div>
+  <div id="importProgressWrapper" class="import-progress" hidden>
+    <div class="import-progress-bar">
+      <div id="importProgressFill" class="import-progress-fill"></div>
+    </div>
+    <span id="importProgressLabel" class="import-progress-label"></span>
+  </div>
+</div>
+<div id="postImportControls" class="post-import-controls">
+  <label class="post-import-option">
+    <input type="checkbox" id="postTaskDesire" data-task="desire" checked />
+    Desire (IA)
+  </label>
+  <label class="post-import-option">
+    <input type="checkbox" id="postTaskImputacion" data-task="imputacion" checked />
+    Imputación IA
+  </label>
+  <button id="postImportRunBtn" disabled>Procesar tras importación (IA)</button>
+  <span id="postImportIndicator" class="post-import-indicator" aria-live="polite"></span>
+</div>
 <div id="config" style="display:none;">
   <div class="config-controls">
     <label for="modelSelect">Modelo</label>
@@ -377,9 +411,129 @@ const saveIfDirty = window.saveIfDirty;
 window.fetchJson = fetchJson;
 window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
+const POST_IMPORT_PREFS_KEY = 'post_import_tasks_pref_v1';
+const POST_IMPORT_TASKS = [
+  { key: 'desire', checkboxId: 'postTaskDesire' },
+  { key: 'imputacion', checkboxId: 'postTaskImputacion' },
+];
+const postImportState = { ready: false, running: false };
+const IMPORT_POLL_INTERVALS = [1500, 2000, 3000, 5000];
 let importPollTimer = null;
+let importPollIntervalIndex = 0;
+let currentImportTaskId = null;
 let savedApiKeyHash = null;
 let savedApiKeyLength = 0;
+
+function loadPostImportPrefs() {
+  try {
+    const raw = localStorage.getItem(POST_IMPORT_PREFS_KEY);
+    if (!raw) return POST_IMPORT_TASKS.map((t) => t.key);
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return POST_IMPORT_TASKS.map((t) => t.key);
+    const normalized = new Set(parsed.map((v) => String(v)));
+    const selected = POST_IMPORT_TASKS.filter((task) => normalized.has(task.key)).map((task) => task.key);
+    return selected.length ? selected : POST_IMPORT_TASKS.map((t) => t.key);
+  } catch (err) {
+    return POST_IMPORT_TASKS.map((t) => t.key);
+  }
+}
+
+function applyPostImportPrefs() {
+  const selected = new Set(loadPostImportPrefs());
+  POST_IMPORT_TASKS.forEach((task) => {
+    const el = document.getElementById(task.checkboxId);
+    if (el) el.checked = selected.has(task.key);
+  });
+}
+
+function getSelectedPostImportTasks() {
+  return POST_IMPORT_TASKS.filter((task) => {
+    const el = document.getElementById(task.checkboxId);
+    return !el || el.checked;
+  }).map((task) => task.key);
+}
+
+function savePostImportPrefs() {
+  const selected = getSelectedPostImportTasks();
+  try {
+    localStorage.setItem(POST_IMPORT_PREFS_KEY, JSON.stringify(selected));
+  } catch (err) {
+    /* ignore */
+  }
+}
+
+function updatePostImportControls(status) {
+  const container = document.getElementById('postImportControls');
+  const btn = document.getElementById('postImportRunBtn');
+  const indicator = document.getElementById('postImportIndicator');
+  if (!container || !btn || !indicator) return;
+  if (status && Object.prototype.hasOwnProperty.call(status, 'post_import_ready')) {
+    postImportState.ready = Boolean(status.post_import_ready);
+  }
+  btn.disabled = !postImportState.ready || postImportState.running;
+  if (postImportState.running) {
+    indicator.textContent = 'Procesando...';
+  } else if (status && Object.prototype.hasOwnProperty.call(status, 'post_import_ready') && !postImportState.ready) {
+    indicator.textContent = '';
+  } else if (postImportState.ready && !indicator.textContent) {
+    indicator.textContent = 'Listo';
+  }
+}
+
+applyPostImportPrefs();
+POST_IMPORT_TASKS.forEach((task) => {
+  const el = document.getElementById(task.checkboxId);
+  if (el) {
+    el.addEventListener('change', () => {
+      savePostImportPrefs();
+    });
+  }
+});
+updatePostImportControls({ post_import_ready: false });
+renderImportStatus(null);
+
+async function runPostImportAI() {
+  const indicator = document.getElementById('postImportIndicator');
+  const tasks = getSelectedPostImportTasks();
+  if (!tasks.length) {
+    toast.info('Selecciona al menos una tarea IA');
+    return;
+  }
+  postImportState.running = true;
+  updatePostImportControls();
+  try {
+    const res = await fetchJson('/api/ai/run_post_import', {
+      method: 'POST',
+      body: JSON.stringify({ tasks, limit: 200 }),
+    }, 90000);
+    const summaryParts = [];
+    Object.entries(res.results || {}).forEach(([alias, stats]) => {
+      if (!stats) return;
+      const processed = Number(stats.processed || 0);
+      const requested = Number(stats.requested || 0);
+      const failed = Number(stats.failed || 0);
+      summaryParts.push(`${alias}: ${processed}/${requested}`);
+      if (failed) summaryParts.push(`KO ${alias}: ${failed}`);
+    });
+    if (summaryParts.length) {
+      indicator.textContent = summaryParts.join(' · ');
+    } else {
+      indicator.textContent = 'Sin tareas procesadas';
+    }
+    if (res.details && res.details.ui_cost_message) {
+      toast.info(res.details.ui_cost_message, { duration: 3000 });
+    }
+    if (res.details && res.details.counts && typeof res.details.counts.n_procesados === 'number') {
+      toast.success(`IA completó ${res.details.counts.n_procesados}`, { duration: 2500 });
+    }
+    postImportState.ready = Boolean(res.has_more);
+  } catch (err) {
+    if (indicator) indicator.textContent = 'Error';
+  } finally {
+    postImportState.running = false;
+    updatePostImportControls();
+  }
+}
 
 function formatPrice(n) {
   const num = Number(n);
@@ -387,16 +541,104 @@ function formatPrice(n) {
     .format(Number.isFinite(num) ? num : 0);
 }
 
-function showImportBanner(msg) {
-  const b = document.getElementById('importBanner');
-  if (!b) return;
-  b.textContent = msg;
-  b.style.display = 'block';
+function resetImportPolling() {
+  if (importPollTimer) {
+    clearTimeout(importPollTimer);
+    importPollTimer = null;
+  }
+  importPollIntervalIndex = 0;
 }
 
-function hideImportBanner() {
-  const b = document.getElementById('importBanner');
-  if (b) b.style.display = 'none';
+function scheduleImportPoll(id) {
+  const delay = IMPORT_POLL_INTERVALS[Math.min(importPollIntervalIndex, IMPORT_POLL_INTERVALS.length - 1)];
+  if (importPollIntervalIndex < IMPORT_POLL_INTERVALS.length - 1) {
+    importPollIntervalIndex += 1;
+  }
+  importPollTimer = setTimeout(() => pollImportStatus(id), delay);
+}
+
+function formatEta(ms) {
+  const value = Number(ms);
+  if (!Number.isFinite(value) || value <= 0) return '';
+  const totalSeconds = Math.ceil(value / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes > 0) {
+    return `${minutes}m ${seconds.toString().padStart(2, '0')}s`;
+  }
+  return `${seconds}s`;
+}
+
+function renderImportStatus(status) {
+  const banner = document.getElementById('importBanner');
+  const messageEl = document.getElementById('importBannerMessage');
+  const progressWrapper = document.getElementById('importProgressWrapper');
+  const progressFill = document.getElementById('importProgressFill');
+  const progressLabel = document.getElementById('importProgressLabel');
+  if (!banner || !messageEl || !progressWrapper || !progressFill || !progressLabel) return;
+
+  if (!status || !status.state) {
+    banner.style.display = 'none';
+    progressWrapper.hidden = true;
+    messageEl.textContent = '';
+    progressFill.style.width = '0%';
+    progressLabel.textContent = '';
+    return;
+  }
+
+  const state = String(status.state || '').toUpperCase();
+  const processed = Number(status.processed || 0);
+  const total = Number(status.total || 0);
+  const etaMs = Number(status.eta_ms || 0);
+
+  let show = true;
+  let showProgress = false;
+  let percent = 0;
+  let message = '';
+  let label = '';
+
+  if (state === 'PENDING') {
+    message = 'Importación en cola…';
+  } else if (state === 'RUNNING') {
+    message = 'Importando productos…';
+    if (total > 0) {
+      percent = Math.min(100, Math.round((processed / total) * 100));
+      showProgress = true;
+      const parts = [`${processed}/${total} · ${percent}%`];
+      const etaText = formatEta(etaMs);
+      if (etaText) parts.push(`ETA ${etaText}`);
+      label = parts.join(' · ');
+    } else if (processed > 0) {
+      showProgress = true;
+      label = `${processed} procesados`;
+    }
+  } else if (state === 'DONE') {
+    message = `Importación completada (${processed} productos)`;
+  } else if (state === 'ERROR') {
+    const errorText = status.error ? `: ${status.error}` : '';
+    message = `Error en importación${errorText}`;
+  } else {
+    show = false;
+  }
+
+  if (!show) {
+    banner.style.display = 'none';
+    progressWrapper.hidden = true;
+    return;
+  }
+
+  messageEl.textContent = message;
+  if (showProgress) {
+    progressWrapper.hidden = false;
+    progressFill.style.width = `${Math.max(Math.min(percent, 100), 0)}%`;
+    progressLabel.textContent = label || '';
+  } else {
+    progressWrapper.hidden = true;
+    progressFill.style.width = '0%';
+    progressLabel.textContent = '';
+  }
+
+  banner.style.display = 'block';
 }
 
 async function sha256(str) {
@@ -408,25 +650,42 @@ async function sha256(str) {
 }
 
 async function pollImportStatus(id) {
+  if (!id) return;
+  if (importPollTimer) {
+    clearTimeout(importPollTimer);
+    importPollTimer = null;
+  }
+  if (currentImportTaskId !== id) {
+    resetImportPolling();
+    currentImportTaskId = id;
+  }
   try {
-    const data = await fetchJson(`/_import_status?task_id=${id}`);
-    if (data.status === 'pending') {
-      if (data.ui_cost_message) showImportBanner(data.ui_cost_message);
-      importPollTimer = setTimeout(() => pollImportStatus(id), 2000);
-    } else if (data.status === 'ai') {
-      if (data.ui_cost_message) showImportBanner(data.ui_cost_message);
-      importPollTimer = setTimeout(() => pollImportStatus(id), 2000);
-    } else {
+    const data = await fetchJson(`/_import_status?task_id=${encodeURIComponent(id)}`);
+    renderImportStatus(data);
+    updatePostImportControls(data);
+    const state = String(data.state || '').toUpperCase();
+    if (state === 'RUNNING' || state === 'PENDING') {
+      scheduleImportPoll(id);
+    } else if (state === 'DONE') {
+      resetImportPolling();
+      currentImportTaskId = null;
       localStorage.removeItem(IMPORT_TASK_LS_KEY);
-      if (data.status === 'done') {
+      if (typeof reloadTable === 'function') {
         await reloadTable();
-        hideImportBanner();
-      } else {
-        toast.error(data.error || 'Error en importación');
       }
+    } else if (state === 'ERROR') {
+      resetImportPolling();
+      currentImportTaskId = null;
+      localStorage.removeItem(IMPORT_TASK_LS_KEY);
+      toast.error(data.error || 'Error en importación');
+    } else {
+      scheduleImportPoll(id);
     }
   } catch (e) {
-    importPollTimer = setTimeout(() => pollImportStatus(id), 4000);
+    if (!importPollTimer) {
+      importPollIntervalIndex = IMPORT_POLL_INTERVALS.length - 1;
+      importPollTimer = setTimeout(() => pollImportStatus(id), IMPORT_POLL_INTERVALS[importPollIntervalIndex]);
+    }
   }
 }
 // Ensure the server shuts down cleanly when the tab or window is closed.
@@ -1124,6 +1383,13 @@ fileInputEl.onchange = async (ev) => {
   if(!file) return;
   const formData = new FormData();
   formData.append('file', file);
+  const selectedPostTasks = getSelectedPostImportTasks();
+  selectedPostTasks.forEach((task) => formData.append('post_import_tasks', task));
+  postImportState.ready = false;
+  updatePostImportControls({ post_import_ready: false });
+  resetImportPolling();
+  currentImportTaskId = null;
+  renderImportStatus({ state: 'PENDING', processed: 0, total: 0, eta_ms: 0 });
   const btn = document.getElementById('uploadBtn');
   btn.disabled = true;
   btn.style.opacity = '0.6';
@@ -1143,6 +1409,7 @@ fileInputEl.onchange = async (ev) => {
   } catch(err){
     console.error(err);
     toast.error('Error al subir archivo');
+    renderImportStatus(null);
   } finally {
     if (loading) loading.style.display = 'none';
     btn.disabled = false;
@@ -1150,6 +1417,13 @@ fileInputEl.onchange = async (ev) => {
     fileInputEl.value = '';
   }
 };
+const postImportRunBtn = document.getElementById('postImportRunBtn');
+if (postImportRunBtn) {
+  postImportRunBtn.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    runPostImportAI();
+  });
+}
 // search feature
 document.getElementById('searchBtn').onclick = () => {
   const term = document.getElementById('searchInput').value.trim().toLowerCase();
