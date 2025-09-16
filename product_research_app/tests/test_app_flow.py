@@ -9,12 +9,13 @@ from urllib.parse import urlparse
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from product_research_app import web_app, database, config
-from product_research_app.services import winner_score
+from product_research_app import db, web_app, database, config
+from product_research_app.services import importer_fast, importer_unified, winner_score
 from product_research_app.services import config as cfg_service
 from product_research_app.utils.db import row_to_dict
 
 def setup_env(tmp_path, monkeypatch):
+    db.close_db()
     monkeypatch.setattr(web_app, "DB_PATH", tmp_path / "data.sqlite3")
     monkeypatch.setattr(web_app, "LOG_DIR", tmp_path / "logs")
     monkeypatch.setattr(web_app, "LOG_PATH", tmp_path / "logs" / "app.log")
@@ -29,7 +30,14 @@ def setup_env(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "config.json")
     monkeypatch.setattr(cfg_service, "DB_PATH", tmp_path / "data.sqlite3")
     cfg_service.init_app_config()
-    return web_app.ensure_db()
+    conn = web_app.ensure_db()
+
+    def _fake_get_db(path="", write=False):
+        return conn
+
+    monkeypatch.setattr(db, "get_db", _fake_get_db)
+    monkeypatch.setattr(importer_fast, "get_db", _fake_get_db)
+    return conn
 
 def make_xlsx(path: Path, rows: List[List[object]]):
     from openpyxl import Workbook
@@ -59,7 +67,7 @@ def test_app_startup(tmp_path, monkeypatch):
     cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='scores'")
     assert cur.fetchone() is not None
 
-def test_import_generates_scores(tmp_path, monkeypatch):
+def test_import_unified_inserts_rows(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)
     xlsx = tmp_path / "products.xlsx"
     make_xlsx(
@@ -69,12 +77,12 @@ def test_import_generates_scores(tmp_path, monkeypatch):
             ["Prod2", 20, 3.0, 50, 500, "2024-03-01~2024-04-01", 2, 7, 0.2, "Medium", "Medium"],
         ],
     )
-    job_id = database.create_import_job(conn, str(xlsx))
-    web_app._process_import_job(job_id, xlsx, "products.xlsx")
+    importer_unified.run_import(xlsx.read_bytes(), "products.xlsx", status_cb=lambda **_: None)
     products = [row_to_dict(r) for r in database.list_products(conn)]
     assert len(products) == 2
     for p in products:
-        assert 0 <= p.get("winner_score", 0) <= 100
+        assert p.get("winner_score") == 0
+        assert p.get("source") == "products.xlsx"
 
 def test_scoring_v2_generate_cases(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)
@@ -497,8 +505,7 @@ def test_import_new_batch_preserves_existing_scores(tmp_path, monkeypatch):
 
     xlsx = tmp_path / "batch.xlsx"
     make_xlsx(xlsx, [["New", 10, 4.5, 100, 1000, 50, 3, 5, 0.3, "High", "Low"]])
-    job_id = database.create_import_job(conn, str(xlsx))
-    web_app._process_import_job(job_id, xlsx, "batch.xlsx")
+    importer_unified.run_import(xlsx.read_bytes(), "batch.xlsx", status_cb=lambda **_: None)
 
     prod_old = database.get_product(conn, pid)
     assert prod_old["winner_score"] == 10
@@ -506,7 +513,7 @@ def test_import_new_batch_preserves_existing_scores(tmp_path, monkeypatch):
     rows = cur.fetchall()
     assert rows
     for _id, score in rows:
-        assert score is not None and score > 0
+        assert score == 0
 
 
 def test_recalculate_selected_and_all(tmp_path, monkeypatch):

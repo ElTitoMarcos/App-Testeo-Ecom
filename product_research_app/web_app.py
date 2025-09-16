@@ -42,10 +42,12 @@ from typing import Dict, Any, List
 from . import database
 from .db import get_db
 from . import config
-from .services import ai_columns
 from .services import winner_score as winner_calc
 from .services import trends_service
-from .services.importer_fast import fast_import, fast_import_records
+from .services.importer_unified import (
+    import_records as unified_import_records,
+    run_import as unified_run_import,
+)
 from . import gpt
 from . import title_analyzer
 from .utils.db import row_to_dict, rget
@@ -170,351 +172,6 @@ def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> str:
             source_used,
         )
     return desire_val
-
-
-def parse_xlsx(binary: bytes):
-    """Parse a minimal XLSX file into a list of dictionaries."""
-    import zipfile
-    import xml.etree.ElementTree as ET
-    from io import BytesIO
-
-    with zipfile.ZipFile(BytesIO(binary)) as z:
-        shared = []
-        if 'xl/sharedStrings.xml' in z.namelist():
-            ss_root = ET.fromstring(z.read('xl/sharedStrings.xml'))
-            for si in ss_root.findall('.//{*}si'):
-                text = ''.join((t.text or '') for t in si.findall('.//{*}t'))
-                shared.append(text)
-        sheet_name = None
-        for name in z.namelist():
-            if name.startswith('xl/worksheets/sheet') and name.endswith('.xml'):
-                sheet_name = name
-                break
-        if not sheet_name:
-            return []
-        root = ET.fromstring(z.read(sheet_name))
-        rows = []
-        for row in root.findall('.//{*}row'):
-            values = []
-            last_col_idx = 0
-            for c in row.findall('{*}c'):
-                cell_ref = c.attrib.get('r', '')
-                letters = ''.join(ch for ch in cell_ref if ch.isalpha())
-                col_idx = 0
-                for ch in letters:
-                    col_idx = col_idx * 26 + (ord(ch.upper()) - ord('A') + 1)
-                while last_col_idx < col_idx - 1:
-                    values.append('')
-                    last_col_idx += 1
-                val = ''
-                cell_type = c.attrib.get('t')
-                if cell_type == 's':
-                    v = c.find('{*}v')
-                    if v is not None:
-                        try:
-                            idx = int(v.text)
-                            val = shared[idx] if idx < len(shared) else ''
-                        except Exception:
-                            val = ''
-                elif cell_type == 'inlineStr':
-                    tnode = c.find('{*}is/{*}t')
-                    val = tnode.text if tnode is not None else ''
-                else:
-                    v = c.find('{*}v')
-                    val = v.text if v is not None else ''
-                values.append(val)
-                last_col_idx = col_idx
-            rows.append(values)
-        while rows and all(not cell for cell in rows[0]):
-            rows.pop(0)
-        if not rows:
-            return []
-        headers = rows[0]
-        records = []
-        for r in rows[1:]:
-            rec = {}
-            for i, h in enumerate(headers):
-                rec[h] = r[i] if i < len(r) else ''
-            records.append(rec)
-        return records
-
-
-def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
-    """Background task to import XLSX data into the database."""
-    conn = ensure_db()
-    rows_imported = 0
-    inserted_ids: List[int] = []
-    try:
-        data = tmp_path.read_bytes()
-        records = parse_xlsx(data)
-
-        used_cols: set[str] = set()
-
-        def find_key(keys, patterns):
-            for k in keys:
-                if k in used_cols:
-                    continue
-                sanitized = ''.join(ch.lower() for ch in k if ch.isalnum())
-                for p in patterns:
-                    if p in sanitized:
-                        used_cols.add(k)
-                        return k
-            return None
-
-        if records:
-            headers = list(records[0].keys())
-            # identify columns with tolerant synonyms
-            rating_col = find_key(headers, ["rating", "stars", "valoracion", "puntuacion"])
-            units_col = find_key(headers, ["unitssold", "units", "ventas", "sold"])
-            revenue_col = find_key(headers, ["revenue", "sales", "ingresos"])
-            conv_col = find_key(headers, ["conversion", "cr", "tasaconversion"])
-            launch_col = find_key(headers, ["launchdate", "fecha", "date", "firstseen"])
-            range_col = None
-            if "Date Range" in headers:
-                range_col = "Date Range"
-                used_cols.add(range_col)
-            else:
-                range_col = find_key(headers, ["daterange", "fecharango", "rangofechas"])
-            price_col = find_key(headers, ["price", "precio", "cost", "unitprice"])
-            img_col = find_key(headers, ["imageurl", "image", "imagelink", "mainimage", "mainimageurl", "img", "imagen", "picture", "primaryimage"])
-            name_col = find_key(headers, ["name", "productname", "title", "product", "producto"])
-            desc_col = find_key(headers, ["description", "descripcion", "desc"])
-            cat_col = find_key(headers, ["category", "categoria", "niche", "segment"])
-            curr_col = find_key(headers, ["currency", "moneda"])
-
-            metric_names = [
-                "magnitud_deseo",
-                "nivel_consciencia_headroom",
-                "evidencia_demanda",
-                "tasa_conversion",
-                "ventas_por_dia",
-                "recencia_lanzamiento",
-                "competition_level_invertido",
-                "facilidad_anuncio",
-                "escalabilidad",
-                "durabilidad_recurrencia",
-            ]
-
-            def sanitize(name: str) -> str:
-                return "".join(ch for ch in name if ch.isalnum())
-
-            metric_cols = {m: find_key(headers, [sanitize(m)]) for m in metric_names}
-
-            def parse_number(val: Any) -> float | None:
-                if val in (None, ''):
-                    return None
-                s = str(val).strip()
-                if not s:
-                    return None
-                percent = '%' in s
-                s = s.replace('%', '').replace(' ', '').replace(',', '.')
-                s = re.sub(r'[^0-9.+-]', '', s)
-                try:
-                    num = float(s)
-                    if percent:
-                        num /= 100.0
-                    return num
-                except Exception:
-                    return None
-
-            def parse_text(val: Any) -> str | None:
-                if val is None:
-                    return None
-                s = str(val).strip()
-                return s or None
-
-            numeric_metrics = {
-                "evidencia_demanda",
-                "tasa_conversion",
-                "ventas_por_dia",
-                "recencia_lanzamiento",
-            }
-
-            cur = conn.cursor()
-            cur.execute("BEGIN")
-            cur.execute("SELECT COUNT(*) FROM products")
-            count = cur.fetchone()[0]
-            cur.execute("SELECT COALESCE(MAX(id), -1) FROM products")
-            max_id = cur.fetchone()[0]
-            is_empty = count == 0
-            base_id = 0 if is_empty else (max_id + 1)
-            rows_validas = []
-            for row in records:
-                name = (row.get(name_col) or '').strip() if name_col else None
-                if not name:
-                    continue
-                description = (row.get(desc_col) or '').strip() if desc_col else None
-                category = (row.get(cat_col) or '').strip() if cat_col else None
-                price = None
-                if price_col and row.get(price_col):
-                    try:
-                        price = float(str(row.get(price_col)).replace(',', '.'))
-                    except Exception:
-                        price = None
-                currency = (row.get(curr_col) or '').strip() if curr_col else None
-                image_url = (row.get(img_col) or '').strip() if img_col else None
-
-                date_range = (row.get(range_col) or '').strip() if range_col else ''
-
-                extras = {}
-                metrics: dict[str, object] = {}
-
-                rating_val = None
-                if rating_col and row.get(rating_col) not in (None, ''):
-                    try:
-                        s = str(row.get(rating_col)).strip().replace(' ', '').replace(',', '.')
-                        s = re.sub(r'[^0-9.]+', '', s)
-                        if s.count('.') > 1:
-                            parts = s.split('.')
-                            s = ''.join(parts[:-1]) + '.' + parts[-1]
-                        rating_val = float(s) if s else None
-                    except Exception:
-                        rating_val = None
-                if rating_val is not None:
-                    extras['rating'] = rating_val
-                    extras['Product Rating'] = rating_val
-
-                units_val = None
-                if units_col and row.get(units_col) not in (None, ''):
-                    try:
-                        s = re.sub(r'[^0-9]+', '', str(row.get(units_col)))
-                        units_val = int(s) if s else None
-                    except Exception:
-                        units_val = None
-                if units_val is not None:
-                    extras['units_sold'] = units_val
-                    extras['Item Sold'] = units_val
-
-                revenue_val = None
-                if revenue_col and row.get(revenue_col) not in (None, ''):
-                    try:
-                        s = str(row.get(revenue_col)).strip().replace(' ', '').replace(',', '.')
-                        s = re.sub(r'[^0-9.]+', '', s)
-                        if s.count('.') > 1:
-                            parts = s.split('.')
-                            s = ''.join(parts[:-1]) + '.' + parts[-1]
-                        revenue_val = float(s) if s else None
-                    except Exception:
-                        revenue_val = None
-                if revenue_val is None and price is not None and units_val is not None:
-                    revenue_val = price * units_val
-                if revenue_val is not None:
-                    extras['revenue'] = revenue_val
-                    extras['Revenue($)'] = revenue_val
-
-                def set_extra(col, key):
-                    val = row.get(col) if col else None
-                    if val is not None and str(val).strip():
-                        extras[key] = str(val).strip()
-
-                set_extra(conv_col, 'conversion_rate')
-                set_extra(launch_col, 'launch_date')
-
-                for m in metric_names:
-                    col = metric_cols.get(m)
-                    raw = row.get(col) if col else None
-                    if raw not in (None, ''):
-                        if m in numeric_metrics:
-                            val = parse_number(raw)
-                        else:
-                            val = parse_text(raw)
-                        if val is not None:
-                            metrics[m] = val
-
-                recognized = {
-                    name_col,
-                    desc_col,
-                    cat_col,
-                    price_col,
-                    curr_col,
-                    img_col,
-                    rating_col,
-                    units_col,
-                    revenue_col,
-                    conv_col,
-                    launch_col,
-                    range_col,
-                }
-                recognized.update(c for c in metric_cols.values() if c)
-                for k, v in row.items():
-                    if k not in recognized:
-                        extras[k] = v
-
-                rows_validas.append(
-                    (name, description, category, price, currency, image_url, date_range, extras, metrics)
-                )
-            for idx, (name, description, category, price, currency, image_url, date_range, extra_cols, metrics) in enumerate(rows_validas):
-                row_id = base_id + idx
-                database.insert_product(
-                    conn,
-                    name=name,
-                    description=description,
-                    category=category,
-                    price=price,
-                    currency=currency,
-                    image_url=image_url,
-                    date_range=date_range,
-                    source=filename,
-                    extra=extra_cols,
-                    commit=False,
-                    product_id=row_id,
-                )
-                if metrics:
-                    database.update_product(conn, row_id, **metrics)
-                rows_imported += 1
-                inserted_ids.append(row_id)
-            conn.commit()
-        
-        if inserted_ids and config.is_auto_fill_ia_on_import_enabled():
-            database.start_import_job_ai(conn, job_id, len(inserted_ids))
-            cfg_cost = config.get_ai_cost_config()
-            res = ai_columns.fill_ai_columns(
-                inserted_ids,
-                model=cfg_cost.get("model"),
-                batch_mode=len(inserted_ids) >= cfg_cost.get("useBatchWhenCountGte", 300),
-                cost_cap_usd=cfg_cost.get("costCapUSD"),
-            )
-            counts = res.get("counts", {})
-            database.update_import_job_ai_progress(conn, job_id, counts.get("n_procesados", 0))
-            database.set_import_job_ai_counts(conn, job_id, counts, res.get("pending_ids", []))
-            if res.get("error"):
-                database.set_import_job_ai_error(conn, job_id, "No se pudieron completar las columnas con IA: revisa la API.")
-        res_scores = winner_calc.generate_winner_scores(conn, product_ids=inserted_ids)
-        updated_scores = int(res_scores.get("updated", 0))
-        logger.info(
-            "Winner Score import/post: imported=%d updated=%d",
-            len(inserted_ids),
-            updated_scores,
-        )
-        database.complete_import_job(conn, job_id, rows_imported, updated_scores)
-    except Exception as exc:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        database.fail_import_job(conn, job_id, str(exc))
-    finally:
-        try:
-            tmp_path.unlink()
-        except Exception:
-            pass
-
-
-def resume_incomplete_imports():
-    """Mark stale pending imports as failed and remove orphan temp files."""
-    conn = ensure_db()
-    database.mark_stale_pending_imports(conn, 5)
-    tmp_dir = APP_DIR / 'uploads'
-    if tmp_dir.exists():
-        cur = conn.cursor()
-        cur.execute("SELECT temp_path FROM import_jobs")
-        valid = {Path(row[0]) for row in cur.fetchall() if row[0]}
-        for f in tmp_dir.glob('import_*'):
-            if f not in valid:
-                try:
-                    f.unlink()
-                except Exception:
-                    pass
 
 
 class _SilentWriter:
@@ -1665,19 +1322,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         filename = Path(filename).name
         ext = Path(filename).suffix.lower()
-        if ext in (".xlsx", ".xls"):
-            tmp_dir = APP_DIR / "uploads"
-            tmp_dir.mkdir(exist_ok=True)
-            tmp_path = tmp_dir / f"import_{int(time.time()*1000)}{ext}"
-            with open(tmp_path, "wb") as f:
-                f.write(data)
-            conn = ensure_db()
-            job_id = database.create_import_job(conn, str(tmp_path))
-            threading.Thread(target=_process_import_job, args=(job_id, tmp_path, filename), daemon=True).start()
-            self.safe_write(lambda: self.send_json({"task_id": job_id}, status=202))
-            return
-
-        if ext == ".csv":
+        if ext in {".csv", ".xlsx", ".xls"}:
             ensure_db()
             task_id = str(int(time.time() * 1000))
             _update_import_status(
@@ -1690,20 +1335,32 @@ class RequestHandler(BaseHTTPRequestHandler):
                 imported=0,
                 filename=filename,
             )
-            csv_bytes = data
+            file_bytes = data
 
-            def run_csv():
+            def run_import_task():
                 _update_import_status(task_id, state="running", stage="running", started_at=time.time())
                 try:
                     def cb(**kwargs):
-                        _update_import_status(task_id, **kwargs)
+                        updates = dict(kwargs)
+                        if "done" in updates:
+                            try:
+                                updates["done"] = int(updates.get("done") or 0)
+                            except Exception:
+                                updates["done"] = 0
+                        if "total" in updates:
+                            try:
+                                updates["total"] = int(updates.get("total") or 0)
+                            except Exception:
+                                updates["total"] = 0
+                        updates.setdefault("state", "running")
+                        _update_import_status(task_id, **updates)
 
-                    count = fast_import(csv_bytes, status_cb=cb, source=filename)
+                    count = unified_run_import(file_bytes, filename, status_cb=cb)
                     snapshot = _get_import_status(task_id) or {}
                     done_val = int(snapshot.get("done", 0) or 0)
                     if done_val < count:
                         done_val = count
-                    total_val = int(snapshot.get("total", 0) or 0)
+                    total_val = int(snapshot.get("total", count) or 0)
                     if total_val < done_val:
                         total_val = done_val
                     _update_import_status(
@@ -1716,7 +1373,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         finished_at=time.time(),
                     )
                 except Exception as exc:
-                    logger.exception("Fast CSV import failed: filename=%s", filename)
+                    logger.exception("Unified import failed: filename=%s", filename)
                     _update_import_status(
                         task_id,
                         state="error",
@@ -1725,7 +1382,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         finished_at=time.time(),
                     )
 
-            threading.Thread(target=run_csv, daemon=True).start()
+            threading.Thread(target=run_import_task, daemon=True).start()
             self.safe_write(lambda: self.send_json({"task_id": task_id}, status=202))
             return
 
@@ -1756,9 +1413,34 @@ class RequestHandler(BaseHTTPRequestHandler):
                 _update_import_status(task_id, state="running", stage="running", started_at=time.time())
                 try:
                     def cb(**kwargs):
-                        _update_import_status(task_id, **kwargs)
+                        updates = dict(kwargs)
+                        if "done" in updates:
+                            try:
+                                updates["done"] = int(updates.get("done") or 0)
+                            except Exception:
+                                updates["done"] = 0
+                        if "total" in updates:
+                            try:
+                                updates["total"] = int(updates.get("total") or 0)
+                            except Exception:
+                                updates["total"] = 0
+                        updates.setdefault("state", "running")
+                        _update_import_status(task_id, **updates)
 
-                    count = fast_import_records(records, status_cb=cb, source=filename)
+                    enriched = []
+                    for item in records:
+                        row = dict(item)
+                        if filename:
+                            row.setdefault("source", filename)
+                        row.setdefault("winner_score", "0")
+                        enriched.append(row)
+                    _update_import_status(
+                        task_id,
+                        stage="parse_json",
+                        done=len(enriched),
+                        total=len(enriched),
+                    )
+                    count = unified_import_records(enriched, status_cb=cb)
                     snapshot = _get_import_status(task_id) or {}
                     done_val = int(snapshot.get("done", 0) or 0)
                     if done_val < count:
@@ -1776,7 +1458,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         finished_at=time.time(),
                     )
                 except Exception as exc:
-                    logger.exception("Fast JSON import failed: filename=%s", filename)
+                    logger.exception("Unified JSON import failed: filename=%s", filename)
                     _update_import_status(
                         task_id,
                         state="error",
@@ -2543,7 +2225,6 @@ class RequestHandler(BaseHTTPRequestHandler):
 
 def run(host: str = '127.0.0.1', port: int = 8000):
     ensure_db()
-    resume_incomplete_imports()
     httpd = HTTPServer((host, port), RequestHandler)
     print(f"Servidor iniciado en http://{host}:{port}")
     try:
