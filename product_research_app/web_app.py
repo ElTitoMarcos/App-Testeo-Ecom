@@ -267,7 +267,167 @@ def _get_import_status(task_id: str) -> Dict[str, Any] | None:
         result["ai_progress"] = _normalize_ai_progress(result.get("ai_progress"))
         result.setdefault("post_import_ready", False)
         return result
+            column_rows = [row for row in pending if row["task_type"] in {"desire", "imputacion"}]
+            winner_rows = [row for row in pending if row["task_type"] == "winner_score"]
 
+            if column_rows:
+                if not api_key or not model:
+                    error_message = "openai_unavailable"
+                    database.fail_ai_tasks(
+                        conn,
+                        [row["id"] for row in column_rows],
+                        "openai_unavailable",
+                    )
+                    for row in column_rows:
+                        progress[row["task_type"]]["failed"] += 1
+                else:
+                    product_id_order = _dedupe_preserve_order(
+                        [int(row["product_id"]) for row in column_rows]
+                    )
+                    products = database.get_products_by_ids(conn, product_id_order)
+                    if not products:
+                        database.fail_ai_tasks(
+                            conn,
+                            [row["id"] for row in column_rows],
+                            "missing_products",
+                        )
+                        for row in column_rows:
+                            progress[row["task_type"]]["failed"] += 1
+                    else:
+                        items: List[Dict[str, Any]] = []
+                        for prod in products:
+                            product = row_to_dict(prod)
+                            try:
+                                extra = json.loads(rget(product, "extra") or "{}")
+                            except Exception:
+                                extra = {}
+                            pid = rget(product, "id")
+                            items.append(
+                                {
+                                    "id": pid,
+                                    "name": rget(product, "name"),
+                                    "category": rget(product, "category"),
+                                    "price": rget(product, "price"),
+                                    "rating": extra.get("rating"),
+                                    "units_sold": extra.get("units_sold"),
+                                    "revenue": extra.get("revenue"),
+                                    "conversion_rate": extra.get("conversion_rate"),
+                                    "launch_date": extra.get("launch_date"),
+                                    "date_range": rget(product, "date_range") or extra.get("date_range"),
+                                    "image_url": rget(product, "image_url") or extra.get("image_url"),
+                                }
+                            )
+                        try:
+                            ok_map, ko_map, usage, duration = gpt.generate_batch_columns(
+                                api_key,
+                                model,
+                                items,
+                            )
+                        except gpt.InvalidJSONError:
+                            error_message = "invalid_json"
+                            database.fail_ai_tasks(
+                                conn,
+                                [row["id"] for row in column_rows],
+                                "invalid_json",
+                            )
+                            for row in column_rows:
+                                progress[row["task_type"]]["failed"] += 1
+                        except Exception as exc:
+                            msg = str(exc) or exc.__class__.__name__
+                            error_message = msg
+                            database.fail_ai_tasks(
+                                conn,
+                                [row["id"] for row in column_rows],
+                                msg[:512],
+                            )
+                            for row in column_rows:
+                                progress[row["task_type"]]["failed"] += 1
+                        else:
+                            successes: List[int] = []
+                            failures: List[int] = []
+                            for row in column_rows:
+                                pid = int(row["product_id"])
+                                tid = int(row["id"])
+                                entry = ok_map.get(str(pid))
+                                if entry:
+                                    updates = {
+                                        "desire": entry.get("desire"),
+                                        "desire_magnitude": entry.get("desire_magnitude"),
+                                        "awareness_level": entry.get("awareness_level"),
+                                        "competition_level": entry.get("competition_level"),
+                                        "ai_columns_completed_at": datetime.utcnow().isoformat(),
+                                    }
+                                    clean_updates = {
+                                        k: v
+                                        for k, v in updates.items()
+                                        if v not in (None, "")
+                                    }
+                                    if clean_updates:
+                                        database.update_product(conn, pid, **clean_updates)
+                                    successes.append(tid)
+                                    progress[row["task_type"]]["processed"] += 1
+                                else:
+                                    failures.append(tid)
+                                    progress[row["task_type"]]["failed"] += 1
+                            if successes:
+                                database.complete_ai_tasks(conn, successes)
+                            if failures:
+                                database.fail_ai_tasks(
+                                    conn,
+                                    failures,
+                                    "missing_result",
+                                )
+                _update_import_status(task_id, ai_progress=copy.deepcopy(progress))
+
+            if winner_rows:
+                winner_ids = _dedupe_preserve_order(
+                    [int(row["product_id"]) for row in winner_rows]
+                )
+                try:
+                    if winner_ids:
+                        winner_calc.generate_winner_scores(conn, product_ids=winner_ids)
+                    database.complete_ai_tasks(
+                        conn,
+                        [row["id"] for row in winner_rows],
+                    )
+                    for _ in winner_rows:
+                        progress["winner_score"]["processed"] += 1
+                except Exception as exc:
+                    msg = str(exc) or "winner_score_error"
+                    error_message = msg
+                    database.fail_ai_tasks(
+                        conn,
+                        [row["id"] for row in winner_rows],
+                        msg[:512],
+                    )
+                    for _ in winner_rows:
+                        progress["winner_score"]["failed"] += 1
+                _update_import_status(task_id, ai_progress=copy.deepcopy(progress))
+
+        final_state = "ERROR" if error_message else "DONE"
+        final_stage = "ai_post" if error_message else "done"
+        updates: Dict[str, Any] = {
+            "state": final_state,
+            "stage": final_stage,
+            "post_import_ready": False,
+            "ai_progress": copy.deepcopy(progress),
+        }
+        if error_message:
+            updates["error"] = error_message
+        else:
+            updates["error"] = None
+        _update_import_status(task_id, **updates)
+    except Exception as exc:
+        logger.exception("Post-import automation failed: task_id=%s", task_id)
+        progress_snapshot = copy.deepcopy(progress)
+        _update_import_status(
+            task_id,
+            state="ERROR",
+            stage="ai_post",
+            error=str(exc),
+            post_import_ready=False,
+            ai_progress=progress_snapshot,
+        )
 
 def _run_post_import_auto(task_id: str, product_ids: Sequence[int]) -> None:
     product_list = [
