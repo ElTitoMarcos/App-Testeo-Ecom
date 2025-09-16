@@ -131,6 +131,28 @@ def _recreate(db, items: Sequence[tuple]) -> None:
 def _round_ms(delta: float) -> int:
     return max(int(round(delta * 1000)), 0)
 
+def _rows_from_records(records):
+  for r in records:
+    if not isinstance(r, dict):
+      continue
+    yield (
+      _int_or_default(r.get('id') or r.get('ID')),
+      r.get('name') or r.get('Nombre') or '',
+      r.get('category_path') or r.get('Categoría') or r.get('categoria') or r.get('category') or '',
+      _num(r.get('price') or r.get('precio')),
+      _num(r.get('rating') or r.get('valoracion')),
+      _num(r.get('units_sold') or r.get('unidades') or r.get('units')),
+      _num(r.get('revenue') or r.get('ingresos') or r.get('sales')),
+      _num(r.get('conversion_rate') or r.get('tasa_conversion') or r.get('conversion')),
+      (r.get('launch_date') or r.get('fecha_lanzamiento') or r.get('launchDate') or '')[:10],
+      r.get('date_range') or r.get('rango_fechas') or r.get('Date Range') or '',
+      r.get('desire_magnitude') or r.get('desireMag') or '',
+      r.get('awareness_level') or r.get('awareness') or '',
+      r.get('competition_level') or r.get('competition') or '',
+      None if (r.get('winner_score') in (None,'')) else int(_num(r.get('winner_score'))),
+      r.get('image_url') or r.get('imagen') or r.get('image') or '',
+      r.get('desire') or ''
+    )
 
 def _push_pragmas(db):
     original = {}
