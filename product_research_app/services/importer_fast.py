@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import re
-from typing import Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from product_research_app.db import get_db
 
@@ -110,7 +110,7 @@ def _lookup(row: Mapping[str, object], sanitized: dict[str, str], field: str) ->
     return None
 
 
-def _parse_number(value: object) -> float | None:
+def _as_float(value: object) -> float | None:
     if value in (None, ""):
         return None
     if isinstance(value, (int, float)):
@@ -165,8 +165,8 @@ def _parse_number(value: object) -> float | None:
     return None
 
 
-def _parse_int(value: object) -> int | None:
-    num = _parse_number(value)
+def _as_int(value: object) -> int | None:
+    num = _as_float(value)
     if num is None:
         return None
     try:
@@ -174,6 +174,51 @@ def _parse_int(value: object) -> int | None:
     except Exception:
         return None
 
+def _resolve_numeric_columns(fieldnames: Iterable[str | None]) -> dict[str, str]:
+    sanitized: dict[str, str] = {}
+    for name in fieldnames:
+        if name is None:
+            continue
+        norm = _normalize_key(str(name))
+        if not norm:
+            continue
+        sanitized[norm] = str(name)
+
+    resolved: dict[str, str] = {}
+    numeric_fields = ("price", "units_sold", "revenue", "rating", "oldness", "awareness")
+    for field in numeric_fields:
+        for alias in FIELD_ALIASES.get(field, ()):  # pragma: no branch - tiny tuple
+            key = _normalize_key(alias)
+            actual = sanitized.get(key)
+            if actual is not None:
+                resolved[field] = actual
+                break
+    return resolved
+
+
+def _vectorized_type_cast(
+    records: list[dict[str, Any]],
+    resolved: Mapping[str, str],
+) -> None:
+    if not records or not resolved:
+        return
+
+    casters: dict[str, Callable[[object], Any]] = {
+        "price": _as_float,
+        "units_sold": _as_int,
+        "revenue": _as_float,
+        "rating": _as_float,
+        "oldness": _as_int,
+        "awareness": _as_float,
+    }
+
+    for field, column in resolved.items():
+        caster = casters.get(field)
+        if caster is None:
+            continue
+        converted = [caster(record.get(column)) for record in records]
+        for record, value in zip(records, converted):
+            record[column] = value
 
 def _coerce_text(value: object | None) -> str | None:
     if value in (None, ""):
@@ -202,7 +247,7 @@ def _row_from_mapping(
             continue
         sanitized.setdefault(norm, str(key))
 
-    product_id = _parse_int(_lookup(row, sanitized, "id"))
+    product_id = _as_int(_lookup(row, sanitized, "id"))
     if product_id is None or product_id <= 0:
         return None
     if product_id in seen_ids:
@@ -216,15 +261,15 @@ def _row_from_mapping(
         return None
     seen_hashes.add(hash_key)
 
-    price_val = _parse_number(_lookup(row, sanitized, "price"))
-    units_val = _parse_number(_lookup(row, sanitized, "units_sold"))
-    revenue_val = _parse_number(_lookup(row, sanitized, "revenue"))
-    rating_val = _parse_number(_lookup(row, sanitized, "rating"))
+    price_val = _as_float(_lookup(row, sanitized, "price"))
+    units_val = _as_int(_lookup(row, sanitized, "units_sold"))
+    revenue_val = _as_float(_lookup(row, sanitized, "revenue"))
+    rating_val = _as_float(_lookup(row, sanitized, "rating"))
 
     desire_val = _lookup(row, sanitized, "desire")
     competition_val = _lookup(row, sanitized, "competition")
-    oldness_val = _lookup(row, sanitized, "oldness")
-    awareness_val = _lookup(row, sanitized, "awareness")
+    oldness_val = _as_int(_lookup(row, sanitized, "oldness"))
+    awareness_val = _as_float(_lookup(row, sanitized, "awareness"))
 
     category_val = _coerce_text(_lookup(row, sanitized, "category"))
     description_val = _coerce_text(_lookup(row, sanitized, "description"))
@@ -265,8 +310,15 @@ def _prepare_rows(records: Iterable[Mapping[str, object]]) -> list[tuple]:
 def _rows_from_csv(csv_bytes: bytes) -> list[tuple]:
     text = csv_bytes.decode("utf-8", errors="ignore")
     reader = csv.DictReader(io.StringIO(text))
-    return _prepare_rows(reader)
+    records: list[dict[str, Any]] = list(reader)
+    if not records:
+        return []
 
+    resolved = _resolve_numeric_columns(reader.fieldnames or [])
+    if resolved:
+        _vectorized_type_cast(records, resolved)
+
+    return _prepare_rows(records)
 
 def _ensure_products_schema(conn) -> None:
     conn.execute(PRODUCTS_TABLE_SQL)
