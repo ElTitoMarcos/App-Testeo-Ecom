@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import io
 from pathlib import Path
-from typing import Callable, Dict, List, Any
+from typing import Any, Callable, Dict, List, Optional
 
 import pandas as pd
 
@@ -71,7 +71,13 @@ def import_records(records: List[Dict[str, Any]], *, status_cb: StatusCallback) 
     return importer_fast.fast_import_records(records, status_cb=_wrapped_status_cb)
 
 
-def run_import(file_bytes: bytes, filename: str, status_cb: StatusCallback) -> int:
+def run_import(
+    file_bytes: bytes,
+    filename: str,
+    status_cb: StatusCallback,
+    *,
+    import_token: Optional[str] = None,
+) -> int:
     """Dispatch CSV/XLSX imports and return the number of inserted rows."""
     ext = Path(filename).suffix.lower()
     source = filename
@@ -86,6 +92,12 @@ def run_import(file_bytes: bytes, filename: str, status_cb: StatusCallback) -> i
         record.setdefault("winner_score", "0")
         if source:
             record.setdefault("source", source)
+        if import_token:
+            # The token is stored temporarily in ``extra`` so we can collect the
+            # product IDs that were upserted during this batch without running
+            # any synchronous GPT work.  See ``consume_import_token`` in the
+            # database layer for cleanup.
+            record.setdefault("_import_token", import_token)
 
     if not records:
         return 0

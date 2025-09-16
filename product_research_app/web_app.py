@@ -25,6 +25,8 @@ import os
 import io
 import re
 import logging
+import unicodedata
+import uuid
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -82,6 +84,74 @@ _DB_INIT_LOCK = threading.Lock()
 
 IMPORT_STATUS: Dict[str, Dict[str, Any]] = {}
 _IMPORT_STATUS_LOCK = threading.Lock()
+
+
+POST_IMPORT_TASKS_ALLOWED = {"desire", "imputacion", "winner_score"}
+DEFAULT_POST_IMPORT_TASKS = ("desire", "imputacion")
+
+
+def _normalize_post_import_task(name: Any) -> str | None:
+    if name is None:
+        return None
+    text = str(name).strip()
+    if not text:
+        return None
+    normalized = unicodedata.normalize("NFKD", text)
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii").lower().strip()
+    if ascii_text in {"desire"}:
+        return "desire"
+    if ascii_text in {"imputacion", "imputation"}:
+        return "imputacion"
+    if ascii_text in {"winner_score", "winnerscore", "winner-score"}:
+        return "winner_score"
+    return None
+
+
+def _dedupe_preserve_order(items: List[Any]) -> List[Any]:
+    seen: set[Any] = set()
+    result: List[Any] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def _enqueue_post_import_tasks(
+    task_id: str,
+    product_ids: List[int],
+    requested_tasks: List[str] | None,
+) -> Dict[str, int]:
+    if not product_ids:
+        return {}
+    normalized: List[str] = []
+    for task in requested_tasks or []:
+        norm = _normalize_post_import_task(task)
+        if norm and norm in POST_IMPORT_TASKS_ALLOWED:
+            normalized.append(norm)
+    normalized = _dedupe_preserve_order(normalized)
+    if not normalized:
+        return {}
+    id_list: List[int] = []
+    for pid in product_ids:
+        try:
+            id_list.append(int(pid))
+        except Exception:
+            continue
+    if not id_list:
+        return {}
+    conn = ensure_db()
+    summary: Dict[str, int] = {}
+    ids = [int(pid) for pid in _dedupe_preserve_order(id_list)]
+    for task_type in normalized:
+        summary[task_type] = database.enqueue_ai_tasks(
+            conn,
+            task_type,
+            ids,
+            import_task_id=task_id,
+        )
+    return summary
 
 
 def _parse_date(s: str):
@@ -949,6 +1019,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/api/ia/batch-columns":
             self.handle_ia_batch_columns()
             return
+        if path == "/api/ai/run_post_import":
+            self.handle_ai_run_post_import()
+            return
         if path == "/auto_weights":
             self.handle_auto_weights()
             return
@@ -1336,9 +1409,15 @@ class RequestHandler(BaseHTTPRequestHandler):
                 filename=filename,
             )
             file_bytes = data
+            import_token = f"{task_id}-{uuid.uuid4().hex}"
+            post_import_defaults: List[str] = []
+            if config.is_auto_fill_ia_on_import_enabled():
+                post_import_defaults.extend(DEFAULT_POST_IMPORT_TASKS)
 
             def run_import_task():
                 _update_import_status(task_id, state="running", stage="running", started_at=time.time())
+                product_ids: List[int] = []
+                consumed_token = False
                 try:
                     def cb(**kwargs):
                         updates = dict(kwargs)
@@ -1355,7 +1434,32 @@ class RequestHandler(BaseHTTPRequestHandler):
                         updates.setdefault("state", "running")
                         _update_import_status(task_id, **updates)
 
-                    count = unified_run_import(file_bytes, filename, status_cb=cb)
+                    # GPT calls for desire/imputación used to run here synchronously.
+                    # They are now deferred to the post-import task queue to keep the
+                    # upload path responsive.
+                    count = unified_run_import(
+                        file_bytes,
+                        filename,
+                        status_cb=cb,
+                        import_token=import_token,
+                    )
+                    conn = ensure_db()
+                    product_ids = database.consume_import_token(conn, import_token)
+                    consumed_token = True
+                    if post_import_defaults and product_ids:
+                        summary = _enqueue_post_import_tasks(
+                            task_id,
+                            product_ids,
+                            list(post_import_defaults),
+                        )
+                        if summary:
+                            _update_import_status(
+                                task_id,
+                                post_import={
+                                    "tasks": summary,
+                                    "product_count": len(product_ids),
+                                },
+                            )
                     snapshot = _get_import_status(task_id) or {}
                     done_val = int(snapshot.get("done", 0) or 0)
                     if done_val < count:
@@ -1381,6 +1485,16 @@ class RequestHandler(BaseHTTPRequestHandler):
                         error=str(exc),
                         finished_at=time.time(),
                     )
+                finally:
+                    if not consumed_token:
+                        try:
+                            conn = ensure_db()
+                            if not product_ids:
+                                product_ids.extend(
+                                    database.consume_import_token(conn, import_token)
+                                )
+                        except Exception:
+                            pass
 
             threading.Thread(target=run_import_task, daemon=True).start()
             self.safe_write(lambda: self.send_json({"task_id": task_id}, status=202))
@@ -1409,8 +1523,15 @@ class RequestHandler(BaseHTTPRequestHandler):
                 filename=filename,
             )
 
+            import_token = f"{task_id}-{uuid.uuid4().hex}"
+            post_import_defaults: List[str] = []
+            if config.is_auto_fill_ia_on_import_enabled():
+                post_import_defaults.extend(DEFAULT_POST_IMPORT_TASKS)
+
             def run_json():
                 _update_import_status(task_id, state="running", stage="running", started_at=time.time())
+                product_ids: List[int] = []
+                consumed_token = False
                 try:
                     def cb(**kwargs):
                         updates = dict(kwargs)
@@ -1427,12 +1548,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                         updates.setdefault("state", "running")
                         _update_import_status(task_id, **updates)
 
-                    enriched = []
+                    enriched: List[Dict[str, Any]] = []
                     for item in records:
                         row = dict(item)
                         if filename:
                             row.setdefault("source", filename)
                         row.setdefault("winner_score", "0")
+                        row.setdefault("_import_token", import_token)
                         enriched.append(row)
                     _update_import_status(
                         task_id,
@@ -1440,7 +1562,25 @@ class RequestHandler(BaseHTTPRequestHandler):
                         done=len(enriched),
                         total=len(enriched),
                     )
+                    # Winner score GPT logic is also deferred; only the bulk insert happens here.
                     count = unified_import_records(enriched, status_cb=cb)
+                    conn = ensure_db()
+                    product_ids = database.consume_import_token(conn, import_token)
+                    consumed_token = True
+                    if post_import_defaults and product_ids:
+                        summary = _enqueue_post_import_tasks(
+                            task_id,
+                            product_ids,
+                            list(post_import_defaults),
+                        )
+                        if summary:
+                            _update_import_status(
+                                task_id,
+                                post_import={
+                                    "tasks": summary,
+                                    "product_count": len(product_ids),
+                                },
+                            )
                     snapshot = _get_import_status(task_id) or {}
                     done_val = int(snapshot.get("done", 0) or 0)
                     if done_val < count:
@@ -1466,6 +1606,16 @@ class RequestHandler(BaseHTTPRequestHandler):
                         error=str(exc),
                         finished_at=time.time(),
                     )
+                finally:
+                    if not consumed_token:
+                        try:
+                            conn = ensure_db()
+                            if not product_ids:
+                                product_ids.extend(
+                                    database.consume_import_token(conn, import_token)
+                                )
+                        except Exception:
+                            pass
 
             threading.Thread(target=run_json, daemon=True).start()
             self.safe_write(lambda: self.send_json({"task_id": task_id}, status=202))
@@ -1660,6 +1810,180 @@ class RequestHandler(BaseHTTPRequestHandler):
         except Exception:
             self._set_json(503)
             self.wfile.write(json.dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
+
+    def handle_ai_run_post_import(self):
+        length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(length).decode('utf-8') if length else ""
+        if body:
+            try:
+                payload = json.loads(body)
+                if not isinstance(payload, dict):
+                    raise ValueError
+            except Exception:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"error": "invalid_json"}).encode('utf-8'))
+                return
+        else:
+            payload = {}
+
+        raw_tasks = payload.get("tasks") or payload.get("task_types")
+        if raw_tasks is None:
+            requested_tasks = list(DEFAULT_POST_IMPORT_TASKS)
+        elif isinstance(raw_tasks, (list, tuple)):
+            requested_tasks = [str(t) for t in raw_tasks]
+        else:
+            requested_tasks = [str(raw_tasks)]
+
+        limit_raw = payload.get("limit", 50)
+        try:
+            limit = int(limit_raw)
+        except Exception:
+            limit = 50
+        limit = max(1, min(limit, 200))
+
+        api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
+        model = config.get_model()
+        if not api_key or not model:
+            self._set_json(503)
+            self.wfile.write(json.dumps({"error": "openai_unavailable"}).encode('utf-8'))
+            return
+
+        normalized_tasks = [
+            t
+            for t in (
+                _normalize_post_import_task(task)
+                for task in requested_tasks
+            )
+            if t in POST_IMPORT_TASKS_ALLOWED
+        ]
+        normalized_tasks = [t for t in normalized_tasks if t != "winner_score"]
+        if not normalized_tasks:
+            normalized_tasks = list(DEFAULT_POST_IMPORT_TASKS)
+
+        conn = ensure_db()
+        pending = database.fetch_pending_ai_tasks(
+            conn,
+            task_types=normalized_tasks,
+            limit=limit,
+        )
+        if not pending:
+            self._set_json()
+            self.wfile.write(
+                json.dumps({"ok": True, "processed": 0, "completed": 0, "failed": 0}).encode('utf-8')
+            )
+            return
+
+        task_ids = [row["id"] for row in pending]
+        database.mark_ai_tasks_in_progress(conn, task_ids)
+
+        product_id_order = _dedupe_preserve_order([int(row["product_id"]) for row in pending])
+        products = database.get_products_by_ids(conn, product_id_order)
+        if not products:
+            database.fail_ai_tasks(conn, task_ids, "missing_products")
+            self._set_json(404)
+            self.wfile.write(json.dumps({"error": "missing_products"}).encode('utf-8'))
+            return
+
+        items: List[Dict[str, Any]] = []
+        for prod in products:
+            product = row_to_dict(prod)
+            try:
+                extra = json.loads(rget(product, "extra") or "{}")
+            except Exception:
+                extra = {}
+            pid = rget(product, "id")
+            items.append(
+                {
+                    "id": pid,
+                    "name": rget(product, "name"),
+                    "category": rget(product, "category"),
+                    "price": rget(product, "price"),
+                    "rating": extra.get("rating"),
+                    "units_sold": extra.get("units_sold"),
+                    "revenue": extra.get("revenue"),
+                    "conversion_rate": extra.get("conversion_rate"),
+                    "launch_date": extra.get("launch_date"),
+                    "date_range": rget(product, "date_range") or extra.get("date_range"),
+                    "image_url": rget(product, "image_url") or extra.get("image_url"),
+                }
+            )
+
+        if not items:
+            database.fail_ai_tasks(conn, task_ids, "missing_payload")
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "missing_payload"}).encode('utf-8'))
+            return
+
+        try:
+            ok_map, ko_map, usage, duration = gpt.generate_batch_columns(api_key, model, items)
+        except gpt.InvalidJSONError as exc:
+            database.fail_ai_tasks(conn, task_ids, "invalid_json")
+            self._set_json(502)
+            self.wfile.write(json.dumps({"error": "Respuesta IA no es JSON"}).encode('utf-8'))
+            return
+        except Exception as exc:
+            database.fail_ai_tasks(conn, task_ids, str(exc))
+            self._set_json(503)
+            self.wfile.write(json.dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
+            return
+
+        successes: List[int] = []
+        failures: List[int] = []
+        completed_products: List[int] = []
+        for row in pending:
+            pid = int(row["product_id"])
+            tid = int(row["id"])
+            entry = ok_map.get(str(pid))
+            if entry:
+                updates = {
+                    "desire": entry.get("desire"),
+                    "desire_magnitude": entry.get("desire_magnitude"),
+                    "awareness_level": entry.get("awareness_level"),
+                    "competition_level": entry.get("competition_level"),
+                    "ai_columns_completed_at": datetime.utcnow().isoformat(),
+                }
+                clean_updates = {k: v for k, v in updates.items() if v not in (None, "")}
+                if clean_updates:
+                    database.update_product(conn, pid, **clean_updates)
+                successes.append(tid)
+                completed_products.append(pid)
+            else:
+                failures.append(tid)
+
+        if successes:
+            database.complete_ai_tasks(conn, successes)
+        if failures:
+            database.fail_ai_tasks(conn, failures, "missing_result")
+
+        cur = conn.cursor()
+        if normalized_tasks:
+            placeholders = ",".join(["?"] * len(normalized_tasks))
+            cur.execute(
+                f"SELECT COUNT(*) FROM ai_task_queue WHERE state='pending' AND task_type IN ({placeholders})",
+                tuple(normalized_tasks),
+            )
+        else:
+            cur.execute("SELECT COUNT(*) FROM ai_task_queue WHERE state='pending'")
+        pending_left = int(cur.fetchone()[0] or 0)
+
+        if not isinstance(usage, dict):
+            usage = {}
+
+        response = {
+            "ok": True,
+            "processed": len(task_ids),
+            "completed": len(successes),
+            "failed": len(failures),
+            "usage": usage,
+            "duration": duration,
+            "pending_left": pending_left,
+        }
+        if ko_map:
+            response["ko"] = ko_map
+        if completed_products:
+            response["product_ids"] = _dedupe_preserve_order(completed_products)
+        self._set_json()
+        self.wfile.write(json.dumps(response).encode('utf-8'))
 
     def handle_auto_weights(self):
         """
