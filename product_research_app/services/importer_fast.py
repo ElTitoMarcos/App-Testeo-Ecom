@@ -220,6 +220,7 @@ def _vectorized_type_cast(
         for record, value in zip(records, converted):
             record[column] = value
 
+
 def _coerce_text(value: object | None) -> str | None:
     if value in (None, ""):
         return None
@@ -420,12 +421,19 @@ def fast_import_adaptive(csv_bytes: bytes, status_cb=lambda **_: None):
         csv_bytes = bytes(csv_bytes)
 
     rows = _rows_from_csv(csv_bytes)
+    product_ids = [
+        int(row[0])
+        for row in rows
+        if isinstance(row, tuple) and row and row[0] is not None
+    ]
+
     rows_imported = _import_rows(rows, status_cb)
 
     def _optimize():
         return None
 
     _optimize.rows_imported = rows_imported  # type: ignore[attr-defined]
+    _optimize.product_ids = product_ids  # type: ignore[attr-defined]
     return _optimize
 
 

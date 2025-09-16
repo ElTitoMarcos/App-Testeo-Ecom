@@ -6,11 +6,13 @@ import logging
 import threading
 import time
 from itertools import islice
-from typing import Any, Dict, Iterable, Iterator
+from typing import Any, Dict, Iterable, Iterator, List
 
 from flask import Flask, request
 
+from product_research_app.ai.queue import dequeue_batch, enqueue_post_import
 from product_research_app.db import get_db
+from product_research_app.services import ai_columns
 from product_research_app.services.importer_fast import fast_import_adaptive
 from product_research_app.utils.timing import phase
 
@@ -27,6 +29,57 @@ logger = logging.getLogger(__name__)
 
 _MAX_IDS_FOR_DEDUPE = 200_000
 
+_POST_IMPORT_TASK_ALIASES = {
+    "desire": "desire_summarize",
+    "desire_summarize": "desire_summarize",
+    "imputacion": "imputacion_campos",
+    "imputacion_campos": "imputacion_campos",
+}
+
+_POST_IMPORT_CANONICAL_TO_ALIAS = {
+    "desire_summarize": "desire",
+    "imputacion_campos": "imputacion",
+}
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    text = str(value).strip().lower()
+    return text in {"1", "true", "yes", "on"}
+
+
+def _canonical_task_name(value: Any) -> str | None:
+    if value is None:
+        return None
+    key = str(value).strip().lower()
+    return _POST_IMPORT_TASK_ALIASES.get(key)
+
+
+def _normalize_post_import_tasks(values: Iterable[Any]) -> list[str]:
+    seen: list[str] = []
+    for value in values:
+        canonical = _canonical_task_name(value)
+        if canonical and canonical not in seen:
+            seen.append(canonical)
+    return seen
+
+
+def _normalize_product_ids(values: Iterable[Any]) -> list[int]:
+    seen: set[int] = set()
+    normalized: list[int] = []
+    for value in values:
+        try:
+            num = int(value)
+        except Exception:
+            continue
+        if num <= 0 or num in seen:
+            continue
+        seen.add(num)
+        normalized.append(num)
+    return normalized
 
 def _chunked(iterable: Iterable[int], size: int) -> Iterator[list[int]]:
     iterator = iter(iterable)
@@ -83,17 +136,32 @@ def _count_existing_ids(candidates: set[int]) -> int:
             total += int(row[0])
     return total
 
+def _enqueue_post_import_tasks(
+    task_id: str, product_ids: Iterable[int], task_types: Iterable[str]
+) -> Dict[str, int]:
+    ids = _normalize_product_ids(product_ids)
+    tasks = _normalize_post_import_tasks(task_types)
+    if not ids or not tasks:
+        logger.debug(
+            "import_job[%s] post_import_queue skipped ids=%s tasks=%s",
+            task_id,
+            len(ids),
+            tasks,
+        )
+        return {}
 
-def _enqueue_post_import_tasks(task_id: str, rows_imported: int) -> int:
-    """Placeholder for post-import asynchronous work."""
-
-    logger.debug(
-        "import_job[%s] post_import_queue noop rows_imported=%s",
-        task_id,
-        rows_imported,
-    )
-    return 0
-
+    counts: Dict[str, int] = {}
+    for task_type in tasks:
+        inserted = enqueue_post_import(task_type, ids)
+        counts[task_type] = inserted
+        logger.info(
+            "import_job[%s] post_import_queue task=%s inserted=%s total_ids=%s",
+            task_id,
+            _POST_IMPORT_CANONICAL_TO_ALIAS.get(task_type, task_type),
+            inserted,
+            len(ids),
+        )
+    return counts
 
 def _round_ms(delta: float) -> int:
     return max(int(round(delta * 1000)), 0)
@@ -120,6 +188,8 @@ def _baseline_status(task_id: str) -> Dict[str, Any]:
         "column_count": 0,
         "total_ms": 0,
         "phases": [],
+        "post_import_ready": False,
+        "post_import_tasks": [],
     }
 
 
@@ -184,6 +254,16 @@ def _update_status(task_id: str, **updates: Any) -> Dict[str, Any]:
             except Exception:
                 updates.pop("phases", None)
 
+        if "post_import_ready" in updates:
+            updates["post_import_ready"] = bool(updates["post_import_ready"])
+
+        if "post_import_tasks" in updates:
+            try:
+                updates["post_import_tasks"] = _normalize_post_import_tasks(
+                    updates["post_import_tasks"] or []
+                )
+            except Exception:
+                updates["post_import_tasks"] = []
         status.update(updates)
         if status.get("total", 0) < status.get("done", 0):
             status["total"] = status.get("done", 0)
@@ -203,7 +283,45 @@ def upload():
         return {"error": "missing_file"}, 400
 
     task_id = str(int(time.time() * 1000))
-    _update_status(task_id, filename=file.filename or None)
+    raw_tasks = request.form.getlist("post_import_tasks")
+    if not raw_tasks:
+        if _truthy(request.form.get("post_import_desire")):
+            raw_tasks.append("desire")
+        if _truthy(request.form.get("post_import_imputacion")):
+            raw_tasks.append("imputacion")
+    post_import_tasks = tuple(_normalize_post_import_tasks(raw_tasks))
+
+    _update_status(
+        task_id,
+        filename=file.filename or None,
+        post_import_tasks=list(post_import_tasks),
+        post_import_ready=False,
+    )
+
+    phase_records: list[Dict[str, int]] = []
+
+    def record_phase(info: Dict[str, Any]) -> None:
+        name = str(info.get("name", ""))
+        try:
+            ms_val = int(info.get("ms", 0))
+        except Exception:
+            ms_val = 0
+        phase_records.append({"name": name, "ms": ms_val})
+        _update_status(task_id, phases=[dict(item) for item in phase_records])
+
+    total_start = time.perf_counter()
+    csv_bytes = b""
+    read_phase: Dict[str, Any] | None = None
+    try:
+        with phase("read_file") as ph:
+            read_phase = ph
+            csv_bytes = file.read()
+    finally:
+        if read_phase is not None:
+            record_phase(read_phase)
+
+    file_size = len(csv_bytes or b"")
+    _update_status(task_id, file_size_bytes=file_size)
 
     phase_records: list[Dict[str, int]] = []
 
@@ -238,6 +356,9 @@ def upload():
         rows_imported = 0
         id_candidates: set[int] = set()
         optimize = None
+        product_ids: List[int] = []
+        post_ready = False
+        post_counts: Dict[str, int] = {}
 
         def cb(**payload):
             _update_status(task_id, **payload)
@@ -289,6 +410,9 @@ def upload():
                     record_phase(db_phase)
 
             rows_imported = int(getattr(optimize, "rows_imported", 0) or 0)
+            product_ids = _normalize_product_ids(
+                getattr(optimize, "product_ids", [])
+            )
             snapshot = _get_status(task_id) or {}
             done_val = max(int(snapshot.get("done", 0) or 0), rows_imported)
             total_val = max(int(snapshot.get("total", 0) or 0), done_val)
@@ -306,7 +430,15 @@ def upload():
             try:
                 with phase("post_import_queue") as ph:
                     post_phase = ph
-                    _enqueue_post_import_tasks(task_id, rows_imported)
+                    post_counts = _enqueue_post_import_tasks(
+                        task_id, product_ids, post_import_tasks
+                    )
+                    post_ready = bool(product_ids and post_import_tasks)
+                    _update_status(
+                        task_id,
+                        post_import_ready=post_ready,
+                        post_import_tasks=list(post_import_tasks),
+                    )
             finally:
                 if post_phase is not None:
                     record_phase(post_phase)
@@ -346,9 +478,11 @@ def upload():
                 row_count=row_count_source,
                 column_count=column_count,
                 phases=[dict(item) for item in phase_records],
+                post_import_ready=post_ready,
+                post_import_tasks=list(post_import_tasks),
             )
             logger.info(
-                "import_job[%s] summary rows=%d columns=%d file_size=%dB existing_ids=%d imported=%d total_ms=%d",
+                "import_job[%s] summary rows=%d columns=%d file_size=%dB existing_ids=%d imported=%d total_ms=%d post_tasks=%s post_counts=%s",
                 task_id,
                 row_count_source,
                 column_count,
@@ -356,6 +490,8 @@ def upload():
                 existing_ids_count,
                 rows_imported,
                 total_elapsed_ms,
+                list(post_import_tasks),
+                post_counts,
             )
 
     threading.Thread(target=run, daemon=True).start()
@@ -380,6 +516,8 @@ def import_status():
             "column_count": 0,
             "total_ms": 0,
             "phases": [],
+            "post_import_ready": False,
+            "post_import_tasks": [],
         }, 200
 
     status = _get_status(task_id)
@@ -398,11 +536,137 @@ def import_status():
             "column_count": 0,
             "total_ms": 0,
             "phases": [],
+            "post_import_ready": False,
+            "post_import_tasks": [],
         }, 200
 
     status.setdefault("task_id", task_id)
     status.setdefault("status", status.get("state"))
     return status
+
+
+@app.post("/api/ai/run_post_import")
+def run_post_import_tasks():
+    payload = request.get_json(silent=True) or {}
+    raw_tasks = payload.get("tasks") or []
+    if not isinstance(raw_tasks, (list, tuple, set)):
+        raw_tasks = [raw_tasks]
+    normalized = _normalize_post_import_tasks(raw_tasks)
+    if not normalized:
+        return {"error": "invalid_tasks"}, 400
+
+    try:
+        limit_val = int(payload.get("limit", 200))
+    except Exception:
+        limit_val = 200
+    limit_val = max(1, min(limit_val, 1000))
+
+    alias_map = {
+        task_type: _POST_IMPORT_CANONICAL_TO_ALIAS.get(task_type, task_type)
+        for task_type in normalized
+    }
+
+    drained: Dict[str, List[int]] = {}
+    drained_counts: Dict[str, int] = {}
+    for task_type in normalized:
+        ids = dequeue_batch(task_type, limit_val)
+        drained[task_type] = ids
+        drained_counts[task_type] = len(ids)
+
+    union_ids = sorted({pid for ids in drained.values() for pid in ids})
+    ai_result: Dict[str, Any] = {}
+    pending_ids: list[int] = []
+
+    if union_ids:
+        try:
+            ai_result = ai_columns.fill_ai_columns(union_ids)
+        except Exception as exc:
+            for task_type, ids in drained.items():
+                if ids:
+                    enqueue_post_import(task_type, ids)
+            logger.exception(
+                "run_post_import failed tasks=%s limit=%s", normalized, limit_val
+            )
+            return {"error": str(exc)}, 500
+
+        pending_ids = _normalize_product_ids(ai_result.get("pending_ids") or [])
+        if pending_ids:
+            for task_type in normalized:
+                enqueue_post_import(task_type, pending_ids)
+    else:
+        ai_result = {
+            "ok": {},
+            "ko": {},
+            "counts": {
+                "n_importados": 0,
+                "n_para_ia": 0,
+                "n_procesados": 0,
+                "n_omitidos_por_valor_existente": 0,
+                "n_reintentados": 0,
+                "n_error_definitivo": 0,
+                "truncated": False,
+                "cost_estimated_usd": 0.0,
+            },
+            "pending_ids": [],
+        }
+
+    processed_ids = set(
+        _normalize_product_ids((ai_result.get("ok") or {}).keys())
+    )
+    failed_ids = set(
+        _normalize_product_ids((ai_result.get("ko") or {}).keys())
+    )
+
+    results: Dict[str, Dict[str, int]] = {}
+    for task_type in normalized:
+        alias = alias_map[task_type]
+        ids = drained.get(task_type, [])
+        processed = sum(1 for pid in ids if pid in processed_ids)
+        failed = sum(1 for pid in ids if pid in failed_ids and pid not in processed_ids)
+        pending = max(len(ids) - processed - failed, 0)
+        results[alias] = {
+            "requested": len(ids),
+            "processed": processed,
+            "failed": failed,
+            "pending": pending,
+        }
+
+    remaining: Dict[str, int] = {}
+    has_more = False
+    conn = get_db()
+    for task_type in normalized:
+        alias = alias_map[task_type]
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM ai_task_queue WHERE task_type = ?",
+                (task_type,),
+            ).fetchone()
+            count = int(row[0]) if row and row[0] is not None else 0
+        except Exception:
+            count = 0
+        remaining[alias] = count
+        if count:
+            has_more = True
+    if pending_ids:
+        has_more = True
+
+    logger.info(
+        "run_post_import tasks=%s limit=%s drained=%s processed=%s has_more=%s pending_ids=%s",
+        normalized,
+        limit_val,
+        drained_counts,
+        ai_result.get("counts", {}),
+        has_more,
+        len(pending_ids),
+    )
+
+    return {
+        "ok": True,
+        "results": results,
+        "details": ai_result,
+        "has_more": has_more,
+        "remaining": remaining,
+    }
 
 
 if __name__ == "__main__":
