@@ -313,7 +313,6 @@ def test_run_post_import_auto(tmp_path, monkeypatch):
     assert prod_a.get("desire") == f"Auto Desire {pid_a}"
     assert winner_calls and set(winner_calls[0]) == {pid_a, pid_b}
 
-
 def test_runner_retries_batches(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)
     monkeypatch.setattr(config, "get_api_key", lambda: "sk-test")

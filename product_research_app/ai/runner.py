@@ -57,7 +57,6 @@ class _RunnerContext:
     winner_weights_ready: bool = False
     winner_weights_lock: threading.Lock = field(default_factory=threading.Lock)
 
-
 def register_progress_callback(import_task_id: str, callback: Optional[_ProgressCallback]) -> None:
     """Register or remove a progress callback for an import."""
 
@@ -355,7 +354,6 @@ def _process_winner_batch(rows: Sequence[Mapping[str, object]], context: _Runner
             pass
     return result
 
-
 def _ensure_winner_weights(
     conn,
     product_ids: Sequence[int],
@@ -427,7 +425,6 @@ def _ensure_winner_weights(
 
         context.winner_weights_ready = True
         return weights_final
-
 
 def _record_batch_failure(
     conn,
