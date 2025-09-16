@@ -386,20 +386,23 @@ def _restore_pragmas(conn, original: dict[str, object]) -> None:
     sync = original.get("synchronous")
     if sync is not None:
         conn.execute(f"PRAGMA synchronous={sync};")
+
     temp_store = original.get("temp_store")
     if temp_store is not None:
         conn.execute(f"PRAGMA temp_store={temp_store};")
 
     fk = original.get("foreign_keys")
     if fk in (0, 1):
-      
         conn.execute(f"PRAGMA foreign_keys={'ON' if fk else 'OFF'};")
     else:
         conn.execute("PRAGMA foreign_keys=ON;")
 
-    conn = get_db()
-    _ensure_products_schema(conn)
-    _ensure_unique_index(conn)
+    sync = original.get("synchronous")
+    if sync is not None:
+        conn.execute(f"PRAGMA synchronous={sync};")
+    temp_store = original.get("temp_store")
+    if temp_store is not None:
+        conn.execute(f"PRAGMA temp_store={temp_store};")
 
 def _import_rows(
     rows: Sequence[tuple],
@@ -418,6 +421,7 @@ def _import_rows(
             _drop_secondary_indexes(conn)
         if phase_recorder is not None:
             phase_recorder(info)
+
     original_pragmas = _apply_pragmas(conn)
     try:
         rows_imported = 0
@@ -470,7 +474,6 @@ def fast_import_adaptive(
     _optimize.rows_imported = rows_imported  # type: ignore[attr-defined]
     _optimize.product_ids = product_ids  # type: ignore[attr-defined]
     return _optimize
-
 
 def fast_import(
     csv_bytes,
