@@ -25,7 +25,7 @@ import time
 import re
 import unicodedata
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import requests
 
@@ -39,6 +39,8 @@ DB_PATH = APP_DIR / "data.sqlite3"
 
 # Cache for baseline arrays recalculated every 10 minutes
 _BASELINE_CACHE: Dict[str, Any] = {"ts": 0, "data": None}
+
+_JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", re.IGNORECASE)
 
 STOPWORDS = {
     "the",
@@ -1080,29 +1082,6 @@ def recommend_winner_weights(
             return {k:int(profile.get(k,50)) for k in allowed}
         return {k: int(round((v/mx)*100.0)) for k,v in raw.items()}
 
-    def _extract_json_block(text: str) -> dict:
-        import json, re
-        # código entre ```json ... ``` o ``` ... ```
-        m = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text)
-        if m:
-            try: return json.loads(m.group(1))
-            except Exception: pass
-        # primera llave balanceada
-        s = text
-        try:
-            start = s.index("{")
-            depth = 0
-            for i,ch in enumerate(s[start:], start):
-                if ch == "{": depth += 1
-                elif ch == "}":
-                    depth -= 1
-                    if depth == 0:
-                        return json.loads(s[start:i+1])
-        except Exception:
-            pass
-        # último intento directo
-        return json.loads(text)
-
     # Si no hay muestras, devuelve algo neutro pero válido
     if not samples:
         return {"weights": {k: 50 for k in allowed}, "justification": ""}
@@ -1140,7 +1119,7 @@ def recommend_winner_weights(
     try:
         resp = call_openai_chat(api_key, model, messages)
         content = resp["choices"][0]["message"]["content"].strip()
-        parsed = _extract_json_block(content)
+        parsed = _extract_json_from_text(content)
     except Exception:
         parsed = {}
 
@@ -1182,6 +1161,116 @@ def recommend_winner_weights(
         out.setdefault(k, 0)
 
     return {"weights": out, "justification": justification}
+
+
+def _normalise_weight_mapping(raw: Mapping[str, Any]) -> Dict[str, int]:
+    cleaned: Dict[str, int] = {}
+    for key, value in (raw or {}).items():
+        try:
+            norm = winner_calc.normalize_weight_key(key)
+        except Exception:
+            continue
+        try:
+            val = float(value)
+        except Exception:
+            continue
+        cleaned[norm] = max(0, min(100, int(round(val))))
+    return cleaned
+
+
+def _complete_weight_profile(weights: Dict[str, int], allowed: Sequence[str]) -> Dict[str, int]:
+    if not weights:
+        weights = {k: 50 for k in allowed}
+    else:
+        weights = dict(weights)
+    for key in allowed:
+        weights.setdefault(key, 0)
+    return weights
+
+
+def _sanitize_weight_order(order_raw: Any, allowed: Sequence[str], weights: Mapping[str, int]) -> List[str]:
+    order: List[str] = []
+    if isinstance(order_raw, list):
+        for item in order_raw:
+            try:
+                norm = winner_calc.normalize_weight_key(item)
+            except Exception:
+                continue
+            if norm not in order and norm in allowed:
+                order.append(norm)
+    remaining = [k for k in allowed if k not in order]
+    remaining.sort(key=lambda key: weights.get(key, 0), reverse=True)
+    order.extend(remaining)
+    return order
+
+
+def recommend_weights_from_aggregates(
+    api_key: str,
+    model: Optional[str],
+    aggregates: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Request Winner Score weights based on dataset aggregates (Prompt B)."""
+
+    if not api_key:
+        raise OpenAIError("Missing API key for winner weight recommendation")
+    if not isinstance(aggregates, Mapping):
+        raise ValueError("Aggregates must be a mapping")
+
+    allowed = list(getattr(winner_calc, "ALLOWED_FIELDS", [])) or [
+        "price",
+        "rating",
+        "units_sold",
+        "revenue",
+        "desire",
+        "competition",
+        "oldness",
+        "awareness",
+    ]
+    model_id = model or "gpt-4o"
+    payload = json.dumps(aggregates, ensure_ascii=False, indent=2)
+    prompt = (
+        "Eres un científico de datos especializado en e-commerce.\n"
+        "Analiza las siguientes estadísticas agregadas del dataset actual y propone pesos 0-100 para las variables del Winner Score.\n"
+        "Devuelve JSON estricto con esta forma:\n"
+        "{\n"
+        '  "weights": {"price": 0-100, ...},\n'
+        '  "order": ["revenue", "price", ...],\n'
+        '  "notes": "explicación corta"\n'
+        "}\n"
+        "Los pesos son intensidades independientes, NO tienen que sumar 100.\n"
+        "Datos agregados:\n"
+        f"{payload}"
+    )
+    messages = [
+        {"role": "system", "content": "Eres un orquestador de modelos IA para research de productos."},
+        {"role": "user", "content": prompt},
+    ]
+    response = call_openai_chat(api_key, model_id, messages, temperature=0.2)
+    content = response["choices"][0]["message"]["content"].strip()
+    parsed = _extract_json_from_text(content)
+
+    raw_weights: Mapping[str, Any] = {}
+    if isinstance(parsed, Mapping):
+        raw_weights = (
+            parsed.get("weights")
+            or parsed.get("pesos")
+            or parsed.get("pesos_0_100")
+            or parsed.get("weights_0_100")
+            or {}
+        )
+    weights = _normalise_weight_mapping(raw_weights)
+    weights = _complete_weight_profile(weights, allowed)
+
+    order_raw = parsed.get("order") if isinstance(parsed, Mapping) else None
+    if order_raw is None and isinstance(parsed, Mapping):
+        order_raw = parsed.get("orden")
+    order = _sanitize_weight_order(order_raw, allowed, weights)
+
+    notes = ""
+    if isinstance(parsed, Mapping):
+        notes = parsed.get("notes") or parsed.get("nota") or parsed.get("justificacion") or ""
+
+    return {"weights": weights, "order": order, "notes": notes}
 
 
 def summarize_top_products(api_key: str, model: str, products: List[Dict[str, Any]]) -> str:
@@ -1229,3 +1318,34 @@ def summarize_top_products(api_key: str, model: str, products: List[Dict[str, An
         return resp["choices"][0]["message"]["content"].strip()
     except Exception as exc:
         raise OpenAIError(f"Respuesta inesperada de OpenAI: {exc}") from exc
+def _extract_json_from_text(text: str) -> Dict[str, Any]:
+    """Parse the first JSON object found inside ``text``."""
+
+    if not text:
+        return {}
+    match = _JSON_BLOCK_RE.search(text)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except Exception:
+            pass
+    try:
+        start = text.index("{")
+    except ValueError:
+        return {}
+    depth = 0
+    for idx, ch in enumerate(text[start:], start):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                snippet = text[start : idx + 1]
+                try:
+                    return json.loads(snippet)
+                except Exception:
+                    break
+    try:
+        return json.loads(text)
+    except Exception:
+        return {}

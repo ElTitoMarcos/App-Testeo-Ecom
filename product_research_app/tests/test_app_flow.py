@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from product_research_app import db, web_app, database, config, gpt
+from product_research_app.ai import runner
 from product_research_app.services import importer_fast, importer_unified, winner_score
 from product_research_app.services import config as cfg_service
 from product_research_app.utils.db import row_to_dict
@@ -29,6 +30,7 @@ def setup_env(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "config.json")
     monkeypatch.setattr(cfg_service, "DB_PATH", tmp_path / "data.sqlite3")
+    monkeypatch.setattr(runner, "DB_PATH", tmp_path / "data.sqlite3")
     cfg_service.init_app_config()
     conn = web_app.ensure_db()
 
@@ -37,6 +39,28 @@ def setup_env(tmp_path, monkeypatch):
 
     monkeypatch.setattr(db, "get_db", _fake_get_db)
     monkeypatch.setattr(importer_fast, "get_db", _fake_get_db)
+
+    def _fake_import_xlsx(bytes_data, *, source, status_cb):
+        from openpyxl import load_workbook
+
+        status_cb(stage="parse_xlsx", done=0, total=0)
+        wb = load_workbook(io.BytesIO(bytes_data), read_only=True)
+        ws = wb.active
+        rows = list(ws.iter_rows(values_only=True))
+        if not rows:
+            status_cb(stage="parse_xlsx", done=0, total=0)
+            return []
+        headers = [str(h) for h in rows[0]]
+        records = []
+        for idx, row in enumerate(rows[1:], start=1):
+            rec = {headers[i]: row[i] for i in range(len(headers))}
+            records.append(rec)
+            if idx % 500 == 0:
+                status_cb(stage="parse_xlsx", done=idx, total=len(rows) - 1)
+        status_cb(stage="parse_xlsx", done=len(records), total=len(records))
+        return records
+
+    monkeypatch.setattr(importer_unified, "import_xlsx", _fake_import_xlsx)
     return conn
 
 def make_xlsx(path: Path, rows: List[List[object]]):
@@ -120,6 +144,8 @@ def test_handle_ai_run_post_import(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "get_api_key", lambda: "sk-test")
     monkeypatch.setattr(config, "get_model", lambda: "gpt-test")
 
+    weight_prompts: list = []
+
     pid_a = database.insert_product(
         conn,
         name="ProdA",
@@ -189,6 +215,159 @@ def test_handle_ai_run_post_import(tmp_path, monkeypatch):
     prod_a = row_to_dict(database.get_product(conn, pid_a))
     assert prod_a.get("desire") == f"Desire {pid_a}"
     assert prod_a.get("desire_magnitude") == "High"
+
+
+def test_run_post_import_auto(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "get_api_key", lambda: "sk-test")
+    monkeypatch.setattr(config, "get_model", lambda: "gpt-test")
+
+    pid_a = database.insert_product(
+        conn,
+        name="ProdA",
+        description="",
+        category="Home",
+        price=10.0,
+        currency="USD",
+        image_url="",
+        source="",
+        extra={"rating": 4.2},
+        product_id=1,
+    )
+    pid_b = database.insert_product(
+        conn,
+        name="ProdB",
+        description="",
+        category="Kitchen",
+        price=20.0,
+        currency="USD",
+        image_url="",
+        source="",
+        extra={"rating": 3.5},
+        product_id=2,
+    )
+
+    def fake_generate_batch_columns(api_key, model, items):
+        ok = {
+            str(item["id"]): {
+                "desire": f"Auto Desire {item['id']}",
+                "desire_magnitude": "High",
+                "awareness_level": "Most Aware",
+                "competition_level": "Low",
+            }
+            for item in items
+        }
+        return ok, {}, {"total_tokens": 0}, 0.1
+
+    winner_calls = []
+    weight_prompts: list = []
+
+    def fake_generate_winner_scores(conn_arg, product_ids=None, weights=None, debug=False):
+        ids = list(product_ids or [])
+        winner_calls.append(ids)
+        assert weights is not None
+        assert set(weights) == set(winner_score.ALLOWED_FIELDS)
+        return {"processed": len(ids), "updated": len(ids)}
+
+    monkeypatch.setattr(gpt, "generate_batch_columns", fake_generate_batch_columns)
+    monkeypatch.setattr(
+        gpt,
+        "recommend_weights_from_aggregates",
+        lambda api_key, model, aggregates: (
+            weight_prompts.append(aggregates)
+            or {
+                "weights": {k: 10 for k in winner_score.ALLOWED_FIELDS},
+                "order": list(winner_score.ALLOWED_FIELDS),
+                "notes": "ok",
+            }
+        ),
+    )
+    monkeypatch.setattr(winner_score, "generate_winner_scores", fake_generate_winner_scores)
+
+    task_id = "task-auto"
+    web_app._update_import_status(
+        task_id,
+        state="RUNNING",
+        stage="ai_post",
+        post_import_ready=True,
+        ai_progress=web_app._empty_ai_progress(),
+    )
+
+    web_app._run_post_import_auto(task_id, [pid_a, pid_b])
+
+    status = web_app._get_import_status(task_id)
+    assert status["state"] == "DONE"
+    assert status["stage"] == "done"
+    assert status["post_import_ready"] is False
+    progress = status["ai_progress"]
+    assert progress["desire"]["processed"] == 2
+    assert progress["imputacion"]["processed"] == 2
+    assert progress["winner_score"]["processed"] == 2
+    assert weight_prompts and weight_prompts[0]["total_products"] == 2
+
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM ai_task_queue WHERE state='done'")
+    assert cur.fetchone()[0] == 6
+
+    prod_a = row_to_dict(database.get_product(conn, pid_a))
+    assert prod_a.get("desire") == f"Auto Desire {pid_a}"
+    assert winner_calls and set(winner_calls[0]) == {pid_a, pid_b}
+
+
+def test_runner_retries_batches(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "get_api_key", lambda: "sk-test")
+    monkeypatch.setattr(config, "get_model", lambda: "gpt-test")
+
+    pid = database.insert_product(
+        conn,
+        name="RetryProd",
+        description="",
+        category="Home",
+        price=15.0,
+        currency="USD",
+        image_url="",
+        source="",
+        extra={},
+        product_id=1,
+    )
+
+    import_id = "task-retry"
+    database.enqueue_ai_tasks(conn, "desire", [pid], import_task_id=import_id)
+
+    calls = {"count": 0}
+
+    def flaky_generate(api_key, model, items):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("boom")
+        return {
+            str(items[0]["id"]): {
+                "desire": "Recovered",
+                "desire_magnitude": "High",
+                "awareness_level": "Most Aware",
+                "competition_level": "Low",
+            }
+        }, {}, {}, 0.1
+
+    monkeypatch.setattr(gpt, "generate_batch_columns", flaky_generate)
+
+    summary = runner.run_auto({"desire"}, batch_size=1, max_parallel=1)
+    assert calls["count"] >= 2
+    assert import_id in summary
+    desire_progress = summary[import_id]["tasks"]["desire"]
+    assert desire_progress["processed"] == 1
+    assert desire_progress["failed"] == 1
+    assert not summary[import_id]["errors"]
+
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT state, attempts FROM ai_task_queue WHERE import_task_id=?",
+        (import_id,),
+    )
+    row = cur.fetchone()
+    assert row[0] == "done"
+    assert int(row[1]) >= 2
 
 def test_scoring_v2_generate_cases(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)

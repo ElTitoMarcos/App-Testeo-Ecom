@@ -5,7 +5,10 @@ import io
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-import pandas as pd
+try:  # pragma: no cover - optional dependency
+    import pandas as pd
+except Exception:  # pragma: no cover - gracefully handle missing pandas
+    pd = None  # type: ignore[assignment]
 
 from . import importer_fast
 
@@ -37,6 +40,9 @@ def import_csv(bytes_data: bytes, *, source: str, status_cb: StatusCallback) -> 
 
 def import_xlsx(bytes_data: bytes, *, source: str, status_cb: StatusCallback) -> List[Dict[str, Any]]:
     """Parse XLSX bytes into a list of dictionaries using pandas."""
+    if pd is None:
+        _safe_emit(status_cb, stage="parse_xlsx", done=0, total=0)
+        raise RuntimeError("pandas is required for XLSX imports")
     _safe_emit(status_cb, stage="parse_xlsx", done=0, total=0)
     df = pd.read_excel(io.BytesIO(bytes_data), dtype=str)
     if df.empty:

@@ -20,6 +20,7 @@ Then open http://host:port in a browser.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import io
@@ -39,7 +40,7 @@ import sqlite3
 import math
 import hashlib
 from datetime import date, datetime, timedelta
-from typing import Dict, Any, List
+from typing import Dict, Any, Iterable, List, Mapping, Optional, Sequence
 
 from . import database
 from .db import get_db
@@ -52,6 +53,7 @@ from .services.importer_unified import (
 )
 from . import gpt
 from . import title_analyzer
+from .ai import runner
 from .utils.db import row_to_dict, rget
 
 WINNER_SCORE_FIELDS = list(winner_calc.FEATURE_MAP.keys())
@@ -87,6 +89,7 @@ _IMPORT_STATUS_LOCK = threading.Lock()
 
 
 POST_IMPORT_TASKS_ALLOWED = {"desire", "imputacion", "winner_score"}
+AI_PROGRESS_TASKS = ("desire", "imputacion", "winner_score")
 DEFAULT_POST_IMPORT_TASKS = ("desire", "imputacion")
 
 
@@ -154,6 +157,62 @@ def _enqueue_post_import_tasks(
     return summary
 
 
+def _coerce_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except Exception:
+        try:
+            return int(float(value or 0))
+        except Exception:
+            return 0
+
+
+def _normalize_ai_progress(progress: Optional[Mapping[str, Mapping[str, Any]]]) -> Dict[str, Dict[str, int]]:
+    normalized: Dict[str, Dict[str, int]] = {}
+    for task_name in AI_PROGRESS_TASKS:
+        entry = progress.get(task_name) if progress else None
+        normalized[task_name] = {
+            "requested": _coerce_int((entry or {}).get("requested")),
+            "processed": _coerce_int((entry or {}).get("processed")),
+            "failed": _coerce_int((entry or {}).get("failed")),
+        }
+    return normalized
+
+
+def _empty_ai_progress() -> Dict[str, Dict[str, int]]:
+    return _normalize_ai_progress({})
+
+
+def _get_post_import_task_flags() -> Dict[str, bool]:
+    cfg = config.load_config()
+    flags = {name: True for name in AI_PROGRESS_TASKS}
+
+    raw_flags: Mapping[str, Any] | None = None
+    if isinstance(cfg.get("postImportTasks"), Mapping):
+        raw_flags = cfg.get("postImportTasks")  # type: ignore[assignment]
+    elif isinstance(cfg.get("post_import_tasks"), Mapping):
+        raw_flags = cfg.get("post_import_tasks")  # type: ignore[assignment]
+
+    if raw_flags:
+        for key, value in raw_flags.items():
+            norm = _normalize_post_import_task(key)
+            if not norm:
+                continue
+            flags[norm] = bool(value)
+
+    if not config.is_auto_fill_ia_on_import_enabled():
+        for key in flags.keys():
+            flags[key] = False
+
+    return flags
+
+
+def _resolve_enabled_post_import_tasks() -> List[str]:
+    flags = _get_post_import_task_flags()
+    ordered = [name for name in AI_PROGRESS_TASKS if flags.get(name, False)]
+    return ordered
+
+
 def _parse_date(s: str):
     s = (s or "").strip()
     if not s:
@@ -204,8 +263,133 @@ def _get_import_status(task_id: str) -> Dict[str, Any] | None:
         status = IMPORT_STATUS.get(task_id)
         if status is None:
             return None
-        return dict(status)
+        result = dict(status)
+        result["ai_progress"] = _normalize_ai_progress(result.get("ai_progress"))
+        result.setdefault("post_import_ready", False)
+        return result
 
+
+def _run_post_import_auto(task_id: str, product_ids: Sequence[int]) -> None:
+    product_list = [
+        int(pid)
+        for pid in _dedupe_preserve_order(list(product_ids or []))
+        if str(pid).strip()
+    ]
+    progress = _empty_ai_progress()
+    try:
+        enabled_tasks = _resolve_enabled_post_import_tasks()
+        if not enabled_tasks or not product_list:
+            _update_import_status(
+                task_id,
+                ai_progress=copy.deepcopy(progress),
+                state="DONE",
+                stage="done",
+                post_import_ready=False,
+            )
+            return
+
+        summary = _enqueue_post_import_tasks(task_id, product_list, enabled_tasks)
+        if summary:
+            _update_import_status(
+                task_id,
+                post_import={
+                    "tasks": summary,
+                    "product_count": len(product_list),
+                },
+            )
+        for name in AI_PROGRESS_TASKS:
+            progress[name]["requested"] = _coerce_int(summary.get(name))
+
+        _update_import_status(task_id, ai_progress=copy.deepcopy(progress))
+
+        batch_cfg = config.get_ai_batch_config()
+        try:
+            batch_size = int(batch_cfg.get("BATCH_SIZE", 200) or 200)
+        except Exception:
+            batch_size = 200
+        batch_size = max(1, min(batch_size, 200))
+        try:
+            max_parallel = int(batch_cfg.get("MAX_CONCURRENCY", 3) or 3)
+        except Exception:
+            max_parallel = 3
+        max_parallel = max(1, min(max_parallel, 8))
+
+        progress_lock = threading.Lock()
+
+        def _on_progress(import_task_id: str, task_type: str, totals: Mapping[str, int]) -> None:
+            if import_task_id != task_id:
+                return
+            with progress_lock:
+                entry = progress.setdefault(
+                    task_type,
+                    {"requested": 0, "processed": 0, "failed": 0},
+                )
+                if "requested" in totals:
+                    entry["requested"] = max(
+                        entry.get("requested", 0),
+                        _coerce_int(totals.get("requested")),
+                    )
+                entry["processed"] = _coerce_int(
+                    totals.get("processed", entry.get("processed", 0))
+                )
+                entry["failed"] = _coerce_int(
+                    totals.get("failed", entry.get("failed", 0))
+                )
+                _update_import_status(task_id, ai_progress=copy.deepcopy(progress))
+
+        runner.register_progress_callback(task_id, _on_progress)
+        try:
+            result = runner.run_auto(
+                set(enabled_tasks),
+                batch_size=batch_size,
+                max_parallel=max_parallel,
+            )
+        finally:
+            runner.unregister_progress_callback(task_id)
+
+        import_summary = result.get(task_id, {})
+        for task_name, totals in (import_summary.get("tasks") or {}).items():
+            entry = progress.setdefault(
+                task_name,
+                {"requested": 0, "processed": 0, "failed": 0},
+            )
+            entry["requested"] = max(
+                entry.get("requested", 0), _coerce_int(totals.get("requested"))
+            )
+            entry["processed"] = _coerce_int(totals.get("processed", entry.get("processed", 0)))
+            entry["failed"] = _coerce_int(totals.get("failed", entry.get("failed", 0)))
+
+        errors = [
+            str(msg)
+            for msg in (import_summary.get("errors") or [])
+            if msg
+        ]
+
+        final_state = "ERROR" if errors else "DONE"
+        final_stage = "ai_post" if errors else "done"
+        updates: Dict[str, Any] = {
+            "state": final_state,
+            "stage": final_stage,
+            "post_import_ready": False,
+            "ai_progress": copy.deepcopy(progress),
+        }
+        if errors:
+            updates["error"] = "; ".join(dict.fromkeys(errors))
+        else:
+            updates["error"] = None
+        _update_import_status(task_id, **updates)
+    except Exception as exc:
+        runner.unregister_progress_callback(task_id)
+        logger.exception("Post-import automation failed: task_id=%s", task_id)
+        progress_snapshot = copy.deepcopy(progress)
+        _update_import_status(
+            task_id,
+            state="ERROR",
+            stage="ai_post",
+            error=str(exc),
+            post_import_ready=False,
+            ai_progress=progress_snapshot,
+        )
 
 def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> str:
     """Return desire value from known sources.
@@ -499,6 +683,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 )
                 data["imported"] = data.get("rows_imported", 0)
                 data["winner_score_updated"] = data.get("winner_score_updated", 0)
+                data["ai_progress"] = _normalize_ai_progress(data.get("ai_counts"))
+                data.setdefault("post_import_ready", False)
                 self.safe_write(lambda: self.send_json(data))
             else:
                 self.safe_write(lambda: self.send_json({"state": "unknown"}))
@@ -1407,13 +1593,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                 error=None,
                 imported=0,
                 filename=filename,
+                post_import_ready=False,
+                ai_progress=_empty_ai_progress(),
             )
             file_bytes = data
             import_token = f"{task_id}-{uuid.uuid4().hex}"
-            post_import_defaults: List[str] = []
-            if config.is_auto_fill_ia_on_import_enabled():
-                post_import_defaults.extend(DEFAULT_POST_IMPORT_TASKS)
-
             def run_import_task():
                 _update_import_status(task_id, state="running", stage="running", started_at=time.time())
                 product_ids: List[int] = []
@@ -1446,20 +1630,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                     conn = ensure_db()
                     product_ids = database.consume_import_token(conn, import_token)
                     consumed_token = True
-                    if post_import_defaults and product_ids:
-                        summary = _enqueue_post_import_tasks(
-                            task_id,
-                            product_ids,
-                            list(post_import_defaults),
-                        )
-                        if summary:
-                            _update_import_status(
-                                task_id,
-                                post_import={
-                                    "tasks": summary,
-                                    "product_count": len(product_ids),
-                                },
-                            )
                     snapshot = _get_import_status(task_id) or {}
                     done_val = int(snapshot.get("done", 0) or 0)
                     if done_val < count:
@@ -1469,21 +1639,29 @@ class RequestHandler(BaseHTTPRequestHandler):
                         total_val = done_val
                     _update_import_status(
                         task_id,
-                        state="done",
-                        stage="done",
+                        state="RUNNING",
+                        stage="ai_post",
                         done=done_val,
                         total=total_val,
                         imported=count,
                         finished_at=time.time(),
+                        post_import_ready=True,
+                        ai_progress=_empty_ai_progress(),
                     )
+                    threading.Thread(
+                        target=_run_post_import_auto,
+                        args=(task_id, list(product_ids)),
+                        daemon=True,
+                    ).start()
                 except Exception as exc:
                     logger.exception("Unified import failed: filename=%s", filename)
                     _update_import_status(
                         task_id,
-                        state="error",
+                        state="ERROR",
                         stage="error",
                         error=str(exc),
                         finished_at=time.time(),
+                        post_import_ready=False,
                     )
                 finally:
                     if not consumed_token:
@@ -1521,13 +1699,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                 error=None,
                 imported=0,
                 filename=filename,
+                post_import_ready=False,
+                ai_progress=_empty_ai_progress(),
             )
 
             import_token = f"{task_id}-{uuid.uuid4().hex}"
-            post_import_defaults: List[str] = []
-            if config.is_auto_fill_ia_on_import_enabled():
-                post_import_defaults.extend(DEFAULT_POST_IMPORT_TASKS)
-
             def run_json():
                 _update_import_status(task_id, state="running", stage="running", started_at=time.time())
                 product_ids: List[int] = []
@@ -1567,20 +1743,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                     conn = ensure_db()
                     product_ids = database.consume_import_token(conn, import_token)
                     consumed_token = True
-                    if post_import_defaults and product_ids:
-                        summary = _enqueue_post_import_tasks(
-                            task_id,
-                            product_ids,
-                            list(post_import_defaults),
-                        )
-                        if summary:
-                            _update_import_status(
-                                task_id,
-                                post_import={
-                                    "tasks": summary,
-                                    "product_count": len(product_ids),
-                                },
-                            )
                     snapshot = _get_import_status(task_id) or {}
                     done_val = int(snapshot.get("done", 0) or 0)
                     if done_val < count:
@@ -1590,21 +1752,29 @@ class RequestHandler(BaseHTTPRequestHandler):
                         total_val = done_val
                     _update_import_status(
                         task_id,
-                        state="done",
-                        stage="done",
+                        state="RUNNING",
+                        stage="ai_post",
                         done=done_val,
                         total=total_val,
                         imported=count,
                         finished_at=time.time(),
+                        post_import_ready=True,
+                        ai_progress=_empty_ai_progress(),
                     )
+                    threading.Thread(
+                        target=_run_post_import_auto,
+                        args=(task_id, list(product_ids)),
+                        daemon=True,
+                    ).start()
                 except Exception as exc:
                     logger.exception("Unified JSON import failed: filename=%s", filename)
                     _update_import_status(
                         task_id,
-                        state="error",
+                        state="ERROR",
                         stage="error",
                         error=str(exc),
                         finished_at=time.time(),
+                        post_import_ready=False,
                     )
                 finally:
                     if not consumed_token:
