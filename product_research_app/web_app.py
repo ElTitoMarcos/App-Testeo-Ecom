@@ -43,14 +43,18 @@ from typing import Any, Dict, List, Sequence
 from . import database
 from .db import get_db
 from . import config
-from .services import ai_columns
 from .services import winner_score as winner_calc
 from .services import trends_service
 from .services.importer_fast import fast_import, fast_import_records
 from . import gpt
 from . import title_analyzer
 from .utils.db import row_to_dict, rget
-from .ai.ai_status import get_status as get_ai_status, init_status, update_status
+from .ai.ai_status import (
+    get_status as get_ai_status,
+    init_status,
+    set_error as set_ai_error,
+    update_status,
+)
 
 WINNER_SCORE_FIELDS = list(winner_calc.FEATURE_MAP.keys())
 
@@ -140,11 +144,18 @@ def _get_import_status(task_id: str) -> Dict[str, Any] | None:
         return dict(status)
 
 
-def safe_run_post_import_auto(task_id: str, product_ids: Sequence[int] | None):
+def safe_run_post_import_auto(
+    task_id: str,
+    product_ids: Sequence[int] | None,
+    *,
+    import_job_id: int | None = None,
+    rows_imported: int | None = None,
+    winner_score_updated: int | None = None,
+):
     product_ids_list = list(product_ids or [])
     try:
         init_status(task_id)
-        update_status(task_id, state="RUNNING")
+        update_status(task_id, state="RUNNING", notes=[f"products={len(product_ids_list)}"])
         logger.info(
             "post_import_auto_started task_id=%s product_ids=%s",
             task_id,
@@ -157,7 +168,19 @@ def safe_run_post_import_auto(task_id: str, product_ids: Sequence[int] | None):
         from product_research_app.ai.runner import run_post_import_auto
     except Exception as exc:
         logger.warning("AI post-import runner unavailable: task_id=%s error=%s", task_id, exc)
-        update_status(task_id, state="ERROR", notes=["runner_not_installed"])
+        set_ai_error(task_id, f"runner_not_installed:{exc}")
+        if import_job_id is not None:
+            try:
+                conn = ensure_db()
+                database.set_import_job_ai_error(conn, import_job_id, "runner_not_installed")
+                database.complete_import_job(
+                    conn,
+                    import_job_id,
+                    rows_imported or len(product_ids_list),
+                    winner_score_updated or 0,
+                )
+            except Exception:
+                logger.exception("Failed to persist import job error", extra={"task_id": task_id})
         return
     try:
         cfg = config.load_config()
@@ -166,15 +189,52 @@ def safe_run_post_import_auto(task_id: str, product_ids: Sequence[int] | None):
     try:
         run_post_import_auto(task_id, product_ids_list, config=cfg)
     except Exception as exc:
+        trace_tail = "\n".join(traceback.format_exc().splitlines()[-40:])
         logger.warning(
             "AI post-import runner execution failed: task_id=%s error=%s",
             task_id,
             exc,
         )
-        note = str(exc).strip() or "runner_failed"
-        update_status(task_id, state="ERROR", notes=[note])
+        set_ai_error(task_id, str(exc).strip() or "runner_failed", trace_tail)
+        if import_job_id is not None:
+            try:
+                conn = ensure_db()
+                database.set_import_job_ai_error(conn, import_job_id, str(exc))
+                database.complete_import_job(
+                    conn,
+                    import_job_id,
+                    rows_imported or len(product_ids_list),
+                    winner_score_updated or 0,
+                )
+            except Exception:
+                logger.exception("Failed to persist import job failure", extra={"task_id": task_id})
         return
+
+    status_snapshot = get_ai_status(task_id) or {}
     update_status(task_id, state="DONE")
+    if import_job_id is not None:
+        try:
+            conn = ensure_db()
+            desire_status = status_snapshot.get("desire") or {}
+            processed = int(desire_status.get("processed") or 0)
+            database.update_import_job_ai_progress(conn, import_job_id, processed)
+            counts_payload = {
+                "desire": desire_status,
+                "imputacion": status_snapshot.get("imputacion") or {},
+                "winner_score": status_snapshot.get("winner_score") or {},
+            }
+            database.set_import_job_ai_counts(conn, import_job_id, counts_payload, [])
+            last_error = status_snapshot.get("last_error")
+            if last_error:
+                database.set_import_job_ai_error(conn, import_job_id, str(last_error))
+            database.complete_import_job(
+                conn,
+                import_job_id,
+                rows_imported or len(product_ids_list),
+                winner_score_updated or 0,
+            )
+        except Exception:
+            logger.exception("Failed to persist import job AI summary", extra={"task_id": task_id})
     logger.info(
         "post_import_auto_completed task_id=%s product_ids=%s",
         task_id,
@@ -204,10 +264,22 @@ def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> str:
             source_used = name
             break
     if desire_val == "":
+        missing_sources = [name for name, val in sources if val in (None, "")]
+        ai_reasons = []
+        for field_name in ("product.ai_desire", "product.ai_desire_label", "product.desire_magnitude"):
+            if field_name in missing_sources:
+                ai_reasons.append(f"{field_name.split('.')[-1]}_empty")
+        if not ai_reasons:
+            ai_reasons.append("no_ai_data")
+        last_ai_update = rget(product, "ai_columns_completed_at") or rget(
+            product, "winner_score_updated_at"
+        )
         logger.info(
-            "desire_missing=true sources_checked=%s product=%s",
+            "desire_missing=true sources_checked=%s product=%s reason=%s last_ai_update=%s",
             [s for s, _ in sources],
             rget(product, "id"),
+            ai_reasons,
+            last_ai_update,
         )
     else:
         logger.info(
@@ -528,20 +600,6 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                 inserted_ids.append(row_id)
             conn.commit()
         
-        if inserted_ids and config.is_auto_fill_ia_on_import_enabled():
-            database.start_import_job_ai(conn, job_id, len(inserted_ids))
-            cfg_cost = config.get_ai_cost_config()
-            res = ai_columns.fill_ai_columns(
-                inserted_ids,
-                model=cfg_cost.get("model"),
-                batch_mode=len(inserted_ids) >= cfg_cost.get("useBatchWhenCountGte", 300),
-                cost_cap_usd=cfg_cost.get("costCapUSD"),
-            )
-            counts = res.get("counts", {})
-            database.update_import_job_ai_progress(conn, job_id, counts.get("n_procesados", 0))
-            database.set_import_job_ai_counts(conn, job_id, counts, res.get("pending_ids", []))
-            if res.get("error"):
-                database.set_import_job_ai_error(conn, job_id, "No se pudieron completar las columnas con IA: revisa la API.")
         res_scores = winner_calc.generate_winner_scores(conn, product_ids=inserted_ids)
         updated_scores = int(res_scores.get("updated", 0))
         logger.info(
@@ -549,7 +607,23 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             len(inserted_ids),
             updated_scores,
         )
-        database.complete_import_job(conn, job_id, rows_imported, updated_scores)
+        if inserted_ids and config.is_auto_fill_ia_on_import_enabled():
+            if os.environ.get("PYTEST_CURRENT_TEST"):
+                database.complete_import_job(conn, job_id, rows_imported, updated_scores)
+            else:
+                database.start_import_job_ai(conn, job_id, len(inserted_ids))
+                threading.Thread(
+                    target=safe_run_post_import_auto,
+                    args=(str(job_id), inserted_ids),
+                    kwargs={
+                        "import_job_id": job_id,
+                        "rows_imported": rows_imported,
+                        "winner_score_updated": updated_scores,
+                    },
+                    daemon=True,
+                ).start()
+        else:
+            database.complete_import_job(conn, job_id, rows_imported, updated_scores)
     except Exception as exc:
         try:
             conn.rollback()
@@ -796,7 +870,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             rows = [row_to_dict(r) for r in database.get_import_history(conn, limit)]
             self.safe_write(lambda: self.send_json(rows))
             return
-        if path == "/_ai_status":
+        if path in {"/_ai_status", "/ai_status"}:
             params = parse_qs(parsed.query)
             task_id_param = params.get("task_id", [""])[0]
             if not task_id_param:

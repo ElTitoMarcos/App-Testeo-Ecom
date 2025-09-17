@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
+import traceback
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence
 
-import sqlite3
-
-from product_research_app.ai.ai_status import update_status
+from product_research_app.ai.ai_status import set_error, update_status
+from product_research_app.database import get_connection as legacy_get_connection  # type: ignore circular
 from product_research_app.ai.gpt_orchestrator import (
     ChatCompletionError,
     run_desire_batch,
@@ -102,63 +105,73 @@ def run_post_import_auto(task_id: str, product_ids: Sequence[int], config: Optio
         update_status(task_id, state="DONE")
         return
 
-    conn = get_db()
-    rows = _fetch_rows(conn, ids)
-    if not rows:
-        update_status(task_id, state="DONE", notes=["no_products_found"])
-        return
+    root_conn = get_db()
+    db_path = _resolve_db_path(root_conn)
+    conn = legacy_get_connection(Path(db_path))
+    try:
+        has_desire_summary = _table_has_column(conn, "products", "desire_summary")
+        rows = _fetch_rows(conn, ids)
+        if not rows:
+            update_status(task_id, state="DONE", notes=["no_products_found"])
+            return
 
-    rows_by_id: Dict[int, Dict[str, Any]] = {}
-    for row in rows:
-        data = row_to_dict(row) or {}
-        pid = data.get("id")
-        if pid is None:
-            continue
-        try:
-            pid_int = int(pid)
-        except Exception:
-            continue
-        rows_by_id[pid_int] = data
-    missing = [pid for pid in ids if pid not in rows_by_id]
-    if missing:
-        note = f"missing_products={len(missing)}"
-        update_status(task_id, notes=[note])
+        rows_by_id: Dict[int, Dict[str, Any]] = {}
+        for row in rows:
+            data = row_to_dict(row) or {}
+            pid = data.get("id")
+            if pid is None:
+                continue
+            try:
+                pid_int = int(pid)
+            except Exception:
+                continue
+            rows_by_id[pid_int] = data
+        missing = [pid for pid in ids if pid not in rows_by_id]
+        if missing:
+            note = f"missing_products={len(missing)}"
+            update_status(task_id, notes=[note])
 
-    calls_used = 0
+        calls_used = 0
 
-    desire_result = _process_desire(
-        task_id,
-        rows_by_id,
-        ids,
-        settings,
-        conn,
-        calls_used,
-    )
-    calls_used += desire_result.calls
-
-    imputacion_processed = ImputacionResult(processed=0, failed=0, calls=0)
-    if settings.imputacion_via_ia:
-        imputacion_processed = _process_imputacion(
+        desire_result = _process_desire(
             task_id,
             rows_by_id,
             ids,
             settings,
             conn,
             calls_used,
+            has_desire_summary=has_desire_summary,
         )
-        calls_used += imputacion_processed.calls
-    else:
-        update_status(task_id, imputacion={"processed": 0, "failed": 0})
+        calls_used += desire_result.calls
 
-    _process_winner_score(
-        task_id,
-        rows_by_id,
-        ids,
-        settings,
-        conn,
-        calls_used,
-        config_map,
-    )
+        imputacion_processed = ImputacionResult(processed=0, failed=0, calls=0)
+        if settings.imputacion_via_ia:
+            imputacion_processed = _process_imputacion(
+                task_id,
+                rows_by_id,
+                ids,
+                settings,
+                conn,
+                calls_used,
+            )
+            calls_used += imputacion_processed.calls
+        else:
+            update_status(task_id, imputacion={"processed": 0, "failed": 0})
+
+        _process_winner_score(
+            task_id,
+            rows_by_id,
+            ids,
+            settings,
+            conn,
+            calls_used,
+            config_map,
+        )
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
     update_status(task_id, state="DONE")
 
@@ -221,6 +234,8 @@ def _process_desire(
     settings: AutoSettings,
     conn: sqlite3.Connection,
     calls_used: int,
+    *,
+    has_desire_summary: bool,
 ) -> BatchResult:
     processed = 0
     failed = 0
@@ -264,11 +279,13 @@ def _process_desire(
             break
 
         logger.info(
-            "IA desire batch=%s processed=%s call=%s/%s",
+            "IA desire batch=%s size=%s processed_total=%s failed_total=%s call=%s/%s",
             batch_index,
             len(batch),
+            processed,
+            failed,
             calls_used + calls + 1,
-            settings.max_calls,
+            settings.max_calls or "inf",
         )
 
         try:
@@ -282,46 +299,102 @@ def _process_desire(
             calls += 1
             failed += len(batch)
             logger.warning("desire_batch_failed task_id=%s error=%s", task_id, exc)
+            set_error(task_id, f"desire_error:{exc}")
             update_status(task_id, notes=[f"desire_error:{exc}"], desire={"failed": failed, "processed": processed})
             continue
         except Exception as exc:  # pragma: no cover - defensive
             calls += 1
             failed += len(batch)
             logger.exception("desire_batch_exception task_id=%s", task_id)
+            trace_tail = _format_trace(exc)
+            set_error(task_id, "desire_exception", trace_tail)
             update_status(task_id, notes=["desire_exception"], desire={"failed": failed, "processed": processed})
             continue
 
-        updates: List[tuple[str, str, int, int]] = []
+        updates_payload: List[Dict[str, Any]] = []
         for item in batch:
             pid = int(item["id"])
             mapped = result_map.get(str(pid))
             if not mapped:
                 failed += 1
                 continue
-            lines = [line.strip()[:90] for line in mapped.get("lines", []) if line and line.strip()]
+            raw_lines = mapped.get("normalized_text") or mapped.get("lines") or []
+            if isinstance(raw_lines, (str, bytes)):
+                raw_lines = [raw_lines]
+            lines: List[str] = []
+            for candidate in raw_lines:
+                if candidate in (None, ""):
+                    continue
+                text_line = str(candidate).strip()
+                if not text_line:
+                    continue
+                lines.append(text_line[:90])
+            if not lines:
+                fallback = mapped.get("text") or item.get("desire") or ""
+                if isinstance(fallback, str):
+                    for part in fallback.splitlines():
+                        part = part.strip()
+                        if part:
+                            lines.append(part[:90])
+            if len(lines) == 1:
+                split_parts = [seg.strip() for seg in lines[0].replace(";", ".").split(".") if seg.strip()]
+                if len(split_parts) >= 2:
+                    lines = [seg[:90] for seg in split_parts[:3]]
+            lines = [line for line in lines if line][:3]
             if not lines:
                 failed += 1
                 continue
-            label = (mapped.get("class") or "").strip().lower()
-            if label not in {"alto", "medio", "bajo"}:
-                label = "medio"
-            magnitude = mapped.get("magnitude")
-            if magnitude is None:
-                magnitude = {"alto": 80, "medio": 50, "bajo": 25}.get(label, 50)
-            else:
-                try:
-                    magnitude = int(magnitude)
-                except Exception:
-                    magnitude = 50
-            magnitude = max(0, min(100, int(magnitude)))
-            updates.append(("\n".join(lines), label, magnitude, pid))
+            if len(lines) == 1:
+                lines.append(lines[0])
+            keywords = mapped.get("keywords") if isinstance(mapped.get("keywords"), list) else []
+            label = _infer_label(mapped.get("class"), keywords)
+            magnitude = _infer_magnitude(mapped.get("magnitude"), label)
+            desire_text = "\n".join(lines[:3])
+            updates_payload.append(
+                {
+                    "ai_desire": desire_text,
+                    "ai_desire_label": label,
+                    "desire_magnitude": magnitude,
+                    "product_id": pid,
+                }
+            )
             processed += 1
 
-        if updates:
-            conn.executemany(
-                "UPDATE products SET ai_desire=?, ai_desire_label=?, desire_magnitude=? WHERE id=?",
-                updates,
-            )
+        if updates_payload:
+            now_iso = datetime.utcnow().isoformat()
+            if has_desire_summary:
+                conn.executemany(
+                    "UPDATE products SET ai_desire=?, ai_desire_label=?, desire_magnitude=?, ai_columns_completed_at=?, desire_summary=? WHERE id=?",
+                    [
+                        (
+                            payload["ai_desire"],
+                            payload["ai_desire_label"],
+                            payload["desire_magnitude"],
+                            now_iso,
+                            payload["ai_desire"],
+                            payload["product_id"],
+                        )
+                        for payload in updates_payload
+                    ],
+                )
+            else:
+                conn.executemany(
+                    "UPDATE products SET ai_desire=?, ai_desire_label=?, desire_magnitude=?, ai_columns_completed_at=? WHERE id=?",
+                    [
+                        (
+                            payload["ai_desire"],
+                            payload["ai_desire_label"],
+                            payload["desire_magnitude"],
+                            now_iso,
+                            payload["product_id"],
+                        )
+                        for payload in updates_payload
+                    ],
+                )
+            try:
+                conn.commit()
+            except Exception:
+                pass
 
         update_status(
             task_id,
@@ -380,11 +453,13 @@ def _process_imputacion(
             break
 
         logger.info(
-            "IA imputacion batch=%s processed=%s call=%s/%s",
+            "IA imputacion batch=%s size=%s processed_total=%s failed_total=%s call=%s/%s",
             batch_index,
             len(batch),
+            processed,
+            failed,
             calls_used + calls + 1,
-            settings.max_calls,
+            settings.max_calls or "inf",
         )
         try:
             result_map = run_imputacion_batch(
@@ -397,12 +472,15 @@ def _process_imputacion(
             calls += 1
             failed += len(batch)
             logger.warning("imputacion_batch_failed task_id=%s error=%s", task_id, exc)
+            set_error(task_id, f"imputacion_error:{exc}")
             update_status(task_id, notes=[f"imputacion_error:{exc}"], imputacion={"failed": failed, "processed": processed})
             continue
-        except Exception:
+        except Exception as exc:
             calls += 1
             failed += len(batch)
             logger.exception("imputacion_batch_exception task_id=%s", task_id)
+            trace_tail = _format_trace(exc)
+            set_error(task_id, "imputacion_exception", trace_tail)
             update_status(task_id, notes=["imputacion_exception"], imputacion={"failed": failed, "processed": processed})
             continue
 
@@ -413,9 +491,9 @@ def _process_imputacion(
                 failed += 1
                 continue
             fields: MutableMapping[str, Any] = {}
-            if "review_count" in mapped:
+            if "review_count" in mapped and mapped["review_count"] not in (None, ""):
                 fields["review_count"] = int(mapped["review_count"])
-            if "image_count" in mapped:
+            if "image_count" in mapped and mapped["image_count"] not in (None, ""):
                 fields["image_count"] = int(mapped["image_count"])
             if not fields:
                 failed += 1
@@ -426,6 +504,10 @@ def _process_imputacion(
                 tuple(fields.values()) + (pid,),
             )
             processed += 1
+        try:
+            conn.commit()
+        except Exception:
+            pass
 
         update_status(
             task_id,
@@ -469,13 +551,16 @@ def _process_winner_score(
                 failed = len(ids)
                 note = f"weights_error:{exc}"
                 logger.warning("weights_call_failed task_id=%s error=%s", task_id, exc)
+                set_error(task_id, note)
                 update_status(task_id, notes=[note])
                 return WinnerResult(processed=0, failed=failed, calls=calls, note=note)
-            except Exception:
+            except Exception as exc:
                 calls += 1
                 failed = len(ids)
                 note = "weights_exception"
                 logger.exception("weights_call_exception task_id=%s", task_id)
+                trace_tail = _format_trace(exc)
+                set_error(task_id, note, trace_tail)
                 update_status(task_id, notes=[note])
                 return WinnerResult(processed=0, failed=failed, calls=calls, note=note)
 
@@ -492,12 +577,21 @@ def _process_winner_score(
     try:
         winner_calc.generate_winner_scores(conn, product_ids=ids)
         processed = len(ids)
-    except Exception:
+    except Exception as exc:
         failed = len(ids)
         logger.exception("winner_score_generation_failed task_id=%s", task_id)
+        trace_tail = _format_trace(exc)
+        set_error(task_id, "winner_score_failed", trace_tail)
         update_status(task_id, notes=["winner_score_failed"], winner_score={"processed": processed, "failed": failed})
         return WinnerResult(processed=processed, failed=failed, calls=calls, note=note)
 
+    logger.info(
+        "IA winner_score processed=%s failed=%s calls=%s/%s",
+        processed,
+        failed,
+        calls_used + calls,
+        settings.max_calls or "inf",
+    )
     update_status(task_id, winner_score={"processed": processed, "failed": failed, "requested": len(ids)})
     return WinnerResult(processed=processed, failed=failed, calls=calls, note=note)
 
@@ -527,3 +621,56 @@ def _build_aggregates(
         data.setdefault("title", data.get("name"))
         products.append(data)
     return build_weighting_aggregates(products)
+
+
+def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    cur = conn.execute(f"PRAGMA table_info({table})")
+    return any(row[1] == column for row in cur.fetchall())
+
+
+def _format_trace(exc: BaseException) -> str:
+    lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
+    tail = [line.rstrip("\n") for line in lines][-40:]
+    return "\n".join(tail)
+
+
+def _resolve_db_path(conn: sqlite3.Connection) -> str:
+    try:
+        rows = conn.execute("PRAGMA database_list").fetchall()
+        for _, name, path in rows:
+            if name == "main" and path:
+                return path
+    except Exception:
+        pass
+    return "product_research_app/data.sqlite3"
+
+
+def _infer_label(raw_label: Any, keywords: Sequence[Any]) -> str:
+    valid = {"alto", "medio", "bajo"}
+    if isinstance(raw_label, str):
+        label = raw_label.strip().lower()
+        if label in valid:
+            return label
+    lowered = [str(kw).lower() for kw in keywords if isinstance(kw, str)]
+    for token in lowered:
+        if any(marker in token for marker in ("alto", "alta", "high", "hot")):
+            return "alto"
+    for token in lowered:
+        if any(marker in token for marker in ("bajo", "baja", "low", "frío", "frio")):
+            return "bajo"
+    return "medio"
+
+
+def _infer_magnitude(raw_magnitude: Any, label: str) -> int:
+    try:
+        if raw_magnitude not in (None, ""):
+            magnitude = int(round(float(raw_magnitude)))
+        else:
+            magnitude = None
+    except Exception:
+        magnitude = None
+    if magnitude is None:
+        mapping = {"alto": 80, "medio": 50, "bajo": 25}
+        magnitude = mapping.get(label, 50)
+    magnitude = max(0, min(100, int(magnitude)))
+    return magnitude
