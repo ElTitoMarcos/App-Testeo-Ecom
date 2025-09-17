@@ -144,13 +144,7 @@ def safe_run_post_import_auto(task_id: str, product_ids: Sequence[int] | None):
     product_ids_list = list(product_ids or [])
     try:
         init_status(task_id)
-        update_status(
-            task_id,
-            state="RUNNING",
-            desire={"requested": len(product_ids_list)},
-            imputacion={"requested": len(product_ids_list)},
-            winner_score={"requested": len(product_ids_list)},
-        )
+        update_status(task_id, state="RUNNING")
         logger.info(
             "post_import_auto_started task_id=%s product_ids=%s",
             task_id,

@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import re
+import time
 from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence, Tuple
 
 import requests
@@ -43,7 +44,7 @@ _TASK_MODEL_MAP: Dict[_TaskName, Tuple[str, str]] = {
 }
 
 
-def run_task(
+def _legacy_run_task(
     task: _TaskName,
     *,
     prompt_text: str,
@@ -662,3 +663,365 @@ def _estimate_tokens(prompt: str, content: str, usage: Optional[float]) -> float
         return float(usage)
     approx = (len(prompt) + len(content)) / 4.0
     return max(1.0, approx)
+
+
+class ChatCompletionError(RuntimeError):
+    """Error raised when the JSON-only chat orchestration fails."""
+
+    def __init__(self, message: str, *, status_code: Optional[int] = None, retry_after: Optional[float] = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after = retry_after
+
+
+_JSON_RESPONSE_FORMAT = {"type": "json_object"}
+_DESIRE_SYSTEM_PROMPT = (
+    "Resume deseo para dropshipping WW. SOLO JSON:\n"
+    '{"items":[{"id":"...","normalized_text":["l1","l2","l3?"],"class":"alto|medio|bajo","magnitude":0-100,"keywords":["k1","k2"]}]}'
+)
+_IMPUTACION_SYSTEM_PROMPT = (
+    "Imputa métricas faltantes SOLO JSON: {\"items\":[{\"id\":\"...\",\"review_count\":int|null,\"image_count\":int|null}]}"
+)
+_WEIGHTS_SYSTEM_PROMPT = (
+    "Ajusta pesos ganador SOLO JSON: {\"weights\":{...},\"order\":[...]}. Pesos en 0-100, order prioriza primero."
+)
+
+_DEFAULT_SIMPLE_TIMEOUT = 20
+_DEFAULT_SIMPLE_RETRY = 1
+
+
+def _get_simple_timeout_retry() -> tuple[int, int]:
+    try:
+        from product_research_app import config  # type: ignore circular import
+
+        settings = config.get_ai_auto_settings()
+    except Exception:
+        return _DEFAULT_SIMPLE_TIMEOUT, _DEFAULT_SIMPLE_RETRY
+    timeout = int(settings.get("GPT_TIMEOUT", _DEFAULT_SIMPLE_TIMEOUT) or _DEFAULT_SIMPLE_TIMEOUT)
+    retry = int(settings.get("GPT_MAX_RETRY", _DEFAULT_SIMPLE_RETRY) or _DEFAULT_SIMPLE_RETRY)
+    timeout = max(1, timeout)
+    retry = max(0, retry)
+    return timeout, retry
+
+
+def _parse_retry_after(value: object) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        try:
+            return float(int(str(value)))
+        except Exception:
+            return None
+
+
+def _run_chat_once(
+    system: str,
+    user: str,
+    *,
+    model: str,
+    timeout: int,
+    temperature: float = 0.0,
+) -> str:
+    api_key = _resolve_api_key()
+    if not api_key:
+        raise ChatCompletionError("OPENAI_API_KEY is not configured")
+    system_prompt = system.strip() or "Responde únicamente con JSON válido."
+    user_message = user if isinstance(user, str) else json.dumps(user, ensure_ascii=False)
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ],
+        "temperature": max(0.0, float(temperature)),
+        "response_format": _JSON_RESPONSE_FORMAT,
+    }
+    try:
+        response = requests.post(
+            CHAT_COMPLETIONS_URL,
+            headers=headers,
+            json=payload,
+            timeout=max(1, int(timeout)),
+        )
+    except requests.RequestException as exc:  # pragma: no cover - network failure
+        raise ChatCompletionError(f"OpenAI request error: {exc}") from exc
+
+    retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+    if response.status_code != 200:
+        message = response.text
+        try:
+            err = response.json()
+            message = err.get("error", {}).get("message", message)
+        except Exception:
+            pass
+        raise ChatCompletionError(
+            f"OpenAI API error {response.status_code}: {message}",
+            status_code=response.status_code,
+            retry_after=retry_after,
+        )
+
+    try:
+        payload_json = response.json()
+    except Exception as exc:  # pragma: no cover - unexpected payload
+        raise ChatCompletionError("OpenAI response is not valid JSON") from exc
+
+    choices = payload_json.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise ChatCompletionError("OpenAI response missing choices")
+    message = choices[0].get("message")
+    if not isinstance(message, dict):
+        raise ChatCompletionError("OpenAI response missing message")
+    content = message.get("content")
+    if not isinstance(content, str):
+        raise ChatCompletionError("OpenAI response missing content")
+    return content.strip()
+
+
+def _call_chat_with_retry(
+    system: str,
+    user: str,
+    *,
+    model: str,
+    timeout: int,
+    max_retry: int,
+    temperature: float = 0.0,
+) -> str:
+    attempts = 0
+    while True:
+        try:
+            return _run_chat_once(system, user, model=model, timeout=timeout, temperature=temperature)
+        except ChatCompletionError as exc:
+            status = exc.status_code or 0
+            should_retry = status == 429 or 500 <= status < 600
+            if attempts >= max_retry or not should_retry:
+                raise
+            delay = exc.retry_after
+            if delay is None:
+                delay = min(2 ** attempts, 10)
+            else:
+                delay = max(0.0, float(delay))
+            if delay:
+                time.sleep(min(delay, 30.0))
+            attempts += 1
+
+
+def _ensure_list_of_str(values: object) -> List[str]:
+    if not isinstance(values, list):
+        return []
+    out: List[str] = []
+    for item in values:
+        if item in (None, ""):
+            continue
+        out.append(str(item).strip())
+    return out
+
+
+def _ensure_lines(entry: Dict[str, Any]) -> List[str]:
+    raw_lines = entry.get("normalized_text")
+    if not isinstance(raw_lines, list):
+        raw_lines = entry.get("lines")
+    lines = _ensure_list_of_str(raw_lines)
+    if not lines:
+        text = entry.get("text")
+        if isinstance(text, str) and text.strip():
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return [line[:200] for line in lines if line]
+
+
+def _ensure_int(value: Any) -> Optional[int]:
+    if value in (None, ""):
+        return None
+    try:
+        return int(round(float(value)))
+    except Exception:
+        return None
+
+
+def run_desire_batch(
+    items: List[Dict[str, Any]],
+    *,
+    timeout: Optional[int] = None,
+    max_retry: Optional[int] = None,
+) -> Dict[str, Dict[str, Any]]:
+    if not items:
+        return {}
+    default_timeout, default_retry = _get_simple_timeout_retry()
+    timeout = timeout or default_timeout
+    max_retry = max_retry if max_retry is not None else default_retry
+    payload = {"items": items}
+    user = "### DATA\n" + json.dumps(payload, ensure_ascii=False)
+    response = _call_chat_with_retry(
+        _DESIRE_SYSTEM_PROMPT,
+        user,
+        model="gpt-4o-mini",
+        timeout=timeout,
+        max_retry=max_retry,
+        temperature=0.0,
+    )
+    try:
+        data = json.loads(response)
+    except json.JSONDecodeError as exc:
+        raise ChatCompletionError(f"Invalid JSON from desire batch: {exc}") from exc
+    entries = data.get("items")
+    if not isinstance(entries, list):
+        raise ChatCompletionError("Desire batch response missing items list")
+    result: Dict[str, Dict[str, Any]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        pid = entry.get("id")
+        if pid in (None, ""):
+            continue
+        key = str(pid)
+        label = entry.get("class")
+        label_str = str(label).strip().lower() if isinstance(label, str) else None
+        magnitude = _ensure_int(entry.get("magnitude"))
+        keywords = _ensure_list_of_str(entry.get("keywords"))
+        result[key] = {
+            "lines": _ensure_lines(entry),
+            "class": label_str,
+            "magnitude": magnitude,
+            "keywords": keywords,
+        }
+    return result
+
+
+def run_imputacion_batch(
+    items: List[Dict[str, Any]],
+    *,
+    timeout: Optional[int] = None,
+    max_retry: Optional[int] = None,
+) -> Dict[str, Dict[str, Any]]:
+    if not items:
+        return {}
+    default_timeout, default_retry = _get_simple_timeout_retry()
+    timeout = timeout or default_timeout
+    max_retry = max_retry if max_retry is not None else default_retry
+    payload = {"items": items}
+    user = "### DATA\n" + json.dumps(payload, ensure_ascii=False)
+    response = _call_chat_with_retry(
+        _IMPUTACION_SYSTEM_PROMPT,
+        user,
+        model="gpt-4o-mini",
+        timeout=timeout,
+        max_retry=max_retry,
+        temperature=0.0,
+    )
+    try:
+        data = json.loads(response)
+    except json.JSONDecodeError as exc:
+        raise ChatCompletionError(f"Invalid JSON from imputacion batch: {exc}") from exc
+    entries = data.get("items")
+    if not isinstance(entries, list):
+        raise ChatCompletionError("Imputación batch response missing items list")
+    result: Dict[str, Dict[str, Any]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        pid = entry.get("id")
+        if pid in (None, ""):
+            continue
+        key = str(pid)
+        review_count = _ensure_int(entry.get("review_count"))
+        image_count = _ensure_int(entry.get("image_count"))
+        result[key] = {}
+        if review_count is not None:
+            result[key]["review_count"] = review_count
+        if image_count is not None:
+            result[key]["image_count"] = image_count
+    return result
+
+
+def run_weights_once(
+    aggregates: Dict[str, Any],
+    *,
+    timeout: Optional[int] = None,
+    max_retry: Optional[int] = None,
+) -> Dict[str, Any]:
+    default_timeout, default_retry = _get_simple_timeout_retry()
+    timeout = timeout or default_timeout
+    max_retry = max_retry if max_retry is not None else default_retry
+    payload = {"aggregates": aggregates}
+    user = "### DATA\n" + json.dumps(payload, ensure_ascii=False)
+    response = _call_chat_with_retry(
+        _WEIGHTS_SYSTEM_PROMPT,
+        user,
+        model="gpt-4o",
+        timeout=timeout,
+        max_retry=max_retry,
+        temperature=0.0,
+    )
+    try:
+        data = json.loads(response)
+    except json.JSONDecodeError as exc:
+        raise ChatCompletionError(f"Invalid JSON from weights request: {exc}") from exc
+    weights = data.get("weights")
+    order = data.get("order")
+    if not isinstance(weights, dict):
+        raise ChatCompletionError("Weights response missing 'weights'")
+    if not isinstance(order, list):
+        raise ChatCompletionError("Weights response missing 'order'")
+    normalized = {str(k): _ensure_int(v) for k, v in weights.items()}
+    normalized = {k: (v if v is not None else 0) for k, v in normalized.items()}
+    order_list = [str(item) for item in order if item not in (None, "")]
+    return {"weights": normalized, "order": order_list}
+
+
+def run_task(*args, **kwargs):  # type: ignore[override]
+    """Dispatcher supporting both legacy and JSON-only execution styles."""
+
+    if args:
+        first = args[0]
+    else:
+        first = None
+
+    if (
+        first in _TASK_MODEL_MAP
+        or "prompt_text" in kwargs
+        or "json_payload" in kwargs
+        or "system_prompt" in kwargs
+    ):
+        return _legacy_run_task(*args, **kwargs)
+
+    if {"system", "user", "model", "timeout"} <= set(kwargs.keys()):
+        system = kwargs["system"]
+        user = kwargs["user"]
+        model = kwargs["model"]
+        timeout = kwargs["timeout"]
+        max_retry = kwargs.get("max_retry")
+        temperature = kwargs.get("temperature", 0.0)
+        default_timeout, default_retry = _get_simple_timeout_retry()
+        timeout_val = int(timeout or default_timeout)
+        retry_val = max_retry if max_retry is not None else default_retry
+        return _call_chat_with_retry(
+            str(system),
+            str(user),
+            model=str(model),
+            timeout=max(1, timeout_val),
+            max_retry=max(0, int(retry_val)),
+            temperature=float(temperature or 0.0),
+        )
+
+    if len(args) >= 4 and "system" not in kwargs and "prompt_text" not in kwargs:
+        system, user, model, timeout = args[:4]
+        max_retry = kwargs.get("max_retry")
+        temperature = kwargs.get("temperature", 0.0)
+        default_timeout, default_retry = _get_simple_timeout_retry()
+        timeout_val = int(timeout or default_timeout)
+        retry_val = max_retry if max_retry is not None else default_retry
+        return _call_chat_with_retry(
+            str(system),
+            str(user),
+            model=str(model),
+            timeout=max(1, timeout_val),
+            max_retry=max(0, int(retry_val)),
+            temperature=float(temperature or 0.0),
+        )
+
+    raise TypeError("Unsupported arguments for run_task")
