@@ -1,4 +1,5 @@
 import * as api from './net.js';
+import { executeGptTask } from './gpt-actions.js';
 
 const SettingsCache = (() => {
   let cache = null;
@@ -324,97 +325,46 @@ function stratifiedSample(list, n){
 }
 
 async function adjustWeightsAI(){
-  const num = v => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
-  const stratifiedSampleBy = (arr, key, n) => {
-    if (!Array.isArray(arr) || arr.length <= n) return (arr || []).slice();
-    const sorted = [...arr].sort((a,b) => num(b[key]) - num(a[key]));
-    const out = [];
-    for (let i=0; i<n; i++){
-      const idx = Math.floor(i * (sorted.length - 1) / Math.max(1,(n - 1)));
-      out.push(sorted[idx]);
+  const btn = document.getElementById('btnAiWeights');
+  const visible = Array.isArray(window.products) ? window.products : [];
+  if (!visible.length) {
+    if (typeof toast !== 'undefined' && toast.info){
+      toast.info('No hay productos visibles para ajustar');
     }
-    return out;
-  };
-
+    return;
+  }
   try{
-    const products = Array.isArray(window.allProducts) ? window.allProducts : [];
-    if (!products.length){ if (typeof toast !== 'undefined') toast.info('No hay productos cargados'); return; }
-
-    // Construir dataset con las 8 features del Winner Score
-    const rows = products.map(p => {
-      const ratingRaw = p.rating ?? (p.extras && p.extras.rating);
-      const unitsRaw  = p.units_sold ?? (p.extras && (p.extras['Item Sold'] || p.extras['Orders']));
-      const revRaw    = p.revenue ?? (p.extras && (p.extras['Revenue($)'] || p.extras['Revenue']));
-      return {
-        price:       num(p.price),
-        rating:      num(ratingRaw),
-        units_sold:  num(unitsRaw),
-        revenue:     num(revRaw),
-        desire:      num(p.desire_magnitude),
-        competition: num(p.competition_level),
-        oldness:     num(typeof computeOldnessDays === 'function' ? computeOldnessDays(p) : 0),
-        awareness:   num(typeof awarenessValue === 'function' ? awarenessValue(p) : 0),
-      };
-    });
-
-    // Target: revenue si >=50% lo tiene; si no, units_sold
-    const revCount = rows.filter(r => r.revenue > 0).length;
-    const targetName = (revCount >= Math.ceil(rows.length * 0.5)) ? 'revenue' : 'units_sold';
-
-    // Enviar el mayor número posible en una sola llamada (controlado por presupuesto)
-    const cfg = (window.userConfig && window.userConfig.aiCost) ? window.userConfig.aiCost : { costCapUSD: 0.25, estTokensPerItemIn: 300, estTokensPerItemOut: 80 };
-    const estTokPerItem = (num(cfg.estTokensPerItemIn) + num(cfg.estTokensPerItemOut)) || 380;
-    const pricePerK = 0.002; // estimación conservadora
-    const maxByBudget = Math.max(30, Math.floor((cfg.costCapUSD || 0.25) / pricePerK * 1000 / estTokPerItem));
-    const HARD_CAP = 500;
-    const MAX = Math.min(HARD_CAP, Math.max(60, maxByBudget));
-
-    let data_sample = rows.map(r => ({ ...r, target: r[targetName] }));
-    if (data_sample.length > MAX) data_sample = stratifiedSampleBy(data_sample, targetName, MAX);
-
-    const features = (typeof metricKeys !== 'undefined' && metricKeys.length) ? metricKeys : [
-      'price','rating','units_sold','revenue','desire','competition','oldness','awareness'
-    ];
-    const payload = { features, target: targetName, data_sample };
-
-    // 1 intento: GPT; fallback estadístico si falla
-    let res = await fetch('/scoring/v2/auto-weights-gpt', {
-      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
-    });
-    if (!res.ok){
-      res = await fetch('/scoring/v2/auto-weights-stat', {
-        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
-      });
-    }
-    if (!res.ok) throw new Error('Auto-weights request failed');
-
-    const out = await res.json(); // { weights:{}, weights_order:[...], method?... }
-    const intWeights = (out && out.weights) ? out.weights : {};
-    const newOrder = (out && Array.isArray(out.weights_order) && out.weights_order.length)
-      ? out.weights_order.slice()
-      : Object.keys(intWeights).sort((a,b) => (intWeights[b]||0) - (intWeights[a]||0));
-
-    // Persistir en backend y refrescar UI con lo guardado
-    const state = await SettingsCache.get();
-    const resSave = await fetch('/api/config/winner-weights', {
-      method:'PATCH', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ weights: intWeights, weights_order: newOrder, weights_enabled: state.enabled })
-    });
-    if (!resSave.ok) throw new Error('Persist weights failed');
-    const saved = await resSave.json();
-    SettingsCache.set(saved);
-    // renderWeightsUI reinstates slider helpers like enhanceRangeWithFloat
-    const fresh = await SettingsCache.get();
-    if (typeof renderWeightsUI === 'function') renderWeightsUI(fresh);
-
-    if (typeof toast !== 'undefined' && toast.success){
-      const method = (out && out.method) ? out.method : 'gpt';
-      toast.success(`Pesos ajustados por IA (${method}) con ${data_sample.length} muestras`);
-    }
+    await executeGptTask('pesos', { button: btn, busyText: 'Consultando…' });
   }catch(err){
+    console.error('Error solicitando pesos IA', err);
     if (typeof toast !== 'undefined' && toast.error){
-      toast.error('No se pudo ajustar por IA. Revisa tu API Key o inténtalo más tarde.');
+      toast.error('No se pudo ajustar los pesos con IA');
     }
+  }
+}
+
+function applyWeightsSuggestion(detail = {}){
+  const weights = detail.weights;
+  if (!weights || typeof weights !== 'object') return;
+  const order = Array.isArray(detail.weights_order) && detail.weights_order.length
+    ? detail.weights_order.slice()
+    : Object.keys(weights).sort((a,b) => (Number(weights[b]) || 0) - (Number(weights[a]) || 0));
+  const enabled = { ...cacheState.enabled };
+  if (detail.weights_enabled && typeof detail.weights_enabled === 'object') {
+    for (const [key, value] of Object.entries(detail.weights_enabled)) {
+      enabled[key] = !!value;
+    }
+  }
+  order.forEach(key => {
+    if (enabled[key] === undefined) enabled[key] = true;
+  });
+  const weightsCopy = Object.fromEntries(Object.entries(weights).map(([k, v]) => [k, Number(v)]));
+  const state = { order, weights: weightsCopy, enabled };
+  isInitialRender = true;
+  renderWeightsUI(state);
+  markDirty();
+  if (typeof toast !== 'undefined' && toast.success) {
+    toast.success('Pesos sugeridos aplicados a los sliders');
   }
 }
 
@@ -455,3 +405,11 @@ window.resetWeights = resetWeights;
 window.adjustWeightsAI = adjustWeightsAI;
 window.markDirty = markDirty;
 window.metricKeys = metricKeys;
+
+document.addEventListener('gpt-weights-suggestion', (event) => {
+  try {
+    applyWeightsSuggestion(event.detail || {});
+  } catch (err) {
+    console.error('No se pudieron aplicar los pesos sugeridos', err);
+  }
+});
