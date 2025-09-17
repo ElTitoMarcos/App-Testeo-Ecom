@@ -170,7 +170,6 @@ def _sanitize_context(context: Mapping[str, Any]) -> Dict[str, Any]:
 
     return sanitized_context
 
-
 def _inject_weighting_summary(context: Dict[str, Any]) -> Dict[str, Any]:
     products = context.get("products")
     if not isinstance(products, list):
@@ -181,7 +180,6 @@ def _inject_weighting_summary(context: Dict[str, Any]) -> Dict[str, Any]:
     titles = sample_product_titles(products, limit=20)
     context["products"] = {"aggregates": aggregates, "sample_titles": titles}
     return context
-
 
 @lru_cache(maxsize=None)
 def _get_system_prompt(task: str) -> str:
