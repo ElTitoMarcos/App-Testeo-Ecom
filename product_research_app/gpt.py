@@ -29,7 +29,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import requests
 
-from . import database, config
+from . import config, database
+from .ai import gpt_orchestrator
 from .services import winner_score as winner_calc
 
 logger = logging.getLogger(__name__)
@@ -247,7 +248,12 @@ def call_openai_chat(
     if response_format is not None:
         payload["response_format"] = response_format
     try:
-        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
+        response = requests.post(
+            url,
+            headers=headers,
+            data=json.dumps(payload),
+            timeout=gpt_orchestrator.get_timeout(),
+        )
     except requests.RequestException as exc:
         raise OpenAIError(f"Failed to connect to OpenAI API: {exc}") from exc
     if response.status_code != 200:

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 from .. import database
+from . import gpt_orchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ class _PendingRequest:
     future: concurrent.futures.Future
     call_fn: Callable[[Sequence[JsonLike]], CallResult]
     created_at: float
-
+    import_id: Optional[object] = None
 
 @dataclass
 class _BatchOutcome:
@@ -72,12 +73,15 @@ class GPTGuard:
         self._inflight_calls = 0
         self._allocated_calls = 0
         self._total_attempts = 0
+        self._parallel_restore_deadline = 0.0
 
     def submit(
         self,
         task_type: str,
         items: Sequence[Mapping[str, Any]],
         call_fn: Callable[[Sequence[JsonLike]], CallResult],
+        *,
+        import_id: Optional[object] = None,
     ) -> Dict[str, Any]:
         """Submit items for a GPT-powered task, respecting quotas and batching."""
 
@@ -110,6 +114,7 @@ class GPTGuard:
                 future=concurrent.futures.Future(),
                 call_fn=call_fn,
                 created_at=time.monotonic(),
+                import_id=import_id,
             )
             with self._lock:
                 condition = self._conditions.get(task_type)
@@ -197,9 +202,9 @@ class GPTGuard:
                 batch = self._collect_ready_batch_locked(task_type, condition)
                 if batch is None:
                     continue
-            call_fn, batch_items, requests = batch
+            call_fn, batch_items, requests, import_id = batch
             try:
-                outcome = self._execute_batch(task_type, call_fn, batch_items)
+                outcome = self._execute_batch(task_type, call_fn, batch_items, import_id)
             except Exception as exc:  # pragma: no cover - defensive
                 logger.exception("GPTGuard batch execution crashed: task=%s error=%s", task_type, exc)
                 outcome = _BatchOutcome(
@@ -228,7 +233,14 @@ class GPTGuard:
         self,
         task_type: str,
         condition: threading.Condition,
-    ) -> Optional[Tuple[Callable[[Sequence[JsonLike]], CallResult], List[JsonLike], List[_PendingRequest]]]:
+    ) -> Optional[
+        Tuple[
+            Callable[[Sequence[JsonLike]], CallResult],
+            List[JsonLike],
+            List[_PendingRequest],
+            Optional[object],
+        ]
+    ]:
         queue = self._queues.get(task_type)
         if not queue:
             return None
@@ -241,6 +253,7 @@ class GPTGuard:
         items = _clone_items(request.items)
         call_fn = request.call_fn
         deadline = request.created_at + self._coalesce_window
+        import_id = request.import_id
 
         while True:
             if len(items) >= self.max_batch:
@@ -259,7 +272,7 @@ class GPTGuard:
                 queue = self._queues.get(task_type)
                 continue
             next_req = queue[0]
-            if next_req.call_fn is not call_fn:
+            if next_req.call_fn is not call_fn or next_req.import_id != import_id:
                 if len(items) >= self.min_batch or now >= deadline or self._coalesce_window <= 0:
                     break
                 remaining = max(0.0, deadline - now)
@@ -279,13 +292,14 @@ class GPTGuard:
             requests.append(queue.popleft())
             items.extend(_clone_items(next_req.items))
 
-        return call_fn, items, requests
+        return call_fn, items, requests, import_id
 
     def _execute_batch(
         self,
         task_type: str,
         call_fn: Callable[[Sequence[JsonLike]], CallResult],
         items: Sequence[JsonLike],
+        import_id: Optional[object],
     ) -> _BatchOutcome:
         attempts = 0
         note: Optional[str] = None
@@ -295,7 +309,8 @@ class GPTGuard:
             attempts += 1
             try:
                 with self._acquire_slot():
-                    result = call_fn(items)
+                    with gpt_orchestrator.acquire_call(import_id, task_type, len(items)):
+                        result = call_fn(items)
                 return _BatchOutcome(success=True, result=result, note=note, attempts=attempts)
             except Exception as exc:  # pragma: no cover - network guarded
                 last_error = exc
@@ -304,6 +319,7 @@ class GPTGuard:
                     note = "rate_limited"
                     self._reduce_parallel_due_to_rate_limit()
                     delay = self._retry_after_seconds(exc)
+                    gpt_orchestrator.handle_retry_after(delay)
                     logger.warning(
                         "GPTGuard rate limit encountered on %s; retrying after %.2fs", task_type, delay
                     )
@@ -326,7 +342,16 @@ class GPTGuard:
     def _acquire_slot(self):
         with self._parallel_cond:
             while self._inflight_calls >= self._current_parallel_limit and not self._shutdown:
-                self._parallel_cond.wait()
+                self._maybe_restore_parallel_locked()
+                timeout = None
+                if (
+                    self._current_parallel_limit == 1
+                    and self._parallel_restore_deadline > 0
+                ):
+                    timeout = max(0.0, self._parallel_restore_deadline - time.monotonic())
+                    if timeout <= 0:
+                        continue
+                self._parallel_cond.wait(timeout)
             self._inflight_calls += 1
             self._total_attempts += 1
         try:
@@ -334,17 +359,33 @@ class GPTGuard:
         finally:
             with self._parallel_cond:
                 self._inflight_calls = max(0, self._inflight_calls - 1)
+                self._maybe_restore_parallel_locked()
                 self._parallel_cond.notify_all()
 
     def _reduce_parallel_due_to_rate_limit(self) -> None:
         with self._parallel_cond:
+            restore_at = time.monotonic() + 60.0
             if self._current_parallel_limit != 1:
                 logger.info(
                     "Reducing GPT parallelism to 1 due to rate limiting (was %s)",
                     self._current_parallel_limit,
                 )
-                self._current_parallel_limit = 1
-                self._parallel_cond.notify_all()
+            self._current_parallel_limit = 1
+            self._parallel_restore_deadline = max(self._parallel_restore_deadline, restore_at)
+            self._parallel_cond.notify_all()
+
+    def _maybe_restore_parallel_locked(self) -> None:
+        if self._current_parallel_limit < self.max_parallel:
+            if self._parallel_restore_deadline <= 0:
+                self._current_parallel_limit = self.max_parallel
+                return
+            if time.monotonic() >= self._parallel_restore_deadline:
+                logger.info(
+                    "Restoring GPT parallelism to %s after cool-down",
+                    self.max_parallel,
+                )
+                self._current_parallel_limit = self.max_parallel
+                self._parallel_restore_deadline = 0.0
 
     def _retry_after_seconds(self, exc: BaseException) -> float:
         for attr in ("retry_after", "retry_after_ms"):

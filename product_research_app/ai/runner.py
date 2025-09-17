@@ -24,6 +24,7 @@ from ..services import aggregates as aggregates_service
 from ..services import config as winner_config
 from ..services import winner_score
 from ..utils.db import row_to_dict, rget
+from . import gpt_orchestrator
 from .gpt_guard import GPTGuard, ai_cache_get, ai_cache_set, hash_key_for_item
 
 logger = logging.getLogger(__name__)
@@ -993,6 +994,8 @@ def run_post_import_auto(task_id: str, product_ids: Sequence[int]) -> Dict[str, 
     notes: List[str] = []
     errors: List[str] = []
 
+    gpt_orchestrator.start_import(task_id_str)
+
     guard = GPTGuard(
         {
             "max_parallel": settings.AI_MAX_PARALLEL,
@@ -1024,6 +1027,7 @@ def run_post_import_auto(task_id: str, product_ids: Sequence[int]) -> Dict[str, 
             errors.append("no_products_found")
             queue_actions.flush(conn)
             conn.commit()
+            gpt_orchestrator.flush_import_metrics(task_id_str)
             return {
                 "task_id": task_id_str,
                 "tasks": _status_snapshot(task_id_str),
@@ -1034,6 +1038,7 @@ def run_post_import_auto(task_id: str, product_ids: Sequence[int]) -> Dict[str, 
 
         # Desire processing
         desire_work = _build_desire_tasks(products, queue_index)
+        gpt_orchestrator.record_cache_saved(task_id_str, len(desire_work["cache"]))
         _set_requested(task_id_str, "desire", desire_work["requested"] + len(missing_ids))
         for entry in desire_work["local"]:
             pid = int(entry["product_id"])
@@ -1081,6 +1086,7 @@ def run_post_import_auto(task_id: str, product_ids: Sequence[int]) -> Dict[str, 
                     "desire",
                     [item["payload"] for item in pending_desire],
                     lambda batch: gpt.orchestrate_desire_summary(api_key, model, batch),
+                    import_id=task_id_str,
                 )
                 for note in summary.get("notes", []):
                     if note:
@@ -1157,6 +1163,7 @@ def run_post_import_auto(task_id: str, product_ids: Sequence[int]) -> Dict[str, 
 
         # Imputacion processing
         imputacion_work = _build_imputacion_tasks(products, queue_index)
+        gpt_orchestrator.record_cache_saved(task_id_str, len(imputacion_work["cache"]))
         _set_requested(task_id_str, "imputacion", imputacion_work["requested"] + len(missing_ids))
         if imputacion_enabled:
             for entry in imputacion_work["local"]:
@@ -1192,6 +1199,7 @@ def run_post_import_auto(task_id: str, product_ids: Sequence[int]) -> Dict[str, 
                         "imputacion",
                         [item["payload"] for item in pending_imputacion],
                         lambda batch: gpt.orchestrate_imputation(api_key, model, batch),
+                        import_id=task_id_str,
                     )
                     for note in summary.get("notes", []):
                         if note:
@@ -1318,6 +1326,7 @@ def run_post_import_auto(task_id: str, product_ids: Sequence[int]) -> Dict[str, 
             "product_ids": product_list,
         }
     finally:
+        gpt_orchestrator.flush_import_metrics(task_id_str)
         try:
             conn.close()
         except Exception:  # pragma: no cover - defensive

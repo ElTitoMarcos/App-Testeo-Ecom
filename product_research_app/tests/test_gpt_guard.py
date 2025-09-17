@@ -1,3 +1,4 @@
+import contextlib
 import json
 import sys
 from datetime import datetime, timedelta
@@ -8,9 +9,18 @@ import pytest
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from product_research_app import database
-from product_research_app.ai import gpt_guard
+from product_research_app.ai import gpt_guard, gpt_orchestrator
 from product_research_app.ai.gpt_guard import GPTGuard, ai_cache_get, ai_cache_set, hash_key_for_item
 
+
+@pytest.fixture(autouse=True)
+def disable_global_gpt_limits(monkeypatch):
+    @contextlib.contextmanager
+    def fake_acquire(import_id, task_type, batch_size):
+        yield
+
+    monkeypatch.setattr(gpt_orchestrator, "acquire_call", fake_acquire)
+    monkeypatch.setattr(gpt_orchestrator, "handle_retry_after", lambda delay: None)
 
 def test_hash_key_for_item_stable():
     item = {"title": "  Test Product  ", "description": "Great", "features": ["a", "b"]}
@@ -143,3 +153,35 @@ def test_gpt_guard_server_error_records_note(monkeypatch):
     assert "server_error_503" in summary["notes"]
     assert summary["results"][0]["success"] is False
     assert summary["results"][0]["attempts"] == 2
+
+def test_gpt_guard_passes_import_id_to_orchestrator(monkeypatch):
+    guard = GPTGuard(
+        {
+            "max_parallel": 1,
+            "max_calls_per_import": 5,
+            "min_batch": 1,
+            "max_batch": 5,
+            "coalesce_ms": 0,
+        }
+    )
+
+    captured = []
+
+    @contextlib.contextmanager
+    def capture(import_id, task_type, batch_size):
+        captured.append((import_id, task_type, batch_size))
+        yield
+
+    monkeypatch.setattr(gpt_orchestrator, "acquire_call", capture)
+
+    guard.submit(
+        "desire",
+        [{"id": 101}],
+        lambda batch: {"ids": [item.get("id") for item in batch]},
+        import_id="task-xyz",
+    )
+
+    assert captured
+    assert captured[0][0] == "task-xyz"
+    assert captured[0][1] == "desire"
+    assert captured[0][2] == 1
