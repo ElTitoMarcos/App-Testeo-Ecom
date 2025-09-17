@@ -104,6 +104,10 @@ def initialize_database(conn: sqlite3.Connection) -> None:
     if "ai_desire_label" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN ai_desire_label TEXT")
         cols.append("ai_desire_label")
+    if "desire_summary" in cols and "ai_desire" in cols:
+        cur.execute(
+            "UPDATE products SET ai_desire=desire_summary WHERE ai_desire IS NULL AND desire_summary IS NOT NULL"
+        )
     if "review_count" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN review_count INTEGER")
         cols.append("review_count")
