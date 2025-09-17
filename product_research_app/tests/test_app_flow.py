@@ -247,17 +247,23 @@ def test_run_post_import_auto(tmp_path, monkeypatch):
         product_id=2,
     )
 
-    def fake_generate_batch_columns(api_key, model, items):
-        ok = {
+    def fake_desire_orchestrator(api_key, model, batch):
+        return {
             str(item["id"]): {
-                "desire": f"Auto Desire {item['id']}",
-                "desire_magnitude": "High",
-                "awareness_level": "Most Aware",
-                "competition_level": "Low",
+                "normalized_text": f"Auto Desire {item['id']}\nLinea {item['id']}",
+                "keywords": [f"k{item['id']}", "growth"],
             }
-            for item in items
+            for item in batch
         }
-        return ok, {}, {"total_tokens": 0}, 0.1
+
+    def fake_imputacion_orchestrator(api_key, model, batch):
+        return {
+            str(item["id"]): {
+                "review_count": 10 * int(item["id"]),
+                "image_count": 3,
+            }
+            for item in batch
+        }
 
     winner_calls = []
     weight_prompts: list = []
@@ -269,7 +275,8 @@ def test_run_post_import_auto(tmp_path, monkeypatch):
         assert set(weights) == set(winner_score.ALLOWED_FIELDS)
         return {"processed": len(ids), "updated": len(ids)}
 
-    monkeypatch.setattr(gpt, "generate_batch_columns", fake_generate_batch_columns)
+    monkeypatch.setattr(gpt, "orchestrate_desire_summary", fake_desire_orchestrator)
+    monkeypatch.setattr(gpt, "orchestrate_imputation", fake_imputacion_orchestrator)
     monkeypatch.setattr(
         gpt,
         "recommend_weights_from_aggregates",
@@ -310,7 +317,11 @@ def test_run_post_import_auto(tmp_path, monkeypatch):
     assert cur.fetchone()[0] == 6
 
     prod_a = row_to_dict(database.get_product(conn, pid_a))
-    assert prod_a.get("desire") == f"Auto Desire {pid_a}"
+    assert prod_a.get("desire") == f"Auto Desire {pid_a}\nLinea {pid_a}"
+    extra_a = json.loads(prod_a.get("extra") or "{}")
+    assert extra_a.get("desire_keywords") == [f"k{pid_a}", "growth"]
+    assert extra_a.get("review_count") == 10 * pid_a
+    assert extra_a.get("image_count") == 3
     assert winner_calls and set(winner_calls[0]) == {pid_a, pid_b}
 
 def test_runner_retries_batches(tmp_path, monkeypatch):

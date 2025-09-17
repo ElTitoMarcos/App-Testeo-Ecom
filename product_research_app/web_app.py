@@ -330,20 +330,6 @@ def _run_post_import_auto(task_id: str, product_ids: Sequence[int]) -> None:
             ai_progress=copy.deepcopy(progress),
         )
 
-        batch_cfg = config.get_ai_batch_config()
-        try:
-            raw_batch = int(batch_cfg.get("BATCH_SIZE", settings.AI_MAX_BATCH_SIZE) or settings.AI_MAX_BATCH_SIZE)
-        except Exception:
-            raw_batch = settings.AI_MAX_BATCH_SIZE
-        min_batch = max(1, settings.AI_MIN_BATCH_SIZE)
-        max_batch = max(min_batch, settings.AI_MAX_BATCH_SIZE)
-        batch_size = max(min_batch, min(raw_batch, max_batch))
-        try:
-            raw_parallel = int(batch_cfg.get("MAX_CONCURRENCY", settings.AI_MAX_PARALLEL) or settings.AI_MAX_PARALLEL)
-        except Exception:
-            raw_parallel = settings.AI_MAX_PARALLEL
-        max_parallel = max(1, min(raw_parallel, settings.AI_MAX_PARALLEL))
-
         progress_lock = threading.Lock()
 
         def _on_progress(import_task_id: str, task_type: str, totals: Mapping[str, int]) -> None:
@@ -373,15 +359,11 @@ def _run_post_import_auto(task_id: str, product_ids: Sequence[int]) -> None:
 
         runner.register_progress_callback(task_id, _on_progress)
         try:
-            result = runner.run_auto(
-                set(enabled_tasks),
-                batch_size=batch_size,
-                max_parallel=max_parallel,
-            )
+            result = runner.run_post_import_auto(task_id, product_list)
         finally:
             runner.unregister_progress_callback(task_id)
 
-        import_summary = result.get(task_id, {})
+        import_summary = result or {}
         for task_name, totals in (import_summary.get("tasks") or {}).items():
             entry = progress.setdefault(
                 task_name,
