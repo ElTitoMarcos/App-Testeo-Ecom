@@ -496,8 +496,11 @@ def update_product(
         "facilidad_anuncio",
         "escalabilidad",
         "durabilidad_recurrencia",
+        "extra",
     }
     data = {k: v for k, v in fields.items() if k in allowed_cols}
+    if "extra" in data and not isinstance(data["extra"], str):
+        data["extra"] = json_dump(data["extra"])
     if not data:
         return
     tri_vals = {"Low", "Medium", "High"}
