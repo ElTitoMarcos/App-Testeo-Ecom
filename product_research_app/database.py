@@ -67,7 +67,11 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             source TEXT,
             import_date TEXT NOT NULL,
             desire TEXT,
-            desire_magnitude TEXT,
+            desire_magnitude INTEGER,
+            ai_desire TEXT,
+            ai_desire_label TEXT,
+            review_count INTEGER,
+            image_count INTEGER,
             awareness_level TEXT,
             competition_level TEXT,
             date_range TEXT,
@@ -79,13 +83,33 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         """
     )
     cur.execute("PRAGMA table_info(products)")
-    cols = [row[1] for row in cur.fetchall()]
+    info = cur.fetchall()
+    cols = [row[1] for row in info]
+    coltypes = {row[1]: (row[2] or "").upper() for row in info}
     if "desire" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN desire TEXT")
     if "desire_magnitude" not in cols and "magnitud_deseo" in cols:
         cur.execute("ALTER TABLE products RENAME COLUMN magnitud_deseo TO desire_magnitude")
+        cols = ["desire_magnitude" if c == "magnitud_deseo" else c for c in cols]
     elif "desire_magnitude" not in cols:
-        cur.execute("ALTER TABLE products ADD COLUMN desire_magnitude TEXT")
+        cur.execute("ALTER TABLE products ADD COLUMN desire_magnitude INTEGER")
+        cols.append("desire_magnitude")
+    elif "INT" not in coltypes.get("desire_magnitude", ""):
+        # Existing databases may still keep a TEXT affinity; SQLite stores values dynamically
+        # so we leave them untouched while new databases receive the INTEGER column above.
+        pass
+    if "ai_desire" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN ai_desire TEXT")
+        cols.append("ai_desire")
+    if "ai_desire_label" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN ai_desire_label TEXT")
+        cols.append("ai_desire_label")
+    if "review_count" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN review_count INTEGER")
+        cols.append("review_count")
+    if "image_count" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN image_count INTEGER")
+        cols.append("image_count")
     if "awareness_level" not in cols and "nivel_consciencia" in cols:
         cur.execute("ALTER TABLE products RENAME COLUMN nivel_consciencia TO awareness_level")
     elif "awareness_level" not in cols:

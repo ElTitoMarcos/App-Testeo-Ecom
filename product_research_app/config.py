@@ -15,6 +15,13 @@ from typing import Any, Dict, Optional
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "autoFillIAOnImport": True,
+    "AI_AUTO_ENABLED": True,
+    "AI_BATCH_SIZE": 100,
+    "AI_MAX_PARALLEL": 1,
+    "AI_MAX_CALLS_PER_IMPORT": 3,
+    "IMPUTACION_VIA_IA": False,
+    "GPT_TIMEOUT": 20,
+    "GPT_MAX_RETRY": 1,
     "aiBatch": {
         "BATCH_SIZE": 10,
         "MAX_CONCURRENCY": 2,
@@ -197,6 +204,46 @@ def get_ai_image_cost_max_usd() -> float:
         return float(cfg.get("aiImageCostMaxUSD", 0.02))
     except Exception:
         return 0.02
+
+
+def get_ai_auto_settings() -> Dict[str, Any]:
+    cfg = load_config()
+    defaults = {
+        "AI_AUTO_ENABLED": True,
+        "AI_BATCH_SIZE": 100,
+        "AI_MAX_PARALLEL": 1,
+        "AI_MAX_CALLS_PER_IMPORT": 3,
+        "IMPUTACION_VIA_IA": False,
+        "GPT_TIMEOUT": 20,
+        "GPT_MAX_RETRY": 1,
+    }
+    settings: Dict[str, Any] = {}
+    for key, default in defaults.items():
+        value = cfg.get(key, default)
+        if key in {"AI_AUTO_ENABLED", "IMPUTACION_VIA_IA"}:
+            settings[key] = bool(value)
+        elif key in {"AI_BATCH_SIZE", "AI_MAX_PARALLEL", "AI_MAX_CALLS_PER_IMPORT", "GPT_TIMEOUT", "GPT_MAX_RETRY"}:
+            try:
+                settings[key] = int(value)
+            except Exception:
+                settings[key] = default
+            if key in {"AI_BATCH_SIZE", "AI_MAX_PARALLEL", "AI_MAX_CALLS_PER_IMPORT"}:
+                settings[key] = max(0, settings[key])
+            elif key in {"GPT_TIMEOUT", "GPT_MAX_RETRY"}:
+                settings[key] = max(0, settings[key])
+        else:
+            settings[key] = value
+    if settings["AI_BATCH_SIZE"] <= 0:
+        settings["AI_BATCH_SIZE"] = defaults["AI_BATCH_SIZE"]
+    if settings["AI_MAX_PARALLEL"] <= 0:
+        settings["AI_MAX_PARALLEL"] = 1
+    if settings["AI_MAX_CALLS_PER_IMPORT"] <= 0:
+        settings["AI_MAX_CALLS_PER_IMPORT"] = defaults["AI_MAX_CALLS_PER_IMPORT"]
+    if settings["GPT_TIMEOUT"] <= 0:
+        settings["GPT_TIMEOUT"] = defaults["GPT_TIMEOUT"]
+    if settings["GPT_MAX_RETRY"] < 0:
+        settings["GPT_MAX_RETRY"] = defaults["GPT_MAX_RETRY"]
+    return settings
 
 
 def get_env_max_items(default: int = 300) -> int:

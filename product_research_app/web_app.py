@@ -36,8 +36,9 @@ import time
 import sqlite3
 import math
 import hashlib
+import traceback
 from datetime import date, datetime, timedelta
-from typing import Dict, Any, List
+from typing import Any, Dict, List, Sequence
 
 from . import database
 from .db import get_db
@@ -49,6 +50,7 @@ from .services.importer_fast import fast_import, fast_import_records
 from . import gpt
 from . import title_analyzer
 from .utils.db import row_to_dict, rget
+from .ai.ai_status import get_status as get_ai_status, init_status, update_status
 
 WINNER_SCORE_FIELDS = list(winner_calc.FEATURE_MAP.keys())
 
@@ -136,6 +138,48 @@ def _get_import_status(task_id: str) -> Dict[str, Any] | None:
         if status is None:
             return None
         return dict(status)
+
+
+def safe_run_post_import_auto(task_id: str, product_ids: Sequence[int] | None):
+    product_ids_list = list(product_ids or [])
+    try:
+        init_status(task_id)
+        update_status(task_id, state="RUNNING")
+        logger.info(
+            "post_import_auto_started task_id=%s product_ids=%s",
+            task_id,
+            len(product_ids_list),
+        )
+    except Exception:
+        logger.exception("Failed to initialise AI status", extra={"task_id": task_id})
+        return
+    try:
+        from product_research_app.ai.runner import run_post_import_auto
+    except Exception as exc:
+        logger.warning("AI post-import runner unavailable: task_id=%s error=%s", task_id, exc)
+        update_status(task_id, state="ERROR", notes=["runner_not_installed"])
+        return
+    try:
+        cfg = config.load_config()
+    except Exception:
+        cfg = {}
+    try:
+        run_post_import_auto(task_id, product_ids_list, config=cfg)
+    except Exception as exc:
+        logger.warning(
+            "AI post-import runner execution failed: task_id=%s error=%s",
+            task_id,
+            exc,
+        )
+        note = str(exc).strip() or "runner_failed"
+        update_status(task_id, state="ERROR", notes=[note])
+        return
+    update_status(task_id, state="DONE")
+    logger.info(
+        "post_import_auto_completed task_id=%s product_ids=%s",
+        task_id,
+        len(product_ids_list),
+    )
 
 
 def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> str:
@@ -751,6 +795,20 @@ class RequestHandler(BaseHTTPRequestHandler):
             conn = ensure_db()
             rows = [row_to_dict(r) for r in database.get_import_history(conn, limit)]
             self.safe_write(lambda: self.send_json(rows))
+            return
+        if path == "/_ai_status":
+            params = parse_qs(parsed.query)
+            task_id_param = params.get("task_id", [""])[0]
+            if not task_id_param:
+                self.safe_write(lambda: self.send_json({"state": "IDLE"}, status=404))
+                return
+            status = get_ai_status(task_id_param)
+            if status is None:
+                self.safe_write(lambda: self.send_json({"state": "IDLE"}, status=404))
+                return
+            payload = dict(status)
+            payload.setdefault("task_id", task_id_param)
+            self.safe_write(lambda: self.send_json(payload))
             return
         if path == "/_import_status":
             params = parse_qs(parsed.query)
@@ -1733,11 +1791,14 @@ class RequestHandler(BaseHTTPRequestHandler):
 
             def run_csv():
                 _update_import_status(task_id, state="running", stage="running", started_at=time.time())
+                product_ids: Sequence[int] = []
                 try:
                     def cb(**kwargs):
                         _update_import_status(task_id, **kwargs)
 
-                    count = fast_import(csv_bytes, status_cb=cb, source=filename)
+                    result = fast_import(csv_bytes, status_cb=cb, source=filename)
+                    count = result.count
+                    product_ids = list(result.product_ids)
                     snapshot = _get_import_status(task_id) or {}
                     done_val = int(snapshot.get("done", 0) or 0)
                     if done_val < count:
@@ -1754,13 +1815,19 @@ class RequestHandler(BaseHTTPRequestHandler):
                         imported=count,
                         finished_at=time.time(),
                     )
+                    threading.Thread(
+                        target=safe_run_post_import_auto,
+                        args=(task_id, product_ids),
+                        daemon=True,
+                    ).start()
                 except Exception as exc:
                     logger.exception("Fast CSV import failed: filename=%s", filename)
                     _update_import_status(
                         task_id,
-                        state="error",
+                        state="ERROR",
                         stage="error",
                         error=str(exc),
+                        trace="\n".join(traceback.format_exc().splitlines()[-40:]),
                         finished_at=time.time(),
                     )
 
@@ -1793,11 +1860,14 @@ class RequestHandler(BaseHTTPRequestHandler):
 
             def run_json():
                 _update_import_status(task_id, state="running", stage="running", started_at=time.time())
+                product_ids: Sequence[int] = []
                 try:
                     def cb(**kwargs):
                         _update_import_status(task_id, **kwargs)
 
-                    count = fast_import_records(records, status_cb=cb, source=filename)
+                    result = fast_import_records(records, status_cb=cb, source=filename)
+                    count = result.count
+                    product_ids = list(result.product_ids)
                     snapshot = _get_import_status(task_id) or {}
                     done_val = int(snapshot.get("done", 0) or 0)
                     if done_val < count:
@@ -1814,13 +1884,19 @@ class RequestHandler(BaseHTTPRequestHandler):
                         imported=count,
                         finished_at=time.time(),
                     )
+                    threading.Thread(
+                        target=safe_run_post_import_auto,
+                        args=(task_id, product_ids),
+                        daemon=True,
+                    ).start()
                 except Exception as exc:
                     logger.exception("Fast JSON import failed: filename=%s", filename)
                     _update_import_status(
                         task_id,
-                        state="error",
+                        state="ERROR",
                         stage="error",
                         error=str(exc),
+                        trace="\n".join(traceback.format_exc().splitlines()[-40:]),
                         finished_at=time.time(),
                     )
 
