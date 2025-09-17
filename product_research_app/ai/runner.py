@@ -740,6 +740,115 @@ class _QueueActions:
         for reason, ids in self.failed.items():
             database.fail_ai_tasks(conn, ids, reason[:255])
 
+def _stringify_desire_text(value: Any) -> str:
+    if isinstance(value, list):
+        lines = [str(line).strip() for line in value if str(line).strip()]
+        return "\n".join(lines)
+    if isinstance(value, str):
+        return value.strip()
+    return ""
+
+
+def _parse_desire_result_payload(payload: Any) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
+    items: Dict[str, Dict[str, Any]] = {}
+    notes: List[str] = []
+    if not isinstance(payload, Mapping):
+        return items, notes
+
+    raw_items = payload.get("items")
+    if isinstance(raw_items, list):
+        for entry in raw_items:
+            if not isinstance(entry, Mapping):
+                continue
+            pid = entry.get("id")
+            if pid is None:
+                continue
+            text = _stringify_desire_text(entry.get("normalized_text"))
+            if not text:
+                text = _stringify_desire_text(entry.get("text"))
+            keywords_raw = entry.get("keywords")
+            if isinstance(keywords_raw, list):
+                keywords = [str(kw).strip() for kw in keywords_raw if str(kw).strip()]
+            else:
+                keywords = []
+            items[str(pid)] = {"normalized_text": text, "keywords": keywords}
+    else:
+        for key, value in payload.items():
+            if key == "notes":
+                continue
+            if not isinstance(key, str) or not isinstance(value, Mapping):
+                continue
+            text = _stringify_desire_text(value.get("normalized_text") or value.get("text"))
+            keywords_raw = value.get("keywords")
+            if isinstance(keywords_raw, list):
+                keywords = [str(kw).strip() for kw in keywords_raw if str(kw).strip()]
+            else:
+                keywords = []
+            items[key] = {"normalized_text": text, "keywords": keywords}
+
+    notes_field = payload.get("notes")
+    if isinstance(notes_field, list):
+        notes.extend(str(note).strip() for note in notes_field if str(note).strip())
+    elif isinstance(notes_field, Mapping):
+        for key, message in notes_field.items():
+            msg = str(message).strip()
+            if not msg:
+                continue
+            if key not in (None, ""):
+                notes.append(f"{key}: {msg}")
+            else:
+                notes.append(msg)
+    elif isinstance(notes_field, str) and notes_field.strip():
+        notes.append(notes_field.strip())
+
+    return items, list(dict.fromkeys(notes))
+
+
+def _parse_imputacion_result_payload(payload: Any) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
+    items: Dict[str, Dict[str, Any]] = {}
+    notes: List[str] = []
+    if not isinstance(payload, Mapping):
+        return items, notes
+
+    raw_items = payload.get("items")
+    if isinstance(raw_items, list):
+        for entry in raw_items:
+            if not isinstance(entry, Mapping):
+                continue
+            pid = entry.get("id")
+            if pid is None:
+                continue
+            items[str(pid)] = {
+                "review_count": entry.get("review_count"),
+                "image_count": entry.get("image_count"),
+            }
+    else:
+        for key, value in payload.items():
+            if key == "notes":
+                continue
+            if not isinstance(key, str) or not isinstance(value, Mapping):
+                continue
+            items[key] = {
+                "review_count": value.get("review_count"),
+                "image_count": value.get("image_count"),
+            }
+
+    notes_field = payload.get("notes")
+    if isinstance(notes_field, Mapping):
+        for key, message in notes_field.items():
+            msg = str(message).strip()
+            if not msg:
+                continue
+            if key not in (None, ""):
+                notes.append(f"{key}: {msg}")
+            else:
+                notes.append(msg)
+    elif isinstance(notes_field, list):
+        notes.extend(str(note).strip() for note in notes_field if str(note).strip())
+    elif isinstance(notes_field, str) and notes_field.strip():
+        notes.append(notes_field.strip())
+
+    return items, list(dict.fromkeys(notes))
 
 def _apply_desire_payload(
     conn,
@@ -938,8 +1047,15 @@ def run_post_import_auto(task_id: str, product_ids: Sequence[int]) -> Dict[str, 
         for entry in desire_work["cache"]:
             pid = int(entry["product_id"])
             payload = entry.get("payload") if isinstance(entry.get("payload"), Mapping) else {}
-            text = payload.get("normalized_text") or payload.get("text") or ""
-            keywords = payload.get("keywords") if isinstance(payload.get("keywords"), list) else []
+            text_value = payload.get("normalized_text")
+            if not text_value:
+                text_value = payload.get("text")
+            text = _stringify_desire_text(text_value)
+            keywords_raw = payload.get("keywords")
+            if isinstance(keywords_raw, list):
+                keywords = [str(kw).strip() for kw in keywords_raw if str(kw).strip()]
+            else:
+                keywords = []
             normalized, stored_keywords = _apply_desire_payload(conn, products, pid, text, keywords)
             cache_key = entry.get("cache_key")
             if cache_key:
@@ -984,7 +1100,10 @@ def run_post_import_auto(task_id: str, product_ids: Sequence[int]) -> Dict[str, 
                 for outcome in summary.get("results", []):
                     batch_items = outcome.get("items") or []
                     if outcome.get("success"):
-                        result_map = outcome.get("result") if isinstance(outcome.get("result"), Mapping) else {}
+                        result_map, result_notes = _parse_desire_result_payload(outcome.get("result"))
+                        for note in result_notes:
+                            if note:
+                                notes.append(str(note))
                         for batch_item in batch_items:
                             pid_raw = batch_item.get("id")
                             try:
@@ -998,8 +1117,12 @@ def run_post_import_auto(task_id: str, product_ids: Sequence[int]) -> Dict[str, 
                             if isinstance(result_map, Mapping):
                                 entry = result_map.get(str(pid_raw)) or result_map.get(str(pid_int))
                             if isinstance(entry, Mapping):
-                                text = entry.get("normalized_text") or entry.get("text") or ""
-                                keywords = entry.get("keywords") if isinstance(entry.get("keywords"), list) else []
+                                text = _stringify_desire_text(entry.get("normalized_text") or entry.get("text"))
+                                keywords_raw = entry.get("keywords")
+                                if isinstance(keywords_raw, list):
+                                    keywords = [str(kw).strip() for kw in keywords_raw if str(kw).strip()]
+                                else:
+                                    keywords = []
                                 normalized, stored_keywords = _apply_desire_payload(conn, products, pid_int, text, keywords)
                                 if meta and meta.get("cache_key"):
                                     ai_cache_set(
@@ -1088,7 +1211,10 @@ def run_post_import_auto(task_id: str, product_ids: Sequence[int]) -> Dict[str, 
                     for outcome in summary.get("results", []):
                         batch_items = outcome.get("items") or []
                         if outcome.get("success"):
-                            result_map = outcome.get("result") if isinstance(outcome.get("result"), Mapping) else {}
+                            result_map, result_notes = _parse_imputacion_result_payload(outcome.get("result"))
+                            for note in result_notes:
+                                if note:
+                                    notes.append(str(note))
                             for batch_item in batch_items:
                                 pid_raw = batch_item.get("id")
                                 try:

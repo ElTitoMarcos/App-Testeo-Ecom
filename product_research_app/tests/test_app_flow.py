@@ -249,20 +249,29 @@ def test_run_post_import_auto(tmp_path, monkeypatch):
 
     def fake_desire_orchestrator(api_key, model, batch):
         return {
-            str(item["id"]): {
-                "normalized_text": f"Auto Desire {item['id']}\nLinea {item['id']}",
-                "keywords": [f"k{item['id']}", "growth"],
-            }
-            for item in batch
+            "items": [
+                {
+                    "id": str(item["id"]),
+                    "normalized_text": [
+                        f"Auto Desire {item['id']}",
+                        f"Linea {item['id']}",
+                    ],
+                    "keywords": [f"k{item['id']}", "growth"],
+                }
+                for item in batch
+            ]
         }
 
     def fake_imputacion_orchestrator(api_key, model, batch):
         return {
-            str(item["id"]): {
-                "review_count": 10 * int(item["id"]),
-                "image_count": 3,
-            }
-            for item in batch
+            "items": [
+                {
+                    "id": str(item["id"]),
+                    "review_count": 10 * int(item["id"]),
+                    "image_count": 3,
+                }
+                for item in batch
+            ]
         }
 
     winner_calls = []
@@ -285,7 +294,8 @@ def test_run_post_import_auto(tmp_path, monkeypatch):
             or {
                 "weights": {k: 10 for k in winner_score.ALLOWED_FIELDS},
                 "order": list(winner_score.ALLOWED_FIELDS),
-                "notes": "ok",
+                "notes": ["ok"],
+                "version": "B.v2",
             }
         ),
     )
