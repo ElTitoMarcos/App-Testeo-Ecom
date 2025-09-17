@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "autoFillIAOnImport": True,
+    "imputacion_via_ia": True,
     "auto_adjust_weights": True,
     "aiBatch": {
         "BATCH_SIZE": 10,
@@ -186,6 +187,22 @@ def include_image_in_ai() -> bool:
         return bool(cfg.get("includeImageInAI", True))
     except Exception:
         return True
+
+
+def is_imputacion_via_ia_enabled() -> bool:
+    """Return whether automatic imputation via IA is enabled."""
+
+    cfg = load_config()
+    value = cfg.get("imputacion_via_ia")
+    if value is None:
+        value = cfg.get("imputacionViaIA")
+    try:
+        return bool(value) if value is not None else True
+    except Exception:
+        return True
+
+
+IMPUTACION_VIA_IA: bool = is_imputacion_via_ia_enabled()
 
 
 def get_ai_image_cost_max_usd() -> float:
