@@ -68,24 +68,25 @@ def test_pesos_uses_aggregated_summary(monkeypatch):
 
     payload = {
         "products": [
-            {"id": "p1", "price": 10, "metrics": {"score": 1}},
-            {"id": "p2", "price": 15, "metrics": {"score": 3}},
-            {"id": "p3", "price": 20, "metrics": {"score": 2}},
+            {"id": "p1", "price": 10, "metrics": {"score": 1}, "title": "Alpha"},
+            {"id": "p2", "price": 15, "metrics": {"score": 3}, "title": "Beta"},
+            {"id": "p3", "price": 20, "metrics": {"score": 2}, "title": "Gamma"},
         ]
     }
     result = gpt_orchestrator.run_task("pesos", prompt_text="Calibra", json_payload=payload)
 
     context = captured["context"]
     assert "products" not in context
-    metrics = context["summary_stats"]["metrics"]
+    aggregates = context["aggregates"]
+    metrics = aggregates["metrics"]
     assert "score" in metrics and "price" in metrics
     score_stats = metrics["score"]
     assert score_stats["min"] == 1.0
     assert score_stats["max"] == 3.0
-    assert score_stats["count"] == 3
     assert score_stats["top_ids"][0] == "p2"
     assert score_stats["bottom_ids"][0] == "p1"
-
+    assert aggregates["total_products"] == 3
+    assert context.get("sample_titles") == ["Alpha", "Beta", "Gamma"]
     assert result["ok"] is True
     assert result["data"]["weights"]["score"] == 0.7
     assert result["data"]["prompt_version"] == "2024-01"

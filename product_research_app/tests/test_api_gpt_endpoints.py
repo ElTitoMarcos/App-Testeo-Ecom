@@ -106,8 +106,8 @@ def test_pesos_endpoint_uses_default_prompt(monkeypatch):
             "group_id": None,
             "time_window": None,
             "products": [
-                {"id": "A", "price": 12, "store": "Shop"},
-                {"id": "B", "price": 22, "store": "Shop", "extra": "ignore"},
+                {"id": "A", "price": 12, "store": "Shop", "title": "Prod 1"},
+                {"id": "B", "price": 22, "store": "Shop", "title": "Prod 2", "extra": "ignore"},
             ],
         },
         "params": {},
@@ -117,10 +117,15 @@ def test_pesos_endpoint_uses_default_prompt(monkeypatch):
     assert response.status_code == 200
     assert captured["task"] == "pesos"
     assert captured["prompt_text"] == gpt_endpoints._DEFAULT_PROMPTS["pesos"]
-    assert captured["json_payload"]["products"] == [
-        {"id": "A", "price": 12, "store": "Shop"},
-        {"id": "B", "price": 22, "store": "Shop"},
-    ]
+    payload_products = captured["json_payload"]["products"]
+    assert set(payload_products.keys()) == {"aggregates", "sample_titles"}
+    aggregates = payload_products["aggregates"]
+    assert aggregates["total_products"] == 2
+    price_stats = aggregates["metrics"]["price"]
+    assert price_stats["min"] == 12.0
+    assert price_stats["max"] == 22.0
+    assert price_stats["coverage"] == 1.0
+    assert payload_products["sample_titles"] == ["Prod 1", "Prod 2"]
 
 
 def test_invalid_body_returns_400():

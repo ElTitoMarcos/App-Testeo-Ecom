@@ -9,6 +9,10 @@ from flask import Blueprint, current_app, jsonify, request
 
 from . import app
 from product_research_app.ai import gpt_orchestrator
+from product_research_app.services.aggregates import (
+    build_weighting_aggregates,
+    sample_product_titles,
+)
 
 _GPT_API = Blueprint("gpt_api", __name__)
 
@@ -74,6 +78,8 @@ def _handle_task(task: str) -> tuple[dict, int]:
 
     sanitized_context = _sanitize_context(context_raw)
     payload = dict(sanitized_context)
+    if task == "pesos":
+        payload = _inject_weighting_summary(payload)
     if params:
         payload["params"] = params
 
@@ -164,6 +170,16 @@ def _sanitize_context(context: Mapping[str, Any]) -> Dict[str, Any]:
 
     return sanitized_context
 
+def _inject_weighting_summary(context: Dict[str, Any]) -> Dict[str, Any]:
+    products = context.get("products")
+    if not isinstance(products, list):
+        context["products"] = {"aggregates": {"metrics": {}, "total_products": 0}, "sample_titles": []}
+        return context
+
+    aggregates = build_weighting_aggregates(products)
+    titles = sample_product_titles(products, limit=20)
+    context["products"] = {"aggregates": aggregates, "sample_titles": titles}
+    return context
 
 @lru_cache(maxsize=None)
 def _get_system_prompt(task: str) -> str:

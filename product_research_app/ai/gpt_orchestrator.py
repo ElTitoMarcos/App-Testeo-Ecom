@@ -9,6 +9,15 @@ from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence, Tuple
 
 import requests
 
+try:  # pragma: no cover - defensive when services package is unavailable
+    from product_research_app.services.aggregates import (
+        build_weighting_aggregates,
+        sample_product_titles,
+    )
+except Exception:  # pragma: no cover
+    build_weighting_aggregates = None
+    sample_product_titles = None
+
 logger = logging.getLogger(__name__)
 
 CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
@@ -65,18 +74,13 @@ def run_task(
     estimated_tokens = 0.0
 
     chosen_system_prompt = system_prompt.strip() if isinstance(system_prompt, str) and system_prompt.strip() else SYSTEM_PROMPT
+
     if task == "pesos":
-        context = dict(payload)
-        if "products" in context:
-            products_list = context.pop("products")
-        else:
-            products_list = []
-        summary = _summarise_products_for_weights(products_list or [])
-        context["summary_stats"] = summary
+        context, original_count = _prepare_weights_context(payload)
         prompt = _build_prompt(prompt_text, context)
         response = _call_openai(model, prompt, api_key, timeout, chosen_system_prompt)
         call_count += 1
-        chunk_sizes.append(len(products_list or []))
+        chunk_sizes.append(original_count)
         content = response["content"]
         estimated_tokens += _estimate_tokens(prompt, content, response.get("usage"))
         text, data, chunk_warnings = _parse_model_response(content)
@@ -223,6 +227,140 @@ def _get_timeout() -> float:
 _DEFAULT_MAX_ITEMS = 300
 _DEFAULT_TIMEOUT = 60.0
 
+def _prepare_weights_context(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
+    context = dict(payload)
+    raw_products = payload.get("products")
+    product_list: List[Dict[str, Any]]
+    if isinstance(raw_products, list):
+        product_list = [item for item in raw_products if isinstance(item, dict)]
+    else:
+        product_list = []
+    product_count = len(product_list)
+
+    aggregates_payload = None
+    sample_titles: List[str] = []
+
+    if isinstance(raw_products, dict):
+        aggregates_payload = _normalise_aggregates(raw_products)
+        sample_titles = _normalise_titles(raw_products.get("sample_titles"))
+    elif product_list:
+        aggregates_payload = _build_weighting_aggregates_from_list(product_list)
+        sample_titles = _derive_sample_titles(product_list)
+
+    context.pop("products", None)
+
+    if aggregates_payload is None:
+        candidate = context.pop("aggregates", None)
+        aggregates_payload = _normalise_aggregates(candidate)
+
+    if aggregates_payload is None and product_list:
+        aggregates_payload = _build_weighting_aggregates_from_list(product_list)
+    if aggregates_payload is None:
+        aggregates_payload = {"metrics": {}, "total_products": product_count}
+
+    if not sample_titles:
+        sample_titles = _normalise_titles(context.get("sample_titles"))
+        if not sample_titles:
+            sample_titles = _derive_sample_titles(product_list)
+
+    if sample_titles:
+        context["sample_titles"] = sample_titles
+    else:
+        context.pop("sample_titles", None)
+
+    context["aggregates"] = aggregates_payload
+
+    if not product_count and isinstance(aggregates_payload, dict):
+        total_hint = aggregates_payload.get("total_products") or aggregates_payload.get("total_items")
+        if isinstance(total_hint, (int, float)):
+            product_count = int(total_hint)
+
+    return context, product_count
+
+
+def _normalise_aggregates(candidate: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(candidate, dict):
+        return None
+    if isinstance(candidate.get("aggregates"), dict):
+        return dict(candidate["aggregates"])
+    if isinstance(candidate.get("summary_stats"), dict):
+        return dict(candidate["summary_stats"])
+    metrics = candidate.get("metrics")
+    if isinstance(metrics, dict):
+        result = dict(candidate)
+        result["metrics"] = dict(metrics)
+        return result
+    return None
+
+
+def _normalise_titles(raw_titles: Any, limit: int = 20) -> List[str]:
+    if not isinstance(raw_titles, Iterable) or isinstance(raw_titles, (str, bytes)):
+        return []
+    cleaned: List[str] = []
+    seen = set()
+    for title in raw_titles:
+        if not isinstance(title, str):
+            continue
+        trimmed = title.strip()
+        if not trimmed or trimmed in seen:
+            continue
+        cleaned.append(trimmed)
+        seen.add(trimmed)
+        if len(cleaned) >= limit:
+            break
+    return cleaned
+
+
+def _derive_sample_titles(products: Sequence[Dict[str, Any]], limit: int = 20) -> List[str]:
+    if not products:
+        return []
+    if sample_product_titles is not None:
+        return sample_product_titles(list(products), limit=limit)
+    return _legacy_sample_titles(products, limit=limit)
+
+
+def _legacy_sample_titles(products: Sequence[Dict[str, Any]], limit: int = 20) -> List[str]:
+    if limit <= 0:
+        return []
+    titles: List[str] = []
+    seen = set()
+    for product in products:
+        if not isinstance(product, dict):
+            continue
+        title = product.get("title")
+        if not isinstance(title, str):
+            continue
+        trimmed = title.strip()
+        if not trimmed or trimmed in seen:
+            continue
+        titles.append(trimmed)
+        seen.add(trimmed)
+
+    if len(titles) <= limit:
+        return titles
+
+    if limit == 1:
+        return titles[:1]
+
+    span = len(titles) - 1
+    indices = []
+    for i in range(limit):
+        idx = round(i * span / (limit - 1))
+        if idx not in indices:
+            indices.append(idx)
+    selected = [titles[idx] for idx in indices]
+    for title in titles:
+        if len(selected) >= limit:
+            break
+        if title not in selected:
+            selected.append(title)
+    return selected[:limit]
+
+
+def _build_weighting_aggregates_from_list(products: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    if build_weighting_aggregates is not None:
+        return build_weighting_aggregates(list(products))
+    return _summarise_products_for_weights(products)
 
 def _chunk_sequence(seq: Sequence[Any], chunk_size: int) -> Iterable[List[Any]]:
     for idx in range(0, len(seq), chunk_size):
