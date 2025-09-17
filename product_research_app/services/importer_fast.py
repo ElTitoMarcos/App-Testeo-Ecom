@@ -1,17 +1,41 @@
 import csv
 import io
+import logging
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterable, Mapping, Sequence
+from typing import Iterable, List, Mapping, Sequence, Set
 
 from product_research_app.db import get_db
 from product_research_app.database import json_dump
+
+
+logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def log_phase(name: str):
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = (time.perf_counter() - start) * 1000.0
+        logger.info("bulk_import_phase=%s duration_ms=%.2f", name, elapsed)
+
+
+@dataclass
+class ImportResult:
+    count: int
+    product_ids: List[int]
 
 UPSERT_SQL = """
 INSERT INTO products (
     id, name, description, category, price, currency, image_url, source,
     import_date, desire, desire_magnitude, awareness_level, competition_level,
-    date_range, winner_score, extra
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
+    date_range, ai_desire, ai_desire_label, review_count, image_count,
+    winner_score, extra
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
 ON CONFLICT(id) DO UPDATE SET
     name=excluded.name,
     description=excluded.description,
@@ -21,11 +45,15 @@ ON CONFLICT(id) DO UPDATE SET
     image_url=excluded.image_url,
     source=excluded.source,
     import_date=excluded.import_date,
-    desire=excluded.desire,
-    desire_magnitude=excluded.desire_magnitude,
+    desire=COALESCE(excluded.desire, products.desire),
+    desire_magnitude=COALESCE(excluded.desire_magnitude, products.desire_magnitude),
     awareness_level=excluded.awareness_level,
     competition_level=excluded.competition_level,
     date_range=excluded.date_range,
+    ai_desire=COALESCE(excluded.ai_desire, products.ai_desire),
+    ai_desire_label=COALESCE(excluded.ai_desire_label, products.ai_desire_label),
+    review_count=COALESCE(excluded.review_count, products.review_count),
+    image_count=COALESCE(excluded.image_count, products.image_count),
     winner_score=COALESCE(excluded.winner_score, products.winner_score),
     extra=excluded.extra;
 """
@@ -57,6 +85,13 @@ FIELD_ALIASES: dict[str, Sequence[str]] = {
     ],
     "desire": ["desire", "deseo"],
     "desire_magnitude": ["desire_magnitude", "desiremag", "magnituddeseo"],
+    "ai_desire": ["ai_desire", "desire_ai", "aidesire"],
+    "ai_desire_label": [
+        "ai_desire_label",
+        "aidesirelabel",
+        "desire_label",
+        "desirelabel",
+    ],
     "awareness_level": ["awareness_level", "awareness", "nivelconsciencia"],
     "competition_level": ["competition_level", "competition", "saturacionmercado"],
     "date_range": ["date_range", "daterange", "rangofechas", "fecharango"],
@@ -67,6 +102,8 @@ FIELD_ALIASES: dict[str, Sequence[str]] = {
     "conversion_rate": ["conversion_rate", "conversion", "tasaconversion", "cr", "conversionrate"],
     "winner_score": ["winner_score", "winnerscore"],
     "source": ["source", "fuente"],
+    "review_count": ["review_count", "reviews", "numreviews"],
+    "image_count": ["image_count", "images", "numimages"],
 }
 
 ALIASES_SANITIZED = {
@@ -177,7 +214,13 @@ def _prepare_rows(records: Iterable[Mapping[str, object]], source: str | None = 
         desire = str(raw_desire).strip() if raw_desire not in (None, "") else None
 
         _, raw_desire_mag = _pick(row, sanitized_keys, "desire_magnitude", recognised)
-        desire_mag = str(raw_desire_mag).strip() if raw_desire_mag not in (None, "") else None
+        desire_mag = _parse_optional_number(raw_desire_mag, as_int=True)
+
+        _, raw_ai_desire = _pick(row, sanitized_keys, "ai_desire", recognised)
+        ai_desire = str(raw_ai_desire).strip() if raw_ai_desire not in (None, "") else None
+
+        _, raw_ai_label = _pick(row, sanitized_keys, "ai_desire_label", recognised)
+        ai_desire_label = str(raw_ai_label).strip() if raw_ai_label not in (None, "") else None
 
         _, raw_awareness = _pick(row, sanitized_keys, "awareness_level", recognised)
         awareness = str(raw_awareness).strip() if raw_awareness not in (None, "") else None
@@ -205,6 +248,12 @@ def _prepare_rows(records: Iterable[Mapping[str, object]], source: str | None = 
         _, raw_conversion = _pick(row, sanitized_keys, "conversion_rate", recognised)
         conversion_rate = _parse_optional_number(raw_conversion)
 
+        _, raw_review_count = _pick(row, sanitized_keys, "review_count", recognised)
+        review_count = _parse_optional_number(raw_review_count, as_int=True)
+
+        _, raw_image_count = _pick(row, sanitized_keys, "image_count", recognised)
+        image_count = _parse_optional_number(raw_image_count, as_int=True)
+
         _, raw_winner = _pick(row, sanitized_keys, "winner_score", recognised)
         winner_score = _parse_optional_number(raw_winner, as_int=True)
 
@@ -222,6 +271,10 @@ def _prepare_rows(records: Iterable[Mapping[str, object]], source: str | None = 
             extras["revenue"] = revenue
         if conversion_rate is not None:
             extras["conversion_rate"] = conversion_rate
+        if review_count is not None:
+            extras["review_count"] = review_count
+        if image_count is not None:
+            extras["image_count"] = image_count
         if launch_date:
             extras["launch_date"] = launch_date
         if category_path and (not category or category_path != category):
@@ -252,6 +305,10 @@ def _prepare_rows(records: Iterable[Mapping[str, object]], source: str | None = 
                 awareness,
                 competition,
                 date_range,
+                ai_desire,
+                ai_desire_label,
+                review_count,
+                image_count,
                 winner_score,
                 json_dump(extras),
             )
@@ -269,38 +326,103 @@ def prepare_rows(records: Iterable[Mapping[str, object]], source: str | None = N
     return _prepare_rows(records, source=source)
 
 
+def _drop_import_indexes(db) -> None:
+    """Placeholder hook to drop heavy indexes before bulk inserts."""
+    # No heavy indexes to drop currently; this keeps the phase timings consistent.
+
+
+def _rebuild_import_indexes(db) -> None:
+    """Placeholder hook to rebuild indexes after bulk inserts."""
+    # Nothing to rebuild yet, but timing is still logged for observability.
+
+
+def _collect_product_ids(db, rows) -> List[int]:
+    product_ids: Set[int] = {
+        int(row_id)
+        for row_id in (row[0] for row in rows)
+        if isinstance(row_id, int)
+    }
+    import_dates = [row[8] for row in rows if isinstance(row[8], str) and row[8]]
+    if not import_dates:
+        return sorted(product_ids)
+    sources = sorted({row[7] for row in rows if isinstance(row[7], str) and row[7]})
+    start = min(import_dates)
+    end = max(import_dates)
+    params: List[object] = [start, end]
+    query = "SELECT id FROM products WHERE import_date BETWEEN ? AND ?"
+    if sources:
+        placeholders = ",".join("?" for _ in sources)
+        query += f" AND source IN ({placeholders})"
+        params.extend(sources)
+    try:
+        cursor = db.execute(query, params)
+        fetched = cursor.fetchall()
+    except Exception:
+        return sorted(product_ids)
+    for row in fetched:
+        value = None
+        try:
+            value = row[0]
+        except Exception:
+            pass
+        if value is None and hasattr(row, "get"):
+            try:
+                value = row.get("id")  # type: ignore[call-arg]
+            except Exception:
+                value = None
+        if value is None:
+            continue
+        try:
+            product_ids.add(int(value))
+        except Exception:
+            continue
+    return sorted(product_ids)
+
+
 def _bulk_insert(rows, status_cb):
     db = get_db()
     db.execute("PRAGMA journal_mode=WAL;")
     db.execute("PRAGMA synchronous=NORMAL;")
     db.execute("PRAGMA temp_store=MEMORY;")
     db.execute("PRAGMA cache_size=-20000;")
+    with log_phase("drop_indexes"):
+        _drop_import_indexes(db)
     db.execute("BEGIN IMMEDIATE;")
+    total = len(rows)
+    success = False
     try:
-        total = len(rows)
         status_cb(stage="prepare", done=0, total=total)
         batch = 1000
-        for idx in range(0, total, batch):
-            chunk = rows[idx: idx + batch]
-            if not chunk:
-                continue
-            db.executemany(UPSERT_SQL, chunk)
-            status_cb(stage="insert", done=min(idx + len(chunk), total), total=total)
+        with log_phase("bulk_insert"):
+            for idx in range(0, total, batch):
+                chunk = rows[idx: idx + batch]
+                if not chunk:
+                    continue
+                db.executemany(UPSERT_SQL, chunk)
+                status_cb(stage="insert", done=min(idx + len(chunk), total), total=total)
         db.execute("COMMIT;")
         status_cb(stage="commit", done=total, total=total)
-        return total
+        success = True
     except Exception:
         db.execute("ROLLBACK;")
         raise
     finally:
+        with log_phase("rebuild_indexes"):
+            _rebuild_import_indexes(db)
         db.execute("PRAGMA synchronous=NORMAL;")
+    product_ids: List[int] = []
+    if success:
+        product_ids = _collect_product_ids(db, rows)
+    return ImportResult(count=total, product_ids=product_ids)
 
 
 def fast_import(csv_bytes: bytes, status_cb=lambda **_: None, source: str | None = None):
-    rows = parse_csv_bytes(csv_bytes, source=source)
+    with log_phase("parse"):
+        rows = parse_csv_bytes(csv_bytes, source=source)
     return _bulk_insert(rows, status_cb)
 
 
 def fast_import_records(records: Iterable[Mapping[str, object]], status_cb=lambda **_: None, source: str | None = None):
-    rows = prepare_rows(records, source=source)
+    with log_phase("parse"):
+        rows = prepare_rows(records, source=source)
     return _bulk_insert(rows, status_cb)
