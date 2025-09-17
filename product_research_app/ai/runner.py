@@ -6,7 +6,6 @@ import logging
 import sqlite3
 import traceback
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence
 
@@ -34,6 +33,7 @@ class AutoSettings:
     batch_size: int = 100
     max_parallel: int = 1
     max_calls: int = 3
+    reserve_desire_calls: int = 1
     imputacion_via_ia: bool = False
     gpt_timeout: int = 20
     gpt_max_retry: int = 1
@@ -62,6 +62,11 @@ class AutoSettings:
             settings.imputacion_via_ia = bool(cfg.get("IMPUTACION_VIA_IA", settings.imputacion_via_ia))
         except Exception:
             settings.imputacion_via_ia = False
+        try:
+            reserve = int(cfg.get("AI_RESERVE_DESIRE_CALLS", settings.reserve_desire_calls))
+        except Exception:
+            reserve = settings.reserve_desire_calls
+        settings.reserve_desire_calls = max(0, reserve)
         try:
             settings.gpt_timeout = max(1, int(cfg.get("GPT_TIMEOUT", settings.gpt_timeout)))
         except Exception:
@@ -176,6 +181,56 @@ def run_post_import_auto(task_id: str, product_ids: Sequence[int], config: Optio
     update_status(task_id, state="DONE")
 
 
+def run_desire_only(
+    task_id: str,
+    product_ids: Sequence[int],
+    config: Optional[Mapping[str, Any]] = None,
+) -> BatchResult:
+    """Execute only the desire pipeline for the provided product ids."""
+
+    config_map = dict(config or {})
+    settings = AutoSettings.from_config(config_map)
+    ids = _normalise_product_ids(product_ids)
+    if not ids:
+        update_status(task_id, desire={"requested": 0, "processed": 0, "failed": 0})
+        return BatchResult(processed=0, failed=0, calls=0)
+
+    root_conn = get_db()
+    db_path = _resolve_db_path(root_conn)
+    conn = legacy_get_connection(Path(db_path))
+    try:
+        rows = _fetch_rows(conn, ids)
+        rows_by_id: Dict[int, Dict[str, Any]] = {}
+        for row in rows:
+            data = row_to_dict(row) or {}
+            pid = data.get("id")
+            if pid is None:
+                continue
+            try:
+                pid_int = int(pid)
+            except Exception:
+                continue
+            rows_by_id[pid_int] = data
+        has_desire_summary = _table_has_column(conn, "products", "desire_summary")
+        update_status(task_id, state="RUNNING")
+        result = _process_desire(
+            task_id,
+            rows_by_id,
+            ids,
+            settings,
+            conn,
+            calls_used=0,
+            has_desire_summary=has_desire_summary,
+        )
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    update_status(task_id, state="DONE")
+    return result
+
+
 @dataclass
 class BatchResult:
     processed: int
@@ -212,19 +267,117 @@ def _fetch_rows(conn: sqlite3.Connection, ids: Sequence[int]) -> List[sqlite3.Ro
     return list(cur.fetchall())
 
 
-def _has_compact_ai_desire(value: Optional[str]) -> bool:
-    if not value:
-        return False
-    lines = [line.strip() for line in str(value).splitlines() if line.strip()]
-    if not (2 <= len(lines) <= 3):
-        return False
-    return all(len(line) <= 90 for line in lines)
-
-
 def _chunk(seq: Sequence[Any], size: int) -> Iterable[List[Any]]:
     size = max(1, int(size))
     for idx in range(0, len(seq), size):
         yield list(seq[idx : idx + size])
+
+
+def _fetch_pending_desire_ids(conn: sqlite3.Connection, ids: Sequence[int]) -> List[int]:
+    if not ids:
+        return []
+    placeholders = ",".join("?" for _ in ids)
+    query = f"""
+        SELECT id
+        FROM products
+        WHERE id IN ({placeholders})
+          AND (
+            COALESCE(ai_desire, '') = '' OR
+            COALESCE(ai_desire_label, '') = '' OR
+            desire_magnitude IS NULL
+          )
+        ORDER BY id
+    """
+    cur = conn.execute(query, tuple(ids))
+    rows = cur.fetchall()
+    pending_ids: List[int] = []
+    for row in rows:
+        try:
+            pending_ids.append(int(row[0]))
+        except Exception:
+            continue
+    return pending_ids
+
+
+def _select_pending_desire_batch(
+    conn: sqlite3.Connection,
+    ids: Sequence[int],
+    limit: int,
+) -> List[Dict[str, Any]]:
+    if not ids or limit <= 0:
+        return []
+    placeholders = ",".join("?" for _ in ids)
+    query = f"""
+        SELECT
+            id,
+            desire,
+            name AS title,
+            description,
+            ai_desire,
+            ai_desire_label,
+            desire_magnitude
+        FROM products
+        WHERE id IN ({placeholders})
+          AND (
+            COALESCE(ai_desire, '') = '' OR
+            COALESCE(ai_desire_label, '') = '' OR
+            desire_magnitude IS NULL
+          )
+        ORDER BY id
+        LIMIT ?
+    """
+    params = tuple(ids) + (int(limit),)
+    cur = conn.execute(query, params)
+    rows = cur.fetchall()
+    batch: List[Dict[str, Any]] = []
+    for row in rows:
+        if isinstance(row, sqlite3.Row):
+            batch.append(dict(row))
+        else:
+            batch.append(
+                {
+                    "id": row[0],
+                    "desire": row[1] if len(row) > 1 else None,
+                    "title": row[2] if len(row) > 2 else None,
+                    "description": row[3] if len(row) > 3 else None,
+                    "ai_desire": row[4] if len(row) > 4 else None,
+                    "ai_desire_label": row[5] if len(row) > 5 else None,
+                    "desire_magnitude": row[6] if len(row) > 6 else None,
+                }
+            )
+    return batch
+
+
+def _sync_desire_summary(
+    conn: sqlite3.Connection,
+    ids: Sequence[int],
+) -> None:
+    if not ids:
+        return
+    unique_ids = []
+    seen: set[int] = set()
+    for value in ids:
+        try:
+            num = int(value)
+        except Exception:
+            continue
+        if num in seen:
+            continue
+        seen.add(num)
+        unique_ids.append(num)
+    if not unique_ids:
+        return
+    for chunk_ids in _chunk(unique_ids, 900):
+        placeholders = ",".join("?" for _ in chunk_ids)
+        query = f"""
+            UPDATE products
+            SET desire_summary = ai_desire
+            WHERE id IN ({placeholders})
+              AND desire_summary IS NULL
+              AND ai_desire IS NOT NULL
+        """
+        conn.execute(query, tuple(chunk_ids))
+    conn.commit()
 
 
 def _process_desire(
@@ -237,173 +390,285 @@ def _process_desire(
     *,
     has_desire_summary: bool,
 ) -> BatchResult:
-    processed = 0
-    failed = 0
+    total_requested = len(ids)
+    existing_ids = {int(pid) for pid in ids if pid in rows_by_id}
+    missing_ids = [pid for pid in ids if pid not in rows_by_id]
+    failed = len(missing_ids)
     calls = 0
-    pending_items: List[Dict[str, Any]] = []
-
-    for pid in ids:
-        row = rows_by_id.get(pid)
-        if not row:
-            failed += 1
-            continue
-        ai_desire = row.get("ai_desire")
-        if _has_compact_ai_desire(ai_desire):
-            processed += 1
-            continue
-        pending_items.append(
-            {
-                "id": str(pid),
-                "desire": row.get("desire"),
-                "title": row.get("name"),
-                "description": row.get("description"),
-            }
-        )
+    pending_ids = _fetch_pending_desire_ids(conn, ids)
+    pending_count = len(pending_ids)
+    processed = max(0, len(existing_ids) - pending_count)
 
     update_status(
         task_id,
         desire={
-            "requested": len(ids),
+            "requested": total_requested,
             "processed": processed,
             "failed": failed,
         },
     )
 
-    if not pending_items:
-        return BatchResult(processed=processed, failed=failed, calls=0)
+    logger.info(
+        "IA desire start: pending=%s batch_size=%s reserve_calls=%s budget=%s",
+        pending_count,
+        settings.batch_size,
+        settings.reserve_desire_calls,
+        settings.max_calls or "inf",
+    )
+    if pending_ids:
+        logger.info("IA desire pending sample=%s", pending_ids[:10])
 
-    for batch_index, batch in enumerate(_chunk(pending_items, settings.batch_size), start=1):
-        if settings.max_calls and (calls_used + calls) >= settings.max_calls:
-            note = "desire_call_limit_reached"
-            update_status(task_id, notes=[note])
-            break
-
+    if pending_count == 0:
         logger.info(
-            "IA desire batch=%s size=%s processed_total=%s failed_total=%s call=%s/%s",
-            batch_index,
-            len(batch),
+            "IA desire done: processed=%s failed=%s calls_used=%s",
             processed,
             failed,
-            calls_used + calls + 1,
-            settings.max_calls or "inf",
+            calls_used,
+        )
+        return BatchResult(processed=processed, failed=failed, calls=0)
+
+    remaining_ids = list(pending_ids)
+    touched_ids: List[int] = []
+    batch_index = 0
+
+    while remaining_ids:
+        if settings.max_calls and (calls_used + calls) >= settings.max_calls:
+            if (calls_used + calls) < settings.reserve_desire_calls:
+                logger.info(
+                    "IA desire reserve_call forcing batch remaining=%s",
+                    len(remaining_ids),
+                )
+            else:
+                note = "desire_call_limit_reached"
+                logger.info(
+                    "IA desire stop: call_budget_exhausted calls_used=%s/%s remaining=%s",
+                    calls_used + calls,
+                    settings.max_calls,
+                    len(remaining_ids),
+                )
+                update_status(task_id, notes=[note])
+                break
+
+        batch_rows = _select_pending_desire_batch(conn, remaining_ids, settings.batch_size)
+        if not batch_rows:
+            break
+
+        batch_index += 1
+        batch_ids: List[int] = []
+        items: List[Dict[str, Any]] = []
+        for row in batch_rows:
+            pid = row.get("id")
+            if pid is None:
+                continue
+            try:
+                pid_int = int(pid)
+            except Exception:
+                continue
+            batch_ids.append(pid_int)
+            items.append(
+                {
+                    "id": str(pid_int),
+                    "desire": row.get("desire"),
+                    "title": row.get("title"),
+                    "description": row.get("description"),
+                }
+            )
+
+        if not items:
+            remaining_ids = [pid for pid in remaining_ids if pid not in set(batch_ids)]
+            continue
+
+        logger.info(
+            "IA desire batch=%s send=%s ids=%s",
+            batch_index,
+            len(items),
+            batch_ids[:10],
         )
 
         try:
             result_map = run_desire_batch(
-                batch,
+                items,
                 timeout=settings.gpt_timeout,
                 max_retry=settings.gpt_max_retry,
             )
             calls += 1
         except ChatCompletionError as exc:
             calls += 1
-            failed += len(batch)
-            logger.warning("desire_batch_failed task_id=%s error=%s", task_id, exc)
-            set_error(task_id, f"desire_error:{exc}")
-            update_status(task_id, notes=[f"desire_error:{exc}"], desire={"failed": failed, "processed": processed})
+            handled = set(batch_ids)
+            remaining_ids = [pid for pid in remaining_ids if pid not in handled]
+            failed += len(handled)
+            raw_message = str(exc).strip()
+            if "OPENAI_API_KEY" in raw_message or "not configured" in raw_message.lower():
+                note = "no_api_key"
+                logger.warning(
+                    "desire_batch_failed task_id=%s batch=%s error=%s",
+                    task_id,
+                    batch_index,
+                    exc,
+                )
+                set_error(task_id, note)
+                update_status(
+                    task_id,
+                    notes=[note],
+                    desire={
+                        "requested": total_requested,
+                        "processed": processed,
+                        "failed": failed,
+                    },
+                )
+            else:
+                note = f"desire_error:{raw_message}" if raw_message else "desire_error"
+                logger.warning(
+                    "desire_batch_failed task_id=%s batch=%s error=%s",
+                    task_id,
+                    batch_index,
+                    exc,
+                )
+                update_status(
+                    task_id,
+                    notes=[note],
+                    desire={
+                        "requested": total_requested,
+                        "processed": processed,
+                        "failed": failed,
+                    },
+                )
             continue
         except Exception as exc:  # pragma: no cover - defensive
             calls += 1
-            failed += len(batch)
-            logger.exception("desire_batch_exception task_id=%s", task_id)
+            handled = set(batch_ids)
+            remaining_ids = [pid for pid in remaining_ids if pid not in handled]
+            failed += len(handled)
+            logger.exception("desire_batch_exception task_id=%s batch=%s", task_id, batch_index)
             trace_tail = _format_trace(exc)
             set_error(task_id, "desire_exception", trace_tail)
-            update_status(task_id, notes=["desire_exception"], desire={"failed": failed, "processed": processed})
+            update_status(
+                task_id,
+                notes=["desire_exception"],
+                desire={
+                    "requested": total_requested,
+                    "processed": processed,
+                    "failed": failed,
+                },
+            )
             continue
 
-        updates_payload: List[Dict[str, Any]] = []
-        for item in batch:
-            pid = int(item["id"])
-            mapped = result_map.get(str(pid))
-            if not mapped:
-                failed += 1
-                continue
-            raw_lines = mapped.get("normalized_text") or mapped.get("lines") or []
-            if isinstance(raw_lines, (str, bytes)):
-                raw_lines = [raw_lines]
-            lines: List[str] = []
-            for candidate in raw_lines:
-                if candidate in (None, ""):
-                    continue
-                text_line = str(candidate).strip()
-                if not text_line:
-                    continue
-                lines.append(text_line[:90])
-            if not lines:
-                fallback = mapped.get("text") or item.get("desire") or ""
-                if isinstance(fallback, str):
-                    for part in fallback.splitlines():
-                        part = part.strip()
-                        if part:
-                            lines.append(part[:90])
-            if len(lines) == 1:
-                split_parts = [seg.strip() for seg in lines[0].replace(";", ".").split(".") if seg.strip()]
-                if len(split_parts) >= 2:
-                    lines = [seg[:90] for seg in split_parts[:3]]
-            lines = [line for line in lines if line][:3]
-            if not lines:
-                failed += 1
-                continue
-            if len(lines) == 1:
-                lines.append(lines[0])
-            keywords = mapped.get("keywords") if isinstance(mapped.get("keywords"), list) else []
-            label = _infer_label(mapped.get("class"), keywords)
-            magnitude = _infer_magnitude(mapped.get("magnitude"), label)
-            desire_text = "\n".join(lines[:3])
-            updates_payload.append(
-                {
-                    "ai_desire": desire_text,
-                    "ai_desire_label": label,
-                    "desire_magnitude": magnitude,
-                    "product_id": pid,
-                }
-            )
-            processed += 1
+        handled = set(batch_ids)
+        remaining_ids = [pid for pid in remaining_ids if pid not in handled]
 
-        if updates_payload:
-            now_iso = datetime.utcnow().isoformat()
-            if has_desire_summary:
-                conn.executemany(
-                    "UPDATE products SET ai_desire=?, ai_desire_label=?, desire_magnitude=?, ai_columns_completed_at=?, desire_summary=? WHERE id=?",
-                    [
-                        (
-                            payload["ai_desire"],
-                            payload["ai_desire_label"],
-                            payload["desire_magnitude"],
-                            now_iso,
-                            payload["ai_desire"],
-                            payload["product_id"],
-                        )
-                        for payload in updates_payload
-                    ],
-                )
-            else:
-                conn.executemany(
-                    "UPDATE products SET ai_desire=?, ai_desire_label=?, desire_magnitude=?, ai_columns_completed_at=? WHERE id=?",
-                    [
-                        (
-                            payload["ai_desire"],
-                            payload["ai_desire_label"],
-                            payload["desire_magnitude"],
-                            now_iso,
-                            payload["product_id"],
-                        )
-                        for payload in updates_payload
-                    ],
-                )
+        raw_preview = getattr(result_map, "raw_response", None)
+        if not result_map:
+            failed += len(batch_ids)
+            preview = (raw_preview or "")[:300]
+            logger.warning(
+                "desire_empty_response task_id=%s batch=%s size=%s preview=%s",
+                task_id,
+                batch_index,
+                len(items),
+                preview,
+            )
+            update_status(
+                task_id,
+                notes=["desire_empty_response"],
+                desire={
+                    "requested": total_requested,
+                    "processed": processed,
+                    "failed": failed,
+                },
+            )
+            continue
+
+        logger.info(
+            "IA desire batch=%s received=%s ids=%s",
+            batch_index,
+            len(result_map),
+            list(result_map.keys())[:10],
+        )
+
+        received_ids: set[int] = set()
+        for key in result_map.keys():
             try:
-                conn.commit()
+                received_ids.add(int(key))
             except Exception:
-                pass
+                continue
+
+        updates: List[tuple[str, str, int, int]] = []
+        for pid in batch_ids:
+            mapped = result_map.get(str(pid))
+            if not isinstance(mapped, Mapping):
+                continue
+            text = str(mapped.get("text") or "").strip()
+            label = str(mapped.get("label") or "").strip().lower()
+            magnitude_val = mapped.get("magnitude")
+            try:
+                magnitude_int = int(magnitude_val)
+            except Exception:
+                magnitude_int = None
+            if not text or label not in {"alto", "medio", "bajo"} or magnitude_int is None:
+                continue
+            magnitude_int = max(0, min(100, magnitude_int))
+            updates.append((text, label, magnitude_int, pid))
+
+        batch_success = len(updates)
+        batch_failed = max(0, len(batch_ids) - batch_success)
+        failed += batch_failed
+
+        if batch_failed:
+            valid_ids = {row[3] for row in updates}
+            missing_in_response = [pid for pid in batch_ids if pid not in received_ids]
+            invalid_in_response = [
+                pid for pid in received_ids if pid in batch_ids and pid not in valid_ids
+            ]
+            logger.warning(
+                "IA desire batch=%s missing_ids=%s invalid_ids=%s",
+                batch_index,
+                missing_in_response[:10],
+                invalid_in_response[:10],
+            )
+
+        if updates:
+            conn.executemany(
+                "UPDATE products SET ai_desire=?, ai_desire_label=?, desire_magnitude=? WHERE id=?",
+                updates,
+            )
+            conn.commit()
+            processed += batch_success
+            touched_ids.extend(int(row[3]) for row in updates)
+            logger.info(
+                "IA desire updated=%s batch=%s calls_used=%s/%s",
+                batch_success,
+                batch_index,
+                calls_used + calls,
+                settings.max_calls or "inf",
+            )
+        else:
+            logger.warning(
+                "IA desire batch=%s produced no valid updates task_id=%s",
+                batch_index,
+                task_id,
+            )
 
         update_status(
             task_id,
             desire={
-                "requested": len(ids),
+                "requested": total_requested,
                 "processed": processed,
                 "failed": failed,
             },
         )
+
+    if has_desire_summary and touched_ids:
+        try:
+            _sync_desire_summary(conn, touched_ids)
+        except Exception:
+            logger.exception("desire_summary_sync_failed task_id=%s", task_id)
+
+    logger.info(
+        "IA desire done: processed=%s failed=%s calls_used=%s",
+        processed,
+        failed,
+        calls_used + calls,
+    )
 
     return BatchResult(processed=processed, failed=failed, calls=calls)
 
@@ -643,34 +908,3 @@ def _resolve_db_path(conn: sqlite3.Connection) -> str:
     except Exception:
         pass
     return "product_research_app/data.sqlite3"
-
-
-def _infer_label(raw_label: Any, keywords: Sequence[Any]) -> str:
-    valid = {"alto", "medio", "bajo"}
-    if isinstance(raw_label, str):
-        label = raw_label.strip().lower()
-        if label in valid:
-            return label
-    lowered = [str(kw).lower() for kw in keywords if isinstance(kw, str)]
-    for token in lowered:
-        if any(marker in token for marker in ("alto", "alta", "high", "hot")):
-            return "alto"
-    for token in lowered:
-        if any(marker in token for marker in ("bajo", "baja", "low", "frío", "frio")):
-            return "bajo"
-    return "medio"
-
-
-def _infer_magnitude(raw_magnitude: Any, label: str) -> int:
-    try:
-        if raw_magnitude not in (None, ""):
-            magnitude = int(round(float(raw_magnitude)))
-        else:
-            magnitude = None
-    except Exception:
-        magnitude = None
-    if magnitude is None:
-        mapping = {"alto": 80, "medio": 50, "bajo": 25}
-        magnitude = mapping.get(label, 50)
-    magnitude = max(0, min(100, int(magnitude)))
-    return magnitude
