@@ -87,7 +87,6 @@ def test_pesos_uses_aggregated_summary(monkeypatch):
     assert score_stats["bottom_ids"][0] == "p1"
     assert aggregates["total_products"] == 3
     assert context.get("sample_titles") == ["Alpha", "Beta", "Gamma"]
-
     assert result["ok"] is True
     assert result["data"]["weights"]["score"] == 0.7
     assert result["data"]["prompt_version"] == "2024-01"

@@ -186,7 +186,6 @@ def _sanitize_context(context: Mapping[str, Any]) -> Dict[str, Any]:
 
     return sanitized_context
 
-
 def _inject_weighting_summary(context: Dict[str, Any]) -> Dict[str, Any]:
     products = context.get("products")
     if not isinstance(products, list):
@@ -197,7 +196,6 @@ def _inject_weighting_summary(context: Dict[str, Any]) -> Dict[str, Any]:
     titles = sample_product_titles(products, limit=20)
     context["products"] = {"aggregates": aggregates, "sample_titles": titles}
     return context
-
 
 def _reshape_imputation_payload(
     data: Any, products: List[Dict[str, Any]]
@@ -373,7 +371,6 @@ def _parse_numeric(value: Any) -> Optional[float]:
     except Exception:
         return None
     return number if math.isfinite(number) else None
-
 
 @lru_cache(maxsize=None)
 def _get_system_prompt(task: str) -> str:

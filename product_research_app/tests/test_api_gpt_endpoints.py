@@ -127,7 +127,6 @@ def test_pesos_endpoint_uses_default_prompt(monkeypatch):
     assert price_stats["coverage"] == 1.0
     assert payload_products["sample_titles"] == ["Prod 1", "Prod 2"]
 
-
 def test_imputacion_endpoint_shapes_imputed_payload(monkeypatch):
     client = app.test_client()
     captured = {}
@@ -185,7 +184,6 @@ def test_imputacion_endpoint_shapes_imputed_payload(monkeypatch):
     assert any("Producto ghost fuera del contexto" in w for w in warnings)
     assert captured["task"] == "imputacion"
     assert captured["json_payload"]["products"] == [{"id": "42", "title": "Producto"}]
-
 
 def test_invalid_body_returns_400():
     client = app.test_client()
