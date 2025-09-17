@@ -127,6 +127,63 @@ def test_pesos_endpoint_uses_default_prompt(monkeypatch):
     assert price_stats["coverage"] == 1.0
     assert payload_products["sample_titles"] == ["Prod 1", "Prod 2"]
 
+def test_imputacion_endpoint_shapes_imputed_payload(monkeypatch):
+    client = app.test_client()
+    captured = {}
+
+    def fake_run_task(task, *, prompt_text, json_payload, model_hint=None, system_prompt=None):
+        captured["task"] = task
+        captured["json_payload"] = json_payload
+        return {
+            "ok": True,
+            "text": "Resumen",
+            "data": {
+                "prompt_version": "v2",
+                "results": {
+                    "42": {
+                        "review_count": {"value": "10"},
+                        "image_count": -3,
+                        "profit_margin": 0.35,
+                        "otro": 99,
+                    },
+                    "ghost": {"review_count": 20},
+                },
+            },
+            "warnings": [],
+            "meta": {"chunks": 1},
+            "model": "gpt-4o-mini",
+        }
+
+    monkeypatch.setattr(gpt_endpoints.gpt_orchestrator, "run_task", fake_run_task)
+
+    body = {
+        "prompt_text": "",
+        "context": {
+            "products": [
+                {"id": 42, "title": "Producto"},
+            ],
+        },
+    }
+
+    response = client.post("/api/gpt/imputacion", json=body)
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ok"] is True
+    assert payload["text"] == "Resumen"
+    data = payload["data"]
+    assert data["prompt_version"] == "v2"
+    imputed = data["imputed"]
+    assert "42" in imputed and "ghost" not in imputed
+    fields = imputed["42"]
+    assert fields["review_count"]["value"] == 10
+    assert fields["image_count"]["value"] == 0
+    assert fields["profit_margin"]["value"] == 0.35
+    assert fields["profit_margin"]["confidence"] == "low_confidence"
+    warnings = payload["warnings"]
+    assert any("Producto 42: image_count ajustado a 0" in w for w in warnings)
+    assert any("Producto ghost fuera del contexto" in w for w in warnings)
+    assert captured["task"] == "imputacion"
+    assert captured["json_payload"]["products"] == [{"id": "42", "title": "Producto"}]
 
 def test_invalid_body_returns_400():
     client = app.test_client()

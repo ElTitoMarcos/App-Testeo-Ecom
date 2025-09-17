@@ -247,6 +247,22 @@ body.dark .gpt-item {
   margin-top: 6px;
 }
 
+.gpt-tag.caution {
+  background: #9c5a1f;
+  color: #fff;
+}
+
+body.dark .gpt-tag.caution {
+  background: #b86a23;
+  color: #fff;
+}
+
+.gpt-note {
+  margin-top: 4px;
+  font-size: 0.75rem;
+  opacity: 0.8;
+}
+
 .gpt-warnings {
   margin-top: 12px;
   border-top: 1px solid rgba(255, 255, 255, 0.1);

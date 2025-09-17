@@ -1,4 +1,4 @@
-import { post } from './net.js';
+import { post, updateProductField } from './net.js';
 
 const ENDPOINTS = {
   consulta: '/api/gpt/consulta',
@@ -124,6 +124,47 @@ function renderMarkdown(text) {
   }
   if (inList) parts.push('</ul>');
   return parts.join('\n');
+}
+
+function formatImputedDisplay(field, value) {
+  if (!Number.isFinite(value)) return String(value);
+  const opts = field === 'profit_margin'
+    ? { minimumFractionDigits: 2, maximumFractionDigits: 4 }
+    : { maximumFractionDigits: 0 };
+  try {
+    return value.toLocaleString('es-ES', opts);
+  } catch (err) {
+    return String(value);
+  }
+}
+
+function normaliseImputedField(field, raw) {
+  if (raw === null || raw === undefined) return null;
+  let base = raw;
+  let confidence = null;
+  let notes = null;
+  if (typeof raw === 'object' && !Array.isArray(raw)) {
+    if (raw.value !== undefined) base = raw.value;
+    else if (raw.suggested !== undefined) base = raw.suggested;
+    else if (raw.imputed !== undefined) base = raw.imputed;
+    if (typeof raw.confidence === 'string' && raw.confidence.trim()) {
+      confidence = raw.confidence.trim();
+    }
+    if (typeof raw.notes === 'string' && raw.notes.trim()) {
+      notes = raw.notes.trim();
+    }
+  }
+  const numeric = Number(base);
+  if (!Number.isFinite(numeric)) return null;
+  let coerced = numeric;
+  if (field === 'review_count' || field === 'image_count') {
+    coerced = Math.max(0, Math.round(numeric));
+  }
+  const display = formatImputedDisplay(field, coerced);
+  if (!confidence && field === 'profit_margin') {
+    confidence = 'low_confidence';
+  }
+  return { value: coerced, display, confidence, notes };
 }
 
 function extractHighlightIds(data) {
@@ -332,13 +373,14 @@ function renderGenericResults(container, results) {
 function renderImputationBlock(container, imputed) {
   const entries = Object.entries(imputed || {});
   if (!entries.length) return;
-  pendingImputations = imputed;
   const block = document.createElement('section');
   block.className = 'gpt-block gpt-imputed';
   block.innerHTML = '<h4>Imputaciones sugeridas</h4>';
   const list = document.createElement('div');
   list.className = 'gpt-table gpt-imputed-list';
+  const normalised = {};
   entries.forEach(([id, fields]) => {
+    const normalizedFields = {};
     const wrapper = document.createElement('div');
     wrapper.className = 'gpt-imputed-item';
     const title = document.createElement('div');
@@ -347,18 +389,34 @@ function renderImputationBlock(container, imputed) {
     wrapper.appendChild(title);
     const ul = document.createElement('ul');
     for (const [k, v] of Object.entries(fields || {})) {
+      const info = normaliseImputedField(k, v);
+      if (!info) continue;
+      normalizedFields[k] = info;
       const li = document.createElement('li');
-      li.innerHTML = `<strong>${formatInline(k)}:</strong> ${formatInline(String(v))}`;
+      let html = `<strong>${formatInline(k)}:</strong> ${formatInline(info.display)}`;
+      if (info.confidence) {
+        const label = info.confidence === 'low_confidence' ? 'Baja confianza' : info.confidence;
+        html += ` <span class="gpt-tag ${info.confidence === 'low_confidence' ? 'caution' : ''}">${formatInline(label)}</span>`;
+      }
+      if (info.notes) {
+        html += `<div class="gpt-note">${formatInline(info.notes)}</div>`;
+      }
+      li.innerHTML = html;
       ul.appendChild(li);
     }
-    wrapper.appendChild(ul);
-    list.appendChild(wrapper);
+    if (Object.keys(normalizedFields).length) {
+      wrapper.appendChild(ul);
+      list.appendChild(wrapper);
+      normalised[id] = normalizedFields;
+    }
   });
+  if (!Object.keys(normalised).length) return;
+  pendingImputations = normalised;
   block.appendChild(list);
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'gpt-apply-btn';
-  btn.textContent = 'Aplicar imputaciones';
+  btn.textContent = 'Aplicar cambios';
   btn.addEventListener('click', () => applyImputations(btn));
   block.appendChild(btn);
   container.appendChild(block);
@@ -382,34 +440,36 @@ async function applyImputations(button) {
       continue;
     }
     try {
-      const payload = Object.assign({}, fields, { source: 'gpt-imputacion' });
-      const res = await fetch(`/products/${numId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || res.statusText || 'Error desconocido');
+      const payload = {};
+      for (const [field, info] of Object.entries(fields || {})) {
+        if (!info || info.value === undefined || info.value === null) continue;
+        payload[field] = info.value;
       }
+      if (!Object.keys(payload).length) continue;
+      await updateProductField(numId, payload, 30000);
       okCount += 1;
     } catch (err) {
       console.error('applyImputations', err);
-      failures.push(`ID ${id}: ${err.message}`);
+      const msg = err && err.message ? err.message : String(err);
+      failures.push(`ID ${id}: ${msg}`);
     }
   }
   if (button) {
     button.disabled = failures.length === 0;
-    button.textContent = failures.length === 0 ? 'Imputaciones aplicadas' : prev || 'Aplicar imputaciones';
+    if (failures.length === 0) {
+      button.textContent = 'Cambios aplicados';
+    } else if (prev !== null) {
+      button.textContent = prev;
+    }
   }
   if (okCount) {
-    if (typeof toast !== 'undefined') toast.success(`Imputaciones aplicadas: ${okCount}`);
+    if (typeof toast !== 'undefined') toast.success(`Cambios aplicados: ${okCount}`);
     if (typeof window.fetchProducts === 'function') {
       try { window.fetchProducts(); } catch (err) { /* ignore */ }
     }
   }
   if (failures.length) {
-    if (typeof toast !== 'undefined') toast.error(`Fallos en ${failures.length} imputaciones`);
+    if (typeof toast !== 'undefined') toast.error(`Fallos en ${failures.length} cambios`);
     lastWarnings = lastWarnings.concat(failures);
     showGptLog();
     const wrap = document.getElementById('gptWarnings');
