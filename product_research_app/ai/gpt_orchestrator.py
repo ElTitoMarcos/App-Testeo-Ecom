@@ -65,7 +65,6 @@ def run_task(
     estimated_tokens = 0.0
 
     chosen_system_prompt = system_prompt.strip() if isinstance(system_prompt, str) and system_prompt.strip() else SYSTEM_PROMPT
-
     if task == "pesos":
         context = dict(payload)
         if "products" in context:
@@ -241,7 +240,6 @@ def _build_prompt(prompt_text: str, context: Optional[Dict[str, Any]]) -> str:
         "\n{...}\n``` que incluya la clave 'prompt_version'."
     )
     return prompt
-
 
 def _call_openai(
     model: str,
