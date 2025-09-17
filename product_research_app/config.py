@@ -7,6 +7,7 @@ file. If the file does not exist, default values are returned.
 """
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -122,6 +123,9 @@ def _merge_defaults(dst: Dict[str, Any], src: Dict[str, Any]) -> bool:
 def get_api_key() -> Optional[str]:
     """Return the stored OpenAI API key if present."""
 
+    env_key = os.environ.get("OPENAI_API_KEY")
+    if env_key:
+        return env_key
     config = load_config()
     return config.get("api_key")
 
@@ -193,6 +197,32 @@ def get_ai_image_cost_max_usd() -> float:
         return float(cfg.get("aiImageCostMaxUSD", 0.02))
     except Exception:
         return 0.02
+
+
+def get_env_max_items(default: int = 300) -> int:
+    """Return MAX_ITEMS override from environment or a default."""
+
+    value = os.environ.get("MAX_ITEMS")
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def get_gpt_timeout_seconds(default: float = 60.0) -> float:
+    """Return GPT timeout (seconds) from environment or default."""
+
+    value = os.environ.get("GPT_TIMEOUT")
+    if value is None:
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
 
 
 SCORING_DEFAULT_WEIGHTS: Dict[str, float] = {
