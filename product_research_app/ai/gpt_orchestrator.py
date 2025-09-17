@@ -36,6 +36,7 @@ def run_task(
     prompt_text: str,
     json_payload: Optional[Dict[str, Any]],
     model_hint: Optional[str] = None,
+    system_prompt: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute an AI task orchestrating chunking and response parsing."""
 
@@ -63,6 +64,7 @@ def run_task(
     chunk_sizes: List[int] = []
     estimated_tokens = 0.0
 
+    chosen_system_prompt = system_prompt.strip() if isinstance(system_prompt, str) and system_prompt.strip() else SYSTEM_PROMPT
     if task == "pesos":
         context = dict(payload)
         if "products" in context:
@@ -72,7 +74,7 @@ def run_task(
         summary = _summarise_products_for_weights(products_list or [])
         context["summary_stats"] = summary
         prompt = _build_prompt(prompt_text, context)
-        response = _call_openai(model, prompt, api_key, timeout)
+        response = _call_openai(model, prompt, api_key, timeout, chosen_system_prompt)
         call_count += 1
         chunk_sizes.append(len(products_list or []))
         content = response["content"]
@@ -111,7 +113,7 @@ def run_task(
             else:
                 chunk_sizes.append(0)
             prompt = _build_prompt(prompt_text, context)
-            response = _call_openai(model, prompt, api_key, timeout)
+            response = _call_openai(model, prompt, api_key, timeout, chosen_system_prompt)
             call_count += 1
             content = response["content"]
             estimated_tokens += _estimate_tokens(prompt, content, response.get("usage"))
@@ -239,8 +241,13 @@ def _build_prompt(prompt_text: str, context: Optional[Dict[str, Any]]) -> str:
     )
     return prompt
 
-
-def _call_openai(model: str, prompt: str, api_key: str, timeout: float) -> Dict[str, Any]:
+def _call_openai(
+    model: str,
+    prompt: str,
+    api_key: str,
+    timeout: float,
+    system_prompt: str,
+) -> Dict[str, Any]:
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -248,7 +255,7 @@ def _call_openai(model: str, prompt: str, api_key: str, timeout: float) -> Dict[
     body = {
         "model": model,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt or SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.2,

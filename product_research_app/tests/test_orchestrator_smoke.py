@@ -29,7 +29,7 @@ def test_consulta_chunking_and_refs(monkeypatch):
     ]
     captured_contexts = []
 
-    def fake_call(model, prompt, api_key, timeout):
+    def fake_call(model, prompt, api_key, timeout, system_prompt):
         context = _context_from_prompt(prompt)
         captured_contexts.append(context)
         return responses.pop(0)
@@ -54,7 +54,7 @@ def test_consulta_chunking_and_refs(monkeypatch):
 def test_pesos_uses_aggregated_summary(monkeypatch):
     captured = {}
 
-    def fake_call(model, prompt, api_key, timeout):
+    def fake_call(model, prompt, api_key, timeout, system_prompt):
         context = _context_from_prompt(prompt)
         captured["context"] = context
         return {
@@ -104,7 +104,7 @@ def test_desire_batches_into_mapping(monkeypatch):
     ]
     contexts = []
 
-    def fake_call(model, prompt, api_key, timeout):
+    def fake_call(model, prompt, api_key, timeout, system_prompt):
         context = _context_from_prompt(prompt)
         contexts.append(context)
         return responses.pop(0)
