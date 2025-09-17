@@ -349,6 +349,46 @@ def test_patch_product_desire(tmp_path, monkeypatch):
     log_text = web_app.LOG_PATH.read_text()
     assert "PATCH not found product_id=9999" in log_text
 
+
+def test_patch_product_imputation_updates_extra(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(web_app, "ensure_db", lambda: conn)
+    pid = database.insert_product(
+        conn,
+        name="Prod",
+        description="",
+        category="",
+        price=5.0,
+        currency=None,
+        image_url="",
+        source="",
+        extra={"rating": 4.0},
+    )
+    body = json.dumps({
+        "review_count": 12,
+        "image_count": 4,
+        "profit_margin": 0.42,
+    })
+
+    class Dummy:
+        def __init__(self, path, body):
+            self.path = path
+            self.headers = {"Content-Length": str(len(body))}
+            self.rfile = io.BytesIO(body.encode("utf-8"))
+            self.wfile = io.BytesIO()
+
+        def _set_json(self, code=200):
+            self.status = code
+
+    handler = Dummy(f"/api/products/{pid}", body)
+    web_app.RequestHandler.do_PATCH(handler)
+    assert handler.status == 200
+    resp = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    extra_dict = json.loads(resp.get("extra") or "{}")
+    assert extra_dict["review_count"] == 12
+    assert extra_dict["image_count"] == 4
+    assert extra_dict["profit_margin"] == 0.42
+
 def test_patch_winner_weights_persists(tmp_path, monkeypatch):
     setup_env(tmp_path, monkeypatch)
 

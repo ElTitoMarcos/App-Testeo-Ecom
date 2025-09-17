@@ -119,7 +119,28 @@ body.dark .skeleton{background:#333;}
     <textarea id="gptPrompt" rows="1" maxlength="2000" placeholder="Escribe consulta para GPT..." aria-label="Escribe consulta para GPT..."></textarea>
     <div id="gptActions">
       <button id="sendPrompt">Enviar consulta a GPT</button>
+      <button id="btnGptWeights">Ajustar pesos con IA</button>
+      <button id="btnGptTrends">Análisis de tendencias (profundo)</button>
+      <button id="btnGptImpute">Imputar campos</button>
+      <button id="btnGptDesire">Resumir desire</button>
       <button id="btnGenWinner" class="bar-btn" disabled title="Generar Winner Score" aria-label="Generar Winner Score">Generar Winner Score</button>
+    </div>
+    <div id="gptPanel" class="card gpt-panel hidden">
+      <div class="gpt-panel-header">
+        <h3>Asistente IA</h3>
+        <span id="gptChunkChip" class="gpt-chip hidden">Procesado por lotes</span>
+      </div>
+      <div id="gptText" class="gpt-markdown muted">Los resultados de la IA aparecerán aquí.</div>
+      <div id="gptRisks" class="gpt-risks hidden">
+        <h4>Riesgos logísticos</h4>
+        <ul></ul>
+      </div>
+      <div id="gptDataBlocks" class="gpt-data"></div>
+      <div id="gptWarnings" class="gpt-warnings hidden">
+        <h4>Log</h4>
+        <ul></ul>
+      </div>
+      <div id="gptMeta" class="gpt-meta hidden"></div>
     </div>
     <div id="searchRowRight">
       <div id="listMeta">0 resultados</div>
@@ -370,6 +391,7 @@ body.dark .skeleton{background:#333;}
 import { applyFilters, readFilters } from '/static/js/filters-panel.js';
 import * as api from "/static/js/net.js";
 import * as groupsService from "/static/js/groups-service.js";
+import { executeGptTask } from '/static/js/gpt-actions.js';
 const { fetchJson } = api;
 const metricKeys = window.metricKeys;
 const openConfigModal = window.openConfigModal;
@@ -472,6 +494,7 @@ function updateResultsBadge(total) {
 window.updateResultsBadge = updateResultsBadge;
 window.allProducts = allProducts;
 window.products = products;
+window.currentTimeWindow = window.currentTimeWindow || null;
 const gridRoot = document.getElementById('productTable');
 
 document.addEventListener('filters-changed', (e) => {
@@ -1197,33 +1220,90 @@ if(gptField){
 async function sendPromptHandler(){
   const prompt = gptField.value.trim();
   if(!prompt){ toast.info('Escribe una consulta'); return; }
-  sendPromptBtn.disabled = true;
   try {
-    const data = await fetchJson('/custom_gpt', {method:'POST', body: JSON.stringify({prompt})});
+    const response = await executeGptTask('consulta', {
+      promptText: prompt,
+      button: sendPromptBtn,
+      busyText: 'Consultando…'
+    });
     const history = document.getElementById('history');
-    if(history){
+    if(history && response){
       const details = document.createElement('details');
       const summary = document.createElement('summary');
       const shortPrompt = prompt.length > 40 ? prompt.substring(0,37) + '...' : prompt;
       summary.textContent = shortPrompt;
       const pre = document.createElement('pre');
-      pre.textContent = data.response || data.error;
+      pre.textContent = response.text || '[sin texto]';
       details.appendChild(summary);
       details.appendChild(pre);
       history.prepend(details);
     }
-    toast.success('Consulta enviada');
     gptField.value = '';
     localStorage.removeItem('lastGptPrompt');
     autoGrow(gptField);
   } catch(err) {
-    toast.error(err.message || 'Error al enviar');
-  } finally {
-    sendPromptBtn.disabled = false;
+    console.error('Error ejecutando consulta GPT', err);
   }
 }
 
 sendPromptBtn.onclick = sendPromptHandler;
+
+function ensureProductsAvailable(){
+  const list = Array.isArray(window.products) ? window.products : [];
+  if (!list.length) {
+    toast.info('No hay productos visibles para analizar');
+    return false;
+  }
+  return true;
+}
+
+const btnGptWeights = document.getElementById('btnGptWeights');
+if (btnGptWeights) {
+  btnGptWeights.addEventListener('click', async () => {
+    if (!ensureProductsAvailable()) return;
+    try {
+      await executeGptTask('pesos', { button: btnGptWeights, busyText: 'Calculando…' });
+    } catch (err) {
+      console.error('Error en pesos IA', err);
+    }
+  });
+}
+
+const btnGptTrends = document.getElementById('btnGptTrends');
+if (btnGptTrends) {
+  btnGptTrends.addEventListener('click', async () => {
+    if (!ensureProductsAvailable()) return;
+    try {
+      await executeGptTask('tendencias', { button: btnGptTrends, busyText: 'Analizando…' });
+    } catch (err) {
+      console.error('Error en análisis de tendencias', err);
+    }
+  });
+}
+
+const btnGptImpute = document.getElementById('btnGptImpute');
+if (btnGptImpute) {
+  btnGptImpute.addEventListener('click', async () => {
+    if (!ensureProductsAvailable()) return;
+    try {
+      await executeGptTask('imputacion', { button: btnGptImpute, busyText: 'Imputando…' });
+    } catch (err) {
+      console.error('Error en imputación IA', err);
+    }
+  });
+}
+
+const btnGptDesire = document.getElementById('btnGptDesire');
+if (btnGptDesire) {
+  btnGptDesire.addEventListener('click', async () => {
+    if (!ensureProductsAvailable()) return;
+    try {
+      await executeGptTask('desire', { button: btnGptDesire, busyText: 'Resumiendo…' });
+    } catch (err) {
+      console.error('Error en desire IA', err);
+    }
+  });
+}
 document.getElementById('darkToggle').onclick = () => {
   document.body.classList.toggle('dark');
 };
@@ -1449,6 +1529,7 @@ document.getElementById('btnGenWinner').onclick = () => {
 
 // -------- Group management --------
 let currentGroupFilter = -1; // -1 indicates all products
+window.currentGroupFilter = currentGroupFilter;
 
 async function loadLists() {
   try {
@@ -1486,6 +1567,7 @@ async function applyGroupFilter(id){
   if(id === -1){
     // load all products
     currentGroupFilter = -1;
+    window.currentGroupFilter = currentGroupFilter;
     fetchProducts();
     // refresh lists to update active styling
     loadLists();
@@ -1493,6 +1575,7 @@ async function applyGroupFilter(id){
   }
   try{
     currentGroupFilter = id;
+    window.currentGroupFilter = currentGroupFilter;
     const data = await fetchJson('/list/' + id);
     allProducts = data;
     window.allProducts = allProducts;

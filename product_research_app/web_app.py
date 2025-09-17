@@ -74,6 +74,9 @@ DEBUG = bool(os.environ.get("DEBUG"))
 DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y")
 
 
+_IMPUTATION_EXTRA_FIELDS = {"review_count", "image_count", "profit_margin"}
+
+
 _DB_INIT = False
 _DB_INIT_PATH: str | None = None
 _DB_INIT_LOCK = threading.Lock()
@@ -170,6 +173,22 @@ def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> str:
             source_used,
         )
     return desire_val
+
+
+def _coerce_imputation_extra_value(field: str, value: Any):
+    if field in {"review_count", "image_count"}:
+        try:
+            number = int(round(float(value)))
+        except Exception:
+            return None
+        return max(0, number)
+    if field == "profit_margin":
+        try:
+            number = float(value)
+        except Exception:
+            return None
+        return number
+    return value
 
 
 def parse_xlsx(binary: bytes):
@@ -1464,7 +1483,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._set_json(400)
                 self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
                 return
-            logger.info("PATCH product_id=%s fields=%s", pid, list(data.keys()))
+            allowed = {"desire", "desire_magnitude", "awareness_level", "competition_level"}
+            imputation_payload = {k: v for k, v in data.items() if k in _IMPUTATION_EXTRA_FIELDS}
+            logger.info(
+                "PATCH product_id=%s fields=%s extra=%s",
+                pid,
+                [k for k in data.keys() if k in allowed],
+                list(imputation_payload.keys()),
+            )
             conn = ensure_db()
             prod = database.get_product(conn, pid)
             if not prod:
@@ -1472,10 +1498,23 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._set_json(404)
                 self.wfile.write(json.dumps({"error": "Not found"}).encode('utf-8'))
                 return
-            allowed = {"desire", "desire_magnitude", "awareness_level", "competition_level"}
             fields = {k: v for k, v in data.items() if k in allowed}
             if fields:
                 database.update_product(conn, pid, **fields)
+            if imputation_payload:
+                try:
+                    extra_dict = json.loads(rget(prod, "extra") or "{}")
+                except Exception:
+                    extra_dict = {}
+                changed = False
+                for key, raw_val in imputation_payload.items():
+                    coerced = _coerce_imputation_extra_value(key, raw_val)
+                    if coerced is None:
+                        continue
+                    extra_dict[key] = coerced
+                    changed = True
+                if changed:
+                    database.update_product(conn, pid, extra=extra_dict)
             product = row_to_dict(database.get_product(conn, pid))
             self._set_json()
             self.wfile.write(json.dumps(product).encode('utf-8'))
