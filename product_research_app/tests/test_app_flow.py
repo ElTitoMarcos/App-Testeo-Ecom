@@ -247,17 +247,23 @@ def test_run_post_import_auto(tmp_path, monkeypatch):
         product_id=2,
     )
 
-    def fake_generate_batch_columns(api_key, model, items):
-        ok = {
+    def fake_desire_orchestrator(api_key, model, batch):
+        return {
             str(item["id"]): {
-                "desire": f"Auto Desire {item['id']}",
-                "desire_magnitude": "High",
-                "awareness_level": "Most Aware",
-                "competition_level": "Low",
+                "normalized_text": f"Auto Desire {item['id']}\nLinea {item['id']}",
+                "keywords": [f"k{item['id']}", "growth"],
             }
-            for item in items
+            for item in batch
         }
-        return ok, {}, {"total_tokens": 0}, 0.1
+
+    def fake_imputacion_orchestrator(api_key, model, batch):
+        return {
+            str(item["id"]): {
+                "review_count": 10 * int(item["id"]),
+                "image_count": 3,
+            }
+            for item in batch
+        }
 
     winner_calls = []
     weight_prompts: list = []
@@ -269,7 +275,8 @@ def test_run_post_import_auto(tmp_path, monkeypatch):
         assert set(weights) == set(winner_score.ALLOWED_FIELDS)
         return {"processed": len(ids), "updated": len(ids)}
 
-    monkeypatch.setattr(gpt, "generate_batch_columns", fake_generate_batch_columns)
+    monkeypatch.setattr(gpt, "orchestrate_desire_summary", fake_desire_orchestrator)
+    monkeypatch.setattr(gpt, "orchestrate_imputation", fake_imputacion_orchestrator)
     monkeypatch.setattr(
         gpt,
         "recommend_weights_from_aggregates",
@@ -310,7 +317,11 @@ def test_run_post_import_auto(tmp_path, monkeypatch):
     assert cur.fetchone()[0] == 6
 
     prod_a = row_to_dict(database.get_product(conn, pid_a))
-    assert prod_a.get("desire") == f"Auto Desire {pid_a}"
+    assert prod_a.get("desire") == f"Auto Desire {pid_a}\nLinea {pid_a}"
+    extra_a = json.loads(prod_a.get("extra") or "{}")
+    assert extra_a.get("desire_keywords") == [f"k{pid_a}", "growth"]
+    assert extra_a.get("review_count") == 10 * pid_a
+    assert extra_a.get("image_count") == 3
     assert winner_calls and set(winner_calls[0]) == {pid_a, pid_b}
 
 def test_runner_retries_batches(tmp_path, monkeypatch):
@@ -359,14 +370,72 @@ def test_runner_retries_batches(tmp_path, monkeypatch):
     assert desire_progress["failed"] == 1
     assert not summary[import_id]["errors"]
 
+
+def test_runner_respects_call_budget(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "get_api_key", lambda: "sk-test")
+    monkeypatch.setattr(config, "get_model", lambda: "gpt-test")
+    monkeypatch.setattr(runner.settings, "AI_MAX_CALLS_PER_IMPORT", 1)
+    monkeypatch.setattr(runner.settings, "AI_MIN_BATCH_SIZE", 1)
+    monkeypatch.setattr(runner.settings, "AI_MAX_BATCH_SIZE", 1)
+    monkeypatch.setattr(runner.settings, "AI_MAX_PARALLEL", 1)
+
+    product_ids = [
+        database.insert_product(
+            conn,
+            name=f"BudgetProd{i}",
+            description="",
+            category="Home",
+            price=10.0 + i,
+            currency="USD",
+            image_url="",
+            source="",
+            extra={},
+            product_id=i,
+        )
+        for i in range(1, 4)
+    ]
+
+    import_id = "task-budget"
+    database.enqueue_ai_tasks(conn, "desire", product_ids, import_task_id=import_id)
+
+    calls = {"count": 0}
+
+    def fake_generate(api_key, model, items):
+        calls["count"] += 1
+        ok = {
+            str(item["id"]): {
+                "desire": f"Budget Desire {item['id']}",
+                "desire_magnitude": "High",
+                "awareness_level": "Most Aware",
+                "competition_level": "Low",
+            }
+            for item in items
+        }
+        return ok, {}, {}, 0.1
+
+    monkeypatch.setattr(gpt, "generate_batch_columns", fake_generate)
+
+    summary = runner.run_auto({"desire"}, batch_size=1, max_parallel=1)
+
+    assert calls["count"] == 1
+    assert import_id in summary
+    desire_summary = summary[import_id]["tasks"]["desire"]
+    assert desire_summary["processed"] == 1
+    assert desire_summary["skipped"] == len(product_ids) - 1
+
     cur = conn.cursor()
     cur.execute(
-        "SELECT state, attempts FROM ai_task_queue WHERE import_task_id=?",
+        "SELECT state, note FROM ai_task_queue WHERE import_task_id=? ORDER BY id",
         (import_id,),
     )
-    row = cur.fetchone()
-    assert row[0] == "done"
-    assert int(row[1]) >= 2
+    rows = cur.fetchall()
+    states = [row[0] for row in rows]
+    notes = [row[1] for row in rows]
+    assert states.count("done") == 1
+    assert states.count("skipped") == len(product_ids) - 1
+    assert all(note == "budget_exhausted" for note in notes if note)
+
 
 def test_scoring_v2_generate_cases(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)

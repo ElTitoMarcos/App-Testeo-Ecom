@@ -340,11 +340,26 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL,
             started_at TEXT,
             finished_at TEXT,
+            pending INTEGER NOT NULL DEFAULT 1,
+            skipped INTEGER NOT NULL DEFAULT 0,
+            note TEXT,
             FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE,
             UNIQUE(task_type, product_id)
         )
         """
     )
+    try:
+        cur.execute("ALTER TABLE ai_task_queue ADD COLUMN pending INTEGER NOT NULL DEFAULT 1")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE ai_task_queue ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE ai_task_queue ADD COLUMN note TEXT")
+    except Exception:
+        pass
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_ai_task_queue_state ON ai_task_queue(state)"
     )
@@ -356,6 +371,18 @@ def initialize_database(conn: sqlite3.Connection) -> None:
     )
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_ai_task_queue_product ON ai_task_queue(product_id)"
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_cache (
+            task_type TEXT,
+            cache_key TEXT,
+            payload_json TEXT,
+            model_version TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (task_type, cache_key)
+        )
+        """
     )
     conn.commit()
 
@@ -866,7 +893,10 @@ def enqueue_ai_tasks(
             attempts=0,
             updated_at=excluded.updated_at,
             started_at=NULL,
-            finished_at=NULL
+            finished_at=NULL,
+            pending=1,
+            skipped=0,
+            note=NULL
         """,
         rows,
     )
@@ -942,7 +972,7 @@ def mark_ai_tasks_in_progress(conn: sqlite3.Connection, task_ids: Sequence[int])
     placeholders = ",".join(["?"] * len(task_ids))
     cur = conn.cursor()
     cur.execute(
-        f"UPDATE ai_task_queue SET state='processing', attempts=attempts+1, started_at=?, updated_at=? "
+        f"UPDATE ai_task_queue SET state='processing', attempts=attempts+1, started_at=?, updated_at=?, pending=0 "
         f"WHERE id IN ({placeholders})",
         (now, now, *[int(tid) for tid in task_ids]),
     )
@@ -956,7 +986,7 @@ def complete_ai_tasks(conn: sqlite3.Connection, task_ids: Sequence[int]) -> None
     placeholders = ",".join(["?"] * len(task_ids))
     cur = conn.cursor()
     cur.execute(
-        f"UPDATE ai_task_queue SET state='done', finished_at=?, updated_at=? "
+        f"UPDATE ai_task_queue SET state='done', finished_at=?, updated_at=?, pending=0, skipped=0, note=NULL "
         f"WHERE id IN ({placeholders})",
         (now, now, *[int(tid) for tid in task_ids]),
     )
@@ -970,7 +1000,7 @@ def fail_ai_tasks(conn: sqlite3.Connection, task_ids: Sequence[int], error: str)
     placeholders = ",".join(["?"] * len(task_ids))
     cur = conn.cursor()
     cur.execute(
-        f"UPDATE ai_task_queue SET state='error', error=?, updated_at=? "
+        f"UPDATE ai_task_queue SET state='error', error=?, updated_at=?, pending=0, skipped=0, note=NULL "
         f"WHERE id IN ({placeholders})",
         (error[:512], now, *[int(tid) for tid in task_ids]),
     )
@@ -986,9 +1016,25 @@ def requeue_ai_tasks(conn: sqlite3.Connection, task_ids: Sequence[int]) -> None:
     placeholders = ",".join(["?"] * len(task_ids))
     cur = conn.cursor()
     cur.execute(
-        f"UPDATE ai_task_queue SET state='pending', error=NULL, updated_at=?, started_at=NULL, finished_at=NULL "
+        f"UPDATE ai_task_queue SET state='pending', error=NULL, updated_at=?, started_at=NULL, finished_at=NULL, pending=1, skipped=0, note=NULL "
         f"WHERE id IN ({placeholders})",
         (now, *[int(tid) for tid in task_ids]),
+    )
+    conn.commit()
+
+
+def skip_ai_tasks(conn: sqlite3.Connection, task_ids: Sequence[int], note: str) -> None:
+    """Mark the specified tasks as skipped without treating them as errors."""
+
+    if not task_ids:
+        return
+    now = datetime.utcnow().isoformat()
+    placeholders = ",".join(["?"] * len(task_ids))
+    cur = conn.cursor()
+    cur.execute(
+        f"UPDATE ai_task_queue SET state='skipped', error=NULL, note=?, updated_at=?, finished_at=?, pending=0, skipped=1 "
+        f"WHERE id IN ({placeholders})",
+        (note[:512], now, now, *[int(tid) for tid in task_ids]),
     )
     conn.commit()
 

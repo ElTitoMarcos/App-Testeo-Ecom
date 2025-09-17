@@ -751,6 +751,159 @@ def generate_batch_columns(api_key: str, model: str, items: List[Dict[str, Any]]
     return ok, ko, usage, duration
 
 
+# ---------------- Post-import automation orchestrators -----------------
+
+
+def orchestrate_desire_summary(
+    api_key: str,
+    model: str,
+    items: Sequence[Mapping[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """Call orchestrator E to obtain desire summaries and keywords."""
+
+    if not items:
+        return {}
+
+    sys_prompt = (
+        "Eres un orquestador IA para investigación de productos. "
+        "Tu tarea es resumir el deseo que despierta cada producto en 2-3 líneas, "
+        "cada una de máximo 90 caracteres, y extraer entre 3 y 6 palabras clave."
+    )
+    intro = (
+        "Responde SOLO con un JSON.\n"
+        "Raíz: objeto cuyas claves son IDs de producto.\n"
+        "Cada valor debe contener: { \"normalized_text\": string, \"keywords\": [string,...] }.\n"
+        "Las líneas deben estar separadas por '\\n' y no incluir viñetas ni números.\n"
+    )
+
+    content: List[Dict[str, Any]] = [{"type": "text", "text": intro}]
+    for item in items:
+        pid = item.get("id")
+        title = item.get("title") or item.get("name")
+        desc = item.get("description") or ""
+        prev = item.get("desire") or item.get("existing_desire") or ""
+        block_lines = [
+            "BEGIN_PRODUCT",
+            f"id: {pid}",
+            f"title: {title}",
+            f"description: {desc}",
+        ]
+        if prev:
+            block_lines.append(f"previous_desire: {prev}")
+        block_lines.append("END_PRODUCT")
+        content.append({"type": "text", "text": "\n".join(block_lines)})
+
+    messages = [
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": content},
+    ]
+
+    response = call_openai_chat(
+        api_key,
+        model,
+        messages,
+        temperature=0.15,
+        response_format={"type": "json_object"},
+    )
+
+    raw = response["choices"][0]["message"]["content"].strip()
+    try:
+        parsed = json.loads(raw)
+    except Exception as exc:
+        raise InvalidJSONError("Respuesta IA no es JSON") from exc
+
+    if not isinstance(parsed, Mapping):
+        raise InvalidJSONError("Respuesta IA no es JSON")
+
+    result: Dict[str, Dict[str, Any]] = {}
+    for item in items:
+        pid = str(item.get("id"))
+        entry = parsed.get(pid)
+        if isinstance(entry, Mapping):
+            normalized = entry.get("normalized_text")
+            keywords = entry.get("keywords")
+            if isinstance(keywords, list):
+                keywords = [str(kw).strip() for kw in keywords if str(kw).strip()]
+            else:
+                keywords = []
+            result[pid] = {
+                "normalized_text": normalized,
+                "keywords": keywords,
+            }
+    return result
+
+
+def orchestrate_imputation(
+    api_key: str,
+    model: str,
+    items: Sequence[Mapping[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """Call orchestrator D to estimate missing numeric metadata."""
+
+    if not items:
+        return {}
+
+    sys_prompt = (
+        "Eres un asistente que imputa métricas faltantes para productos de e-commerce. "
+        "A partir del título, descripción y categoría estima recuento de reseñas y cantidad de imágenes."
+    )
+    intro = (
+        "Responde SOLO con JSON.\n"
+        "Raíz: objeto cuyas claves son IDs de producto.\n"
+        "Cada valor: { \"review_count\": entero>=0, \"image_count\": entero>=0 }.\n"
+        "Si no tienes datos suficientes usa 0. No devuelvas comentarios.\n"
+    )
+
+    content: List[Dict[str, Any]] = [{"type": "text", "text": intro}]
+    for item in items:
+        pid = item.get("id")
+        title = item.get("title") or item.get("name")
+        desc = item.get("description") or ""
+        category = item.get("category") or ""
+        block_lines = [
+            "BEGIN_PRODUCT",
+            f"id: {pid}",
+            f"title: {title}",
+            f"category: {category}",
+            f"description: {desc}",
+            "END_PRODUCT",
+        ]
+        content.append({"type": "text", "text": "\n".join(block_lines)})
+
+    messages = [
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": content},
+    ]
+
+    response = call_openai_chat(
+        api_key,
+        model,
+        messages,
+        temperature=0.1,
+        response_format={"type": "json_object"},
+    )
+
+    raw = response["choices"][0]["message"]["content"].strip()
+    try:
+        parsed = json.loads(raw)
+    except Exception as exc:
+        raise InvalidJSONError("Respuesta IA no es JSON") from exc
+
+    if not isinstance(parsed, Mapping):
+        raise InvalidJSONError("Respuesta IA no es JSON")
+
+    result: Dict[str, Dict[str, Any]] = {}
+    for item in items:
+        pid = str(item.get("id"))
+        entry = parsed.get(pid)
+        if isinstance(entry, Mapping):
+            result[pid] = {
+                "review_count": entry.get("review_count"),
+                "image_count": entry.get("image_count"),
+            }
+    return result
+
+
 # ---------------- Winner Score evaluation -----------------
 
 
