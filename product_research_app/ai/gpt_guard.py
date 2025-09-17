@@ -39,7 +39,6 @@ class _PendingRequest:
     created_at: float
     import_id: Optional[object] = None
 
-
 @dataclass
 class _BatchOutcome:
     """Result of a batch execution."""

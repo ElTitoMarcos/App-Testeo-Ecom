@@ -862,7 +862,6 @@ def orchestrate_desire_summary(
         notes = []
     return {"items": result_items, "notes": notes}
 
-
 def orchestrate_imputation(
     api_key: str,
     model: str,
@@ -949,7 +948,6 @@ def orchestrate_imputation(
         notes = []
 
     return {"items": result_items, "notes": notes}
-
 
 # ---------------- Winner Score evaluation -----------------
 
