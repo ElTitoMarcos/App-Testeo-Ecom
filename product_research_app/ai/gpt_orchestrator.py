@@ -837,18 +837,28 @@ class DesireBatchResult(dict):
         self.raw_response = raw_response
 
 
-def _extract_desire_json_block(raw_text: str) -> str:
+def _extract_desire_json_block(raw_text: str) -> Optional[str]:
     text = (raw_text or "").strip()
     if not text:
-        raise ChatCompletionError("Empty response from desire batch")
+        return None
     match = JSON_BLOCK_RE.search(text)
     if match:
         return match.group(1)
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        raise ChatCompletionError("Desire batch response missing JSON object")
-    return text[start : end + 1]
+    cleaned = re.sub(r"```(?:json)?", "", text, flags=re.IGNORECASE)
+    cleaned = cleaned.replace("```", "")
+    start = cleaned.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    for index in range(start, len(cleaned)):
+        char = cleaned[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return cleaned[start : index + 1]
+    return None
 
 
 def _normalize_desire_lines(entry: Mapping[str, Any]) -> List[str]:
@@ -875,12 +885,23 @@ def _normalize_desire_lines(entry: Mapping[str, Any]) -> List[str]:
     return normalized
 
 
-def _normalize_desire_label(raw_label: Any, raw_keywords: Any, lines: Sequence[str]) -> str:
+def _normalize_desire_label(
+    raw_label: Any,
+    raw_keywords: Any,
+    lines: Sequence[str],
+    magnitude_hint: Optional[int] = None,
+) -> str:
     valid = {"alto", "medio", "bajo"}
     if isinstance(raw_label, str):
         cleaned = raw_label.strip().lower()
         if cleaned in valid:
             return cleaned
+    if magnitude_hint is not None:
+        if magnitude_hint >= 70:
+            return "alto"
+        if magnitude_hint >= 45:
+            return "medio"
+        return "bajo"
     keywords = _ensure_list_of_str(raw_keywords)
     keyword_count = len(keywords)
     blob = " ".join(lines).lower()
@@ -899,14 +920,23 @@ def _normalize_desire_label(raw_label: Any, raw_keywords: Any, lines: Sequence[s
     return "medio"
 
 
-def _normalize_desire_magnitude(raw_value: Any, label: str) -> int:
-    try:
-        if raw_value not in (None, ""):
-            magnitude = int(round(float(raw_value)))
-        else:
-            magnitude = None
-    except Exception:
-        magnitude = None
+def _normalize_desire_magnitude(
+    raw_value: Any,
+    label: str,
+    magnitude_hint: Optional[int] = None,
+) -> int:
+    magnitude: Optional[int] = None
+    candidates: List[Any] = []
+    if raw_value not in (None, ""):
+        candidates.append(raw_value)
+    if magnitude_hint is not None:
+        candidates.append(magnitude_hint)
+    for candidate in candidates:
+        try:
+            magnitude = int(round(float(candidate)))
+            break
+        except Exception:
+            continue
     if magnitude is None:
         defaults = {"alto": 80, "medio": 50, "bajo": 25}
         magnitude = defaults.get(label, 50)
@@ -918,7 +948,7 @@ def run_desire_batch(
     *,
     timeout: Optional[int] = None,
     max_retry: Optional[int] = None,
-) -> Dict[str, Dict[str, Any]]:
+) -> DesireBatchResult:
     if not items:
         return DesireBatchResult({}, "")
     default_timeout, default_retry = _get_simple_timeout_retry()
@@ -934,13 +964,22 @@ def run_desire_batch(
         max_retry=max_retry,
         temperature=0.0,
     )
+    json_block = _extract_desire_json_block(response)
+    if not json_block:
+        preview = (response or "")[:200]
+        logger.warning("desire_batch_invalid_payload preview=%s", preview)
+        return DesireBatchResult({}, response)
     try:
-        data = json.loads(_extract_desire_json_block(response))
+        data = json.loads(json_block)
     except json.JSONDecodeError as exc:
-        raise ChatCompletionError(f"Invalid JSON from desire batch: {exc}") from exc
+        preview = json_block[:200]
+        logger.warning("desire_batch_invalid_json error=%s preview=%s", exc, preview)
+        return DesireBatchResult({}, response)
     entries = data.get("items")
     if not isinstance(entries, list):
-        raise ChatCompletionError("Desire batch response missing items list")
+        preview = json_block[:200]
+        logger.warning("desire_batch_invalid_items preview=%s", preview)
+        return DesireBatchResult({}, response)
     result: Dict[str, Dict[str, Any]] = {}
     for entry in entries:
         if not isinstance(entry, dict):
@@ -952,8 +991,11 @@ def run_desire_batch(
         lines = _normalize_desire_lines(entry)
         if not lines:
             continue
-        label = _normalize_desire_label(entry.get("class"), entry.get("keywords"), lines)
-        magnitude = _normalize_desire_magnitude(entry.get("magnitude"), label)
+        magnitude_hint = _ensure_int(entry.get("magnitude"))
+        label = _normalize_desire_label(
+            entry.get("class"), entry.get("keywords"), lines, magnitude_hint
+        )
+        magnitude = _normalize_desire_magnitude(entry.get("magnitude"), label, magnitude_hint)
         result[key] = {
             "text": "\n".join(lines[:3]),
             "label": label,

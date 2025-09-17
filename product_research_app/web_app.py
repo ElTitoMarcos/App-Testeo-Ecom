@@ -249,6 +249,13 @@ def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> str:
     product.ai_desire_label -> product.desire_magnitude.  Normalizes to
     string and logs when no value is found."""
 
+    def _is_blank(value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return value.strip() == ""
+        return False
+
     sources = [
         ("product.desire", rget(product, "desire")),
         ("extras.desire", rget(extras, "desire")),
@@ -259,16 +266,21 @@ def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> str:
     desire_val = ""
     source_used = None
     for name, val in sources:
-        if val not in (None, ""):
+        if not _is_blank(val):
             desire_val = str(val)
             source_used = name
             break
     if desire_val == "":
-        missing_sources = [name for name, val in sources if val in (None, "")]
+        ai_desire_val = rget(product, "ai_desire")
+        ai_label_val = rget(product, "ai_desire_label")
+        magnitude_val = rget(product, "desire_magnitude")
         ai_reasons = []
-        for field_name in ("product.ai_desire", "product.ai_desire_label", "product.desire_magnitude"):
-            if field_name in missing_sources:
-                ai_reasons.append(f"{field_name.split('.')[-1]}_empty")
+        if _is_blank(ai_desire_val):
+            ai_reasons.append("ai_desire_empty")
+        if _is_blank(ai_label_val):
+            ai_reasons.append("ai_desire_label_empty")
+        if magnitude_val in (None, ""):
+            ai_reasons.append("desire_magnitude_missing")
         if not ai_reasons:
             ai_reasons.append("no_ai_data")
         last_ai_update = rget(product, "ai_columns_completed_at") or rget(

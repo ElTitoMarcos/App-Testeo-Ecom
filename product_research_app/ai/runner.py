@@ -282,8 +282,8 @@ def _fetch_pending_desire_ids(conn: sqlite3.Connection, ids: Sequence[int]) -> L
         FROM products
         WHERE id IN ({placeholders})
           AND (
-            COALESCE(ai_desire, '') = '' OR
-            COALESCE(ai_desire_label, '') = '' OR
+            NULLIF(ai_desire, '') IS NULL OR
+            NULLIF(ai_desire_label, '') IS NULL OR
             desire_magnitude IS NULL
           )
         ORDER BY id
@@ -319,8 +319,8 @@ def _select_pending_desire_batch(
         FROM products
         WHERE id IN ({placeholders})
           AND (
-            COALESCE(ai_desire, '') = '' OR
-            COALESCE(ai_desire_label, '') = '' OR
+            NULLIF(ai_desire, '') IS NULL OR
+            NULLIF(ai_desire_label, '') IS NULL OR
             desire_magnitude IS NULL
           )
         ORDER BY id
@@ -398,6 +398,7 @@ def _process_desire(
     pending_ids = _fetch_pending_desire_ids(conn, ids)
     pending_count = len(pending_ids)
     processed = max(0, len(existing_ids) - pending_count)
+    pending_start = pending_count
 
     update_status(
         task_id,
@@ -408,32 +409,33 @@ def _process_desire(
         },
     )
 
+    sample_ids = pending_ids[:10]
     logger.info(
-        "IA desire start: pending=%s batch_size=%s reserve_calls=%s budget=%s",
+        "IA desire start: pending=%s sample_ids=%s batch_size=%s",
         pending_count,
+        sample_ids,
         settings.batch_size,
-        settings.reserve_desire_calls,
-        settings.max_calls or "inf",
     )
-    if pending_ids:
-        logger.info("IA desire pending sample=%s", pending_ids[:10])
 
     if pending_count == 0:
         logger.info(
-            "IA desire done: processed=%s failed=%s calls_used=%s",
-            processed,
+            "IA desire done: pending_start=%s updated=%s failed=%s",
+            pending_start,
+            0,
             failed,
-            calls_used,
         )
         return BatchResult(processed=processed, failed=failed, calls=0)
 
     remaining_ids = list(pending_ids)
     touched_ids: List[int] = []
     batch_index = 0
+    total_updated = 0
 
     while remaining_ids:
-        if settings.max_calls and (calls_used + calls) >= settings.max_calls:
-            if (calls_used + calls) < settings.reserve_desire_calls:
+        current_total_calls = calls_used + calls
+        reserve_calls = max(0, settings.reserve_desire_calls)
+        if settings.max_calls and current_total_calls >= settings.max_calls:
+            if current_total_calls < reserve_calls and pending_count > 0:
                 logger.info(
                     "IA desire reserve_call forcing batch remaining=%s",
                     len(remaining_ids),
@@ -442,7 +444,7 @@ def _process_desire(
                 note = "desire_call_limit_reached"
                 logger.info(
                     "IA desire stop: call_budget_exhausted calls_used=%s/%s remaining=%s",
-                    calls_used + calls,
+                    current_total_calls,
                     settings.max_calls,
                     len(remaining_ids),
                 )
@@ -479,10 +481,10 @@ def _process_desire(
             continue
 
         logger.info(
-            "IA desire batch=%s send=%s ids=%s",
+            "IA desire batch=%s size=%s pending_before=%s",
             batch_index,
             len(items),
-            batch_ids[:10],
+            len(remaining_ids),
         )
 
         try:
@@ -553,23 +555,28 @@ def _process_desire(
             )
             continue
 
+        calls_label = settings.max_calls or "inf"
+        logger.info(
+            "IA desire batch=%s size=%s calls_used=%s/%s",
+            batch_index,
+            len(batch_ids),
+            calls_used + calls,
+            calls_label,
+        )
+
         handled = set(batch_ids)
         remaining_ids = [pid for pid in remaining_ids if pid not in handled]
 
-        raw_preview = getattr(result_map, "raw_response", None)
         if not result_map:
             failed += len(batch_ids)
-            preview = (raw_preview or "")[:300]
+            raw_preview = (getattr(result_map, "raw_response", "") or "")[:200]
             logger.warning(
-                "desire_empty_response task_id=%s batch=%s size=%s preview=%s",
-                task_id,
-                batch_index,
-                len(items),
-                preview,
+                "IA desire empty_response for batch ids=%s preview=%s",
+                batch_ids[:10],
+                raw_preview,
             )
             update_status(
                 task_id,
-                notes=["desire_empty_response"],
                 desire={
                     "requested": total_requested,
                     "processed": processed,
@@ -577,13 +584,6 @@ def _process_desire(
                 },
             )
             continue
-
-        logger.info(
-            "IA desire batch=%s received=%s ids=%s",
-            batch_index,
-            len(result_map),
-            list(result_map.keys())[:10],
-        )
 
         received_ids: set[int] = set()
         for key in result_map.keys():
@@ -633,19 +633,17 @@ def _process_desire(
             )
             conn.commit()
             processed += batch_success
+            total_updated += batch_success
             touched_ids.extend(int(row[3]) for row in updates)
             logger.info(
-                "IA desire updated=%s batch=%s calls_used=%s/%s",
+                "IA desire updated=%s (this batch); total_updated=%s",
                 batch_success,
-                batch_index,
-                calls_used + calls,
-                settings.max_calls or "inf",
+                total_updated,
             )
         else:
             logger.warning(
-                "IA desire batch=%s produced no valid updates task_id=%s",
-                batch_index,
-                task_id,
+                "IA desire empty_response for batch ids=%s",
+                batch_ids[:10],
             )
 
         update_status(
@@ -664,10 +662,10 @@ def _process_desire(
             logger.exception("desire_summary_sync_failed task_id=%s", task_id)
 
     logger.info(
-        "IA desire done: processed=%s failed=%s calls_used=%s",
-        processed,
+        "IA desire done: pending_start=%s updated=%s failed=%s",
+        pending_start,
+        total_updated,
         failed,
-        calls_used + calls,
     )
 
     return BatchResult(processed=processed, failed=failed, calls=calls)
@@ -858,6 +856,7 @@ def _process_winner_score(
         settings.max_calls or "inf",
     )
     update_status(task_id, winner_score={"processed": processed, "failed": failed, "requested": len(ids)})
+    logger.info("Winner Score recalculated for ids=%s (post-desire)", len(ids))
     return WinnerResult(processed=processed, failed=failed, calls=calls, note=note)
 
 
