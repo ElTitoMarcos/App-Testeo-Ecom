@@ -741,7 +741,6 @@ class _QueueActions:
         for reason, ids in self.failed.items():
             database.fail_ai_tasks(conn, ids, reason[:255])
 
-
 def _stringify_desire_text(value: Any) -> str:
     if isinstance(value, list):
         lines = [str(line).strip() for line in value if str(line).strip()]
@@ -851,7 +850,6 @@ def _parse_imputacion_result_payload(payload: Any) -> Tuple[Dict[str, Dict[str, 
         notes.append(notes_field.strip())
 
     return items, list(dict.fromkeys(notes))
-
 
 def _apply_desire_payload(
     conn,

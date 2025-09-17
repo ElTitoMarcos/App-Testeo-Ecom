@@ -154,7 +154,6 @@ def test_gpt_guard_server_error_records_note(monkeypatch):
     assert summary["results"][0]["success"] is False
     assert summary["results"][0]["attempts"] == 2
 
-
 def test_gpt_guard_passes_import_id_to_orchestrator(monkeypatch):
     guard = GPTGuard(
         {

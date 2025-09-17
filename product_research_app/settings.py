@@ -29,7 +29,6 @@ def _get_int(name: str, default: int) -> int:
         except Exception:
             return default
 
-
 def _get_float(name: str, default: float) -> float:
     value = os.environ.get(name)
     if value is None:
@@ -41,7 +40,6 @@ def _get_float(name: str, default: float) -> float:
             return float(value.replace(",", "."))
         except Exception:
             return default
-
 
 AI_AUTO_ENABLED: bool = _get_bool("AI_AUTO_ENABLED", True)
 AI_MAX_CALLS_PER_IMPORT: int = max(0, _get_int("AI_MAX_CALLS_PER_IMPORT", 4))
