@@ -231,7 +231,6 @@ def _get_timeout() -> float:
 _DEFAULT_MAX_ITEMS = 300
 _DEFAULT_TIMEOUT = 60.0
 
-
 def _prepare_weights_context(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
     context = dict(payload)
     raw_products = payload.get("products")
@@ -367,7 +366,6 @@ def _build_weighting_aggregates_from_list(products: Sequence[Dict[str, Any]]) ->
         return build_weighting_aggregates(list(products))
     return _summarise_products_for_weights(products)
 
-
 def _chunk_sequence(seq: Sequence[Any], chunk_size: int) -> Iterable[List[Any]]:
     for idx in range(0, len(seq), chunk_size):
         yield list(seq[idx : idx + chunk_size])
@@ -384,7 +382,6 @@ def _build_prompt(prompt_text: str, context: Optional[Dict[str, Any]]) -> str:
         " ```json DATA_JSON\n{...}\n``` e incluye la clave obligatoria 'prompt_version'."
     )
     return prompt
-
 
 def _call_openai(
     model: str,
@@ -466,7 +463,6 @@ def _merge_chunk_data(base: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[st
         base = {}
     if not isinstance(incoming, dict):
         return base
-
     refs = incoming.get("refs")
     if isinstance(refs, list):
         base_refs = base.get("refs")
@@ -500,7 +496,6 @@ def _merge_refs(existing: List[Dict[str, Any]], new_refs: List[Dict[str, Any]]) 
         merged.append(ref)
     return merged
 
-
 def _merge_refs_dict(existing: Dict[str, Any], new_refs: Dict[str, Any]) -> Dict[str, Any]:
     result: Dict[str, Any] = {}
     if isinstance(existing, dict):
@@ -531,8 +526,7 @@ def _merge_refs_dict(existing: Dict[str, Any], new_refs: Dict[str, Any]) -> Dict
             result[key] = value
 
     return result
-
-
+  
 def _extract_mapping(data: Dict[str, Any]) -> Dict[str, Any]:
     mapping: Dict[str, Any] = {}
     if not isinstance(data, dict):
