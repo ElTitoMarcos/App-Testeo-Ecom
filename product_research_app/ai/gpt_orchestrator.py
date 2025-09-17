@@ -820,20 +820,6 @@ def _ensure_list_of_str(values: object) -> List[str]:
             continue
         out.append(str(item).strip())
     return out
-
-
-def _ensure_lines(entry: Dict[str, Any]) -> List[str]:
-    raw_lines = entry.get("normalized_text")
-    if not isinstance(raw_lines, list):
-        raw_lines = entry.get("lines")
-    lines = _ensure_list_of_str(raw_lines)
-    if not lines:
-        text = entry.get("text")
-        if isinstance(text, str) and text.strip():
-            lines = [line.strip() for line in text.splitlines() if line.strip()]
-    return [line[:200] for line in lines if line]
-
-
 def _ensure_int(value: Any) -> Optional[int]:
     if value in (None, ""):
         return None
@@ -843,6 +829,90 @@ def _ensure_int(value: Any) -> Optional[int]:
         return None
 
 
+class DesireBatchResult(dict):
+    """Mapping of product id -> normalized desire output with raw payload."""
+
+    def __init__(self, data: Mapping[str, Dict[str, Any]], raw_response: str) -> None:
+        super().__init__(data)
+        self.raw_response = raw_response
+
+
+def _extract_desire_json_block(raw_text: str) -> str:
+    text = (raw_text or "").strip()
+    if not text:
+        raise ChatCompletionError("Empty response from desire batch")
+    match = JSON_BLOCK_RE.search(text)
+    if match:
+        return match.group(1)
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ChatCompletionError("Desire batch response missing JSON object")
+    return text[start : end + 1]
+
+
+def _normalize_desire_lines(entry: Mapping[str, Any]) -> List[str]:
+    lines = _ensure_list_of_str(entry.get("normalized_text"))
+    if not lines:
+        lines = _ensure_list_of_str(entry.get("lines"))
+    if not lines:
+        text_value = entry.get("text")
+        if isinstance(text_value, str) and text_value.strip():
+            lines = [segment.strip() for segment in text_value.splitlines() if segment.strip()]
+    normalized: List[str] = []
+    for line in lines:
+        if not line:
+            continue
+        normalized.append(line[:90])
+        if len(normalized) >= 3:
+            break
+    if len(normalized) == 1:
+        splits = [seg.strip() for seg in normalized[0].replace(";", ".").split(".") if seg.strip()]
+        if len(splits) >= 2:
+            normalized = [segment[:90] for segment in splits[:3]]
+        elif normalized[0]:
+            normalized.append(normalized[0])
+    return normalized
+
+
+def _normalize_desire_label(raw_label: Any, raw_keywords: Any, lines: Sequence[str]) -> str:
+    valid = {"alto", "medio", "bajo"}
+    if isinstance(raw_label, str):
+        cleaned = raw_label.strip().lower()
+        if cleaned in valid:
+            return cleaned
+    keywords = _ensure_list_of_str(raw_keywords)
+    keyword_count = len(keywords)
+    blob = " ".join(lines).lower()
+    if any(token in blob for token in ("muy alta", "alta demanda", "gran demanda", "hot", "tendencia", "trend")):
+        return "alto"
+    if any(token in blob for token in ("baja demanda", "poca demanda", "low demand", "sin demanda", "fría", "fria")):
+        return "bajo"
+    if keyword_count >= 4 or len(blob) >= 200:
+        return "alto"
+    if keyword_count <= 1 and len(blob) < 80:
+        return "bajo"
+    if keyword_count == 3:
+        return "alto"
+    if keyword_count == 2:
+        return "medio"
+    return "medio"
+
+
+def _normalize_desire_magnitude(raw_value: Any, label: str) -> int:
+    try:
+        if raw_value not in (None, ""):
+            magnitude = int(round(float(raw_value)))
+        else:
+            magnitude = None
+    except Exception:
+        magnitude = None
+    if magnitude is None:
+        defaults = {"alto": 80, "medio": 50, "bajo": 25}
+        magnitude = defaults.get(label, 50)
+    return max(0, min(100, int(magnitude)))
+
+
 def run_desire_batch(
     items: List[Dict[str, Any]],
     *,
@@ -850,7 +920,7 @@ def run_desire_batch(
     max_retry: Optional[int] = None,
 ) -> Dict[str, Dict[str, Any]]:
     if not items:
-        return {}
+        return DesireBatchResult({}, "")
     default_timeout, default_retry = _get_simple_timeout_retry()
     timeout = timeout or default_timeout
     max_retry = max_retry if max_retry is not None else default_retry
@@ -865,7 +935,7 @@ def run_desire_batch(
         temperature=0.0,
     )
     try:
-        data = json.loads(response)
+        data = json.loads(_extract_desire_json_block(response))
     except json.JSONDecodeError as exc:
         raise ChatCompletionError(f"Invalid JSON from desire batch: {exc}") from exc
     entries = data.get("items")
@@ -879,17 +949,17 @@ def run_desire_batch(
         if pid in (None, ""):
             continue
         key = str(pid)
-        label = entry.get("class")
-        label_str = str(label).strip().lower() if isinstance(label, str) else None
-        magnitude = _ensure_int(entry.get("magnitude"))
-        keywords = _ensure_list_of_str(entry.get("keywords"))
+        lines = _normalize_desire_lines(entry)
+        if not lines:
+            continue
+        label = _normalize_desire_label(entry.get("class"), entry.get("keywords"), lines)
+        magnitude = _normalize_desire_magnitude(entry.get("magnitude"), label)
         result[key] = {
-            "lines": _ensure_lines(entry),
-            "class": label_str,
+            "text": "\n".join(lines[:3]),
+            "label": label,
             "magnitude": magnitude,
-            "keywords": keywords,
         }
-    return result
+    return DesireBatchResult(result, response)
 
 
 def run_imputacion_batch(
