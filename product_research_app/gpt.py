@@ -29,7 +29,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import requests
 
-from . import database, config
+from . import config, database
+from .ai import gpt_orchestrator
 from .services import winner_score as winner_calc
 
 logger = logging.getLogger(__name__)
@@ -247,7 +248,12 @@ def call_openai_chat(
     if response_format is not None:
         payload["response_format"] = response_format
     try:
-        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
+        response = requests.post(
+            url,
+            headers=headers,
+            data=json.dumps(payload),
+            timeout=gpt_orchestrator.get_timeout(),
+        )
     except requests.RequestException as exc:
         raise OpenAIError(f"Failed to connect to OpenAI API: {exc}") from exc
     if response.status_code != 200:
@@ -751,6 +757,200 @@ def generate_batch_columns(api_key: str, model: str, items: List[Dict[str, Any]]
     return ok, ko, usage, duration
 
 
+# ---------------- Post-import automation orchestrators -----------------
+
+
+def orchestrate_desire_summary(
+    api_key: str,
+    model: str,
+    items: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Call orchestrator E to obtain desire summaries and keywords."""
+
+    if not items:
+        return {"items": []}
+
+    payload_items: List[Dict[str, Any]] = []
+    for item in items:
+        pid = item.get("id")
+        if pid is None:
+            continue
+        payload_items.append(
+            {
+                "id": str(pid),
+                "desire": item.get("desire")
+                or item.get("existing_desire")
+                or "",
+                "title": item.get("title")
+                or item.get("name")
+                or "",
+                "description": item.get("description") or "",
+            }
+        )
+
+    if not payload_items:
+        return {"items": []}
+
+    sys_prompt = (
+        "Eres un asistente de marketing. Resume el deseo principal de cada producto para "
+        "dropshipping WW.\nReglas:\n- No inventes; usa desire o, si falta, title/description.\n"
+        "- 2–3 líneas, máx 90 chars/linea. Sin emojis. Tono analítico.\n"
+        "- Devuelve SOLO un bloque JSON válido con:\n"
+        "  { \"items\": [ { \"id\": \"...\", \"normalized_text\": [\"l1\",\"l2\",\"l3?\"], \"keywords\": [\"k1\",\"k2\",\"k3\"] } ] }"
+    )
+    user_payload = {"items": payload_items}
+    user_content = "### DATA\n" + json.dumps(user_payload, ensure_ascii=False)
+
+    messages = [
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": user_content},
+    ]
+
+    response = call_openai_chat(
+        api_key,
+        model,
+        messages,
+        temperature=0.15,
+        response_format={"type": "json_object"},
+    )
+
+    raw = response["choices"][0]["message"]["content"].strip()
+    try:
+        parsed = json.loads(raw)
+    except Exception as exc:
+        raise InvalidJSONError("Respuesta IA no es JSON") from exc
+
+    if not isinstance(parsed, Mapping):
+        raise InvalidJSONError("Respuesta IA no es JSON")
+
+    entries = parsed.get("items")
+    if not isinstance(entries, list):
+        raise InvalidJSONError("Respuesta IA no es JSON")
+
+    result_items: List[Dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        pid = entry.get("id")
+        if pid is None:
+            continue
+        lines_raw = entry.get("normalized_text")
+        if isinstance(lines_raw, list):
+            lines = [str(line).strip() for line in lines_raw if str(line).strip()]
+        elif isinstance(lines_raw, str):
+            lines = [seg.strip() for seg in lines_raw.splitlines() if seg.strip()]
+        else:
+            lines = []
+        normalized = "\n".join(lines)
+        keywords_raw = entry.get("keywords")
+        if isinstance(keywords_raw, list):
+            keywords = [str(kw).strip() for kw in keywords_raw if str(kw).strip()]
+        else:
+            keywords = []
+        result_items.append(
+            {
+                "id": str(pid),
+                "normalized_text": normalized,
+                "keywords": keywords,
+            }
+        )
+
+    notes_raw = parsed.get("notes")
+    if isinstance(notes_raw, list):
+        notes = [str(note).strip() for note in notes_raw if str(note).strip()]
+    else:
+        notes = []
+    return {"items": result_items, "notes": notes}
+
+
+def orchestrate_imputation(
+    api_key: str,
+    model: str,
+    items: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Call orchestrator D to estimate missing numeric metadata."""
+
+    if not items:
+        return {"items": []}
+
+    payload_items: List[Dict[str, Any]] = []
+    for item in items:
+        pid = item.get("id")
+        if pid is None:
+            continue
+        payload_items.append(
+            {
+                "id": str(pid),
+                "title": item.get("title") or item.get("name") or "",
+                "description": item.get("description") or "",
+                "category": item.get("category") or "",
+            }
+        )
+
+    if not payload_items:
+        return {"items": []}
+
+    sys_prompt = (
+        "Imputa solo si hay base textual mínima. Si no, deja null y explica en notes por id si es necesario.\n"
+        "Devuelve SOLO JSON:\n"
+        "{ \"items\": [ { \"id\": \"...\", \"review_count\": 12|null, \"image_count\": 4|null } ] }"
+    )
+
+    user_payload = {"items": payload_items}
+    user_content = "### DATA\n" + json.dumps(user_payload, ensure_ascii=False)
+
+    messages = [
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": user_content},
+    ]
+
+    response = call_openai_chat(
+        api_key,
+        model,
+        messages,
+        temperature=0.1,
+        response_format={"type": "json_object"},
+    )
+
+    raw = response["choices"][0]["message"]["content"].strip()
+    try:
+        parsed = json.loads(raw)
+    except Exception as exc:
+        raise InvalidJSONError("Respuesta IA no es JSON") from exc
+
+    if not isinstance(parsed, Mapping):
+        raise InvalidJSONError("Respuesta IA no es JSON")
+
+    entries = parsed.get("items")
+    if not isinstance(entries, list):
+        raise InvalidJSONError("Respuesta IA no es JSON")
+
+    result_items: List[Dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        pid = entry.get("id")
+        if pid is None:
+            continue
+        result_items.append(
+            {
+                "id": str(pid),
+                "review_count": entry.get("review_count"),
+                "image_count": entry.get("image_count"),
+            }
+        )
+
+    notes_field = parsed.get("notes")
+    if isinstance(notes_field, Mapping):
+        notes = {str(k): str(v).strip() for k, v in notes_field.items() if str(v).strip()}
+    elif isinstance(notes_field, list):
+        notes = [str(item).strip() for item in notes_field if str(item).strip()]
+    else:
+        notes = []
+
+    return {"items": result_items, "notes": notes}
+
+
 # ---------------- Winner Score evaluation -----------------
 
 
@@ -1227,50 +1427,77 @@ def recommend_weights_from_aggregates(
         "awareness",
     ]
     model_id = model or "gpt-4o"
-    payload = json.dumps(aggregates, ensure_ascii=False, indent=2)
-    prompt = (
-        "Eres un científico de datos especializado en e-commerce.\n"
-        "Analiza las siguientes estadísticas agregadas del dataset actual y propone pesos 0-100 para las variables del Winner Score.\n"
-        "Devuelve JSON estricto con esta forma:\n"
-        "{\n"
-        '  "weights": {"price": 0-100, ...},\n'
-        '  "order": ["revenue", "price", ...],\n'
-        '  "notes": "explicación corta"\n'
-        "}\n"
-        "Los pesos son intensidades independientes, NO tienen que sumar 100.\n"
-        "Datos agregados:\n"
-        f"{payload}"
-    )
+    sample_titles_raw = aggregates.get("sample_titles")
+    if isinstance(sample_titles_raw, (list, tuple)):
+        sample_titles = [str(title) for title in sample_titles_raw]
+    else:
+        sample_titles = []
+    dataset_payload = {
+        "aggregates": aggregates,
+        "sample_titles": sample_titles,
+        "count": int(aggregates.get("total_products", 0) or 0),
+    }
+    user_content = "### AGGREGATES\n" + json.dumps(dataset_payload, ensure_ascii=False)
     messages = [
-        {"role": "system", "content": "Eres un orquestador de modelos IA para research de productos."},
-        {"role": "user", "content": prompt},
+        {
+            "role": "system",
+            "content": (
+                "Devuelve pesos 0–100 y order, optimizados para winners WW, basados en aggregates.\n"
+                "SOLO JSON:\n"
+                '{ "weights": {...}, "order": ["..."], "notes": [], "version": "B.v2" }'
+            ),
+        },
+        {"role": "user", "content": user_content},
     ]
-    response = call_openai_chat(api_key, model_id, messages, temperature=0.2)
-    content = response["choices"][0]["message"]["content"].strip()
-    parsed = _extract_json_from_text(content)
+    response = call_openai_chat(
+        api_key,
+        model_id,
+        messages,
+        temperature=0.1,
+        response_format={"type": "json_object"},
+    )
+    raw = response["choices"][0]["message"]["content"].strip()
+    try:
+        parsed = json.loads(raw)
+    except Exception as exc:
+        raise InvalidJSONError("Respuesta IA no es JSON") from exc
 
-    raw_weights: Mapping[str, Any] = {}
-    if isinstance(parsed, Mapping):
-        raw_weights = (
-            parsed.get("weights")
-            or parsed.get("pesos")
-            or parsed.get("pesos_0_100")
-            or parsed.get("weights_0_100")
-            or {}
-        )
+    if not isinstance(parsed, Mapping):
+        raise InvalidJSONError("Respuesta IA no es JSON")
+
+    raw_weights_obj = parsed.get("weights")
+    if not isinstance(raw_weights_obj, Mapping):
+        for alt in ("pesos", "pesos_0_100", "weights_0_100"):
+            candidate = parsed.get(alt)
+            if isinstance(candidate, Mapping):
+                raw_weights_obj = candidate
+                break
+        else:
+            raw_weights_obj = {}
+    raw_weights = raw_weights_obj
     weights = _normalise_weight_mapping(raw_weights)
     weights = _complete_weight_profile(weights, allowed)
 
-    order_raw = parsed.get("order") if isinstance(parsed, Mapping) else None
-    if order_raw is None and isinstance(parsed, Mapping):
-        order_raw = parsed.get("orden")
+    order_raw = parsed.get("order") if isinstance(parsed.get("order"), list) else parsed.get("orden")
     order = _sanitize_weight_order(order_raw, allowed, weights)
 
-    notes = ""
-    if isinstance(parsed, Mapping):
-        notes = parsed.get("notes") or parsed.get("nota") or parsed.get("justificacion") or ""
+    notes_field = parsed.get("notes")
+    if isinstance(notes_field, list):
+        notes = [str(note).strip() for note in notes_field if str(note).strip()]
+    elif isinstance(notes_field, Mapping):
+        notes = [
+            f"{key}: {str(message).strip()}" if key not in (None, "") else str(message).strip()
+            for key, message in notes_field.items()
+            if str(message).strip()
+        ]
+    elif isinstance(notes_field, str) and notes_field.strip():
+        notes = [notes_field.strip()]
+    else:
+        notes = []
 
-    return {"weights": weights, "order": order, "notes": notes}
+    version = parsed.get("version") if isinstance(parsed.get("version"), str) else "B.v2"
+
+    return {"weights": weights, "order": order, "notes": notes, "version": version}
 
 
 def summarize_top_products(api_key: str, model: str, products: List[Dict[str, Any]]) -> str:
