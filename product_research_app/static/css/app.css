@@ -33,6 +33,267 @@ body.dark {
   --bar-btn-focus: #3A6FD8;
 }
 
+#gptActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+#gptActions button {
+  flex-shrink: 0;
+}
+
+.gpt-panel {
+  margin-top: 10px;
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 10px;
+  padding: 12px;
+  color: #1a1b2e;
+}
+
+body.dark .gpt-panel {
+  background: #0f1224;
+  border-color: #2f355c;
+  color: #f4f6ff;
+}
+
+.gpt-panel.hidden {
+  display: none;
+}
+
+.gpt-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.gpt-panel-header h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.gpt-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  font-size: 0.75rem;
+  border-radius: 999px;
+  background: #f7c655;
+  color: #1a1b2e;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  font-weight: 600;
+}
+
+body.dark .gpt-chip {
+  background: #f0b429;
+  color: #1a1b2e;
+}
+
+.gpt-chip.hidden {
+  display: none;
+}
+
+.gpt-markdown {
+  line-height: 1.45;
+  color: #1a1b2e;
+}
+
+body.dark .gpt-markdown {
+  color: #f4f6ff;
+}
+
+.gpt-markdown p {
+  margin: 0 0 0.6em;
+}
+
+.gpt-markdown ul {
+  margin: 0.4em 0 0.6em 1.4em;
+  padding: 0;
+}
+
+.gpt-markdown a {
+  color: #80b3ff;
+  text-decoration: underline;
+}
+
+.gpt-markdown code {
+  background: rgba(255, 255, 255, 0.08);
+  padding: 2px 4px;
+  border-radius: 4px;
+  font-family: "Fira Code", monospace;
+  font-size: 0.85em;
+}
+
+.gpt-risks {
+  margin-top: 12px;
+  border-left: 3px solid #f39c12;
+  background: rgba(243, 156, 18, 0.12);
+  padding: 8px 10px;
+  border-radius: 6px;
+}
+
+body.dark .gpt-risks {
+  background: rgba(243, 156, 18, 0.18);
+}
+
+.gpt-risks h4 {
+  margin: 0 0 4px;
+  font-size: 0.95rem;
+}
+
+.gpt-risks ul {
+  margin: 0;
+  padding-left: 1.2em;
+  font-size: 0.88rem;
+}
+
+.gpt-data {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.gpt-block {
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 8px;
+  padding: 10px;
+  color: #1a1b2e;
+}
+
+body.dark .gpt-block {
+  background: rgba(21, 26, 48, 0.9);
+  border-color: rgba(96, 110, 154, 0.4);
+  color: #f4f6ff;
+}
+
+.gpt-block h4 {
+  margin: 0 0 6px;
+  font-size: 0.95rem;
+  color: inherit;
+}
+
+.gpt-block ul {
+  margin: 0;
+  padding-left: 1.2em;
+  font-size: 0.9rem;
+}
+
+.gpt-block ul li {
+  margin-bottom: 4px;
+}
+
+.gpt-block .gpt-order {
+  margin-top: 6px;
+  font-size: 0.85rem;
+  color: #c5ceff;
+}
+
+.gpt-metric {
+  font-weight: 600;
+  margin-right: 8px;
+}
+
+.gpt-value {
+  font-variant-numeric: tabular-nums;
+}
+
+.gpt-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+.gpt-item {
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 8px;
+  padding: 10px;
+  color: #1a1b2e;
+}
+
+body.dark .gpt-item {
+  background: rgba(21, 26, 48, 0.9);
+  border-color: rgba(96, 110, 154, 0.4);
+  color: #f4f6ff;
+}
+
+.gpt-item header {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.gpt-item ul {
+  margin: 4px 0 0 1.2em;
+  padding: 0;
+  font-size: 0.85rem;
+}
+
+.gpt-tag {
+  display: inline-flex;
+  padding: 2px 8px;
+  background: #1f8b4c;
+  color: #fff;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  margin-top: 6px;
+}
+
+.gpt-warnings {
+  margin-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  padding-top: 8px;
+}
+
+.gpt-warnings.hidden {
+  display: none;
+}
+
+.gpt-warnings h4 {
+  margin: 0 0 4px;
+  font-size: 0.9rem;
+}
+
+.gpt-warnings ul {
+  margin: 0;
+  padding-left: 1.2em;
+  font-size: 0.85rem;
+}
+
+.gpt-meta {
+  margin-top: 10px;
+  font-size: 0.8rem;
+  opacity: 0.75;
+}
+
+.gpt-meta.hidden {
+  display: none;
+}
+
+.gpt-apply-btn {
+  margin-top: 10px;
+  padding: 6px 12px;
+  font-size: 0.85rem;
+}
+
+.gpt-highlight {
+  background: rgba(247, 198, 85, 0.18);
+  box-shadow: 0 0 0 2px rgba(247, 198, 85, 0.8);
+}
+
+body.dark .gpt-highlight {
+  background: rgba(247, 198, 85, 0.15);
+  box-shadow: 0 0 0 2px rgba(247, 198, 85, 0.65);
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
