@@ -120,10 +120,7 @@ body.dark .skeleton{background:#333;}
     <div id="gptActions">
       <button id="sendPrompt">Enviar consulta a GPT</button>
       <button id="btnGptWeights">Ajustar pesos con IA</button>
-      <button id="btnGptTrends">Análisis de tendencias (profundo)</button>
-      <button id="btnGptImpute">Imputar campos</button>
-      <button id="btnGptDesire">Resumir desire</button>
-      <button id="btnGenWinner" class="bar-btn" disabled title="Generar Winner Score" aria-label="Generar Winner Score">Generar Winner Score</button>
+      <div id="auto-ai-status" class="ai-chip muted small hidden" role="status" aria-live="polite"></div>
     </div>
     <div id="gptPanel" class="card gpt-panel hidden">
       <div class="gpt-panel-header">
@@ -432,19 +429,31 @@ async function sha256(str) {
 async function pollImportStatus(id) {
   try {
     const data = await fetchJson(`/_import_status?task_id=${id}`);
-    if (data.status === 'pending') {
+    const status = (data.status || data.state || '').toString().toLowerCase();
+    if (status === 'pending' || status === 'queued' || status === 'running') {
       if (data.ui_cost_message) showImportBanner(data.ui_cost_message);
       importPollTimer = setTimeout(() => pollImportStatus(id), 2000);
-    } else if (data.status === 'ai') {
+    } else if (status === 'ai') {
       if (data.ui_cost_message) showImportBanner(data.ui_cost_message);
+      const aiStatusPayload = {
+        state: 'RUNNING',
+        desire: data.ai_counts?.desire,
+        imputacion: data.ai_counts?.imputacion,
+        winner_score: data.ai_counts?.winner_score,
+        message: data.message
+      };
+      renderAutoAIStatus(aiStatusPayload);
       importPollTimer = setTimeout(() => pollImportStatus(id), 2000);
     } else {
       localStorage.removeItem(IMPORT_TASK_LS_KEY);
-      if (data.status === 'done') {
+      if (status === 'done' || status === 'finished') {
         await reloadTable();
         hideImportBanner();
+        pollAutoAIStatus(id);
       } else {
         toast.error(data.error || 'Error en importación');
+        pollAutoAIStatus(null);
+        hideAutoAIStatus();
       }
     }
   } catch (e) {
@@ -600,6 +609,28 @@ const columns = [
   { key: 'competition_level', label: 'Competition level', type: 'string', headerClass: 'ec-col ec-col-competition', cellClass: 'ec-col ec-col-competition', dataEcCol: 'competition_level' },
   { key: 'winner_score', label: 'Winner Score', type: 'number' },
 ];
+
+const AUTO_PENDING_FIELDS = new Set(['desire_summary', 'review_count', 'image_count', 'winner_score']);
+
+function shouldShowPendingPlaceholder(key, value) {
+  if (!AUTO_PENDING_FIELDS.has(key)) return false;
+  if (value === null || value === undefined) return true;
+  if (typeof value === 'string') {
+    return value.trim() === '';
+  }
+  if (key === 'winner_score') {
+    const num = Number(value);
+    return !Number.isFinite(num);
+  }
+  return false;
+}
+
+function applyPendingPlaceholder(td, key, value) {
+  if (!shouldShowPendingPlaceholder(key, value)) return false;
+  td.textContent = '(pendiente)';
+  td.classList.add('muted', 'pending-placeholder');
+  return true;
+}
 
 let trendingWords = [];
 
@@ -857,15 +888,21 @@ function renderTable() {
       }
       if (col.render) {
         try { td.textContent = col.render(item); } catch (e) { td.textContent = ''; }
+        applyPendingPlaceholder(td, key, value);
       } else if (key === 'winner_score') {
-        const sc = parseFloat(value);
-        if (!isNaN(sc)) {
-          const scInt = Math.round(sc);
-          td.innerHTML = '<span class="' + winnerScoreClass(scInt) + '">' + scInt.toLocaleString(undefined,{maximumFractionDigits:0}) + '</span>';
-          if (item.winner_score_breakdown && item.winner_score_breakdown.justifications) {
-            const j = item.winner_score_breakdown.justifications;
-            const tooltip = Object.entries(j).map(([k,v])=>`${k}: ${v}`).join('\n');
-            td.title = tooltip;
+        if (!applyPendingPlaceholder(td, key, value)) {
+          const sc = parseFloat(value);
+          if (!isNaN(sc)) {
+            const scInt = Math.round(sc);
+            td.innerHTML = '<span class="' + winnerScoreClass(scInt) + '">' + scInt.toLocaleString(undefined,{maximumFractionDigits:0}) + '</span>';
+            if (item.winner_score_breakdown && item.winner_score_breakdown.justifications) {
+              const j = item.winner_score_breakdown.justifications;
+              const tooltip = Object.entries(j).map(([k,v])=>`${k}: ${v}`).join('\n');
+              td.title = tooltip;
+            }
+          } else {
+            td.textContent = value || '';
+            applyPendingPlaceholder(td, key, value);
           }
         }
       } else if (key === 'image_url' && value) {
@@ -1004,6 +1041,7 @@ function renderTable() {
         }
       } else {
         td.textContent = value || '';
+        applyPendingPlaceholder(td, key, value);
       }
       tr.appendChild(td);
     });
@@ -1145,6 +1183,7 @@ fileInputEl.onchange = async (ev) => {
   ev.preventDefault();
   const file = fileInputEl.files[0];
   if(!file) return;
+  pollAutoAIStatus(null);
   const formData = new FormData();
   formData.append('file', file);
   const btn = document.getElementById('uploadBtn');
@@ -1193,6 +1232,9 @@ document.getElementById('searchBtn').onclick = () => {
 };
 const gptField = document.getElementById('gptPrompt');
 const sendPromptBtn = document.getElementById('sendPrompt');
+const autoAIStatusEl = document.getElementById('auto-ai-status');
+let autoAIStatusTimer = null;
+let currentAutoAITaskId = null;
 
 function autoGrow(el){
   el.style.height = 'auto';
@@ -1269,41 +1311,116 @@ if (btnGptWeights) {
   });
 }
 
-const btnGptTrends = document.getElementById('btnGptTrends');
-if (btnGptTrends) {
-  btnGptTrends.addEventListener('click', async () => {
-    if (!ensureProductsAvailable()) return;
-    try {
-      await executeGptTask('tendencias', { button: btnGptTrends, busyText: 'Analizando…' });
-    } catch (err) {
-      console.error('Error en análisis de tendencias', err);
-    }
-  });
+function clearAutoAIStatusTimer() {
+  if (autoAIStatusTimer) {
+    clearTimeout(autoAIStatusTimer);
+    autoAIStatusTimer = null;
+  }
 }
 
-const btnGptImpute = document.getElementById('btnGptImpute');
-if (btnGptImpute) {
-  btnGptImpute.addEventListener('click', async () => {
-    if (!ensureProductsAvailable()) return;
-    try {
-      await executeGptTask('imputacion', { button: btnGptImpute, busyText: 'Imputando…' });
-    } catch (err) {
-      console.error('Error en imputación IA', err);
+function formatAutoAIProgress(label, info) {
+  if (!info) return null;
+  if (typeof info === 'object') {
+    const current = info.current ?? info.done ?? info.completed ?? info.progress ?? info.processed;
+    const total = info.total ?? info.expected ?? info.max ?? info.out_of;
+    if (total !== undefined && total !== null) {
+      return `${label} ${(current ?? 0)}/${total}`;
     }
-  });
+    if (current !== undefined && current !== null) {
+      return `${label} ${current}`;
+    }
+  }
+  if (typeof info === 'number' && !Number.isNaN(info)) {
+    return `${label} ${info}`;
+  }
+  if (typeof info === 'string' && info.trim()) {
+    return `${label} ${info.trim()}`;
+  }
+  return null;
 }
 
-const btnGptDesire = document.getElementById('btnGptDesire');
-if (btnGptDesire) {
-  btnGptDesire.addEventListener('click', async () => {
-    if (!ensureProductsAvailable()) return;
-    try {
-      await executeGptTask('desire', { button: btnGptDesire, busyText: 'Resumiendo…' });
-    } catch (err) {
-      console.error('Error en desire IA', err);
-    }
-  });
+function hideAutoAIStatus() {
+  if (!autoAIStatusEl) return;
+  autoAIStatusEl.textContent = '';
+  autoAIStatusEl.classList.add('hidden');
 }
+
+function renderAutoAIStatus(status) {
+  if (!autoAIStatusEl) return;
+  const state = (status?.state || '').toString().toUpperCase();
+  if (state !== 'RUNNING') {
+    hideAutoAIStatus();
+    return;
+  }
+  const segments = [];
+  const desireInfo = status.desire ?? status.desire_summary;
+  const imputacionInfo = status.imputacion ?? status.imputation;
+  const scoreInfo = status.winner_score ?? status.score;
+  const pushSegment = (label, info) => {
+    const seg = formatAutoAIProgress(label, info);
+    if (seg) segments.push(seg);
+  };
+  pushSegment('Desire', desireInfo);
+  pushSegment('Imputación', imputacionInfo);
+  pushSegment('Score', scoreInfo);
+  if (!segments.length && status?.message) {
+    segments.push(status.message);
+  }
+  autoAIStatusEl.textContent = `Procesamiento automático – ${segments.join(' · ') || 'en curso'}`;
+  autoAIStatusEl.classList.remove('hidden');
+}
+
+async function pollAutoAIStatus(taskId) {
+  if (!autoAIStatusEl) return;
+  if (!taskId) {
+    currentAutoAITaskId = null;
+    clearAutoAIStatusTimer();
+    hideAutoAIStatus();
+    return;
+  }
+  currentAutoAITaskId = taskId;
+  clearAutoAIStatusTimer();
+  try {
+    const resp = await fetch(`/_ai_status?task_id=${encodeURIComponent(taskId)}`, { cache: 'no-store' });
+    if (resp.status === 404) {
+      if (currentAutoAITaskId === taskId) {
+        hideAutoAIStatus();
+        currentAutoAITaskId = null;
+      }
+      return;
+    }
+    if (!resp.ok) {
+      throw new Error(`status ${resp.status}`);
+    }
+    const data = await resp.json().catch(() => ({}));
+    if (currentAutoAITaskId !== taskId) {
+      return;
+    }
+    renderAutoAIStatus(data);
+    const state = (data?.state || '').toString().toUpperCase();
+    if (state === 'RUNNING') {
+      const interval = Number(data?.poll_interval_ms);
+      const delay = Number.isFinite(interval)
+        ? Math.min(Math.max(interval, 2000), 4000)
+        : 2500;
+      autoAIStatusTimer = setTimeout(() => {
+        pollAutoAIStatus(taskId);
+      }, delay);
+    } else {
+      hideAutoAIStatus();
+      currentAutoAITaskId = null;
+    }
+  } catch (err) {
+    console.debug('Auto AI status polling stopped', err);
+    if (currentAutoAITaskId === taskId) {
+      hideAutoAIStatus();
+      currentAutoAITaskId = null;
+    }
+  }
+}
+
+window.renderAutoAIStatus = renderAutoAIStatus;
+window.pollAutoAIStatus = pollAutoAIStatus;
 document.getElementById('darkToggle').onclick = () => {
   document.body.classList.toggle('dark');
 };
@@ -1486,45 +1603,6 @@ document.getElementById('btnExport').onclick = async () => {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   } catch(err){ console.error(err); toast.error('Error al exportar'); }
-};
-
-function getSelectedProductIds(){ return Array.from(selection, Number); }
-function setLoading(btn, s){ if(s){ btn.dataset.prev=btn.textContent; btn.textContent='Actualizando…'; } else { btn.textContent=btn.dataset.prev||btn.textContent; } }
-
-// Generate Winner Score for selected or all products
-document.getElementById('btnGenWinner').onclick = () => {
-  const ids = getSelectedProductIds();
-  const rows = ids.length ? allProducts.filter(p=>ids.includes(Number(p.id))) : products;
-  const payloadProducts = rows.map(p=>{
-    const metrics={};
-    metricKeys.forEach(k=>{ if(p[k]!==undefined) metrics[k]=p[k]; });
-    return {id:p.id, metrics};
-  });
-  if(payloadProducts.some(p=>Object.keys(p.metrics).length<metricKeys.length)){
-    toast.info('Algunos productos tienen métricas faltantes');
-  }
-  const body = ids.length ? {product_ids: ids} : {};
-  body.products = payloadProducts;
-  const btn = document.getElementById('btnGenWinner');
-  btn.disabled = true; setLoading(btn, true);
-  fetch('/api/winner-score/generate?debug=1', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify(body)
-  }).then(r=>r.json()).then(({processed=0, updated=0, diag})=>{
-    if(!processed) toast.info('Nada que recalcular (0 seleccionados)');
-    else if(updated>0) toast.success(`Winner Score recalculado: ${updated}/${processed} cambiaron`);
-    else {
-      if(diag && diag.sum_filtered===0){
-        toast.info(`Recalculado ${processed}. No afectó: los pesos de métricas presentes suman 0 → fallback uniforme.`);
-      } else {
-        toast.info(`Recalculado ${processed}. El entero 0–100 no varió (redondeo).`);
-      }
-    }
-    if(ids.length) reloadRows(ids); else reloadTable();
-  }).catch(err=>{
-    console.error(err);
-    toast.error('No se pudo actualizar el Winner Score');
-  }).finally(()=>{ btn.disabled=false; setLoading(btn,false); });
 };
 
 // -------- Group management --------

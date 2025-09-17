@@ -36,13 +36,37 @@ body.dark {
 #gptActions {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
   align-items: center;
   margin-top: 8px;
 }
 
 #gptActions button {
   flex-shrink: 0;
+}
+
+.ai-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  background: rgba(123, 148, 255, 0.18);
+  border: 1px solid rgba(123, 148, 255, 0.28);
+  color: inherit;
+}
+
+.ai-chip.small {
+  font-size: 0.7rem;
+  padding: 3px 8px;
+}
+
+body.dark .ai-chip {
+  background: rgba(103, 132, 255, 0.16);
+  border-color: rgba(103, 132, 255, 0.32);
+  color: #dbe4ff;
 }
 
 .gpt-panel {
@@ -1491,6 +1515,10 @@ th[aria-sort="descending"]::after{ content:" ▼"; opacity:.6; }
 
 .muted {
   opacity: 0.7;
+}
+
+.pending-placeholder {
+  font-style: italic;
 }
 
 /* Cards */
