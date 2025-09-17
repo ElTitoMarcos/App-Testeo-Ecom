@@ -22,11 +22,15 @@ logger = logging.getLogger(__name__)
 
 CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
 SYSTEM_PROMPT = (
-    "Eres un analista experto que trabaja con grandes listados de productos. "
-    "Debes entregar conclusiones claras y siempre terminar con un bloque JSON "
-    "dentro de triple acento grave que incluya la clave obligatoria 'prompt_version'."
+    "Todos producen texto legible y terminan con un bloque JSON dentro de ```json DATA_JSON``` "
+    "con la clave obligatoria 'prompt_version'. Tu backend separará la última fence, "
+    "así que respeta ese formato. Regla global: ignora filtros de UI y usa exactamente "
+    "el conjunto recibido (si hay group_id, céntrate en él; si no, usa todos los productos)."
 )
-JSON_BLOCK_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
+JSON_BLOCK_RE = re.compile(
+    r"```json(?:\s+DATA_JSON)?\s*(\{.*?\})\s*```",
+    re.DOTALL,
+)
 
 _TaskName = Literal["consulta", "pesos", "tendencias", "imputacion", "desire"]
 
@@ -374,8 +378,8 @@ def _build_prompt(prompt_text: str, context: Optional[Dict[str, Any]]) -> str:
         prompt += json.dumps(context, ensure_ascii=False)
     prompt += (
         "\n\n### INSTRUCCIONES DE FORMATO\n"
-        "Responde en español y finaliza siempre con un bloque ```json"  # noqa: B950
-        "\n{...}\n``` que incluya la clave 'prompt_version'."
+        "Responde en español y finaliza siempre con un bloque DATA_JSON usando la sintaxis"
+        " ```json DATA_JSON\n{...}\n``` e incluye la clave obligatoria 'prompt_version'."
     )
     return prompt
 
@@ -430,13 +434,14 @@ def _call_openai(
 
 def _parse_model_response(content: str) -> Tuple[str, Optional[Dict[str, Any]], List[str]]:
     warnings: List[str] = []
-    match = JSON_BLOCK_RE.search(content)
+    matches = list(JSON_BLOCK_RE.finditer(content))
     data: Optional[Dict[str, Any]] = None
-    if not match:
+    if not matches:
         warnings.append("Respuesta sin bloque JSON")
         text = content.strip()
         return text, None, warnings
 
+    match = matches[-1]
     json_text = match.group(1)
     try:
         parsed = json.loads(json_text)
@@ -449,12 +454,12 @@ def _parse_model_response(content: str) -> Tuple[str, Optional[Dict[str, Any]], 
     except json.JSONDecodeError as exc:
         warnings.append(f"JSON inválido: {exc}")
 
-    text = JSON_BLOCK_RE.sub("", content).strip()
+    text = (content[: match.start()] + content[match.end() :]).strip()
     return text, data, warnings
 
 
 def _merge_chunk_data(base: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, Any]:
-    if not base:
+    if not isinstance(base, dict):
         base = {}
     if not isinstance(incoming, dict):
         return base
@@ -465,6 +470,10 @@ def _merge_chunk_data(base: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[st
             base_refs = []
         base_refs = _merge_refs(base_refs, refs)
         base["refs"] = base_refs
+    elif isinstance(refs, dict):
+        existing_refs = base.get("refs") if isinstance(base.get("refs"), dict) else {}
+        base["refs"] = _merge_refs_dict(existing_refs, refs)
+
     for key, value in incoming.items():
         if key == "refs":
             continue
@@ -487,7 +496,37 @@ def _merge_refs(existing: List[Dict[str, Any]], new_refs: List[Dict[str, Any]]) 
         merged.append(ref)
     return merged
 
+def _merge_refs_dict(existing: Dict[str, Any], new_refs: Dict[str, Any]) -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    if isinstance(existing, dict):
+        for key, value in existing.items():
+            if isinstance(value, list):
+                result[key] = list(value)
+            else:
+                result[key] = value
 
+    for key, value in new_refs.items():
+        if key == "product_ids" and isinstance(value, list):
+            current = result.get(key, []) if isinstance(result.get(key), list) else []
+            merged_ids: List[str] = []
+            seen: set[str] = set()
+            for source in (current, value):
+                for item in source:
+                    if item in (None, ""):
+                        continue
+                    string_id = str(item)
+                    if string_id in seen:
+                        continue
+                    seen.add(string_id)
+                    merged_ids.append(string_id)
+            result[key] = merged_ids
+        elif isinstance(value, list):
+            result[key] = list(value)
+        else:
+            result[key] = value
+
+    return result
+  
 def _extract_mapping(data: Dict[str, Any]) -> Dict[str, Any]:
     mapping: Dict[str, Any] = {}
     if not isinstance(data, dict):

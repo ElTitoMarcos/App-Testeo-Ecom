@@ -20,7 +20,7 @@ def test_consulta_endpoint_filters_products_and_uses_template(monkeypatch):
         return {
             "ok": True,
             "text": "Análisis",
-            "data": {"refs": [{"id": "1"}], "prompt_version": "v1"},
+            "data": {"refs": {"product_ids": ["1"]}, "prompt_version": "v1"},
             "warnings": [],
             "meta": {"chunks": 1},
             "model": "gpt-4o-mini",

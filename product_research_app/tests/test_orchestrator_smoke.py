@@ -19,11 +19,11 @@ def _context_from_prompt(prompt: str) -> dict:
 def test_consulta_chunking_and_refs(monkeypatch):
     responses = [
         {
-            "content": "Resumen 1\n```json\n{\"refs\":[{\"id\":\"1\",\"category\":\"A\"}],\"prompt_version\":\"v1\"}\n```",
+            "content": "Resumen 1\n```json DATA_JSON\n{\"refs\":{\"product_ids\":[\"1\"]},\"prompt_version\":\"v1\"}\n```",
             "usage": 120,
         },
         {
-            "content": "Resumen 2\n```json\n{\"refs\":[{\"id\":\"2\",\"category\":\"A\"}],\"prompt_version\":\"v2\"}\n```",
+            "content": "Resumen 2\n```json DATA_JSON\n{\"refs\":{\"product_ids\":[\"2\"]},\"prompt_version\":\"v2\"}\n```",
             "usage": 130,
         },
     ]
@@ -47,7 +47,7 @@ def test_consulta_chunking_and_refs(monkeypatch):
     assert len(captured_contexts[0]["products"]) == 2
     assert len(captured_contexts[1]["products"]) == 1
     refs = result["data"]["refs"]
-    assert {ref["id"] for ref in refs} == {"1", "2"}
+    assert refs["product_ids"] == ["1", "2"]
     assert result["data"]["prompt_version"] == "v2"
 
 
@@ -58,7 +58,7 @@ def test_pesos_uses_aggregated_summary(monkeypatch):
         context = _context_from_prompt(prompt)
         captured["context"] = context
         return {
-            "content": "Hecho\n```json\n{\"weights\":{\"score\":0.7},\"prompt_version\":\"2024-01\"}\n```",
+            "content": "Hecho\n```json DATA_JSON\n{\"weights\":{\"score\":0.7},\"prompt_version\":\"2024-01\"}\n```",
             "usage": 88,
         }
 
@@ -95,11 +95,11 @@ def test_pesos_uses_aggregated_summary(monkeypatch):
 def test_desire_batches_into_mapping(monkeypatch):
     responses = [
         {
-            "content": "Bloque1\n```json\n{\"results\":{\"a\":{\"desire\":\"Alta\"}},\"prompt_version\":\"v1\"}\n```",
+            "content": "Bloque1\n```json DATA_JSON\n{\"results\":{\"a\":{\"desire\":\"Alta\"}},\"prompt_version\":\"v1\"}\n```",
             "usage": None,
         },
         {
-            "content": "Bloque2\n```json\n{\"results\":{\"b\":{\"desire\":\"Media\"},\"c\":{\"desire\":\"Baja\"}},\"prompt_version\":\"v2\"}\n```",
+            "content": "Bloque2\n```json DATA_JSON\n{\"results\":{\"b\":{\"desire\":\"Media\"},\"c\":{\"desire\":\"Baja\"}},\"prompt_version\":\"v2\"}\n```",
             "usage": None,
         },
     ]
