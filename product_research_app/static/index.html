@@ -11,8 +11,8 @@
 /* Basic layout */
 body { margin:0; padding:0; font-family: 'Segoe UI', Tahoma, sans-serif; color:#222; background: linear-gradient(to bottom, #f8fbff, #e9f0ff); }
 body.dark { background: #1a1b2e; color:#eaeaea; }
-header { padding:20px; text-align:center; background: linear-gradient(90deg, #0062ff, #00c8ff); color:#fff; box-shadow:0 2px 5px rgba(0,0,0,0.3); }
-body.dark header { background: linear-gradient(90deg, #2e2e78, #6547a6); }
+#app-header .app-toolbar { padding:20px; text-align:center; background: linear-gradient(90deg, #0062ff, #00c8ff); color:#fff; box-shadow:0 2px 5px rgba(0,0,0,0.3); }
+body.dark #app-header .app-toolbar { background: linear-gradient(90deg, #2e2e78, #6547a6); }
 .container { max-width: 1200px; margin: 0 auto; padding: 10px; }
 .card { background:#121426; border:1px solid #222642; border-radius:10px; padding:12px; margin-bottom:15px; }
 body.dark .card { background:#121426; border-color:#222642; }
@@ -95,31 +95,23 @@ body.dark .skeleton{background:#333;}
 </head>
 <body class="dark">
 <div id="topBar">
-  <header id="app-header" style="padding:8px 15px; display:flex; align-items:center; justify-content:space-between; position:relative;">
-    <div style="display:flex; align-items:center; gap:8px;">
-      <h1 style="margin:0; font-size:1.4rem;">Ecom Testing App</h1>
-      <p style="margin:0;font-size:12px; opacity:0.8;">By El Tito 🤙</p>
-    </div>
-    <div style="flex:1; display:flex; justify-content:flex-end; gap:8px; align-items:center;">
-      <input type="file" id="fileInput" style="display:none;" />
-      <button id="uploadBtn" title="Subir archivo">📤</button>
-      <button id="refreshBtn" title="Actualizar lista">🔄</button>
-      <button id="btn-ver-tendencias" title="Ver tendencias" data-action="toggle-trends">📊</button>
-      <button id="darkToggle" title="Modo oscuro">🌙</button>
-      <button id="configBtn" title="Configuración avanzada">⚙️</button>
-    </div>
-    <div id="header-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-      <div class="hp-track">
-        <div class="hp-fill">
-          <span class="hp-percent">0%</span>
-        </div>
+  <div id="app-header">
+    <div class="app-toolbar" style="padding:8px 15px; display:flex; align-items:center; justify-content:space-between; position:relative;">
+      <div style="display:flex; align-items:center; gap:8px;">
+        <h1 style="margin:0; font-size:1.4rem;">Ecom Testing App</h1>
+        <p style="margin:0;font-size:12px; opacity:0.8;">By El Tito 🤙</p>
       </div>
-      <div class="hp-meta">
-        <span class="hp-title">Proceso</span>
-        <span class="hp-stage">En espera</span>
+      <div style="flex:1; display:flex; justify-content:flex-end; gap:8px; align-items:center;">
+        <input type="file" id="fileInput" style="display:none;" />
+        <button id="uploadBtn" title="Subir archivo">📤</button>
+        <button id="refreshBtn" title="Actualizar lista">🔄</button>
+        <button id="btn-ver-tendencias" title="Ver tendencias" data-action="toggle-trends">📊</button>
+        <button id="darkToggle" title="Modo oscuro">🌙</button>
+        <button id="configBtn" title="Configuración avanzada">⚙️</button>
       </div>
     </div>
-  </header>
+    <div id="progress-slot-global" class="progress-slot" aria-live="polite"></div>
+  </div>
   <!-- Search bar row with controls -->
   <div id="searchRow">
     <input type="text" id="searchInput" placeholder="Buscar producto o palabra clave..." aria-label="Buscar productos" />
@@ -260,15 +252,6 @@ body.dark .skeleton{background:#333;}
 <div id="imgOverlay" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background: rgba(0,0,0,0.8); justify-content:center; align-items:center; z-index:1000;">
   <img id="overlayImg" src="" style="max-width:90%; max-height:90%; box-shadow:0 0 10px #000; border-radius:8px;" />
 </div>
-<!-- Progress bar for micro interactions -->
-<div id="progressBar" style="position:fixed; top:0; left:0; height:3px; background:#0077cc; width:0%; display:none; z-index:3000;"></div>
-<!-- Loading overlay shown during file uploads -->
-<div id="loadingOverlay" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.6); color:#fff; font-size:20px; align-items:center; justify-content:center; z-index:2000;">
-  <div style="text-align:center;">
-    <div class="spinner" style="margin-bottom:10px; width:40px; height:40px; border:5px solid #f3f3f3; border-top:5px solid #0062ff; border-radius:50%; animation: spin 1s linear infinite;"></div>
-    <div>Cargando archivo...</div>
-  </div>
-</div>
 <div id="filtersDrawer" class="drawer right hidden">
   <div style="display:flex; justify-content:space-between; align-items:center;">
     <h3>Filtros</h3>
@@ -359,12 +342,6 @@ body.dark .skeleton{background:#333;}
     <button id="clearFilters" style="flex:1;">Limpiar</button>
   </div>
 </div>
-<style>
-@keyframes spin {
-  0% { transform: rotate(0deg); }
-  100% { transform: rotate(360deg); }
-}
-</style>
 <script type="module" src="/static/js/loading.js"></script>
 <script src="/static/js/overlay.js"></script>
 <script src="/static/js/toast.js"></script>
@@ -398,6 +375,9 @@ const IMPORT_STATUS_URL = '/_import_status';
 const IMPORT_START_URL = '/upload';
 let savedApiKeyHash = null;
 let savedApiKeyLength = 0;
+
+const getGlobalProgressHost = () => document.querySelector('#progress-slot-global');
+const getActionHost = () => document.querySelector('#bottomBar') || getGlobalProgressHost();
 
 function formatPrice(n) {
   const num = Number(n);
@@ -433,14 +413,14 @@ function mapServerFraction(serverPct) {
   return Math.min(IMPORT_POLL_MAX_FRAC, frac);
 }
 
-async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL } = {}) {
+async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL, host = getGlobalProgressHost() } = {}) {
   const id = typeof taskId === 'string' ? taskId : String(taskId || '');
   if (!id) return null;
   while (true) {
     let data;
     try {
       const resp = await fetch(`${statusUrl}?task_id=${encodeURIComponent(id)}&t=${Date.now()}`,
-        { __skipLoadingHook: true, cache: 'no-store' }
+        { __skipLoadingHook: true, __hostEl: host, cache: 'no-store' }
       );
       if (!resp.ok) throw new Error('Estado no disponible');
       data = await resp.json();
@@ -474,7 +454,8 @@ async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL
 
 async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IMPORT_STATUS_URL } = {}) {
   if (!file) throw new Error('Archivo no válido');
-  const tracker = LoadingHelpers.start('Importando catálogo');
+  const host = getGlobalProgressHost();
+  const tracker = LoadingHelpers.start('Importando catálogo', { host });
   tracker.setStage('Subiendo archivo…');
   let lastResult = null;
   try {
@@ -483,6 +464,7 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     const xhr = new XMLHttpRequest();
     xhr.responseType = 'json';
     xhr.__skipLoadingHook = true;
+    xhr.__hostEl = host;
     const startResult = await new Promise((resolve, reject) => {
       xhr.open('POST', startUrl, true);
       xhr.upload.onprogress = (event) => {
@@ -527,7 +509,7 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     tracker.step(IMPORT_UPLOAD_FRAC, 'Archivo subido');
     localStorage.setItem(IMPORT_TASK_LS_KEY, idStr);
 
-    lastResult = await followImportTask(idStr, tracker, { statusUrl });
+    lastResult = await followImportTask(idStr, tracker, { statusUrl, host });
 
     const importedCount = lastResult?.imported ?? lastResult?.rows_imported;
     if (Number.isFinite(importedCount) && importedCount > 0) {
@@ -798,25 +780,6 @@ async function loadConfig() {
     if (input) input.value = '';
     if (saveBtn) saveBtn.disabled = true;
   }
-}
-
-// Microinteraction progress bar
-function startProgress() {
-  const bar = document.getElementById('progressBar');
-  bar.style.display = 'block';
-  bar.style.width = '0%';
-  let progress = 0;
-  const interval = setInterval(() => {
-    progress += 10;
-    bar.style.width = progress + '%';
-    if (progress >= 100) {
-      clearInterval(interval);
-      setTimeout(() => {
-        bar.style.display = 'none';
-        bar.style.width = '0%';
-      }, 200);
-    }
-  }, 30);
 }
 
 // helper to highlight trending keywords
@@ -1183,10 +1146,11 @@ window.onload = async () => {
   const tid = localStorage.getItem(IMPORT_TASK_LS_KEY);
   if (tid) {
     toast.info('Reanudando importación previa…');
-    const tracker = LoadingHelpers.start('Importando catálogo');
+    const host = getGlobalProgressHost();
+    const tracker = LoadingHelpers.start('Importando catálogo', { host });
     tracker.step(IMPORT_UPLOAD_FRAC, 'Reanudando…');
     try {
-      const result = await followImportTask(tid, tracker);
+      const result = await followImportTask(tid, tracker, { host });
       const importedCount = result?.imported ?? result?.rows_imported;
       if (Number.isFinite(importedCount) && importedCount > 0) {
         toast.success(`Importados ${importedCount}`);
@@ -1216,7 +1180,14 @@ document.getElementById('configBtn').onclick = async () => {
   modal.setAttribute('role','dialog');
   modal.setAttribute('aria-modal','true');
   modal.setAttribute('aria-labelledby','configModalTitle');
-  modal.innerHTML = '<header class="modal-header"><h3 id="configModalTitle">Configuración</h3><button type="button" class="modal-close" aria-label="Cerrar">✕</button></header><div class="modal-body"></div>';
+  modal.innerHTML = `
+    <header class="modal-header">
+      <h3 id="configModalTitle">Configuración</h3>
+      <div class="modal-progress-slot progress-slot" aria-live="polite"></div>
+      <button type="button" class="modal-close" aria-label="Cerrar">✕</button>
+    </header>
+    <div class="modal-body"></div>
+  `;
   const body = modal.querySelector('.modal-body');
   const cfgParent = cfg.parentElement;
   const wParent = wcard.parentElement;
@@ -1256,9 +1227,8 @@ fileInputEl.onchange = async (ev) => {
   ev.preventDefault();
   const file = fileInputEl.files[0];
   if (!file) return;
-  const btn = document.getElementById('uploadBtn');
   try {
-    await importCatalog(file, { startUrl: IMPORT_START_URL, statusUrl: IMPORT_STATUS_URL, btn });
+    await importCatalog(file, { startUrl: IMPORT_START_URL, statusUrl: IMPORT_STATUS_URL });
   } catch (err) {
     console.error(err);
   } finally {
@@ -1452,41 +1422,71 @@ document.getElementById('imgOverlay').onclick = (e) => {
   }
 };
 
-// Delete a single product by ID
-async function deleteProduct(id){
-  try {
-    if (typeof currentGroupFilter !== 'undefined' && currentGroupFilter > 0) {
-      // remove only from current list
-      const data = await fetchJson('/remove_from_list', {method:'POST', body: JSON.stringify({list_id: currentGroupFilter, ids: [id]})});
-      if(data.error){ toast.error('Error al eliminar del grupo: '+data.error); }
-      // reload current list
-      applyGroupFilter(currentGroupFilter);
-    } else {
-      const data = await fetchJson('/delete', {method:'POST', body: JSON.stringify({ids: [id]})});
-      if(data.error){ toast.error('Error al eliminar: '+data.error); }
-      fetchProducts();
+  // Delete a single product by ID
+  async function deleteProduct(id){
+    const host = getActionHost();
+    const tracker = LoadingHelpers.start('Eliminando productos', { host });
+    try {
+      if (typeof currentGroupFilter !== 'undefined' && currentGroupFilter > 0) {
+        const data = await fetchJson('/remove_from_list', {
+          method:'POST',
+          body: JSON.stringify({list_id: currentGroupFilter, ids: [id]}),
+          __hostEl: host,
+          __skipLoadingHook: true
+        });
+        if(data.error){ toast.error('Error al eliminar del grupo: '+data.error); }
+        await applyGroupFilter(currentGroupFilter, { skipProgress: true, host });
+      } else {
+        const data = await fetchJson('/delete', {
+          method:'POST',
+          body: JSON.stringify({ids: [id]}),
+          __hostEl: host,
+          __skipLoadingHook: true
+        });
+        if(data.error){ toast.error('Error al eliminar: '+data.error); }
+        await fetchProducts();
+      }
+    } catch(err){
+      console.error(err);
+      toast.error('Error al eliminar');
+    } finally {
+      tracker.done();
     }
-  } catch(err){ console.error(err); toast.error('Error al eliminar'); }
-}
+  }
 
 // Delete selected products
 document.getElementById('btnDelete').onclick = () => {
   const ids = Array.from(selection, Number);
   if(!ids.length){ toast.info('Selecciona al menos un producto para eliminar'); return; }
   toast.info('¿Eliminar los productos seleccionados?', {actionText:'Eliminar', onAction: async () => {
+    const host = getActionHost();
+    const tracker = LoadingHelpers.start('Eliminando productos', { host });
     try{
       if (typeof currentGroupFilter !== 'undefined' && currentGroupFilter > 0) {
-        const data = await fetchJson('/remove_from_list', {method:'POST', body: JSON.stringify({list_id: currentGroupFilter, ids: ids})});
+        const data = await fetchJson('/remove_from_list', {
+          method:'POST',
+          body: JSON.stringify({list_id: currentGroupFilter, ids: ids}),
+          __hostEl: host,
+          __skipLoadingHook: true
+        });
         if(data.error){ toast.error('Error al eliminar del grupo: '+data.error); } else { toast.success('Eliminados del grupo: '+data.removed); }
-        startProgress();
-        applyGroupFilter(currentGroupFilter);
+        await applyGroupFilter(currentGroupFilter, { skipProgress: true, host });
       } else {
-        const data = await fetchJson('/delete', {method:'POST', body: JSON.stringify({ids: ids})});
+        const data = await fetchJson('/delete', {
+          method:'POST',
+          body: JSON.stringify({ids: ids}),
+          __hostEl: host,
+          __skipLoadingHook: true
+        });
         if(data.error){ toast.error('Error al eliminar: '+data.error); } else { toast.success('Productos eliminados: '+data.deleted); }
-        startProgress();
-        fetchProducts();
+        await fetchProducts();
       }
-    }catch(err){ console.error(err); toast.error('Error al eliminar'); }
+    }catch(err){
+      console.error(err);
+      toast.error('Error al eliminar');
+    } finally {
+      tracker.done();
+    }
   }});
 };
 
@@ -1498,8 +1498,11 @@ document.getElementById('btnExport').onclick = async () => {
   const params = new URLSearchParams();
   params.set('ids', ids.join(','));
   // request export file
+  const host = getActionHost();
+  const tracker = LoadingHelpers.start('Exportando productos', { host });
   try{
-    const res = await fetch('/export?'+params.toString(), {method:'GET'});
+    tracker.setStage('Preparando archivo…');
+    const res = await fetch('/export?'+params.toString(), {method:'GET', __hostEl: host, __skipLoadingHook: true});
     if(res.status !== 200){ toast.error('Error al exportar'); return; }
     const blob = await res.blob();
     // determine filename from header or default
@@ -1509,8 +1512,7 @@ document.getElementById('btnExport').onclick = async () => {
       const match = disposition.match(/filename="?([^\"]+)"?/);
       if(match) filename = match[1];
     }
-    // progress feedback
-    startProgress();
+    tracker.step(0.7, 'Descargando…');
     // trigger download
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -1520,15 +1522,22 @@ document.getElementById('btnExport').onclick = async () => {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  } catch(err){ console.error(err); toast.error('Error al exportar'); }
+    tracker.step(1, 'Completado');
+  } catch(err){
+    console.error(err);
+    toast.error('Error al exportar');
+    tracker.step(1, 'Error');
+  } finally {
+    tracker.done();
+  }
 };
 
 function getSelectedProductIds(){ return Array.from(selection, Number); }
 
 // Generate Winner Score for selected or all products
-document.getElementById('btnGenWinner').onclick = async (ev) => {
-  const btn = ev.currentTarget;
-  const tracker = LoadingHelpers.start('Generando Winner Score', { btn });
+document.getElementById('btnGenWinner').onclick = async () => {
+  const host = getGlobalProgressHost();
+  const tracker = LoadingHelpers.start('Generando Winner Score', { host });
   try {
     const ids = getSelectedProductIds();
     const rows = ids.length ? allProducts.filter(p=>ids.includes(Number(p.id))) : products;
@@ -1548,6 +1557,7 @@ document.getElementById('btnGenWinner').onclick = async (ev) => {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify(body),
+      __hostEl: host,
       __skipLoadingHook: true
     });
     let payload = {};
@@ -1616,7 +1626,7 @@ async function loadLists() {
 window.loadLists = loadLists;
 document.addEventListener('groups-updated', () => loadLists());
 
-async function applyGroupFilter(id){
+async function applyGroupFilter(id, { skipProgress = false, host = null } = {}){
   if(id === -1){
     // load all products
     currentGroupFilter = -1;
@@ -1627,7 +1637,8 @@ async function applyGroupFilter(id){
   }
   try{
     currentGroupFilter = id;
-    const data = await fetchJson('/list/' + id);
+    const fetchOpts = skipProgress ? { __skipLoadingHook: true, __hostEl: host } : (host ? { __hostEl: host } : undefined);
+    const data = await fetchJson('/list/' + id, fetchOpts);
     allProducts = data;
     window.allProducts = allProducts;
     selection.clear();
@@ -1653,7 +1664,6 @@ window.addEventListener('DOMContentLoaded', () => {
   loadLists();
 });
 window.renderTable = renderTable;
-window.startProgress = startProgress;
 window.parseDate = parseDate;
 </script>
 <script type="module" src="/static/js/completar-ia.js"></script>

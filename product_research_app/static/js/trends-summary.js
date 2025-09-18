@@ -54,7 +54,8 @@ function ensureDefaultDates() {
 
 async function fetchTrends(btn) {
   ensureDefaultDates();
-  const tracker = LoadingHelpers.start('Actualizando tendencias', { btn });
+  const host = document.querySelector('#progress-slot-global');
+  const tracker = LoadingHelpers.start('Actualizando tendencias', { host });
   try {
     if ($status) $status.textContent = 'Cargando...';
     tracker.step(0.05);
@@ -66,6 +67,7 @@ async function fetchTrends(btn) {
     tracker.step(0.25);
     const res = await fetch(url.toString(), {
       credentials: 'same-origin',
+      __hostEl: host,
       __skipLoadingHook: true
     });
     if (!res.ok) throw new Error('HTTP ' + res.status);

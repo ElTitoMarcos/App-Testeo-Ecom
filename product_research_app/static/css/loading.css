@@ -1,47 +1,39 @@
-/* ===================== Header Progress ===================== */
-#app-header { position: relative; }
+/* ======= PROGRESS LAYOUT SLOTS ======= */
+#app-header { position: relative; display: grid; grid-template-rows: auto auto; row-gap: 6px; }
 
-/* Contenedor pegado al borde inferior del header */
-#header-progress{
-  position:absolute; left:12px; right:12px; bottom:6px;
-  display:flex; align-items:center; gap:10px;
-  pointer-events:none; z-index:10; opacity:0; transition:opacity 160ms ease;
-  --hp-track: rgba(255,255,255,0.14);
-  --hp-fill: #8b5cf6; /* violeta sólido, cambia si tu tema usa otro primario */
-  --hp-text: rgba(255,255,255,0.85);
+/* Slot genérico: colapsado por defecto para NO ocupar espacio */
+.progress-slot { height: 0; overflow: clip; transition: height 160ms ease; }
+
+/* Cuando hay progreso, el slot se expande y empuja el contenido (sin solapar) */
+.progress-slot.active { height: 18px; }
+
+/* ======= RAIL ======= */
+.progress-rail {
+  width: 100%; height: 18px; border-radius: 9999px; background: rgba(255,255,255,0.14);
+  outline: 1px solid rgba(0,0,0,0.18); position: relative; overflow: hidden;
 }
 
-/* Pista gruesa */
-#header-progress .hp-track{
-  flex:1; height:16px; border-radius:9999px; overflow:hidden;
-  background: var(--hp-track); outline:1px solid rgba(0,0,0,0.15);
-}
-
-/* Relleno con transición de ancho (sin degradados chillones) */
-#header-progress .hp-fill{
-  height:100%; width:0%;
-  background: var(--hp-fill);
+.progress-fill {
+  position: absolute; left: 0; top: 0; bottom: 0; width: 0%;
+  background: #8b5cf6; /* violeta sólido, cambia si tu primario es otro */
   transition: width 140ms ease-out;
-  position:relative;
 }
 
-/* % dentro de la barra, legible */
-#header-progress .hp-percent{
-  position:absolute; right:8px; top:50%; transform:translateY(-50%);
-  font-size:12px; line-height:1; color:white; font-variant-numeric: tabular-nums;
-  text-shadow: 0 1px 2px rgba(0,0,0,0.35);
+.progress-percent {
+  position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+  font-size: 12px; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,.35);
+  font-variant-numeric: tabular-nums;
 }
 
-/* Meta info a la izquierda: título + etapa */
-#header-progress .hp-meta{
-  display:flex; align-items:center; gap:8px; white-space:nowrap;
-  color: var(--hp-text); font-size:12px; text-shadow: 0 1px 2px rgba(0,0,0,0.2);
+.progress-meta {
+  position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+  font-size: 12px; color: rgba(255,255,255,0.9); text-shadow: 0 1px 2px rgba(0,0,0,.25);
 }
-#header-progress .hp-title{ font-weight:600; }
-#header-progress .hp-stage{ opacity:.85; }
+.progress-title { font-weight: 600; margin-right: 8px; }
+.progress-stage { opacity: .9; }
 
-/* Visible mientras haya progreso > 0 */
-#header-progress.is-active{ opacity:1; }
+/* Modal: el slot está dentro del header del diálogo, así que no se difumina ni queda tapado */
+.modal .progress-slot { margin-top: 6px; }
 
-/* Accesibilidad al foco (por si se navega con teclado/lectores) */
-#header-progress:focus-visible { outline: 2px solid #ffffff55; border-radius: 10px; }
+/* Kill switch por si aparece legacy UI */
+#top-progress, .loading-overlay { display: none !important; }
