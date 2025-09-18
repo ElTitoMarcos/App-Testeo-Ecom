@@ -57,22 +57,25 @@ async function fetchTrends(btn) {
   const tracker = LoadingHelpers.start('Actualizando tendencias', { btn });
   try {
     if ($status) $status.textContent = 'Cargando...';
-    tracker.step(0.05, 'Preparando filtros');
+    tracker.step(0.05);
     const fISO = $desde ? toISOFromDDMMYYYY($desde.value) : null;
     const tISO = $hasta ? toISOFromDDMMYYYY($hasta.value) : null;
     const url = new URL('/api/trends/summary', window.location.origin);
     if (fISO) url.searchParams.set('from', fISO);
     if (tISO) url.searchParams.set('to', tISO);
-    tracker.step(0.25, 'Consultando servidor');
-    const res = await fetch(url.toString(), { credentials: 'same-origin', __buttonEl: btn });
+    tracker.step(0.25);
+    const res = await fetch(url.toString(), {
+      credentials: 'same-origin',
+      __skipLoadingHook: true
+    });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const json = await res.json();
-    tracker.step(0.5, 'Procesando datos');
+    tracker.step(0.5);
     handleTrendsResponse(json, tracker);
-    tracker.step(0.95, 'Actualizando paneles');
+    tracker.step(0.95);
   } catch (e) {
     (window.toast?.error || alert).call(window.toast || window, 'No se pudieron cargar las tendencias.');
-    tracker.step(1, 'Error al cargar');
+    tracker.step(1);
   } finally {
     if ($status) $status.textContent = '';
     tracker.done();
@@ -360,10 +363,10 @@ function applyTrendsScope(scope, tracker){
   const categoriesAgg = normalizeCategories(scope?.categoriesAgg || []);
   const allProducts = normalizeProducts(scope?.allProducts || []);
   window.__latestTrendsData = { categoriesAgg, allProducts };
-  tracker?.step(0.7, 'Dibujando gráficos');
+  tracker?.step(0.7);
   renderTopCategoriesBar(categoriesAgg);
   renderRightPareto(categoriesAgg);
-  tracker?.step(0.85, 'Actualizando tabla');
+  tracker?.step(0.85);
   fillTrendsTable(categoriesAgg);
 }
 
@@ -377,7 +380,7 @@ export function renderTrends(categoriesAgg, allProducts, tracker) {
     ? allProducts
     : fallback.allProducts;
   applyTrendsScope({ categoriesAgg: categories, allProducts: products }, tracker);
-  tracker?.step(0.92, 'Render completo');
+  tracker?.step(0.92);
 }
 
 // Toggle montado una sola vez

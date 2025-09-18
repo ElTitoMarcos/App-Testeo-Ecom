@@ -342,11 +342,11 @@ async function adjustWeightsAI(ev){
   try{
     const products = Array.isArray(window.allProducts) ? window.allProducts : [];
     if (!products.length){
-      tracker.step(1, 'Sin productos disponibles');
+      tracker.step(1);
       if (typeof toast !== 'undefined') toast.info('No hay productos cargados');
       return;
     }
-    tracker.step(0.1, 'Preparando dataset');
+    tracker.step(0.1);
 
     // Construir dataset con las 8 features del Winner Score
     const rows = products.map(p => {
@@ -368,7 +368,7 @@ async function adjustWeightsAI(ev){
     // Target: revenue si >=50% lo tiene; si no, units_sold
     const revCount = rows.filter(r => r.revenue > 0).length;
     const targetName = (revCount >= Math.ceil(rows.length * 0.5)) ? 'revenue' : 'units_sold';
-    tracker.step(0.22, 'Calculando muestras');
+    tracker.step(0.22);
 
     // Enviar el mayor número posible en una sola llamada (controlado por presupuesto)
     const cfg = (window.userConfig && window.userConfig.aiCost) ? window.userConfig.aiCost : { costCapUSD: 0.25, estTokensPerItemIn: 300, estTokensPerItemOut: 80 };
@@ -385,15 +385,21 @@ async function adjustWeightsAI(ev){
       'price','rating','units_sold','revenue','desire','competition','oldness','awareness'
     ];
     const payload = { features, target: targetName, data_sample };
-    tracker.step(0.35, 'Solicitando recomendación');
+    tracker.step(0.35);
 
     // 1 intento: GPT; fallback estadístico si falla
     let res = await fetch('/scoring/v2/auto-weights-gpt', {
-      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload), __buttonEl: btn
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload),
+      __skipLoadingHook: true
     });
     if (!res.ok){
       res = await fetch('/scoring/v2/auto-weights-stat', {
-        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload), __buttonEl: btn
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(payload),
+        __skipLoadingHook: true
       });
     }
     if (!res.ok) throw new Error('Auto-weights request failed');
@@ -403,14 +409,15 @@ async function adjustWeightsAI(ev){
     const newOrder = (out && Array.isArray(out.weights_order) && out.weights_order.length)
       ? out.weights_order.slice()
       : Object.keys(intWeights).sort((a,b) => (intWeights[b]||0) - (intWeights[a]||0));
-    tracker.step(0.55, 'Procesando respuesta');
+    tracker.step(0.55);
 
     // Persistir en backend y refrescar UI con lo guardado
     const state = await SettingsCache.get();
     const resSave = await fetch('/api/config/winner-weights', {
-      method:'PATCH', headers:{'Content-Type':'application/json'},
+      method:'PATCH',
+      headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ weights: intWeights, weights_order: newOrder, weights_enabled: state.enabled }),
-      __buttonEl: btn
+      __skipLoadingHook: true
     });
     if (!resSave.ok) throw new Error('Persist weights failed');
     const saved = await resSave.json();
@@ -418,15 +425,15 @@ async function adjustWeightsAI(ev){
     // renderWeightsUI reinstates slider helpers like enhanceRangeWithFloat
     const fresh = await SettingsCache.get();
     if (typeof renderWeightsUI === 'function') renderWeightsUI(fresh);
-    tracker.step(0.85, 'Actualizando controles');
+    tracker.step(0.85);
 
     if (typeof toast !== 'undefined' && toast.success){
       const method = (out && out.method) ? out.method : 'gpt';
       toast.success(`Pesos ajustados por IA (${method}) con ${data_sample.length} muestras`);
     }
-    tracker.step(1, 'Listo');
+    tracker.step(1);
   }catch(err){
-    tracker.step(1, 'Error al ajustar');
+    tracker.step(1);
     if (typeof toast !== 'undefined' && toast.error){
       toast.error('No se pudo ajustar por IA. Revisa tu API Key o inténtalo más tarde.');
     }

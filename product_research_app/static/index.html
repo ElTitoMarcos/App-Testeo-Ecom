@@ -95,7 +95,7 @@ body.dark .skeleton{background:#333;}
 </head>
 <body class="dark">
 <div id="topBar">
-  <header style="padding:8px 15px; display:flex; align-items:center; justify-content:space-between;">
+  <header id="app-header" style="padding:8px 15px; display:flex; align-items:center; justify-content:space-between;">
     <div style="display:flex; align-items:center; gap:8px;">
       <h1 style="margin:0; font-size:1.4rem;">Ecom Testing App</h1>
       <p style="margin:0;font-size:12px; opacity:0.8;">By El Tito 🤙</p>
@@ -107,6 +107,10 @@ body.dark .skeleton{background:#333;}
       <button id="btn-ver-tendencias" title="Ver tendencias" data-action="toggle-trends">📊</button>
       <button id="darkToggle" title="Modo oscuro">🌙</button>
       <button id="configBtn" title="Configuración avanzada">⚙️</button>
+    </div>
+    <div id="header-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+      <div class="hp-fill"></div>
+      <span class="hp-label" aria-hidden="true"></span>
     </div>
   </header>
   <!-- Search bar row with controls -->
@@ -380,8 +384,10 @@ const saveIfDirty = window.saveIfDirty;
 window.fetchJson = fetchJson;
 window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
-let importPollTimer = null;
-let importTaskTracker = null;
+const IMPORT_UPLOAD_FRAC = 0.30;
+const IMPORT_POLL_MAX_FRAC = 0.99;
+const IMPORT_STATUS_URL = '/_import_status';
+const IMPORT_START_URL = '/upload';
 let savedApiKeyHash = null;
 let savedApiKeyLength = 0;
 
@@ -411,40 +417,143 @@ async function sha256(str) {
     .join('');
 }
 
-async function pollImportStatus(id, tracker = importTaskTracker) {
-  let finished = false;
-  try {
-    const data = await fetchJson(`/_import_status?task_id=${id}`);
-    const pctRaw = Number(data.pct ?? data.progress ?? data.percentage ?? 0);
-    if (tracker && Number.isFinite(pctRaw)) {
-      const pct = Math.max(0, Math.min(1, pctRaw / 100));
-      tracker.step(pct, data.message || 'Procesando importación');
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+function mapServerFraction(serverPct) {
+  const span = IMPORT_POLL_MAX_FRAC - IMPORT_UPLOAD_FRAC;
+  const clamped = Math.max(0, Math.min(100, Number(serverPct) || 0));
+  return IMPORT_UPLOAD_FRAC + (clamped / 100) * span;
+}
+
+async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL } = {}) {
+  const id = typeof taskId === 'string' ? taskId : String(taskId || '');
+  if (!id) return null;
+  while (true) {
+    let data;
+    try {
+      const resp = await fetch(`${statusUrl}?task_id=${encodeURIComponent(id)}&t=${Date.now()}`,
+        { __skipLoadingHook: true, cache: 'no-store' }
+      );
+      if (!resp.ok) throw new Error('Estado no disponible');
+      data = await resp.json();
+    } catch (err) {
+      await sleep(900);
+      continue;
     }
     if (data.ui_cost_message) showImportBanner(data.ui_cost_message);
-    if (data.status === 'pending' || data.status === 'ai') {
-      importPollTimer = setTimeout(() => pollImportStatus(id, tracker), 2000);
-      return;
+    const raw = data.pct ?? data.percent ?? data.percentage ?? data.progress ?? (data.done ? 100 : undefined);
+    if (Number.isFinite(Number(raw))) {
+      tracker?.step(mapServerFraction(Number(raw)));
     }
-    localStorage.removeItem(IMPORT_TASK_LS_KEY);
-    finished = true;
-    importPollTimer = null;
-    if (data.status === 'done') {
-      tracker?.step(0.98, 'Actualizando catálogo');
-      await reloadTable();
+    const statusVal = String(data.state || data.status || '').toLowerCase();
+    if (['pending', 'running', 'ai', 'processing'].includes(statusVal)) {
+      await sleep(600);
+      continue;
+    }
+    if (statusVal === 'done' || statusVal === 'completed' || statusVal === 'finished' || Number(raw) >= 100) {
+      await reloadTable({ skipProgress: true });
       hideImportBanner();
-      tracker?.step(1, 'Importación completada');
-    } else {
+      return data;
+    }
+    if (statusVal === 'error' || data.error) {
+      hideImportBanner();
       toast.error(data.error || 'Error en importación');
+      return data;
+    }
+    if (statusVal === 'unknown' || !statusVal) {
+      toast.error('Estado de importación desconocido');
       hideImportBanner();
-      tracker?.step(1, data.error || 'Error en importación');
+      return data;
     }
-  } catch (e) {
-    importPollTimer = setTimeout(() => pollImportStatus(id, tracker), 4000);
+    await sleep(600);
+  }
+}
+
+async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IMPORT_STATUS_URL, btn } = {}) {
+  if (!file) throw new Error('Archivo no válido');
+  const tracker = LoadingHelpers.start('Importando catálogo', { btn });
+  let trackerFinished = false;
+  const finishTracker = () => {
+    if (trackerFinished) return;
+    trackerFinished = true;
+    tracker.done();
+  };
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    const xhr = new XMLHttpRequest();
+    xhr.responseType = 'json';
+    xhr.__skipLoadingHook = true;
+    const startResult = await new Promise((resolve, reject) => {
+      xhr.open('POST', startUrl, true);
+      xhr.upload.onprogress = (event) => {
+        if (!event.lengthComputable) return;
+        const frac = Math.min(IMPORT_UPLOAD_FRAC, (event.loaded / event.total) * IMPORT_UPLOAD_FRAC);
+        tracker.step(frac);
+      };
+      xhr.onerror = () => reject(new Error('Error de red subiendo el archivo'));
+      xhr.onload = () => {
+        let payload = xhr.response;
+        if (!payload && xhr.responseText) {
+          try { payload = JSON.parse(xhr.responseText); }
+          catch (e) { payload = null; }
+        }
+        if (xhr.status >= 200 && xhr.status < 300 && payload) {
+          if (payload.task_id) {
+            resolve({ kind: 'async', data: payload, taskId: payload.task_id });
+            return;
+          }
+          if (payload.ok) {
+            resolve({ kind: 'sync', data: payload });
+            return;
+          }
+          if (payload.error) {
+            reject(new Error(payload.error));
+            return;
+          }
+          resolve({ kind: 'sync', data: payload });
+        } else {
+          const message = payload?.error || payload?.message || 'Respuesta inválida al iniciar importación';
+          reject(new Error(message));
+        }
+      };
+      xhr.send(fd);
+    });
+
+    if (startResult.kind === 'sync') {
+      await reloadTable({ skipProgress: true });
+      tracker.step(1);
+      finishTracker();
+      hideImportBanner();
+      const importedCount = startResult.data?.imported ?? startResult.data?.rows_imported;
+      if (Number.isFinite(importedCount) && importedCount > 0) {
+        toast.success(`Importados ${importedCount}`);
+      }
+      return startResult.data;
+    }
+
+    const taskId = startResult.taskId;
+    const idStr = typeof taskId === 'string' ? taskId : String(taskId);
+    tracker.step(IMPORT_UPLOAD_FRAC);
+    localStorage.setItem(IMPORT_TASK_LS_KEY, idStr);
+    const result = await followImportTask(idStr, tracker, { statusUrl });
+    localStorage.removeItem(IMPORT_TASK_LS_KEY);
+    const importedCount = result?.imported ?? result?.rows_imported;
+    if (Number.isFinite(importedCount) && importedCount > 0) {
+      toast.success(`Importados ${importedCount}`);
+    }
+    tracker.step(1);
+    finishTracker();
+    return result;
+  } catch (err) {
+    localStorage.removeItem(IMPORT_TASK_LS_KEY);
+    hideImportBanner();
+    toast.error(err?.message || 'Error al importar catálogo');
+    tracker.step(1);
+    finishTracker();
+    throw err;
   } finally {
-    if (finished) {
-      importTaskTracker = null;
-      tracker?.done();
-    }
+    finishTracker();
   }
 }
 // Ensure the server shuts down cleanly when the tab or window is closed.
@@ -727,9 +836,10 @@ function isTrending(name) {
   return words.some(w => trendingWords.includes(w));
 }
 
-async function fetchProducts() {
+async function fetchProducts(options = {}) {
   const prevSel = new Set(selection);
-  const data = await fetchJson('/products');
+  const fetchOpts = options && options.skipProgress ? { __skipLoadingHook: true } : undefined;
+  const data = await fetchJson('/products', fetchOpts);
   if(data.length && data[0].desire !== undefined && window.ensureColumnVisible){
     ensureColumnVisible('desire');
   }
@@ -751,8 +861,8 @@ async function fetchProducts() {
 }
 
 window.fetchProducts = fetchProducts;
-async function reloadTable(){ await fetchProducts(); }
-async function reloadRows(ids){ await fetchProducts(); }
+async function reloadTable(options){ await fetchProducts(options); }
+async function reloadRows(ids, options){ await fetchProducts(options); }
 
 function renderTable() {
   const headerRow = document.getElementById('headerRow');
@@ -1081,9 +1191,23 @@ window.onload = async () => {
   await loadConfig();
   await fetchProducts();
   const tid = localStorage.getItem(IMPORT_TASK_LS_KEY);
-  if(tid){
-    toast.info('Reanudando IA post-import desde el último punto guardado…');
-    pollImportStatus(tid);
+  if (tid) {
+    toast.info('Reanudando importación previa…');
+    const tracker = LoadingHelpers.start('Importando catálogo');
+    tracker.step(IMPORT_UPLOAD_FRAC);
+    try {
+      const result = await followImportTask(tid, tracker);
+      const importedCount = result?.imported ?? result?.rows_imported;
+      const statusVal = String(result?.state || result?.status || '').toLowerCase();
+      if (statusVal === 'done' || statusVal === 'completed' || statusVal === 'finished') {
+        if (Number.isFinite(importedCount) && importedCount > 0) {
+          toast.success(`Importados ${importedCount}`);
+        }
+      }
+    } finally {
+      localStorage.removeItem(IMPORT_TASK_LS_KEY);
+      tracker.done();
+    }
   }
 };
 // Toggle config panel
@@ -1139,42 +1263,13 @@ document.getElementById('uploadBtn').onclick = () => {
 fileInputEl.onchange = async (ev) => {
   ev.preventDefault();
   const file = fileInputEl.files[0];
-  if(!file) return;
+  if (!file) return;
   const btn = document.getElementById('uploadBtn');
-  clearTimeout(importPollTimer);
-  importPollTimer = null;
-  const tracker = LoadingHelpers.start('Importando catálogo', { btn });
-  tracker.step(0.05, 'Subiendo archivo');
   try {
-    const formData = new FormData();
-    formData.append('file', file);
-    const data = await fetchJson('/upload', {method:'POST', body: formData, __buttonEl: btn});
-    if (data.task_id) {
-      tracker.step(0.2, 'Procesando importación');
-      localStorage.setItem(IMPORT_TASK_LS_KEY, data.task_id);
-      importTaskTracker = tracker;
-      pollImportStatus(data.task_id, tracker);
-      return;
-    } else if (data.ok) {
-      tracker.step(0.75, 'Actualizando catálogo');
-      await reloadTable();
-      hideImportBanner();
-      toast.success(`Importados ${data.imported || 0}`);
-      tracker.step(1, 'Importación completada');
-    } else if (data.error) {
-      toast.error('Error: ' + data.error);
-      tracker.step(1, data.error);
-    } else {
-      tracker.step(1, 'Importación finalizada');
-    }
-  } catch(err){
+    await importCatalog(file, { startUrl: IMPORT_START_URL, statusUrl: IMPORT_STATUS_URL, btn });
+  } catch (err) {
     console.error(err);
-    toast.error('Error al subir archivo');
-    tracker.step(1, 'Error al subir');
   } finally {
-    if (importTaskTracker !== tracker) {
-      tracker.done();
-    }
     fileInputEl.value = '';
   }
 };
@@ -1453,14 +1548,15 @@ document.getElementById('btnGenWinner').onclick = async (ev) => {
     if(payloadProducts.some(p=>Object.keys(p.metrics).length<metricKeys.length)){
       toast.info('Algunos productos tienen métricas faltantes');
     }
-    tracker.step(0.15, 'Preparando datos');
+    tracker.step(0.15);
     const body = ids.length ? {product_ids: ids} : {};
     body.products = payloadProducts;
-    tracker.step(0.35, 'Enviando solicitud');
+    tracker.step(0.35);
     const res = await fetch('/api/winner-score/generate?debug=1', {
-      method:'POST', headers:{'Content-Type':'application/json'},
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
       body: JSON.stringify(body),
-      __buttonEl: btn
+      __skipLoadingHook: true
     });
     let payload = {};
     try { payload = await res.json(); }
@@ -1480,13 +1576,14 @@ document.getElementById('btnGenWinner').onclick = async (ev) => {
         toast.info(`Recalculado ${processed}. El entero 0–100 no varió (redondeo).`);
       }
     }
-    tracker.step(0.7, 'Actualizando productos');
-    if(ids.length) await reloadRows(ids); else await reloadTable();
-    tracker.step(1, 'Winner Score actualizado');
+    tracker.step(0.7);
+    if(ids.length) await reloadRows(ids, { skipProgress: true });
+    else await reloadTable({ skipProgress: true });
+    tracker.step(1);
   } catch(err){
     console.error(err);
     toast.error('No se pudo actualizar el Winner Score');
-    tracker.step(1, 'Error al calcular');
+    tracker.step(1);
   } finally {
     tracker.done();
   }
