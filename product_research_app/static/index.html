@@ -5,6 +5,7 @@
 <title>Product Research Copilot</title>
 <link rel="stylesheet" href="/static/css/app.css">
 <link rel="stylesheet" href="/static/css/toast.css">
+<link rel="stylesheet" href="/static/css/loading.css">
 <script type="module" src="/static/js/config.js"></script>
 <style>
 /* Basic layout */
@@ -353,6 +354,7 @@ body.dark .skeleton{background:#333;}
   100% { transform: rotate(360deg); }
 }
 </style>
+<script type="module" src="/static/js/loading.js"></script>
 <script src="/static/js/overlay.js"></script>
 <script src="/static/js/toast.js"></script>
 <script src="/static/js/table.js"></script>
@@ -370,6 +372,7 @@ body.dark .skeleton{background:#333;}
 import { applyFilters, readFilters } from '/static/js/filters-panel.js';
 import * as api from "/static/js/net.js";
 import * as groupsService from "/static/js/groups-service.js";
+import { LoadingHelpers } from '/static/js/loading.js';
 const { fetchJson } = api;
 const metricKeys = window.metricKeys;
 const openConfigModal = window.openConfigModal;
@@ -378,6 +381,7 @@ window.fetchJson = fetchJson;
 window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
 let importPollTimer = null;
+let importTaskTracker = null;
 let savedApiKeyHash = null;
 let savedApiKeyLength = 0;
 
@@ -407,26 +411,40 @@ async function sha256(str) {
     .join('');
 }
 
-async function pollImportStatus(id) {
+async function pollImportStatus(id, tracker = importTaskTracker) {
+  let finished = false;
   try {
     const data = await fetchJson(`/_import_status?task_id=${id}`);
-    if (data.status === 'pending') {
-      if (data.ui_cost_message) showImportBanner(data.ui_cost_message);
-      importPollTimer = setTimeout(() => pollImportStatus(id), 2000);
-    } else if (data.status === 'ai') {
-      if (data.ui_cost_message) showImportBanner(data.ui_cost_message);
-      importPollTimer = setTimeout(() => pollImportStatus(id), 2000);
+    const pctRaw = Number(data.pct ?? data.progress ?? data.percentage ?? 0);
+    if (tracker && Number.isFinite(pctRaw)) {
+      const pct = Math.max(0, Math.min(1, pctRaw / 100));
+      tracker.step(pct, data.message || 'Procesando importación');
+    }
+    if (data.ui_cost_message) showImportBanner(data.ui_cost_message);
+    if (data.status === 'pending' || data.status === 'ai') {
+      importPollTimer = setTimeout(() => pollImportStatus(id, tracker), 2000);
+      return;
+    }
+    localStorage.removeItem(IMPORT_TASK_LS_KEY);
+    finished = true;
+    importPollTimer = null;
+    if (data.status === 'done') {
+      tracker?.step(0.98, 'Actualizando catálogo');
+      await reloadTable();
+      hideImportBanner();
+      tracker?.step(1, 'Importación completada');
     } else {
-      localStorage.removeItem(IMPORT_TASK_LS_KEY);
-      if (data.status === 'done') {
-        await reloadTable();
-        hideImportBanner();
-      } else {
-        toast.error(data.error || 'Error en importación');
-      }
+      toast.error(data.error || 'Error en importación');
+      hideImportBanner();
+      tracker?.step(1, data.error || 'Error en importación');
     }
   } catch (e) {
-    importPollTimer = setTimeout(() => pollImportStatus(id), 4000);
+    importPollTimer = setTimeout(() => pollImportStatus(id, tracker), 4000);
+  } finally {
+    if (finished) {
+      importTaskTracker = null;
+      tracker?.done();
+    }
   }
 }
 // Ensure the server shuts down cleanly when the tab or window is closed.
@@ -1122,31 +1140,41 @@ fileInputEl.onchange = async (ev) => {
   ev.preventDefault();
   const file = fileInputEl.files[0];
   if(!file) return;
-  const formData = new FormData();
-  formData.append('file', file);
   const btn = document.getElementById('uploadBtn');
-  btn.disabled = true;
-  btn.style.opacity = '0.6';
-  const loading = document.getElementById('loadingOverlay');
-  if (loading) loading.style.display = 'flex';
+  clearTimeout(importPollTimer);
+  importPollTimer = null;
+  const tracker = LoadingHelpers.start('Importando catálogo', { btn });
+  tracker.step(0.05, 'Subiendo archivo');
   try {
-    const data = await fetchJson('/upload', {method:'POST', body: formData});
+    const formData = new FormData();
+    formData.append('file', file);
+    const data = await fetchJson('/upload', {method:'POST', body: formData, __buttonEl: btn});
     if (data.task_id) {
+      tracker.step(0.2, 'Procesando importación');
       localStorage.setItem(IMPORT_TASK_LS_KEY, data.task_id);
-      pollImportStatus(data.task_id);
+      importTaskTracker = tracker;
+      pollImportStatus(data.task_id, tracker);
+      return;
     } else if (data.ok) {
+      tracker.step(0.75, 'Actualizando catálogo');
       await reloadTable();
+      hideImportBanner();
       toast.success(`Importados ${data.imported || 0}`);
+      tracker.step(1, 'Importación completada');
     } else if (data.error) {
       toast.error('Error: ' + data.error);
+      tracker.step(1, data.error);
+    } else {
+      tracker.step(1, 'Importación finalizada');
     }
   } catch(err){
     console.error(err);
     toast.error('Error al subir archivo');
+    tracker.step(1, 'Error al subir');
   } finally {
-    if (loading) loading.style.display = 'none';
-    btn.disabled = false;
-    btn.style.opacity = '';
+    if (importTaskTracker !== tracker) {
+      tracker.done();
+    }
     fileInputEl.value = '';
   }
 };
@@ -1409,42 +1437,59 @@ document.getElementById('btnExport').onclick = async () => {
 };
 
 function getSelectedProductIds(){ return Array.from(selection, Number); }
-function setLoading(btn, s){ if(s){ btn.dataset.prev=btn.textContent; btn.textContent='Actualizando…'; } else { btn.textContent=btn.dataset.prev||btn.textContent; } }
 
 // Generate Winner Score for selected or all products
-document.getElementById('btnGenWinner').onclick = () => {
-  const ids = getSelectedProductIds();
-  const rows = ids.length ? allProducts.filter(p=>ids.includes(Number(p.id))) : products;
-  const payloadProducts = rows.map(p=>{
-    const metrics={};
-    metricKeys.forEach(k=>{ if(p[k]!==undefined) metrics[k]=p[k]; });
-    return {id:p.id, metrics};
-  });
-  if(payloadProducts.some(p=>Object.keys(p.metrics).length<metricKeys.length)){
-    toast.info('Algunos productos tienen métricas faltantes');
-  }
-  const body = ids.length ? {product_ids: ids} : {};
-  body.products = payloadProducts;
-  const btn = document.getElementById('btnGenWinner');
-  btn.disabled = true; setLoading(btn, true);
-  fetch('/api/winner-score/generate?debug=1', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify(body)
-  }).then(r=>r.json()).then(({processed=0, updated=0, diag})=>{
-    if(!processed) toast.info('Nada que recalcular (0 seleccionados)');
-    else if(updated>0) toast.success(`Winner Score recalculado: ${updated}/${processed} cambiaron`);
-    else {
+document.getElementById('btnGenWinner').onclick = async (ev) => {
+  const btn = ev.currentTarget;
+  const tracker = LoadingHelpers.start('Generando Winner Score', { btn });
+  try {
+    const ids = getSelectedProductIds();
+    const rows = ids.length ? allProducts.filter(p=>ids.includes(Number(p.id))) : products;
+    const payloadProducts = rows.map(p=>{
+      const metrics={};
+      metricKeys.forEach(k=>{ if(p[k]!==undefined) metrics[k]=p[k]; });
+      return {id:p.id, metrics};
+    });
+    if(payloadProducts.some(p=>Object.keys(p.metrics).length<metricKeys.length)){
+      toast.info('Algunos productos tienen métricas faltantes');
+    }
+    tracker.step(0.15, 'Preparando datos');
+    const body = ids.length ? {product_ids: ids} : {};
+    body.products = payloadProducts;
+    tracker.step(0.35, 'Enviando solicitud');
+    const res = await fetch('/api/winner-score/generate?debug=1', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body),
+      __buttonEl: btn
+    });
+    let payload = {};
+    try { payload = await res.json(); }
+    catch (_) { payload = {}; }
+    if (!res.ok) {
+      throw new Error(payload?.error || res.statusText || 'Error al recalcular');
+    }
+    const { processed = 0, updated = 0, diag } = payload;
+    if(!processed) {
+      toast.info('Nada que recalcular (0 seleccionados)');
+    } else if(updated>0) {
+      toast.success(`Winner Score recalculado: ${updated}/${processed} cambiaron`);
+    } else {
       if(diag && diag.sum_filtered===0){
         toast.info(`Recalculado ${processed}. No afectó: los pesos de métricas presentes suman 0 → fallback uniforme.`);
       } else {
         toast.info(`Recalculado ${processed}. El entero 0–100 no varió (redondeo).`);
       }
     }
-    if(ids.length) reloadRows(ids); else reloadTable();
-  }).catch(err=>{
+    tracker.step(0.7, 'Actualizando productos');
+    if(ids.length) await reloadRows(ids); else await reloadTable();
+    tracker.step(1, 'Winner Score actualizado');
+  } catch(err){
     console.error(err);
     toast.error('No se pudo actualizar el Winner Score');
-  }).finally(()=>{ btn.disabled=false; setLoading(btn,false); });
+    tracker.step(1, 'Error al calcular');
+  } finally {
+    tracker.done();
+  }
 };
 
 // -------- Group management --------
