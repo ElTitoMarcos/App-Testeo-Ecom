@@ -47,6 +47,7 @@ from .services import winner_score as winner_calc
 from .services import trends_service
 from .services.importer_fast import fast_import, fast_import_records
 from . import gpt
+from .prompts.registry import normalize_task
 from . import title_analyzer
 from .utils.db import row_to_dict, rget
 
@@ -1318,6 +1319,14 @@ class RequestHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path.startswith("/api/gpt/"):
+            task = path[len("/api/gpt/") :]
+            if not task:
+                self._set_json(404)
+                self.wfile.write(json.dumps({"error": "unknown_task"}).encode('utf-8'))
+                return
+            self.handle_prompt_task(task)
+            return
         if path == "/api/analyze/titles":
             self.handle_analyze_titles()
             return
@@ -2105,6 +2114,64 @@ class RequestHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._set_json(500)
             self.wfile.write(json.dumps({"error": str(exc)}).encode('utf-8'))
+
+    def handle_prompt_task(self, task: str):
+        try:
+            canonical = normalize_task(task)
+        except KeyError:
+            self._set_json(404)
+            self.wfile.write(json.dumps({"error": "unknown_task"}).encode('utf-8'))
+            return
+
+        length = int(self.headers.get('Content-Length', 0))
+        raw_body = self.rfile.read(length) if length else b""
+        if raw_body:
+            try:
+                payload = json.loads(raw_body.decode('utf-8') or "{}")
+            except Exception:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"error": "invalid_json"}).encode('utf-8'))
+                return
+            if not isinstance(payload, dict):
+                self._set_json(400)
+                self.wfile.write(json.dumps({"error": "invalid_payload"}).encode('utf-8'))
+                return
+        else:
+            payload = {}
+
+        context_json = payload.get("context_json")
+        aggregates = payload.get("aggregates")
+        data = payload.get("data")
+
+        try:
+            result = gpt.call_gpt(
+                canonical,
+                context_json=context_json,
+                aggregates=aggregates,
+                data=data,
+            )
+        except gpt.InvalidJSONError as exc:
+            self._set_json(422)
+            self.wfile.write(
+                json.dumps({"error": "invalid_model_output", "detail": str(exc)}).encode('utf-8')
+            )
+            return
+        except gpt.OpenAIError as exc:
+            self._set_json(502)
+            self.wfile.write(json.dumps({"error": "openai_error", "detail": str(exc)}).encode('utf-8'))
+            return
+        except ValueError as exc:
+            self._set_json(404)
+            self.wfile.write(json.dumps({"error": "unknown_task", "detail": str(exc)}).encode('utf-8'))
+            return
+        except Exception as exc:
+            logger.exception("Error inesperado en /api/gpt/%s", canonical)
+            self._set_json(500)
+            self.wfile.write(json.dumps({"error": "internal_error", "detail": str(exc)}).encode('utf-8'))
+            return
+
+        self._set_json()
+        self.wfile.write(json.dumps(result, ensure_ascii=False).encode('utf-8'))
 
     def handle_ba_insights(self):
         length = int(self.headers.get('Content-Length', 0))

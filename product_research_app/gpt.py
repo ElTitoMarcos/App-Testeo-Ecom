@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 import re
 import unicodedata
@@ -30,6 +31,13 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from . import database, config
+from .prompts.registry import (
+    get_json_schema,
+    get_system_prompt,
+    get_task_prompt,
+    is_json_only,
+    normalize_task,
+)
 from .services import winner_score as winner_calc
 
 logger = logging.getLogger(__name__)
@@ -71,6 +79,164 @@ class OpenAIError(Exception):
 class InvalidJSONError(OpenAIError):
     """Raised when the model response is not valid JSON."""
     pass
+
+
+def _dumps_payload(payload: Any | None) -> str:
+    data = {} if payload is None else payload
+    return json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _looks_like_response_format_error(message: str) -> bool:
+    lowered = message.lower()
+    return "response_format" in lowered or "json_schema" in lowered or "schema" in lowered
+
+
+def _extract_first_json_block(text: str) -> Tuple[Any, str]:
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char not in "{[":
+            continue
+        try:
+            obj, end = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        remainder = text[index + end :].strip()
+        return obj, remainder
+    raise InvalidJSONError("No se encontró JSON válido en la respuesta")
+
+
+def _parse_message_content(raw: Dict[str, Any]) -> Tuple[Optional[Any], str]:
+    choices = raw.get("choices") or []
+    if not choices:
+        raise OpenAIError("Respuesta de OpenAI sin choices")
+    message = choices[0].get("message", {}) or {}
+    content = message.get("content", "")
+    parsed_json: Optional[Any] = None
+    text_parts: List[str] = []
+    if isinstance(content, str):
+        text_parts.append(content)
+    elif isinstance(content, list):
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = part.get("type") or part.get("role")
+            if part_type in {"text", "output_text"}:
+                text_parts.append(str(part.get("text", "")))
+            elif part_type in {"json", "output_json"}:
+                parsed_json = part.get("json")
+    elif isinstance(content, dict):
+        part_type = content.get("type")
+        if part_type in {"json", "output_json"}:
+            parsed_json = content.get("json")
+        if "text" in content:
+            text_parts.append(str(content.get("text", "")))
+    text = "\n".join(part for part in text_parts if part).strip()
+    return parsed_json, text
+
+
+def _parse_json_content(text: str) -> Any:
+    if not text:
+        raise InvalidJSONError("La respuesta JSON está vacía")
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        obj, remainder = _extract_first_json_block(text)
+        if remainder:
+            raise InvalidJSONError("La respuesta JSON contiene texto adicional")
+    if not isinstance(obj, (dict, list)):
+        raise InvalidJSONError("La respuesta JSON debe ser un objeto o lista")
+    return obj
+
+
+def build_messages(
+    task: str,
+    context_json: Optional[Dict[str, Any]] = None,
+    aggregates: Optional[Dict[str, Any]] = None,
+    data: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Construye los mensajes para Prompt Maestro v3."""
+
+    try:
+        canonical = normalize_task(task)
+    except KeyError as exc:
+        raise ValueError(f"Tarea desconocida: {task}") from exc
+
+    system_prompt = get_system_prompt(canonical)
+    task_prompt = get_task_prompt(canonical)
+    sections = [task_prompt]
+
+    if canonical in {"A", "C", "D", "E"}:
+        sections.append("### CONTEXT_JSON\n" + _dumps_payload(context_json))
+    elif canonical == "B":
+        sections.append("### AGGREGATES\n" + _dumps_payload(aggregates))
+    elif canonical == "E_auto":
+        sections.append("### DATA\n" + _dumps_payload(data))
+
+    user_content = "\n\n".join(sections).strip()
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content},
+    ]
+
+
+def call_gpt(
+    task: str,
+    context_json: Optional[Dict[str, Any]] = None,
+    aggregates: Optional[Dict[str, Any]] = None,
+    data: Optional[Dict[str, Any]] = None,
+    temperature: float = 0,
+) -> Dict[str, Any]:
+    """Ejecuta una llamada estándar a Prompt Maestro v3."""
+
+    try:
+        canonical = normalize_task(task)
+    except KeyError as exc:
+        raise ValueError(f"Tarea desconocida: {task}") from exc
+
+    messages = build_messages(canonical, context_json, aggregates, data)
+    api_key = config.get_api_key() or os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise OpenAIError("No hay API key configurada")
+    model = config.get_model()
+
+    schema = get_json_schema(canonical)
+    response_format: Optional[Dict[str, Any]] = None
+    if is_json_only(canonical) and schema:
+        response_format = {"type": "json_schema", "json_schema": schema}
+
+    try:
+        raw = call_openai_chat(
+            api_key,
+            model,
+            messages,
+            temperature=temperature,
+            response_format=response_format,
+        )
+    except OpenAIError as exc:
+        if response_format and _looks_like_response_format_error(str(exc)):
+            raw = call_openai_chat(
+                api_key,
+                model,
+                messages,
+                temperature=temperature,
+            )
+        else:
+            raise
+
+    parsed_json, text_content = _parse_message_content(raw)
+    if is_json_only(canonical):
+        content = parsed_json if parsed_json is not None else _parse_json_content(text_content)
+        if not isinstance(content, (dict, list)):
+            raise InvalidJSONError("La respuesta JSON debe ser un objeto o lista")
+    else:
+        if text_content:
+            content = text_content
+        elif parsed_json is not None:
+            content = json.dumps(parsed_json, ensure_ascii=False)
+        else:
+            content = ""
+
+    return {"ok": True, "task": canonical, "content": content, "raw": raw}
 
 
 def _build_image_message(image_bytes: bytes, instructions: str, filename: str) -> list:
