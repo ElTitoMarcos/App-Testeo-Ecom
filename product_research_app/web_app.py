@@ -49,6 +49,7 @@ from .services.importer_fast import DEFAULT_BATCH_SIZE, fast_import, fast_import
 from . import gpt
 from .prompts.registry import normalize_task
 from . import title_analyzer
+from . import product_enrichment
 from .utils.db import row_to_dict, rget
 
 WINNER_SCORE_FIELDS = list(winner_calc.FEATURE_MAP.keys())
@@ -81,6 +82,9 @@ _DB_INIT_LOCK = threading.Lock()
 
 IMPORT_STATUS: Dict[str, Dict[str, Any]] = {}
 _IMPORT_STATUS_LOCK = threading.Lock()
+
+_ENRICH_WORKERS: Dict[int, threading.Thread] = {}
+_ENRICH_LOCK = threading.Lock()
 
 
 def _parse_date(s: str):
@@ -668,6 +672,25 @@ def resume_incomplete_imports():
                     pass
 
 
+def _start_enrichment_worker(job_id: int) -> bool:
+    def runner() -> None:
+        try:
+            product_enrichment.run_job_sync(job_id)
+        except Exception:
+            logger.exception("Enrichment worker crashed job_id=%s", job_id)
+        finally:
+            with _ENRICH_LOCK:
+                _ENRICH_WORKERS.pop(job_id, None)
+
+    with _ENRICH_LOCK:
+        if job_id in _ENRICH_WORKERS:
+            return False
+        thread = threading.Thread(target=runner, name=f"enrich-{job_id}", daemon=True)
+        _ENRICH_WORKERS[job_id] = thread
+        thread.start()
+        return True
+
+
 class _SilentWriter:
     """Wrapper around a socket writer that ignores connection errors."""
 
@@ -906,6 +929,21 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self.safe_write(lambda: self.send_json(status))
             else:
                 self.safe_write(lambda: self.send_json({"state": "unknown"}))
+            return
+        if path == "/enrich/status":
+            params = parse_qs(parsed.query)
+            job_raw = params.get("job_id", [""])[0]
+            try:
+                job_id = int(job_raw)
+            except (TypeError, ValueError):
+                self.safe_write(lambda: self.send_json({"error": "invalid_job_id"}, status=400))
+                return
+            conn = ensure_db()
+            payload = database.get_enrichment_status(conn, job_id)
+            if payload is None:
+                self.safe_write(lambda: self.send_json({"error": "job_not_found"}, status=404))
+                return
+            self.safe_write(lambda: self.send_json(payload))
             return
         if path == "/metrics":
             params = parse_qs(parsed.query)
@@ -1502,6 +1540,37 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/shutdown":
             self.handle_shutdown()
+            return
+        if path == "/enrich/start":
+            params = parse_qs(parsed.query)
+            job_raw = params.get("job_id", [""])[0]
+            try:
+                job_id = int(job_raw)
+            except (TypeError, ValueError):
+                self.safe_write(lambda: self.send_json({"error": "invalid_job_id"}, status=400))
+                return
+            conn = ensure_db()
+            job = database.get_import_job(conn, job_id)
+            if job is None:
+                self.safe_write(lambda: self.send_json({"error": "job_not_found"}, status=404))
+                return
+            config_data = product_enrichment.parse_job_config(job["config"])
+            full_config, _ = product_enrichment.ensure_enrich_config(config_data)
+            database.update_import_job_progress(
+                conn,
+                job_id,
+                phase="enrich",
+                status="enriching",
+                config=full_config,
+            )
+            started = _start_enrichment_worker(job_id)
+            payload = database.get_enrichment_status(conn, job_id) or {
+                "job_id": job_id,
+                "phase": "enrich",
+            }
+            payload["started"] = started
+            logger.info("enrich start job=%s started=%s", job_id, started)
+            self.safe_write(lambda: self.send_json(payload))
             return
         if path == "/products":
             length = int(self.headers.get('Content-Length', 0))

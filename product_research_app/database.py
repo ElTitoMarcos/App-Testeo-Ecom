@@ -20,7 +20,7 @@ import json
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
 def get_connection(db_path: Path) -> sqlite3.Connection:
@@ -405,14 +405,35 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             job_id INTEGER NOT NULL,
             sig_hash TEXT NOT NULL,
             raw JSON NOT NULL,
+            result JSON,
             state TEXT NOT NULL CHECK(state IN ('raw','pending_enrich','enriched','failed')),
             updated_at TEXT NOT NULL,
             FOREIGN KEY(job_id) REFERENCES import_jobs(id) ON DELETE CASCADE
         )
         """
     )
+    try:
+        cur.execute("ALTER TABLE items ADD COLUMN result JSON")
+    except Exception:
+        pass
     cur.execute("CREATE INDEX IF NOT EXISTS idx_items_job ON items(job_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_items_state ON items(state)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_items_sig_hash ON items(sig_hash)")
+
+    # Cache for enrichment responses to avoid duplicate AI calls
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS enrichment_cache (
+            sig_hash TEXT PRIMARY KEY,
+            desire INTEGER,
+            awareness INTEGER,
+            reason TEXT,
+            updated_at TEXT NOT NULL,
+            source TEXT
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_enrichment_cache_updated ON enrichment_cache(updated_at)")
 
     # Batch metrics for observability
     cur.execute(
@@ -1190,6 +1211,254 @@ def transition_job_items(
         conn.commit()
     return cur.rowcount
 
+def list_items_by_state(
+    conn: sqlite3.Connection, job_id: int, state: str
+) -> List[sqlite3.Row]:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, sig_hash, raw, result, updated_at
+        FROM items
+        WHERE job_id=? AND state=?
+        ORDER BY id
+        """,
+        (job_id, state),
+    )
+    return cur.fetchall()
+
+
+def mark_item_enriched(
+    conn: sqlite3.Connection, item_id: int, result: Dict[str, Any], *, commit: bool = False
+) -> None:
+    now = datetime.utcnow().isoformat()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE items SET state='enriched', result=json(?), updated_at=? WHERE id=?",
+        (json_dump(result), now, item_id),
+    )
+    if commit:
+        conn.commit()
+
+
+def mark_item_failed(
+    conn: sqlite3.Connection,
+    item_id: int,
+    error: Optional[str] = None,
+    *,
+    commit: bool = False,
+) -> None:
+    payload: Optional[str] = None
+    if error:
+        payload = json_dump({"error": error})
+    now = datetime.utcnow().isoformat()
+    cur = conn.cursor()
+    if payload is None:
+        cur.execute(
+            "UPDATE items SET state='failed', result=NULL, updated_at=? WHERE id=?",
+            (now, item_id),
+        )
+    else:
+        cur.execute(
+            "UPDATE items SET state='failed', result=?, updated_at=? WHERE id=?",
+            (payload, now, item_id),
+        )
+    if commit:
+        conn.commit()
+
+
+def get_product_by_sig_hash(
+    conn: sqlite3.Connection, sig_hash: str
+) -> Optional[sqlite3.Row]:
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM products WHERE sig_hash=?",
+        (sig_hash,),
+    )
+    return cur.fetchone()
+
+
+def update_product_enrichment(
+    conn: sqlite3.Connection,
+    sig_hash: str,
+    desire: Optional[int],
+    awareness: Optional[int],
+    reason: Optional[str],
+    *,
+    source: str = "ai",
+    commit: bool = False,
+) -> bool:
+    row = get_product_by_sig_hash(conn, sig_hash)
+    if row is None:
+        return False
+    extra_payload: Dict[str, Any] = {}
+    raw_extra = row["extra"]
+    if raw_extra:
+        try:
+            extra_payload = json.loads(raw_extra)
+        except Exception:
+            extra_payload = {}
+    enrichment = {
+        "desire_score": desire,
+        "awareness_score": awareness,
+        "reason": reason,
+        "source": source,
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+    extra_payload.setdefault("enrichment", {}).update(
+        {k: v for k, v in enrichment.items() if v is not None}
+    )
+    cur = conn.cursor()
+    desire_value: Optional[str] = None
+    if desire is not None:
+        desire_value = str(int(desire))
+    cur.execute(
+        "UPDATE products SET desire=?, extra=json(?) WHERE id=?",
+        (desire_value, json_dump(extra_payload), row["id"]),
+    )
+    if commit:
+        conn.commit()
+    return True
+
+
+def get_enrichment_cache(
+    conn: sqlite3.Connection,
+    sig_hashes: Sequence[str],
+    *,
+    max_age_days: int = 30,
+) -> Dict[str, sqlite3.Row]:
+    if not sig_hashes:
+        return {}
+    threshold = (datetime.utcnow() - timedelta(days=max_age_days)).isoformat()
+    placeholders = ",".join(["?"] * len(sig_hashes))
+    cur = conn.cursor()
+    cur.execute(
+        f"""
+        SELECT sig_hash, desire, awareness, reason, updated_at, source
+        FROM enrichment_cache
+        WHERE sig_hash IN ({placeholders}) AND updated_at >= ?
+        """,
+        (*sig_hashes, threshold),
+    )
+    return {row["sig_hash"]: row for row in cur.fetchall()}
+
+
+def upsert_enrichment_cache(
+    conn: sqlite3.Connection,
+    sig_hash: str,
+    desire: Optional[int],
+    awareness: Optional[int],
+    reason: Optional[str],
+    *,
+    source: str = "ai",
+    commit: bool = False,
+) -> None:
+    now = datetime.utcnow().isoformat()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO enrichment_cache (sig_hash, desire, awareness, reason, updated_at, source)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(sig_hash) DO UPDATE SET
+            desire=excluded.desire,
+            awareness=excluded.awareness,
+            reason=excluded.reason,
+            updated_at=excluded.updated_at,
+            source=excluded.source
+        """,
+        (sig_hash, desire, awareness, reason, now, source),
+    )
+    if commit:
+        conn.commit()
+
+
+def update_enrichment_metrics(
+    conn: sqlite3.Connection,
+    job_id: int,
+    metrics: Dict[str, Any],
+    *,
+    commit: bool = True,
+) -> None:
+    row = get_import_job(conn, job_id)
+    if row is None:
+        return
+    try:
+        existing = json.loads(row["metrics"]) if row["metrics"] else {}
+    except Exception:
+        existing = {}
+    if not isinstance(existing, dict):
+        existing = {}
+    enrich_metrics = existing.get("enrich")
+    if not isinstance(enrich_metrics, dict):
+        enrich_metrics = {}
+    enrich_metrics.update(metrics)
+    existing["enrich"] = enrich_metrics
+    update_import_job_progress(conn, job_id, metrics=existing, commit=commit)
+
+
+def get_enrichment_status(
+    conn: sqlite3.Connection, job_id: int
+) -> Optional[Dict[str, Any]]:
+    job = get_import_job(conn, job_id)
+    if job is None:
+        return None
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM items WHERE job_id=?", (job_id,))
+    total = int(cur.fetchone()[0])
+    cur.execute(
+        "SELECT COUNT(*) FROM items WHERE job_id=? AND state='enriched'",
+        (job_id,),
+    )
+    enriched = int(cur.fetchone()[0])
+    cur.execute(
+        "SELECT COUNT(*) FROM items WHERE job_id=? AND state='failed'",
+        (job_id,),
+    )
+    failed = int(cur.fetchone()[0])
+    cur.execute(
+        "SELECT COUNT(*) FROM items WHERE job_id=? AND state='pending_enrich'",
+        (job_id,),
+    )
+    queued = int(cur.fetchone()[0])
+    try:
+        metrics_raw = json.loads(job["metrics"]) if job["metrics"] else {}
+    except Exception:
+        metrics_raw = {}
+    if not isinstance(metrics_raw, dict):
+        metrics_raw = {}
+    enrich_metrics = metrics_raw.get("enrich")
+    if not isinstance(enrich_metrics, dict):
+        enrich_metrics = {}
+    try:
+        config_raw = json.loads(job["config"]) if job["config"] else {}
+    except Exception:
+        config_raw = {}
+    if not isinstance(config_raw, dict):
+        config_raw = {}
+    enrich_config = config_raw.get("enrich")
+    if not isinstance(enrich_config, dict):
+        enrich_config = {}
+    processed = enriched + failed
+    eta: Optional[float] = None
+    total_duration = float(enrich_metrics.get("total_duration_ms") or 0.0)
+    if processed and total_duration > 0:
+        rate = processed / (total_duration / 1000.0)
+        if rate > 0 and queued:
+            eta = queued / rate
+    payload = {
+        "job_id": job_id,
+        "phase": "enrich",
+        "status": job["status"],
+        "total": total,
+        "enriched": enriched,
+        "failed": failed,
+        "queued": queued,
+        "processed": processed,
+        "eta_estimate": eta,
+        "metrics": enrich_metrics,
+        "config": enrich_config,
+        "updated_at": job["updated_at"],
+    }
+    return payload
 
 def merge_staging_into_products(conn: sqlite3.Connection, job_id: int) -> None:
     cur = conn.cursor()
