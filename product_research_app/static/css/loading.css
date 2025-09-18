@@ -1,17 +1,47 @@
-/* Barra de progreso embebida en la cabecera */
+/* ===================== Header Progress ===================== */
 #app-header { position: relative; }
-#header-progress {
-  position: absolute; left: 0; right: 0; bottom: 0;
-  height: 4px; background: rgba(255,255,255,0.12);
-  border-radius: 0; overflow: hidden; opacity: 0; transition: opacity 160ms ease;
-  pointer-events: none; z-index: 10;
+
+/* Contenedor pegado al borde inferior del header */
+#header-progress{
+  position:absolute; left:12px; right:12px; bottom:6px;
+  display:flex; align-items:center; gap:10px;
+  pointer-events:none; z-index:10; opacity:0; transition:opacity 160ms ease;
+  --hp-track: rgba(255,255,255,0.14);
+  --hp-fill: #8b5cf6; /* violeta sólido, cambia si tu tema usa otro primario */
+  --hp-text: rgba(255,255,255,0.85);
 }
-#header-progress .hp-fill {
-  width: 0%; height: 100%;
-  background: linear-gradient(90deg, #6bc1ff, #9be77f);
+
+/* Pista gruesa */
+#header-progress .hp-track{
+  flex:1; height:16px; border-radius:9999px; overflow:hidden;
+  background: var(--hp-track); outline:1px solid rgba(0,0,0,0.15);
+}
+
+/* Relleno con transición de ancho (sin degradados chillones) */
+#header-progress .hp-fill{
+  height:100%; width:0%;
+  background: var(--hp-fill);
   transition: width 140ms ease-out;
+  position:relative;
 }
-#header-progress .hp-label {
-  position: absolute; right: 10px; bottom: 6px; font-size: 11px;
-  color: rgba(255,255,255,0.7); user-select: none;
+
+/* % dentro de la barra, legible */
+#header-progress .hp-percent{
+  position:absolute; right:8px; top:50%; transform:translateY(-50%);
+  font-size:12px; line-height:1; color:white; font-variant-numeric: tabular-nums;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.35);
 }
+
+/* Meta info a la izquierda: título + etapa */
+#header-progress .hp-meta{
+  display:flex; align-items:center; gap:8px; white-space:nowrap;
+  color: var(--hp-text); font-size:12px; text-shadow: 0 1px 2px rgba(0,0,0,0.2);
+}
+#header-progress .hp-title{ font-weight:600; }
+#header-progress .hp-stage{ opacity:.85; }
+
+/* Visible mientras haya progreso > 0 */
+#header-progress.is-active{ opacity:1; }
+
+/* Accesibilidad al foco (por si se navega con teclado/lectores) */
+#header-progress:focus-visible { outline: 2px solid #ffffff55; border-radius: 10px; }
