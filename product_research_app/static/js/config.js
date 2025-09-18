@@ -326,7 +326,9 @@ function stratifiedSample(list, n){
 
 async function adjustWeightsAI(ev){
   const btn = ev?.currentTarget || document.getElementById('btnAiWeights');
-  const tracker = LoadingHelpers.start('Ajustando pesos con IA', { btn });
+  const modal = btn?.closest('.modal') || document.querySelector('.config-modal.modal');
+  const host = modal?.querySelector('.modal-progress-slot') || modal || document.querySelector('#progress-slot-global');
+  const tracker = LoadingHelpers.start('Ajustando pesos con IA', { host });
   const num = v => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
   const stratifiedSampleBy = (arr, key, n) => {
     if (!Array.isArray(arr) || arr.length <= n) return (arr || []).slice();
@@ -392,6 +394,7 @@ async function adjustWeightsAI(ev){
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify(payload),
+      __hostEl: host,
       __skipLoadingHook: true
     });
     if (!res.ok){
@@ -399,6 +402,7 @@ async function adjustWeightsAI(ev){
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body: JSON.stringify(payload),
+        __hostEl: host,
         __skipLoadingHook: true
       });
     }
@@ -417,6 +421,7 @@ async function adjustWeightsAI(ev){
       method:'PATCH',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ weights: intWeights, weights_order: newOrder, weights_enabled: state.enabled }),
+      __hostEl: host,
       __skipLoadingHook: true
     });
     if (!resSave.ok) throw new Error('Persist weights failed');
