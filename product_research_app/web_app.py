@@ -127,6 +127,25 @@ def _update_import_status(task_id: str, **updates) -> Dict[str, Any]:
         return dict(state)
 
 
+def _set_import_progress(
+    task_id: str,
+    pct: float | int | None = None,
+    message: str | None = None,
+    **updates: Any,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {}
+    if pct is not None:
+        try:
+            pct_val = int(round(float(pct)))
+            payload["pct"] = max(0, min(100, pct_val))
+        except Exception:
+            pass
+    if message is not None:
+        payload["message"] = message
+    payload.update(updates)
+    return _update_import_status(task_id, **payload)
+
+
 def _get_import_status(task_id: str) -> Dict[str, Any] | None:
     with _IMPORT_STATUS_LOCK:
         status = IMPORT_STATUS.get(task_id)
@@ -244,9 +263,22 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
     conn = ensure_db()
     rows_imported = 0
     inserted_ids: List[int] = []
+    task_key = str(job_id)
     try:
+        _set_import_progress(
+            task_key,
+            pct=2,
+            message="Inicializando importación",
+            state="running",
+            stage="prepare",
+            started_at=time.time(),
+            filename=filename,
+        )
         data = tmp_path.read_bytes()
         records = parse_xlsx(data)
+        total_records = len(records)
+        if total_records:
+            _set_import_progress(task_key, pct=5, message="Analizando archivo", total=total_records)
 
         used_cols: set[str] = set()
 
@@ -443,7 +475,16 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                 rows_validas.append(
                     (name, description, category, price, currency, image_url, date_range, extras, metrics)
                 )
-            for idx, (name, description, category, price, currency, image_url, date_range, extra_cols, metrics) in enumerate(rows_validas):
+            total_valid = len(rows_validas)
+            if total_valid:
+                _set_import_progress(
+                    task_key,
+                    pct=20,
+                    message="Preparando inserción",
+                    done=0,
+                    total=total_valid,
+                )
+            for idx, (name, description, category, price, currency, image_url, date_range, extra_cols, metrics) in enumerate(rows_validas, start=1):
                 row_id = base_id + idx
                 database.insert_product(
                     conn,
@@ -463,9 +504,28 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                     database.update_product(conn, row_id, **metrics)
                 rows_imported += 1
                 inserted_ids.append(row_id)
+                if total_valid:
+                    if idx == total_valid or idx % 50 == 0:
+                        frac = idx / max(total_valid, 1)
+                        pct = 20 + min(60, 60 * frac)
+                        _set_import_progress(
+                            task_key,
+                            pct=pct,
+                            message=f"Insertando registros {idx}/{total_valid}",
+                            done=idx,
+                            total=total_valid,
+                        )
             conn.commit()
-        
+            _set_import_progress(
+                task_key,
+                pct=82,
+                message="Guardando cambios",
+                done=rows_imported,
+                total=total_valid or rows_imported,
+            )
+
         if inserted_ids and config.is_auto_fill_ia_on_import_enabled():
+            _set_import_progress(task_key, pct=88, message="Completando columnas con IA")
             database.start_import_job_ai(conn, job_id, len(inserted_ids))
             cfg_cost = config.get_ai_cost_config()
             res = ai_columns.fill_ai_columns(
@@ -479,6 +539,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             database.set_import_job_ai_counts(conn, job_id, counts, res.get("pending_ids", []))
             if res.get("error"):
                 database.set_import_job_ai_error(conn, job_id, "No se pudieron completar las columnas con IA: revisa la API.")
+        _set_import_progress(task_key, pct=92, message="Calculando Winner Score")
         res_scores = winner_calc.generate_winner_scores(conn, product_ids=inserted_ids)
         updated_scores = int(res_scores.get("updated", 0))
         logger.info(
@@ -487,12 +548,30 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             updated_scores,
         )
         database.complete_import_job(conn, job_id, rows_imported, updated_scores)
+        _set_import_progress(
+            task_key,
+            pct=100,
+            message="Completado",
+            state="done",
+            stage="done",
+            imported=rows_imported,
+            finished_at=time.time(),
+        )
     except Exception as exc:
         try:
             conn.rollback()
         except Exception:
             pass
         database.fail_import_job(conn, job_id, str(exc))
+        _set_import_progress(
+            task_key,
+            pct=100,
+            message=f"Error: {exc}",
+            state="error",
+            stage="error",
+            error=str(exc),
+            finished_at=time.time(),
+        )
     finally:
         try:
             tmp_path.unlink()
@@ -1690,15 +1769,59 @@ class RequestHandler(BaseHTTPRequestHandler):
                 imported=0,
                 filename=filename,
             )
+            _set_import_progress(task_id, pct=0, message="En cola", state="queued")
             csv_bytes = data
 
             def run_csv():
                 _update_import_status(task_id, state="running", stage="running", started_at=time.time())
+                _set_import_progress(task_id, pct=5, message="Preparando importación")
                 try:
                     def cb(**kwargs):
-                        _update_import_status(task_id, **kwargs)
+                        stage = kwargs.get("stage")
+                        done = int(kwargs.get("done", 0) or 0)
+                        total = int(kwargs.get("total", 0) or 0)
+                        extra = {k: v for k, v in kwargs.items() if k not in {"stage", "done", "total"}}
+                        if stage == "prepare":
+                            _set_import_progress(
+                                task_id,
+                                pct=8,
+                                message="Analizando archivo",
+                                done=done,
+                                total=total,
+                                **extra,
+                            )
+                        elif stage == "insert":
+                            frac = done / max(total, 1) if total else 0.0
+                            pct = 20 + min(60, 60 * frac)
+                            msg = f"Insertando registros ({done}/{total})" if total else "Insertando registros"
+                            _set_import_progress(
+                                task_id,
+                                pct=pct,
+                                message=msg,
+                                done=done,
+                                total=total,
+                                **extra,
+                            )
+                        elif stage == "commit":
+                            _set_import_progress(
+                                task_id,
+                                pct=82,
+                                message="Guardando cambios",
+                                done=done,
+                                total=total,
+                                **extra,
+                            )
+                        else:
+                            _update_import_status(task_id, **kwargs)
 
                     count = fast_import(csv_bytes, status_cb=cb, source=filename)
+                    _set_import_progress(
+                        task_id,
+                        pct=88,
+                        message="Normalizando datos",
+                        done=count,
+                        total=count,
+                    )
                     snapshot = _get_import_status(task_id) or {}
                     done_val = int(snapshot.get("done", 0) or 0)
                     if done_val < count:
@@ -1706,6 +1829,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                     total_val = int(snapshot.get("total", 0) or 0)
                     if total_val < done_val:
                         total_val = done_val
+                    _set_import_progress(
+                        task_id,
+                        pct=95,
+                        message="Finalizando importación",
+                        done=done_val,
+                        total=total_val,
+                    )
                     _update_import_status(
                         task_id,
                         state="done",
@@ -1714,6 +1844,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                         total=total_val,
                         imported=count,
                         finished_at=time.time(),
+                        pct=100,
+                        message="Completado",
                     )
                 except Exception as exc:
                     logger.exception("Fast CSV import failed: filename=%s", filename)
@@ -1723,6 +1855,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                         stage="error",
                         error=str(exc),
                         finished_at=time.time(),
+                        pct=100,
+                        message=f"Error: {exc}",
                     )
 
             threading.Thread(target=run_csv, daemon=True).start()
@@ -1751,14 +1885,58 @@ class RequestHandler(BaseHTTPRequestHandler):
                 imported=0,
                 filename=filename,
             )
+            _set_import_progress(task_id, pct=0, message="En cola", state="queued")
 
             def run_json():
                 _update_import_status(task_id, state="running", stage="running", started_at=time.time())
+                _set_import_progress(task_id, pct=5, message="Preparando importación", total=len(records))
                 try:
                     def cb(**kwargs):
-                        _update_import_status(task_id, **kwargs)
+                        stage = kwargs.get("stage")
+                        done = int(kwargs.get("done", 0) or 0)
+                        total = int(kwargs.get("total", len(records)) or 0)
+                        extra = {k: v for k, v in kwargs.items() if k not in {"stage", "done", "total"}}
+                        if stage == "prepare":
+                            _set_import_progress(
+                                task_id,
+                                pct=8,
+                                message="Analizando archivo",
+                                done=done,
+                                total=total,
+                                **extra,
+                            )
+                        elif stage == "insert":
+                            frac = done / max(total, 1) if total else 0.0
+                            pct = 20 + min(60, 60 * frac)
+                            msg = f"Insertando registros ({done}/{total})" if total else "Insertando registros"
+                            _set_import_progress(
+                                task_id,
+                                pct=pct,
+                                message=msg,
+                                done=done,
+                                total=total,
+                                **extra,
+                            )
+                        elif stage == "commit":
+                            _set_import_progress(
+                                task_id,
+                                pct=82,
+                                message="Guardando cambios",
+                                done=done,
+                                total=total,
+                                **extra,
+                            )
+                        else:
+                            _update_import_status(task_id, **kwargs)
 
                     count = fast_import_records(records, status_cb=cb, source=filename)
+                    _set_import_progress(
+                        task_id,
+                        pct=88,
+                        message="Normalizando datos",
+                        done=count,
+                        total=count,
+                    )
                     snapshot = _get_import_status(task_id) or {}
                     done_val = int(snapshot.get("done", 0) or 0)
                     if done_val < count:
@@ -1766,6 +1944,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                     total_val = int(snapshot.get("total", len(records)) or 0)
                     if total_val < done_val:
                         total_val = done_val
+                    _set_import_progress(
+                        task_id,
+                        pct=95,
+                        message="Finalizando importación",
+                        done=done_val,
+                        total=total_val,
+                    )
                     _update_import_status(
                         task_id,
                         state="done",
@@ -1774,6 +1959,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                         total=total_val,
                         imported=count,
                         finished_at=time.time(),
+                        pct=100,
+                        message="Completado",
                     )
                 except Exception as exc:
                     logger.exception("Fast JSON import failed: filename=%s", filename)
@@ -1783,6 +1970,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                         stage="error",
                         error=str(exc),
                         finished_at=time.time(),
+                        pct=100,
+                        message=f"Error: {exc}",
                     )
 
             threading.Thread(target=run_json, daemon=True).start()

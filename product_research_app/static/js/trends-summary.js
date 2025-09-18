@@ -1,3 +1,5 @@
+import { LoadingHelpers } from './loading.js';
+
 const fmt = {
   money: formatMoney,
   percent: (p) => (p * 100).toFixed(1).replace('.', ',') + '%'
@@ -21,7 +23,7 @@ const $status = document.querySelector('#trends-status');
 if ($btnAplicar) {
   $btnAplicar.addEventListener('click', (ev) => {
     ev.preventDefault();
-    fetchTrends();
+    fetchTrends(ev.currentTarget);
   });
 }
 
@@ -50,37 +52,47 @@ function ensureDefaultDates() {
   } catch (_) {}
 }
 
-async function fetchTrends() {
+async function fetchTrends(btn) {
   ensureDefaultDates();
+  const tracker = LoadingHelpers.start('Actualizando tendencias', { btn });
   try {
     if ($status) $status.textContent = 'Cargando...';
+    tracker.step(0.05);
     const fISO = $desde ? toISOFromDDMMYYYY($desde.value) : null;
     const tISO = $hasta ? toISOFromDDMMYYYY($hasta.value) : null;
     const url = new URL('/api/trends/summary', window.location.origin);
     if (fISO) url.searchParams.set('from', fISO);
     if (tISO) url.searchParams.set('to', tISO);
-    const res = await fetch(url.toString(), { credentials: 'same-origin' });
+    tracker.step(0.25);
+    const res = await fetch(url.toString(), {
+      credentials: 'same-origin',
+      __skipLoadingHook: true
+    });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const json = await res.json();
-    handleTrendsResponse(json);
+    tracker.step(0.5);
+    handleTrendsResponse(json, tracker);
+    tracker.step(0.95);
   } catch (e) {
     (window.toast?.error || alert).call(window.toast || window, 'No se pudieron cargar las tendencias.');
+    tracker.step(1);
   } finally {
     if ($status) $status.textContent = '';
+    tracker.done();
   }
 }
 
-function handleTrendsResponse(summary) {
+function handleTrendsResponse(summary, tracker) {
   if (!summary) return;
   const scope = computeTrendsScope();
   if (scope.categoriesAgg.length) {
-    applyTrendsScope(scope);
+    applyTrendsScope(scope, tracker);
     return;
   }
   const categoriesRaw = summary.categoriesAgg || summary.top_categories || summary.categories || [];
   const allProductsRaw =
     summary.products || summary.items || summary.all_products || summary.allProducts || [];
-  renderTrends(categoriesRaw, allProductsRaw);
+  renderTrends(categoriesRaw, allProductsRaw, tracker);
 }
 
 function toNumber(value) {
@@ -347,17 +359,19 @@ function fillTrendsTable(categoriesAgg) {
   thead?.querySelectorAll('th[aria-sort]').forEach((th) => th.removeAttribute('aria-sort'));
 }
 
-function applyTrendsScope(scope){
+function applyTrendsScope(scope, tracker){
   const categoriesAgg = normalizeCategories(scope?.categoriesAgg || []);
   const allProducts = normalizeProducts(scope?.allProducts || []);
   window.__latestTrendsData = { categoriesAgg, allProducts };
+  tracker?.step(0.7);
   renderTopCategoriesBar(categoriesAgg);
   renderRightPareto(categoriesAgg);
+  tracker?.step(0.85);
   fillTrendsTable(categoriesAgg);
 }
 
 // Llama a esta función desde tu flujo principal tras obtener datos
-export function renderTrends(categoriesAgg, allProducts) {
+export function renderTrends(categoriesAgg, allProducts, tracker) {
   const fallback = computeTrendsScope();
   const categories = Array.isArray(categoriesAgg) && categoriesAgg.length
     ? categoriesAgg
@@ -365,7 +379,8 @@ export function renderTrends(categoriesAgg, allProducts) {
   const products = Array.isArray(allProducts) && allProducts.length
     ? allProducts
     : fallback.allProducts;
-  applyTrendsScope({ categoriesAgg: categories, allProducts: products });
+  applyTrendsScope({ categoriesAgg: categories, allProducts: products }, tracker);
+  tracker?.step(0.92);
 }
 
 // Toggle montado una sola vez
@@ -427,4 +442,3 @@ function formatMoney(v){
 window.computeTrendsScope = computeTrendsScope;
 
 mountTrendsToggle();
-

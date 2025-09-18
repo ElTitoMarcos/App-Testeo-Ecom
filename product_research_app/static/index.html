@@ -5,6 +5,7 @@
 <title>Product Research Copilot</title>
 <link rel="stylesheet" href="/static/css/app.css">
 <link rel="stylesheet" href="/static/css/toast.css">
+<link rel="stylesheet" href="/static/css/loading.css">
 <script type="module" src="/static/js/config.js"></script>
 <style>
 /* Basic layout */
@@ -94,7 +95,7 @@ body.dark .skeleton{background:#333;}
 </head>
 <body class="dark">
 <div id="topBar">
-  <header style="padding:8px 15px; display:flex; align-items:center; justify-content:space-between;">
+  <header id="app-header" style="padding:8px 15px; display:flex; align-items:center; justify-content:space-between;">
     <div style="display:flex; align-items:center; gap:8px;">
       <h1 style="margin:0; font-size:1.4rem;">Ecom Testing App</h1>
       <p style="margin:0;font-size:12px; opacity:0.8;">By El Tito 🤙</p>
@@ -106,6 +107,10 @@ body.dark .skeleton{background:#333;}
       <button id="btn-ver-tendencias" title="Ver tendencias" data-action="toggle-trends">📊</button>
       <button id="darkToggle" title="Modo oscuro">🌙</button>
       <button id="configBtn" title="Configuración avanzada">⚙️</button>
+    </div>
+    <div id="header-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+      <div class="hp-fill"></div>
+      <span class="hp-label" aria-hidden="true"></span>
     </div>
   </header>
   <!-- Search bar row with controls -->
@@ -353,6 +358,7 @@ body.dark .skeleton{background:#333;}
   100% { transform: rotate(360deg); }
 }
 </style>
+<script type="module" src="/static/js/loading.js"></script>
 <script src="/static/js/overlay.js"></script>
 <script src="/static/js/toast.js"></script>
 <script src="/static/js/table.js"></script>
@@ -370,6 +376,7 @@ body.dark .skeleton{background:#333;}
 import { applyFilters, readFilters } from '/static/js/filters-panel.js';
 import * as api from "/static/js/net.js";
 import * as groupsService from "/static/js/groups-service.js";
+import { LoadingHelpers } from '/static/js/loading.js';
 const { fetchJson } = api;
 const metricKeys = window.metricKeys;
 const openConfigModal = window.openConfigModal;
@@ -377,7 +384,10 @@ const saveIfDirty = window.saveIfDirty;
 window.fetchJson = fetchJson;
 window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
-let importPollTimer = null;
+const IMPORT_UPLOAD_FRAC = 0.30;
+const IMPORT_POLL_MAX_FRAC = 0.99;
+const IMPORT_STATUS_URL = '/_import_status';
+const IMPORT_START_URL = '/upload';
 let savedApiKeyHash = null;
 let savedApiKeyLength = 0;
 
@@ -407,26 +417,143 @@ async function sha256(str) {
     .join('');
 }
 
-async function pollImportStatus(id) {
-  try {
-    const data = await fetchJson(`/_import_status?task_id=${id}`);
-    if (data.status === 'pending') {
-      if (data.ui_cost_message) showImportBanner(data.ui_cost_message);
-      importPollTimer = setTimeout(() => pollImportStatus(id), 2000);
-    } else if (data.status === 'ai') {
-      if (data.ui_cost_message) showImportBanner(data.ui_cost_message);
-      importPollTimer = setTimeout(() => pollImportStatus(id), 2000);
-    } else {
-      localStorage.removeItem(IMPORT_TASK_LS_KEY);
-      if (data.status === 'done') {
-        await reloadTable();
-        hideImportBanner();
-      } else {
-        toast.error(data.error || 'Error en importación');
-      }
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+function mapServerFraction(serverPct) {
+  const span = IMPORT_POLL_MAX_FRAC - IMPORT_UPLOAD_FRAC;
+  const clamped = Math.max(0, Math.min(100, Number(serverPct) || 0));
+  return IMPORT_UPLOAD_FRAC + (clamped / 100) * span;
+}
+
+async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL } = {}) {
+  const id = typeof taskId === 'string' ? taskId : String(taskId || '');
+  if (!id) return null;
+  while (true) {
+    let data;
+    try {
+      const resp = await fetch(`${statusUrl}?task_id=${encodeURIComponent(id)}&t=${Date.now()}`,
+        { __skipLoadingHook: true, cache: 'no-store' }
+      );
+      if (!resp.ok) throw new Error('Estado no disponible');
+      data = await resp.json();
+    } catch (err) {
+      await sleep(900);
+      continue;
     }
-  } catch (e) {
-    importPollTimer = setTimeout(() => pollImportStatus(id), 4000);
+    if (data.ui_cost_message) showImportBanner(data.ui_cost_message);
+    const raw = data.pct ?? data.percent ?? data.percentage ?? data.progress ?? (data.done ? 100 : undefined);
+    if (Number.isFinite(Number(raw))) {
+      tracker?.step(mapServerFraction(Number(raw)));
+    }
+    const statusVal = String(data.state || data.status || '').toLowerCase();
+    if (['pending', 'running', 'ai', 'processing'].includes(statusVal)) {
+      await sleep(600);
+      continue;
+    }
+    if (statusVal === 'done' || statusVal === 'completed' || statusVal === 'finished' || Number(raw) >= 100) {
+      await reloadTable({ skipProgress: true });
+      hideImportBanner();
+      return data;
+    }
+    if (statusVal === 'error' || data.error) {
+      hideImportBanner();
+      toast.error(data.error || 'Error en importación');
+      return data;
+    }
+    if (statusVal === 'unknown' || !statusVal) {
+      toast.error('Estado de importación desconocido');
+      hideImportBanner();
+      return data;
+    }
+    await sleep(600);
+  }
+}
+
+async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IMPORT_STATUS_URL, btn } = {}) {
+  if (!file) throw new Error('Archivo no válido');
+  const tracker = LoadingHelpers.start('Importando catálogo', { btn });
+  let trackerFinished = false;
+  const finishTracker = () => {
+    if (trackerFinished) return;
+    trackerFinished = true;
+    tracker.done();
+  };
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    const xhr = new XMLHttpRequest();
+    xhr.responseType = 'json';
+    xhr.__skipLoadingHook = true;
+    const startResult = await new Promise((resolve, reject) => {
+      xhr.open('POST', startUrl, true);
+      xhr.upload.onprogress = (event) => {
+        if (!event.lengthComputable) return;
+        const frac = Math.min(IMPORT_UPLOAD_FRAC, (event.loaded / event.total) * IMPORT_UPLOAD_FRAC);
+        tracker.step(frac);
+      };
+      xhr.onerror = () => reject(new Error('Error de red subiendo el archivo'));
+      xhr.onload = () => {
+        let payload = xhr.response;
+        if (!payload && xhr.responseText) {
+          try { payload = JSON.parse(xhr.responseText); }
+          catch (e) { payload = null; }
+        }
+        if (xhr.status >= 200 && xhr.status < 300 && payload) {
+          if (payload.task_id) {
+            resolve({ kind: 'async', data: payload, taskId: payload.task_id });
+            return;
+          }
+          if (payload.ok) {
+            resolve({ kind: 'sync', data: payload });
+            return;
+          }
+          if (payload.error) {
+            reject(new Error(payload.error));
+            return;
+          }
+          resolve({ kind: 'sync', data: payload });
+        } else {
+          const message = payload?.error || payload?.message || 'Respuesta inválida al iniciar importación';
+          reject(new Error(message));
+        }
+      };
+      xhr.send(fd);
+    });
+
+    if (startResult.kind === 'sync') {
+      await reloadTable({ skipProgress: true });
+      tracker.step(1);
+      finishTracker();
+      hideImportBanner();
+      const importedCount = startResult.data?.imported ?? startResult.data?.rows_imported;
+      if (Number.isFinite(importedCount) && importedCount > 0) {
+        toast.success(`Importados ${importedCount}`);
+      }
+      return startResult.data;
+    }
+
+    const taskId = startResult.taskId;
+    const idStr = typeof taskId === 'string' ? taskId : String(taskId);
+    tracker.step(IMPORT_UPLOAD_FRAC);
+    localStorage.setItem(IMPORT_TASK_LS_KEY, idStr);
+    const result = await followImportTask(idStr, tracker, { statusUrl });
+    localStorage.removeItem(IMPORT_TASK_LS_KEY);
+    const importedCount = result?.imported ?? result?.rows_imported;
+    if (Number.isFinite(importedCount) && importedCount > 0) {
+      toast.success(`Importados ${importedCount}`);
+    }
+    tracker.step(1);
+    finishTracker();
+    return result;
+  } catch (err) {
+    localStorage.removeItem(IMPORT_TASK_LS_KEY);
+    hideImportBanner();
+    toast.error(err?.message || 'Error al importar catálogo');
+    tracker.step(1);
+    finishTracker();
+    throw err;
+  } finally {
+    finishTracker();
   }
 }
 // Ensure the server shuts down cleanly when the tab or window is closed.
@@ -709,9 +836,10 @@ function isTrending(name) {
   return words.some(w => trendingWords.includes(w));
 }
 
-async function fetchProducts() {
+async function fetchProducts(options = {}) {
   const prevSel = new Set(selection);
-  const data = await fetchJson('/products');
+  const fetchOpts = options && options.skipProgress ? { __skipLoadingHook: true } : undefined;
+  const data = await fetchJson('/products', fetchOpts);
   if(data.length && data[0].desire !== undefined && window.ensureColumnVisible){
     ensureColumnVisible('desire');
   }
@@ -733,8 +861,8 @@ async function fetchProducts() {
 }
 
 window.fetchProducts = fetchProducts;
-async function reloadTable(){ await fetchProducts(); }
-async function reloadRows(ids){ await fetchProducts(); }
+async function reloadTable(options){ await fetchProducts(options); }
+async function reloadRows(ids, options){ await fetchProducts(options); }
 
 function renderTable() {
   const headerRow = document.getElementById('headerRow');
@@ -1063,9 +1191,23 @@ window.onload = async () => {
   await loadConfig();
   await fetchProducts();
   const tid = localStorage.getItem(IMPORT_TASK_LS_KEY);
-  if(tid){
-    toast.info('Reanudando IA post-import desde el último punto guardado…');
-    pollImportStatus(tid);
+  if (tid) {
+    toast.info('Reanudando importación previa…');
+    const tracker = LoadingHelpers.start('Importando catálogo');
+    tracker.step(IMPORT_UPLOAD_FRAC);
+    try {
+      const result = await followImportTask(tid, tracker);
+      const importedCount = result?.imported ?? result?.rows_imported;
+      const statusVal = String(result?.state || result?.status || '').toLowerCase();
+      if (statusVal === 'done' || statusVal === 'completed' || statusVal === 'finished') {
+        if (Number.isFinite(importedCount) && importedCount > 0) {
+          toast.success(`Importados ${importedCount}`);
+        }
+      }
+    } finally {
+      localStorage.removeItem(IMPORT_TASK_LS_KEY);
+      tracker.done();
+    }
   }
 };
 // Toggle config panel
@@ -1121,32 +1263,13 @@ document.getElementById('uploadBtn').onclick = () => {
 fileInputEl.onchange = async (ev) => {
   ev.preventDefault();
   const file = fileInputEl.files[0];
-  if(!file) return;
-  const formData = new FormData();
-  formData.append('file', file);
+  if (!file) return;
   const btn = document.getElementById('uploadBtn');
-  btn.disabled = true;
-  btn.style.opacity = '0.6';
-  const loading = document.getElementById('loadingOverlay');
-  if (loading) loading.style.display = 'flex';
   try {
-    const data = await fetchJson('/upload', {method:'POST', body: formData});
-    if (data.task_id) {
-      localStorage.setItem(IMPORT_TASK_LS_KEY, data.task_id);
-      pollImportStatus(data.task_id);
-    } else if (data.ok) {
-      await reloadTable();
-      toast.success(`Importados ${data.imported || 0}`);
-    } else if (data.error) {
-      toast.error('Error: ' + data.error);
-    }
-  } catch(err){
+    await importCatalog(file, { startUrl: IMPORT_START_URL, statusUrl: IMPORT_STATUS_URL, btn });
+  } catch (err) {
     console.error(err);
-    toast.error('Error al subir archivo');
   } finally {
-    if (loading) loading.style.display = 'none';
-    btn.disabled = false;
-    btn.style.opacity = '';
     fileInputEl.value = '';
   }
 };
@@ -1409,42 +1532,61 @@ document.getElementById('btnExport').onclick = async () => {
 };
 
 function getSelectedProductIds(){ return Array.from(selection, Number); }
-function setLoading(btn, s){ if(s){ btn.dataset.prev=btn.textContent; btn.textContent='Actualizando…'; } else { btn.textContent=btn.dataset.prev||btn.textContent; } }
 
 // Generate Winner Score for selected or all products
-document.getElementById('btnGenWinner').onclick = () => {
-  const ids = getSelectedProductIds();
-  const rows = ids.length ? allProducts.filter(p=>ids.includes(Number(p.id))) : products;
-  const payloadProducts = rows.map(p=>{
-    const metrics={};
-    metricKeys.forEach(k=>{ if(p[k]!==undefined) metrics[k]=p[k]; });
-    return {id:p.id, metrics};
-  });
-  if(payloadProducts.some(p=>Object.keys(p.metrics).length<metricKeys.length)){
-    toast.info('Algunos productos tienen métricas faltantes');
-  }
-  const body = ids.length ? {product_ids: ids} : {};
-  body.products = payloadProducts;
-  const btn = document.getElementById('btnGenWinner');
-  btn.disabled = true; setLoading(btn, true);
-  fetch('/api/winner-score/generate?debug=1', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify(body)
-  }).then(r=>r.json()).then(({processed=0, updated=0, diag})=>{
-    if(!processed) toast.info('Nada que recalcular (0 seleccionados)');
-    else if(updated>0) toast.success(`Winner Score recalculado: ${updated}/${processed} cambiaron`);
-    else {
+document.getElementById('btnGenWinner').onclick = async (ev) => {
+  const btn = ev.currentTarget;
+  const tracker = LoadingHelpers.start('Generando Winner Score', { btn });
+  try {
+    const ids = getSelectedProductIds();
+    const rows = ids.length ? allProducts.filter(p=>ids.includes(Number(p.id))) : products;
+    const payloadProducts = rows.map(p=>{
+      const metrics={};
+      metricKeys.forEach(k=>{ if(p[k]!==undefined) metrics[k]=p[k]; });
+      return {id:p.id, metrics};
+    });
+    if(payloadProducts.some(p=>Object.keys(p.metrics).length<metricKeys.length)){
+      toast.info('Algunos productos tienen métricas faltantes');
+    }
+    tracker.step(0.15);
+    const body = ids.length ? {product_ids: ids} : {};
+    body.products = payloadProducts;
+    tracker.step(0.35);
+    const res = await fetch('/api/winner-score/generate?debug=1', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body),
+      __skipLoadingHook: true
+    });
+    let payload = {};
+    try { payload = await res.json(); }
+    catch (_) { payload = {}; }
+    if (!res.ok) {
+      throw new Error(payload?.error || res.statusText || 'Error al recalcular');
+    }
+    const { processed = 0, updated = 0, diag } = payload;
+    if(!processed) {
+      toast.info('Nada que recalcular (0 seleccionados)');
+    } else if(updated>0) {
+      toast.success(`Winner Score recalculado: ${updated}/${processed} cambiaron`);
+    } else {
       if(diag && diag.sum_filtered===0){
         toast.info(`Recalculado ${processed}. No afectó: los pesos de métricas presentes suman 0 → fallback uniforme.`);
       } else {
         toast.info(`Recalculado ${processed}. El entero 0–100 no varió (redondeo).`);
       }
     }
-    if(ids.length) reloadRows(ids); else reloadTable();
-  }).catch(err=>{
+    tracker.step(0.7);
+    if(ids.length) await reloadRows(ids, { skipProgress: true });
+    else await reloadTable({ skipProgress: true });
+    tracker.step(1);
+  } catch(err){
     console.error(err);
     toast.error('No se pudo actualizar el Winner Score');
-  }).finally(()=>{ btn.disabled=false; setLoading(btn,false); });
+    tracker.step(1);
+  } finally {
+    tracker.done();
+  }
 };
 
 // -------- Group management --------
