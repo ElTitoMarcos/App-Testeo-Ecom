@@ -153,13 +153,15 @@ def _build_payload(
     }
 
     ranges_txt = "0-100" if not force_brief else "0-1"
-    instructions = (
+    instructions_template = (
         "Devuelve SOLO JSON válido con este formato: "
-        "{\"results\":[{\"id\":\"<id>\",\"desire\":{rng},"
-        "\"desire_magnitude\":\"Low|Medium|High\","
-        "\"awareness_level\":{rng},\"competition_level\":{rng},"
-        "\"winner_score\":{rng}}]}\n"
-    ).format(rng=ranges_txt)
+        '{"results":[{"id":"<id>","desire":RANGE_VALUE,'
+        '"desire_magnitude":"Low|Medium|High",'
+        '"awareness_level":RANGE_VALUE,"competition_level":RANGE_VALUE,'
+        '"winner_score":RANGE_VALUE}]}'
+        "\n"
+    )
+    instructions = instructions_template.replace("RANGE_VALUE", ranges_txt)
     if force_brief:
         instructions += "Responde con números compactos (máx 2 decimales).\n"
 
@@ -372,7 +374,7 @@ async def _score_batch_with_backfill(
             len(missing),
             [m["id"] for m in missing][:20],
         )
-
+    return parsed
     return parsed
 
 async def _run_batches_parallel(
