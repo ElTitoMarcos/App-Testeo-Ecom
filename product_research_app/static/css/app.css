@@ -33,6 +33,49 @@ body.dark {
   --bar-btn-focus: #3A6FD8;
 }
 
+/* Ensure global overlays do not block clicks */
+#global-progress-wrapper,
+#global-progress-bar {
+  pointer-events: none;
+}
+
+header .progress-hitbox {
+  pointer-events: none;
+}
+
+.modal-backdrop {
+  z-index: 40;
+}
+
+header,
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+}
+
+.modal header,
+.modal .modal-header {
+  position: static;
+  top: auto;
+  z-index: auto;
+}
+
+.global-progress-overlay {
+  position: relative;
+  height: auto;
+  inset: auto;
+}
+
+.app-backdrop {
+  backdrop-filter: blur(3px);
+}
+
+body,
+header {
+  backdrop-filter: none !important;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;

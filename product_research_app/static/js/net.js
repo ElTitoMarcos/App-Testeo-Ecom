@@ -53,3 +53,10 @@ export async function post(url, data, timeoutMs = 25000) {
     body: JSON.stringify(data)
   }, timeoutMs);
 }
+
+if (typeof window !== 'undefined') {
+  window.apiPing = async () => fetch('/healthz')
+    .then((r) => r.json())
+    .then((j) => console.log('healthz', j))
+    .catch(console.error);
+}

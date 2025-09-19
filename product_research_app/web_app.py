@@ -907,6 +907,16 @@ class RequestHandler(BaseHTTPRequestHandler):
         return None, None
 
     def handle_events(self):
+        parsed = urlparse(self.path)
+        params = parse_qs(parsed.query)
+        job_id = params.get("job_id", [None])[0] or None
+        client = "unknown"
+        if self.client_address:
+            client = f"{self.client_address[0]}:{self.client_address[1]}"
+        if job_id:
+            logger.info("SSE connection opened from %s (job_id=%s)", client, job_id)
+        else:
+            logger.info("SSE connection opened from %s", client)
         self.close_connection = False
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -918,13 +928,13 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         subscriber = progress_subscribe()
         try:
-            self._safe_write(b": init\n\n")
+            self._safe_write(b":init\n\n")
             self.wfile.flush()
             while True:
                 try:
                     event = subscriber.queue.get(timeout=KEEPALIVE_INTERVAL)
                 except Empty:
-                    if not self._safe_write(b": keepalive\n\n"):
+                    if not self._safe_write(b":keepalive\n\n"):
                         break
                     try:
                         self.wfile.flush()
@@ -944,6 +954,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                     break
         finally:
             progress_unsubscribe(subscriber)
+            if job_id:
+                logger.info("SSE connection closed for %s (job_id=%s)", client, job_id)
+            else:
+                logger.info("SSE connection closed for %s", client)
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -957,6 +971,23 @@ class RequestHandler(BaseHTTPRequestHandler):
         path = parsed.path
         if path == "/events":
             self.handle_events()
+            return
+        if path == "/healthz":
+            payload = {
+                "ok": True,
+                "time": datetime.utcnow().isoformat() + "Z",
+                "db": "ok",
+            }
+            try:
+                ensure_db()
+                conn = get_db(str(DB_PATH))
+                conn.execute("SELECT 1;").fetchone()
+            except Exception as exc:
+                payload["ok"] = False
+                payload["db"] = "error"
+                payload["error"] = str(exc)
+                logger.exception("healthz check failed")
+            self.send_json(payload)
             return
         if path == "/" or path == "/index.html":
             self._serve_static("index.html")

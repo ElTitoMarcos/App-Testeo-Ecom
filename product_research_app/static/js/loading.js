@@ -1,5 +1,18 @@
 const SSE_SUPPORTED = typeof window !== 'undefined' && typeof window.EventSource === 'function';
 
+if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+  document.addEventListener('DOMContentLoaded', () => {
+    window.__domReady = true;
+  });
+  if (!window.__actionsHubReady) {
+    document.addEventListener('readystatechange', () => {
+      if (document.readyState === 'complete') {
+        window.__actionsHubReady = true;
+      }
+    });
+  }
+}
+
 const OP_LABELS = {
   import: 'Import',
   enrich: 'Enriq.',
@@ -104,7 +117,11 @@ function ensureSource() {
     return;
   }
   if (eventSource) return;
+  console.info('[SSE] conectando a /events');
   eventSource = new EventSource('/events');
+  eventSource.onopen = () => {
+    console.info('[SSE] abierto');
+  };
   eventSource.onmessage = (ev) => {
     if (!ev.data) return;
     try {
@@ -114,12 +131,15 @@ function ensureSource() {
       console.warn('Invalid progress payload', err);
     }
   };
-  eventSource.onerror = () => {
+  eventSource.onerror = (err) => {
+    console.warn('[SSE] error, se reiniciará la conexión', err);
     if (eventSource) {
+      console.info('[SSE] cerrado');
       eventSource.close();
       eventSource = null;
     }
     if (!reconnectTimer) {
+      console.info('[SSE] reintentando conexión en 4s');
       reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
         ensureSource();

@@ -6,7 +6,10 @@
 <link rel="stylesheet" href="/static/css/app.css">
 <link rel="stylesheet" href="/static/css/toast.css">
 <link rel="stylesheet" href="/static/css/loading.css">
-<script type="module" src="/static/js/config.js"></script>
+<script type="module" src="/static/js/config.js" defer></script>
+<script type="module" src="/static/js/net.js" defer></script>
+<script src="/static/js/actions-hub.js" defer></script>
+<script src="/static/js/error-logger.js" defer></script>
 <style>
 /* Basic layout */
 body { margin:0; padding:0; font-family: 'Segoe UI', Tahoma, sans-serif; color:#222; background: linear-gradient(to bottom, #f8fbff, #e9f0ff); }
@@ -95,7 +98,7 @@ body.dark .skeleton{background:#333;}
 </head>
 <body class="dark">
 <div id="topBar">
-  <div id="app-header">
+  <div id="app-header" class="app-header">
     <div class="app-toolbar" style="padding:8px 15px; display:flex; align-items:center; justify-content:space-between; position:relative;">
       <div style="display:flex; align-items:center; gap:8px;">
         <h1 style="margin:0; font-size:1.4rem;">Ecom Testing App</h1>
@@ -353,17 +356,17 @@ body.dark .skeleton{background:#333;}
     <button id="clearFilters" style="flex:1;">Limpiar</button>
   </div>
 </div>
-<script type="module" src="/static/js/loading.js"></script>
-<script src="/static/js/overlay.js"></script>
-<script src="/static/js/toast.js"></script>
-<script src="/static/js/table.js"></script>
-<script src="/static/js/columns.js"></script>
-<script type="module" src="/static/js/add-group.js"></script>
-<script type="module" src="/static/js/manage-groups.js"></script>
-<script src="/static/js/winner_score.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-<script type="module" src="/static/js/trends-summary.js"></script>
+<script type="module" src="/static/js/loading.js" defer></script>
+<script src="/static/js/overlay.js" defer></script>
+<script src="/static/js/toast.js" defer></script>
+<script src="/static/js/table.js" defer></script>
+<script src="/static/js/columns.js" defer></script>
+<script type="module" src="/static/js/add-group.js" defer></script>
+<script type="module" src="/static/js/manage-groups.js" defer></script>
+<script src="/static/js/winner_score.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" defer></script>
+<script type="module" src="/static/js/trends-summary.js" defer></script>
 <script type="module" src="/static/js/trends-insights.js" defer></script>
 <script type="module" src="/static/js/table-sort.js" defer></script>
 <script type="module" src="/static/js/help-tooltip.js" defer></script>
@@ -1661,7 +1664,7 @@ window.addEventListener('DOMContentLoaded', () => {
 window.renderTable = renderTable;
 window.parseDate = parseDate;
 </script>
-<script type="module" src="/static/js/completar-ia.js"></script>
+<script type="module" src="/static/js/completar-ia.js" defer></script>
 <script type="module" src="/static/js/filters-panel.js" defer></script>
 </body>
 </html>
