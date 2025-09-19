@@ -36,7 +36,7 @@ import time
 import sqlite3
 import math
 import hashlib
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional
 
 from . import database
@@ -76,6 +76,8 @@ DEBUG = bool(os.environ.get("DEBUG"))
 
 DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y")
 
+DEFAULT_STREAM_WINDOW = timedelta(minutes=10)
+
 
 _DB_INIT = False
 _DB_INIT_PATH: str | None = None
@@ -100,14 +102,69 @@ def _parse_date(s: str):
     return None
 
 
-def _parse_iso8601(s: str) -> Optional[str]:
-    text = (s or "").strip()
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _ensure_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _isoformat_utc(dt: datetime) -> str:
+    return _ensure_utc(dt).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def _to_storage_timestamp(dt: datetime) -> str:
+    return _ensure_utc(dt).replace(tzinfo=None).isoformat(timespec="microseconds")
+
+
+def _parse_iso8601_to_utc(value: Optional[str]) -> Optional[datetime]:
+    text = (value or "").strip()
     if not text:
         return None
+    if text.endswith("Z") or text.endswith("z"):
+        text = text[:-1] + "+00:00"
     try:
-        return datetime.fromisoformat(text).isoformat()
+        parsed = datetime.fromisoformat(text)
     except ValueError:
         return None
+    return _ensure_utc(parsed)
+
+
+def _resolve_since(
+    raw_value: Optional[str], stored_value: Optional[str], now: datetime
+) -> datetime:
+    for candidate in (raw_value, stored_value):
+        parsed = _parse_iso8601_to_utc(candidate)
+        if parsed is not None:
+            return parsed
+    return now - DEFAULT_STREAM_WINDOW
+
+
+def has_active_jobs(conn: sqlite3.Connection) -> bool:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT 1
+        FROM import_jobs
+        WHERE phase IN ('parse','insert','enrich')
+          AND (status IS NULL OR status NOT IN ('done','paused_by_budget','failed'))
+        LIMIT 1
+        """
+    )
+    if cur.fetchone():
+        return True
+    cur.execute(
+        """
+        SELECT 1
+        FROM items
+        WHERE state IN ('raw','pending_enrich')
+        LIMIT 1
+        """
+    )
+    return cur.fetchone() is not None
 
 def ensure_db():
     global _DB_INIT, _DB_INIT_PATH
@@ -739,6 +796,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Pragma", "no-cache")
         self.end_headers()
 
     def _set_html(self, status=200):
@@ -838,16 +897,19 @@ class RequestHandler(BaseHTTPRequestHandler):
             limit = max(1, min(limit, 1000))
             since_param = params.get("since", [""])[0]
             conn = ensure_db()
-            since = _parse_iso8601(since_param) or database.get_stream_cursor(conn, "products_since")
-            if since is None:
-                since = (datetime.utcnow() - timedelta(minutes=10)).isoformat()
-            rows = database.list_products_since(conn, since, limit)
-            next_since = since
+            now = now_utc()
+            server_now_iso = _isoformat_utc(now)
+            stored_cursor = database.get_stream_cursor(conn, "products_since")
+            since_dt = _resolve_since(since_param, stored_cursor, now)
+            since_value = _to_storage_timestamp(since_dt)
+            rows = database.list_products_since(conn, since_value, limit + 1)
+            has_more = len(rows) > limit
+            visible_rows = rows[:limit]
             payload_rows: List[Dict[str, Any]] = []
-            for row in rows:
-                created_at = row.get("created_at")
-                if created_at and created_at > next_since:
-                    next_since = created_at
+            for row in visible_rows:
+                created_at_raw = row.get("created_at")
+                created_dt = _parse_iso8601_to_utc(created_at_raw)
+                created_iso = _isoformat_utc(created_dt) if created_dt else created_at_raw
                 payload = {
                     "id": row.get("id"),
                     "title": row.get("title"),
@@ -858,10 +920,19 @@ class RequestHandler(BaseHTTPRequestHandler):
                 }
                 if row.get("group_id") is not None:
                     payload["group_id"] = row.get("group_id")
+                if created_iso:
+                    payload["created_at"] = created_iso
                 payload_rows.append(payload)
-            self.safe_write(
-                lambda: self.send_json({"rows": payload_rows, "next_since": next_since})
-            )
+            next_since = payload_rows[-1]["created_at"] if payload_rows else server_now_iso
+            response = {
+                "rows": payload_rows,
+                "count": len(payload_rows),
+                "has_more": has_more,
+                "next_since": next_since,
+                "server_now": server_now_iso,
+                "active_jobs": has_active_jobs(conn),
+            }
+            self.safe_write(lambda: self.send_json(response))
             return
         if path == "/enrich/delta":
             params = parse_qs(parsed.query)
@@ -872,16 +943,19 @@ class RequestHandler(BaseHTTPRequestHandler):
             limit = max(1, min(limit, 2000))
             since_param = params.get("since", [""])[0]
             conn = ensure_db()
-            since = _parse_iso8601(since_param) or database.get_stream_cursor(conn, "enrich_since")
-            if since is None:
-                since = (datetime.utcnow() - timedelta(minutes=10)).isoformat()
-            updates_rows = database.list_enrichment_updates_since(conn, since, limit)
-            next_since = since
+            now = now_utc()
+            server_now_iso = _isoformat_utc(now)
+            stored_cursor = database.get_stream_cursor(conn, "enrich_since")
+            since_dt = _resolve_since(since_param, stored_cursor, now)
+            since_value = _to_storage_timestamp(since_dt)
+            update_rows = database.list_enrichment_updates_since(conn, since_value, limit + 1)
+            has_more = len(update_rows) > limit
+            visible_updates = update_rows[:limit]
             payload_updates: List[Dict[str, Any]] = []
-            for row in updates_rows:
-                updated_at = row.get("enrichment_updated_at")
-                if updated_at and updated_at > next_since:
-                    next_since = updated_at
+            for row in visible_updates:
+                updated_raw = row.get("updated_at")
+                updated_dt = _parse_iso8601_to_utc(updated_raw)
+                updated_iso = _isoformat_utc(updated_dt) if updated_dt else updated_raw
                 payload_updates.append(
                     {
                         "id": row.get("id"),
@@ -890,11 +964,19 @@ class RequestHandler(BaseHTTPRequestHandler):
                         "awareness_level": row.get("awareness_level"),
                         "competition_level": row.get("competition_level"),
                         "winner_score": row.get("winner_score"),
+                        "updated_at": updated_iso,
                     }
                 )
-            self.safe_write(
-                lambda: self.send_json({"updates": payload_updates, "next_since": next_since})
-            )
+            next_since = payload_updates[-1]["updated_at"] if payload_updates else server_now_iso
+            response = {
+                "rows": payload_updates,
+                "count": len(payload_updates),
+                "has_more": has_more,
+                "next_since": next_since,
+                "server_now": server_now_iso,
+                "active_jobs": has_active_jobs(conn),
+            }
+            self.safe_write(lambda: self.send_json(response))
             return
         if path == "/api/auth/has-key":
             has_key = bool(config.get_api_key())

@@ -1040,7 +1040,7 @@ def list_enrichment_updates_since(
             "awareness_level": row["awareness_level"],
             "competition_level": row["competition_level"],
             "winner_score": row["winner_score"],
-            "enrichment_updated_at": row["enrichment_updated_at"],
+            "updated_at": row["enrichment_updated_at"],
         }
         desire_val = payload.get("desire")
         if desire_val not in (None, ""):
