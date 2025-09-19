@@ -50,6 +50,7 @@ from . import gpt
 from .prompts.registry import normalize_task
 from . import title_analyzer
 from . import product_enrichment
+from .sse import publish_progress
 from .utils.db import row_to_dict, rget
 
 WINNER_SCORE_FIELDS = list(winner_calc.FEATURE_MAP.keys())
@@ -129,7 +130,9 @@ def _update_import_status(task_id: str, **updates) -> Dict[str, Any]:
     with _IMPORT_STATUS_LOCK:
         state = IMPORT_STATUS.setdefault(task_id, {})
         state.update(updates)
-        return dict(state)
+        snapshot = dict(state)
+    publish_progress({"event": "import", "task_id": task_id, **snapshot})
+    return snapshot
 
 
 def _set_import_progress(
@@ -1569,6 +1572,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 "phase": "enrich",
             }
             payload["started"] = started
+            publish_progress({"event": "enrich", **payload})
             logger.info("enrich start job=%s started=%s", job_id, started)
             self.safe_write(lambda: self.send_json(payload))
             return
@@ -1771,6 +1775,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                 "weights_enabled": enabled,
                 "weights_order": saved_order,
             }
+            publish_progress({
+                "event": "weights",
+                "action": "updated",
+                "payload": resp,
+            })
             self._set_json()
             self.wfile.write(json.dumps(resp).encode('utf-8'))
             return
@@ -2928,6 +2937,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         conn = ensure_db()
         deleted = 0
+        deleted_ids: List[int] = []
         for pid in ids:
             try:
                 pid_int = int(pid)
@@ -2936,8 +2946,15 @@ class RequestHandler(BaseHTTPRequestHandler):
             try:
                 database.delete_product(conn, pid_int)
                 deleted += 1
+                deleted_ids.append(pid_int)
             except Exception:
                 continue
+        if deleted_ids:
+            publish_progress({
+                "event": "delete",
+                "ids": deleted_ids,
+                "deleted": deleted,
+            })
         self._set_json()
         self.wfile.write(json.dumps({"deleted": deleted}).encode('utf-8'))
 

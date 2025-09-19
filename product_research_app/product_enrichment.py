@@ -25,8 +25,16 @@ import httpx
 
 from . import config, database
 from .db import get_db
+from .sse import publish_progress
 
 logger = logging.getLogger(__name__)
+
+
+def _emit_enrich_progress(job_id: int, **payload: Any) -> None:
+    """Emit an enrichment progress event via SSE."""
+
+    publish_progress({"event": "enrich", "job_id": job_id, **payload})
+
 
 DEFAULT_BATCH_SIZE = int(os.getenv("ENRICH_BATCH_SIZE", "20"))
 DEFAULT_CONCURRENCY = int(os.getenv("ENRICH_CONCURRENCY", "12"))
@@ -422,6 +430,21 @@ class EnrichmentPipeline:
             "total": self.total_items,
         }
 
+    def _emit_metrics(self, *, status: Optional[str] = None, **extra: Any) -> None:
+        metrics = extra.pop("metrics", None)
+        if metrics is None:
+            metrics = self.snapshot_metrics()
+        payload = {
+            "phase": "enrich",
+            "status": status or ("paused_by_budget" if self.budget_paused else "enriching"),
+            "metrics": metrics,
+            "remaining": self.remaining,
+            "cache_hits": self.cache_hits,
+            "triage_skipped": self.triage_skipped,
+        }
+        payload.update(extra)
+        _emit_enrich_progress(self.job_id, **payload)
+
     def prepare(self) -> None:
         pending = database.list_items_by_state(self.conn, self.job_id, "pending_enrich")
         self.total_items = len(pending)
@@ -460,7 +483,9 @@ class EnrichmentPipeline:
                     self.high_priority.append(item)
         self.conn.commit()
         if self.cache_hits:
-            database.update_enrichment_metrics(self.conn, self.job_id, self.snapshot_metrics())
+            metrics = self.snapshot_metrics()
+            database.update_enrichment_metrics(self.conn, self.job_id, metrics)
+            self._emit_metrics(metrics=metrics)
         self.logger.info(
             "enrich job=%s queued high=%d low=%d cache_hits=%d",
             self.job_id,
@@ -639,9 +664,9 @@ class EnrichmentPipeline:
                 return None
             if not self.high_priority and self.low_priority and not self.mode_exhaustivo:
                 self._skip_low_priority_pending()
-                database.update_enrichment_metrics(
-                    self.conn, self.job_id, self.snapshot_metrics()
-                )
+                metrics = self.snapshot_metrics()
+                database.update_enrichment_metrics(self.conn, self.job_id, metrics)
+                self._emit_metrics(metrics=metrics)
                 return None
             queue = self.high_priority if self.high_priority else self.low_priority
             if not queue:
@@ -650,9 +675,9 @@ class EnrichmentPipeline:
             items = list(itertools.islice(queue, 0, batch_size))
             estimated_tokens = sum(max(item.tokens_estimate, 1) for item in items)
             if self._budget_would_exceed(estimated_tokens):
-                database.update_enrichment_metrics(
-                    self.conn, self.job_id, self.snapshot_metrics()
-                )
+                metrics = self.snapshot_metrics()
+                database.update_enrichment_metrics(self.conn, self.job_id, metrics)
+                self._emit_metrics(status="paused_by_budget", metrics=metrics)
                 return None
             for _ in range(len(items)):
                 queue.popleft()
@@ -679,7 +704,9 @@ class EnrichmentPipeline:
             failed = await asyncio.to_thread(self._mark_batch_failed_sync, items, str(exc))
             elapsed_ms = (time.perf_counter() - start) * 1000.0
             self._update_metrics_after_batch(len(items), 0, failed, estimated_tokens, elapsed_ms)
-            database.update_enrichment_metrics(self.conn, self.job_id, self.snapshot_metrics())
+            metrics = self.snapshot_metrics()
+            database.update_enrichment_metrics(self.conn, self.job_id, metrics)
+            self._emit_metrics(metrics=metrics)
             return
         mapping = {entry["id"]: entry for entry in normalised}
         enriched, failed = await asyncio.to_thread(self._apply_results_sync, items, mapping)
@@ -698,7 +725,9 @@ class EnrichmentPipeline:
             estimated_tokens,
             self.cost_cents,
         )
-        database.update_enrichment_metrics(self.conn, self.job_id, self.snapshot_metrics())
+        metrics = self.snapshot_metrics()
+        database.update_enrichment_metrics(self.conn, self.job_id, metrics)
+        self._emit_metrics(metrics=metrics)
 
     def _apply_results_sync(
         self, items: List[PendingItem], mapping: Dict[int, Dict[str, Any]]
@@ -779,8 +808,11 @@ async def run_job(job_id: int, *, logger: logging.Logger = logger) -> None:
         status="enriching",
         config=full_config,
     )
+    _emit_enrich_progress(job_id, phase="enrich", status="enriching", config=full_config)
     pipeline.prepare()
-    database.update_enrichment_metrics(conn, job_id, pipeline.snapshot_metrics())
+    metrics = pipeline.snapshot_metrics()
+    database.update_enrichment_metrics(conn, job_id, metrics)
+    pipeline._emit_metrics(metrics=metrics)
     if pipeline.remaining == 0:
         status = job["status"] if job["status"] in {"done", "paused_by_budget"} else "done"
         database.update_import_job_progress(
@@ -789,6 +821,7 @@ async def run_job(job_id: int, *, logger: logging.Logger = logger) -> None:
             phase="enrich",
             status=status,
         )
+        pipeline._emit_metrics(status=status, metrics=metrics)
         return
     api_key = resolve_api_key()
     if not api_key:
@@ -808,7 +841,8 @@ async def run_job(job_id: int, *, logger: logging.Logger = logger) -> None:
                 for _ in range(worker_count)
             ]
             await asyncio.gather(*tasks)
-        database.update_enrichment_metrics(conn, job_id, pipeline.snapshot_metrics())
+        metrics = pipeline.snapshot_metrics()
+        database.update_enrichment_metrics(conn, job_id, metrics)
         if pipeline.budget_paused:
             database.update_import_job_progress(
                 conn,
@@ -816,6 +850,7 @@ async def run_job(job_id: int, *, logger: logging.Logger = logger) -> None:
                 phase="enrich",
                 status="paused_by_budget",
             )
+            pipeline._emit_metrics(status="paused_by_budget", metrics=metrics)
         else:
             database.update_import_job_progress(
                 conn,
@@ -823,6 +858,7 @@ async def run_job(job_id: int, *, logger: logging.Logger = logger) -> None:
                 phase="enrich",
                 status="done",
             )
+            pipeline._emit_metrics(status="done", metrics=metrics)
     except Exception as exc:
         logger.exception("Enrichment job %s crashed", job_id)
         database.update_import_job_progress(
@@ -832,6 +868,7 @@ async def run_job(job_id: int, *, logger: logging.Logger = logger) -> None:
             status="error",
             error=str(exc),
         )
+        _emit_enrich_progress(job_id, phase="enrich", status="error", error=str(exc))
         raise
 
 
