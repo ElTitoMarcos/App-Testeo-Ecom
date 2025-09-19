@@ -1,5 +1,3 @@
-const SSE_SUPPORTED = typeof window !== 'undefined' && typeof window.EventSource === 'function';
-
 const OP_LABELS = {
   import: 'Import',
   enrich: 'Enriq.',
@@ -19,10 +17,9 @@ const COMPLETION_HOLD_MS = 2200;
 const listeners = new Set();
 const operations = new Map();
 
-let eventSource = null;
-let reconnectTimer = null;
 let topBarSyncRaf = null;
-let fallbackNotified = false;
+let busUnsubscribe = null;
+let ensureBusRetryTimer = null;
 
 function clampPercent(value) {
   if (typeof value !== 'number' || Number.isNaN(value)) return 0;
@@ -94,38 +91,38 @@ function notify() {
   }
 }
 
-function ensureSource() {
-  if (!SSE_SUPPORTED) {
-    if (!fallbackNotified) {
-      fallbackNotified = true;
-      console.warn('SSE no soportado; la barra global usará un estado estático.');
-      document.documentElement?.setAttribute('data-sse-disabled', '1');
+function ensureBusListener() {
+  if (typeof window === 'undefined') return;
+  if (busUnsubscribe) return;
+
+  const bus = window.SSEBus;
+  if (!bus || typeof bus.on !== 'function') {
+    if (!ensureBusRetryTimer) {
+      ensureBusRetryTimer = setTimeout(() => {
+        ensureBusRetryTimer = null;
+        ensureBusListener();
+      }, 1000);
     }
     return;
   }
-  if (eventSource) return;
-  eventSource = new EventSource('/events');
-  eventSource.onmessage = (ev) => {
-    if (!ev.data) return;
+
+  try {
+    if (typeof bus.connect === 'function') {
+      bus.connect();
+    }
+  } catch (err) {
+    console.error('[SSE] connect failed', err);
+  }
+
+  const off = bus.on((payload) => {
+    if (!payload || typeof payload !== 'object') return;
     try {
-      const payload = JSON.parse(ev.data);
       handleEvent(payload);
     } catch (err) {
-      console.warn('Invalid progress payload', err);
+      console.error('progress event handler failed', err);
     }
-  };
-  eventSource.onerror = () => {
-    if (eventSource) {
-      eventSource.close();
-      eventSource = null;
-    }
-    if (!reconnectTimer) {
-      reconnectTimer = setTimeout(() => {
-        reconnectTimer = null;
-        ensureSource();
-      }, 4000);
-    }
-  };
+  });
+  busUnsubscribe = typeof off === 'function' ? off : () => {};
 }
 
 function handleEvent(event) {
@@ -184,7 +181,7 @@ function deriveState() {
 }
 
 export function useSSEProgress() {
-  ensureSource();
+  ensureBusListener();
   return {
     subscribe(fn) {
       if (typeof fn !== 'function') return () => {};
@@ -216,18 +213,7 @@ function initGlobalProgressBar() {
   const store = useSSEProgress();
   let hideTimer = null;
 
-function render(state) {
-    if (!SSE_SUPPORTED) {
-      host.classList.add('is-visible', 'is-disabled');
-      host.classList.remove('is-complete');
-      host.setAttribute('aria-hidden', 'false');
-      host.setAttribute('aria-valuenow', '0');
-      host.setAttribute('aria-label', 'Seguimiento en vivo no disponible (SSE no soportado)');
-      if (fill) fill.style.width = '0%';
-      if (label) label.textContent = 'Seguimiento en vivo no disponible';
-      scheduleTopBarSync();
-      return;
-    }
+  function render(state) {
     const { primary, entries, summary } = state;
     const hasEntries = entries && entries.length > 0;
     if (!hasEntries) {
@@ -278,8 +264,29 @@ export const LoadingHelpers = {
   }
 };
 
+function connectSSEBusSafely() {
+  if (typeof window === 'undefined') return;
+  const bus = window.SSEBus;
+  if (!bus || typeof bus.connect !== 'function') return;
+  bus.connect();
+}
+
+const connectSSEOnReady = () => {
+  try {
+    connectSSEBusSafely();
+  } catch (err) {
+    console.error(err);
+  }
+};
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', connectSSEOnReady);
+} else {
+  connectSSEOnReady();
+}
+
 function setup() {
-  ensureSource();
+  ensureBusListener();
   initGlobalProgressBar();
   scheduleTopBarSync();
   window.addEventListener('resize', scheduleTopBarSync, { passive: true });
