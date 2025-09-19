@@ -1,39 +1,77 @@
-/* ======= PROGRESS LAYOUT SLOTS ======= */
-#app-header { position: relative; display: grid; grid-template-rows: auto auto; row-gap: 6px; }
-
-/* Slot genérico: colapsado por defecto para NO ocupar espacio */
-.progress-slot { height: 0; overflow: clip; transition: height 160ms ease; }
-
-/* Cuando hay progreso, el slot se expande y empuja el contenido (sin solapar) */
-.progress-slot.active { height: 18px; }
-
-/* ======= RAIL ======= */
-.progress-rail {
-  width: 100%; height: 18px; border-radius: 9999px; background: rgba(255,255,255,0.14);
-  outline: 1px solid rgba(0,0,0,0.18); position: relative; overflow: hidden;
+:root {
+  --global-progress-height: 12px;
 }
 
-.progress-fill {
-  position: absolute; left: 0; top: 0; bottom: 0; width: 0%;
-  background: #8b5cf6; /* violeta sólido, cambia si tu primario es otro */
-  transition: width 140ms ease-out;
+#app-header {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
-.progress-percent {
-  position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
-  font-size: 12px; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,.35);
-  font-variant-numeric: tabular-nums;
+.global-progress {
+  position: relative;
+  width: 100%;
+  height: 0;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.18);
+  transition: height 180ms ease, opacity 260ms ease;
+  opacity: 0;
+  pointer-events: none;
+  margin-top: 0;
 }
 
-.progress-meta {
-  position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
-  font-size: 12px; color: rgba(255,255,255,0.9); text-shadow: 0 1px 2px rgba(0,0,0,.25);
+.global-progress.is-visible {
+  height: var(--global-progress-height);
+  opacity: 1;
+  margin-top: 4px;
 }
-.progress-title { font-weight: 600; margin-right: 8px; }
-.progress-stage { opacity: .9; }
 
-/* Modal: el slot está dentro del header del diálogo, así que no se difumina ni queda tapado */
-.modal .progress-slot { margin-top: 6px; }
+.global-progress.is-complete {
+  opacity: 0;
+  transition-duration: 420ms;
+}
 
-/* Kill switch por si aparece legacy UI */
-#top-progress, .loading-overlay { display: none !important; }
+.global-progress__fill {
+  position: absolute;
+  inset: 0;
+  width: 0%;
+  background: linear-gradient(90deg, #9f7aea, #6d28d9);
+  box-shadow: 0 0 12px rgba(111, 66, 193, 0.45);
+  transition: width 180ms ease-out;
+}
+
+.global-progress__label {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  letter-spacing: 0.01em;
+}
+
+.global-progress.is-disabled {
+  opacity: 0.85;
+}
+
+.global-progress.is-disabled .global-progress__fill {
+  opacity: 0;
+}
+
+body.dark .global-progress {
+  background: rgba(255, 255, 255, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+}
+
+body.dark .global-progress__fill {
+  background: linear-gradient(90deg, #c084fc, #7c3aed);
+}
+
+body.dark .global-progress__label {
+  color: rgba(255, 255, 255, 0.92);
+}

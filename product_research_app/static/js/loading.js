@@ -1,159 +1,294 @@
-// loading.js — barra en flujo con soporte multi-host (header y modal) y limpieza de legados
+const SSE_SUPPORTED = typeof window !== 'undefined' && typeof window.EventSource === 'function';
 
-// ===== Legacy killer: por si algún módulo viejo intenta crear su barra/overlay =====
-(function killLegacy() {
-  const zap = () => {
-    document.querySelectorAll('#top-progress, .loading-overlay').forEach(n => n.remove());
-  };
-  zap();
-  const mo = new MutationObserver(zap);
-  mo.observe(document.documentElement, { childList: true, subtree: true });
-})();
+const OP_LABELS = {
+  import: 'Import',
+  enrich: 'Enriq.',
+  delete: 'Elim.',
+  weights: 'Pesos'
+};
 
-// ===== ProgressRail: una barra por "host" (slot). host = elemento contenedor (header, modal, etc.)
-function createRailInHost(host) {
-  if (!host) return null;
-  let rail = host.querySelector(':scope > .progress-rail');
-  if (rail) return rail;
+const OP_PRIORITY = {
+  import: 1,
+  enrich: 2,
+  delete: 3,
+  weights: 4
+};
 
-  host.classList.add('active');
-  rail = document.createElement('div');
-  rail.className = 'progress-rail';
-  rail.innerHTML = `
-    <div class="progress-fill"></div>
-    <span class="progress-meta"><span class="progress-title">Proceso</span><span class="progress-stage">Iniciando…</span></span>
-    <span class="progress-percent">0%</span>
-  `;
-  host.appendChild(rail);
-  return rail;
+const COMPLETION_HOLD_MS = 2200;
+
+const listeners = new Set();
+const operations = new Map();
+
+let eventSource = null;
+let reconnectTimer = null;
+let topBarSyncRaf = null;
+let fallbackNotified = false;
+
+function clampPercent(value) {
+  if (typeof value !== 'number' || Number.isNaN(value)) return 0;
+  return Math.max(0, Math.min(100, Math.round(value)));
 }
 
-function ensureSlot(el) {
-  // Si el host es un modal o un hijo suyo, usa/crea .modal-progress-slot. Si no, usa #progress-slot-global.
-  let host = el && (el.closest('.modal')?.querySelector('.modal-progress-slot'));
-  if (!host) host = document.querySelector('#progress-slot-global');
-
-  // Si no existe el slot de modal, créalo en caliente bajo el title del diálogo
-  if (!host && el && el.closest('.modal')) {
-    const modal = el.closest('.modal');
-    const header = modal.querySelector('.modal-header') || modal.querySelector('[data-role="modal-header"]') || modal;
-    host = document.createElement('div');
-    host.className = 'modal-progress-slot progress-slot active';
-    header.appendChild(host);
+function toNumber(value) {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : 0;
   }
-  return host;
+  if (typeof value === 'string') {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : 0;
+  }
+  return 0;
 }
 
-const Rails = new WeakMap(); // host -> { rail, fill, pctEl, titleEl, stageEl, tasks: Map }
-
-function getRailState(host) {
-  if (!host) return null;
-  let state = Rails.get(host);
-  if (state) return state;
-  const rail = createRailInHost(host);
-  if (!rail) return null;
-  const fill = rail.querySelector('.progress-fill');
-  const pctEl = rail.querySelector('.progress-percent');
-  const titleEl = rail.querySelector('.progress-title');
-  const stageEl = rail.querySelector('.progress-stage');
-  state = { rail, fill, pctEl, titleEl, stageEl, tasks: new Map(), hideTimer: null };
-  Rails.set(host, state);
-  return state;
+function resolvePercent(event, previous) {
+  if (event == null) return previous?.percent || 0;
+  const direct = event.percent ?? event.pct;
+  if (direct != null) return clampPercent(Number(direct));
+  const total = toNumber(event.total);
+  if (total > 0) {
+    const processed = toNumber(event.processed ?? event.done ?? event.imported);
+    return clampPercent((processed / total) * 100);
+  }
+  const imported = toNumber(event.imported);
+  const queued = toNumber(event.queued);
+  if (imported > 0 || queued > 0) {
+    const totalGuess = imported + queued;
+    if (totalGuess > 0) {
+      return clampPercent((imported / totalGuess) * 100);
+    }
+  }
+  if (event.status && ['done', 'completed', 'error'].includes(String(event.status))) {
+    return 100;
+  }
+  return previous?.percent ?? 0;
 }
 
-function refreshHost(host) {
-  const s = getRailState(host); if (!s) return;
-  const tasks = s.tasks;
-  if (tasks.size === 0) {
-    // completar al 100% brevemente y colapsar el slot
-    s.fill.style.width = '100%';
-    s.pctEl.textContent = '100%';
-    clearTimeout(s.hideTimer);
-    s.hideTimer = setTimeout(() => {
-      s.fill.style.width = '0%';
-      s.pctEl.textContent = '0%';
-      host.classList.remove('active'); // colapsa el slot (height:0)
-    }, 300);
+function scheduleTopBarSync() {
+  if (topBarSyncRaf) return;
+  topBarSyncRaf = requestAnimationFrame(() => {
+    topBarSyncRaf = null;
+    const topBar = document.getElementById('topBar');
+    if (!topBar) return;
+    const rect = topBar.getBoundingClientRect();
+    document.documentElement.style.setProperty('--topbar-height', `${Math.round(rect.height)}px`);
+  });
+}
+
+function pruneOperations() {
+  const now = Date.now();
+  for (const [key, entry] of operations.entries()) {
+    if (entry.completed && entry.completedAt && now - entry.completedAt > COMPLETION_HOLD_MS) {
+      operations.delete(key);
+    }
+  }
+}
+
+function notify() {
+  const snapshot = deriveState();
+  for (const listener of listeners) {
+    try {
+      listener(snapshot);
+    } catch (err) {
+      console.error('progress listener failed', err);
+    }
+  }
+}
+
+function ensureSource() {
+  if (!SSE_SUPPORTED) {
+    if (!fallbackNotified) {
+      fallbackNotified = true;
+      console.warn('SSE no soportado; la barra global usará un estado estático.');
+      document.documentElement?.setAttribute('data-sse-disabled', '1');
+    }
     return;
   }
-  // promedio simple de progresos
-  let sum = 0, last;
-  for (const t of tasks.values()) { sum += (t.progress || 0); last = t; }
-  const avg = Math.min(0.99, sum / tasks.size);
-  const pct = Math.round(avg * 100);
-  s.fill.style.width = pct + '%';
-  s.pctEl.textContent = pct + '%';
-  host.classList.add('active');
-  if (last) {
-    if (last.title) s.titleEl.textContent = last.title;
-    if (last.stage) s.stageEl.textContent = last.stage;
-  }
-}
-
-function startTaskInHost({ title = 'Procesando…', hostEl = null } = {}) {
-  const host = ensureSlot(hostEl);
-  const s = getRailState(host);
-  if (!s) return { step(){}, setStage(){}, done(){} };
-
-  const id = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
-  s.tasks.set(id, { progress: 0, title, stage: 'Iniciando…' });
-  refreshHost(host);
-
-  return {
-    step(frac, stage) {
-      const t = s.tasks.get(id); if (!t) return;
-      t.progress = Math.max(0, Math.min(1, frac));
-      if (stage) t.stage = stage;
-      refreshHost(host);
-    },
-    setStage(stage) {
-      const t = s.tasks.get(id); if (!t) return;
-      t.stage = stage; refreshHost(host);
-    },
-    done() {
-      s.tasks.delete(id);
-      refreshHost(host);
+  if (eventSource) return;
+  eventSource = new EventSource('/events');
+  eventSource.onmessage = (ev) => {
+    if (!ev.data) return;
+    try {
+      const payload = JSON.parse(ev.data);
+      handleEvent(payload);
+    } catch (err) {
+      console.warn('Invalid progress payload', err);
+    }
+  };
+  eventSource.onerror = () => {
+    if (eventSource) {
+      eventSource.close();
+      eventSource = null;
+    }
+    if (!reconnectTimer) {
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        ensureSource();
+      }, 4000);
     }
   };
 }
 
-// Exponer helper público
+function handleEvent(event) {
+  if (!event || !event.operation) return;
+  const op = String(event.operation);
+  const jobId = event.job_id ?? event.jobId ?? 'default';
+  const key = `${op}:${jobId}`;
+  const prev = operations.get(key);
+  const now = Date.now();
+  const percent = resolvePercent(event, prev);
+  const status = event.status ?? prev?.status ?? null;
+  const completed = percent >= 100 || (status && ['done', 'completed', 'error'].includes(String(status)));
+  const entry = {
+    key,
+    operation: op,
+    job_id: jobId,
+    percent,
+    status,
+    message: event.message ?? prev?.message ?? '',
+    enriched: toNumber(event.enriched ?? prev?.enriched ?? 0),
+    failed: toNumber(event.failed ?? prev?.failed ?? 0),
+    imported: toNumber(event.imported ?? prev?.imported ?? 0),
+    queued: toNumber(event.queued ?? prev?.queued ?? 0),
+    phase: event.phase ?? prev?.phase ?? op,
+    eta_ms: event.eta_ms ?? prev?.eta_ms ?? null,
+    updatedAt: now,
+    completed,
+    completedAt: completed ? (prev?.completed && prev?.completedAt ? prev.completedAt : now) : null
+  };
+  operations.set(key, entry);
+  pruneOperations();
+  notify();
+}
+
+function deriveState() {
+  const now = Date.now();
+  const items = Array.from(operations.values()).sort((a, b) => {
+    if (a.completed !== b.completed) return a.completed ? 1 : -1;
+    const pa = OP_PRIORITY[a.operation] ?? 50;
+    const pb = OP_PRIORITY[b.operation] ?? 50;
+    if (pa !== pb) return pa - pb;
+    return (b.updatedAt ?? 0) - (a.updatedAt ?? 0);
+  });
+  const visible = items.filter((entry) => {
+    if (!entry.completed) return true;
+    if (!entry.completedAt) return true;
+    return now - entry.completedAt <= COMPLETION_HOLD_MS;
+  });
+  const primary = visible[0] ?? null;
+  const summary = visible
+    .filter((entry) => entry.percent > 0 || entry.message)
+    .slice(0, 3)
+    .map((entry) => `${OP_LABELS[entry.operation] || entry.operation} ${entry.percent}%`)
+    .join(' · ');
+  return { entries: visible, primary, summary };
+}
+
+export function useSSEProgress() {
+  ensureSource();
+  return {
+    subscribe(fn) {
+      if (typeof fn !== 'function') return () => {};
+      listeners.add(fn);
+      try {
+        fn(deriveState());
+      } catch (err) {
+        console.error('progress subscriber error', err);
+      }
+      return () => listeners.delete(fn);
+    },
+    getState: deriveState
+  };
+}
+
+function formatAria(entry) {
+  if (!entry) return 'Sin progreso activo';
+  const label = OP_LABELS[entry.operation] || entry.operation;
+  const phase = entry.phase ? ` (${entry.phase})` : '';
+  const msg = entry.message ? `: ${entry.message}` : '';
+  return `${label}${phase} ${entry.percent}%${msg}`;
+}
+
+function initGlobalProgressBar() {
+  const host = document.getElementById('global-progress-bar');
+  if (!host) return;
+  const fill = host.querySelector('.global-progress__fill');
+  const label = host.querySelector('.global-progress__label');
+  const store = useSSEProgress();
+  let hideTimer = null;
+
+function render(state) {
+    if (!SSE_SUPPORTED) {
+      host.classList.add('is-visible', 'is-disabled');
+      host.classList.remove('is-complete');
+      host.setAttribute('aria-hidden', 'false');
+      host.setAttribute('aria-valuenow', '0');
+      host.setAttribute('aria-label', 'Seguimiento en vivo no disponible (SSE no soportado)');
+      if (fill) fill.style.width = '0%';
+      if (label) label.textContent = 'Seguimiento en vivo no disponible';
+      scheduleTopBarSync();
+      return;
+    }
+    const { primary, entries, summary } = state;
+    const hasEntries = entries && entries.length > 0;
+    if (!hasEntries) {
+      host.classList.remove('is-visible', 'is-complete');
+      host.setAttribute('aria-hidden', 'true');
+      host.setAttribute('aria-valuenow', '0');
+      if (fill) fill.style.width = '0%';
+      if (label) label.textContent = '';
+      scheduleTopBarSync();
+      return;
+    }
+    const percent = clampPercent(primary?.percent ?? 0);
+    if (fill) fill.style.width = `${percent}%`;
+    host.setAttribute('aria-valuenow', String(percent));
+    host.setAttribute('aria-hidden', 'false');
+    host.setAttribute('aria-label', formatAria(primary));
+    if (label) label.textContent = summary || formatAria(primary);
+    host.classList.add('is-visible');
+    const allCompleted = entries.every((entry) => entry.completed);
+    host.classList.toggle('is-complete', allCompleted);
+    if (hideTimer) {
+      clearTimeout(hideTimer);
+      hideTimer = null;
+    }
+    if (allCompleted) {
+      hideTimer = setTimeout(() => {
+        host.classList.remove('is-visible', 'is-complete');
+        host.setAttribute('aria-hidden', 'true');
+        if (fill) fill.style.width = '0%';
+        if (label) label.textContent = '';
+        scheduleTopBarSync();
+      }, COMPLETION_HOLD_MS + 200);
+    }
+    scheduleTopBarSync();
+  }
+
+  store.subscribe(render);
+  render(store.getState());
+}
+
 export const LoadingHelpers = {
-  start(title, opts = {}) {
-    return startTaskInHost({ title, hostEl: opts.host || null });
+  start() {
+    return {
+      step() {},
+      setStage() {},
+      done() {}
+    };
   }
 };
 
-// ===== Hooks de red: si se pasa init.__hostEl, el progreso aparece en ese host; si no, en el global =====
-(() => {
-  const _fetch = window.fetch;
-  window.fetch = async function(input, init = {}) {
-    if (init && init.__skipLoadingHook) {
-      return _fetch.call(this, input, init);
-    }
-    const host = init.__hostEl || null;
-    const t = startTaskInHost({ title: 'Cargando datos', hostEl: host });
-    try { return await _fetch(input, init); }
-    finally { t.done(); }
-  };
+function setup() {
+  ensureSource();
+  initGlobalProgressBar();
+  scheduleTopBarSync();
+  window.addEventListener('resize', scheduleTopBarSync, { passive: true });
+}
 
-  const _open = XMLHttpRequest.prototype.open;
-  const _send = XMLHttpRequest.prototype.send;
-  XMLHttpRequest.prototype.open = function(method, url, async, user, password) {
-    this.__method = method; this.__url = url;
-    return _open.apply(this, arguments);
-  };
-  XMLHttpRequest.prototype.send = function(body) {
-    if (this.__skipLoadingHook) {
-      return _send.apply(this, arguments);
-    }
-    const host = this.__hostEl || null;
-    const t = startTaskInHost({ title: 'Comunicando…', hostEl: host });
-    const end = () => t.done();
-    this.addEventListener('loadend', end);
-    this.addEventListener('error', end);
-    this.addEventListener('abort', end);
-    try { return _send.apply(this, arguments); }
-    catch (e) { end(); throw e; }
-  };
-})();
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', setup);
+} else {
+  setup();
+}
+
+export default LoadingHelpers;
