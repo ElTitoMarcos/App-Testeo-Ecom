@@ -36,6 +36,7 @@ import time
 import sqlite3
 import math
 import hashlib
+from queue import Empty
 from datetime import date, datetime, timedelta
 from typing import Dict, Any, List
 
@@ -50,6 +51,12 @@ from . import gpt
 from .prompts.registry import normalize_task
 from . import title_analyzer
 from . import product_enrichment
+from .progress_events import (
+    KEEPALIVE_INTERVAL,
+    publish_progress,
+    subscribe as progress_subscribe,
+    unsubscribe as progress_unsubscribe,
+)
 from .utils.db import row_to_dict, rget
 
 WINNER_SCORE_FIELDS = list(winner_calc.FEATURE_MAP.keys())
@@ -125,11 +132,114 @@ def ensure_db():
     return conn
 
 
+def _coerce_int(value: Any) -> int:
+    try:
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, (int, float)):
+            return int(value)
+        if value is None:
+            return 0
+        text = str(value).strip()
+        if not text:
+            return 0
+        return int(float(text))
+    except (ValueError, TypeError):
+        return 0
+
+
+def _emit_import_event(task_id: str, state: Dict[str, Any], updates: Dict[str, Any]) -> None:
+    if not state:
+        return
+    try:
+        job_id = state.get("job_id") or updates.get("job_id")
+        if job_id is None:
+            try:
+                job_id = int(task_id)
+            except Exception:
+                return
+        total = updates.get("total", state.get("total"))
+        total_i = _coerce_int(total)
+        processed = (
+            updates.get("processed")
+            or updates.get("done")
+            or state.get("processed")
+            or state.get("done")
+        )
+        processed_i = _coerce_int(processed)
+        imported = (
+            updates.get("imported")
+            or updates.get("rows_imported")
+            or state.get("imported")
+            or state.get("rows_imported")
+            or processed_i
+        )
+        imported_i = _coerce_int(imported)
+        percent = updates.get("pct") or state.get("pct")
+        if percent is None and total_i:
+            try:
+                percent = int(round((processed_i / max(total_i, 1)) * 100))
+            except Exception:
+                percent = 0
+        try:
+            percent_i = int(round(float(percent))) if percent is not None else 0
+        except Exception:
+            percent_i = 0
+        percent_i = max(0, min(100, percent_i))
+        queued = updates.get("queued")
+        if queued is None:
+            queued = state.get("queued")
+        if queued is None and total_i:
+            queued = max(total_i - processed_i, 0)
+        queued_i = _coerce_int(queued) if queued is not None else 0
+        normalized = updates.get("normalized") or state.get("normalized")
+        if normalized is None:
+            normalized = processed_i
+        normalized_i = _coerce_int(normalized)
+        phase = (
+            updates.get("phase")
+            or updates.get("stage")
+            or state.get("phase")
+            or state.get("stage")
+            or "import"
+        )
+        status = (
+            updates.get("status")
+            or updates.get("state")
+            or state.get("status")
+            or state.get("state")
+        )
+        message = updates.get("message") or state.get("message")
+        eta_raw = updates.get("eta_ms") or state.get("eta_ms")
+        event: Dict[str, Any] = {
+            "operation": "import",
+            "job_id": job_id,
+            "phase": phase,
+            "percent": percent_i,
+            "imported": imported_i,
+            "normalized": normalized_i,
+            "queued": queued_i,
+            "message": message,
+        }
+        if status:
+            event["status"] = status
+        if eta_raw is not None:
+            try:
+                event["eta_ms"] = int(float(eta_raw))
+            except Exception:
+                pass
+        publish_progress(job_id, event)
+    except Exception:
+        logger.exception("Failed to emit import progress for task %s", task_id)
+
+
 def _update_import_status(task_id: str, **updates) -> Dict[str, Any]:
     with _IMPORT_STATUS_LOCK:
         state = IMPORT_STATUS.setdefault(task_id, {})
         state.update(updates)
-        return dict(state)
+        snapshot = dict(state)
+    _emit_import_event(task_id, snapshot, updates)
+    return snapshot
 
 
 def _set_import_progress(
@@ -795,6 +905,45 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return filename, data
         return None, None
 
+    def handle_events(self):
+        self.close_connection = False
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
+        self.end_headers()
+        subscriber = progress_subscribe()
+        try:
+            self._safe_write(b": init\n\n")
+            self.wfile.flush()
+            while True:
+                try:
+                    event = subscriber.queue.get(timeout=KEEPALIVE_INTERVAL)
+                except Empty:
+                    if not self._safe_write(b": keepalive\n\n"):
+                        break
+                    try:
+                        self.wfile.flush()
+                    except Exception:
+                        break
+                    continue
+                try:
+                    data = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+                except Exception:
+                    continue
+                chunk = f"data: {data}\n\n".encode("utf-8")
+                if not self._safe_write(chunk):
+                    break
+                try:
+                    self.wfile.flush()
+                except Exception:
+                    break
+        finally:
+            progress_unsubscribe(subscriber)
+
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -805,6 +954,9 @@ class RequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path == "/events":
+            self.handle_events()
+            return
         if path == "/" or path == "/index.html":
             self._serve_static("index.html")
             return
@@ -2550,6 +2702,22 @@ class RequestHandler(BaseHTTPRequestHandler):
         samples_in = data.get("data_sample") or []
         target = data.get("target") or ""
         if not samples_in or not target:
+            job_id = f"weights-{int(time.time() * 1000)}"
+            publish_progress(
+                job_id,
+                {
+                    "operation": "weights",
+                    "job_id": job_id,
+                    "phase": "weights",
+                    "percent": 100,
+                    "imported": 0,
+                    "enriched": 0,
+                    "failed": 0,
+                    "queued": 0,
+                    "status": "error",
+                    "message": "Datos insuficientes",
+                },
+            )
             self._set_json(400)
             self.wfile.write(json.dumps({"error": "Datos insuficientes"}).encode('utf-8'))
             return
@@ -2560,14 +2728,76 @@ class RequestHandler(BaseHTTPRequestHandler):
             row = {k: float(s.get(k, 0.0)) for k in features}
             row[target] = float(s.get("target", 0.0))
             samples.append(row)
+        job_id = f"weights-{int(time.time() * 1000)}"
         api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
         model = config.get_model()
         if not api_key or not model:
+            publish_progress(
+                job_id,
+                {
+                    "operation": "weights",
+                    "job_id": job_id,
+                    "phase": "weights",
+                    "percent": 100,
+                    "imported": 0,
+                    "enriched": 0,
+                    "failed": 0,
+                    "queued": 0,
+                    "status": "error",
+                    "message": "Falta API Key",
+                },
+            )
             self._set_json(400)
             self.wfile.write(json.dumps({"error": "No API key configured"}).encode('utf-8'))
             return
         # --- pedir a GPT (o devolverá fallback desde gpt.py) ---
-        result = gpt.recommend_winner_weights(api_key, model, samples, target)
+        publish_progress(
+            job_id,
+            {
+                "operation": "weights",
+                "job_id": job_id,
+                "phase": "weights",
+                "percent": 20,
+                "imported": len(samples),
+                "enriched": 0,
+                "failed": 0,
+                "queued": 0,
+                "message": "Analizando muestras",
+            },
+        )
+        try:
+            result = gpt.recommend_winner_weights(api_key, model, samples, target)
+        except Exception as exc:
+            publish_progress(
+                job_id,
+                {
+                    "operation": "weights",
+                    "job_id": job_id,
+                    "phase": "weights",
+                    "percent": 100,
+                    "imported": len(samples),
+                    "enriched": 0,
+                    "failed": 1,
+                    "queued": 0,
+                    "status": "error",
+                    "message": f"Error IA: {exc}",
+                },
+            )
+            raise
+        publish_progress(
+            job_id,
+            {
+                "operation": "weights",
+                "job_id": job_id,
+                "phase": "weights",
+                "percent": 60,
+                "imported": len(samples),
+                "enriched": 0,
+                "failed": 0,
+                "queued": 0,
+                "message": "IA completada",
+            },
+        )
         weights_raw = result.get("weights", {}) or {}
         notes = result.get("justification", "")
 
@@ -2605,9 +2835,38 @@ class RequestHandler(BaseHTTPRequestHandler):
             "order": order,
             "method": "gpt",
             "diagnostics": {"notes": notes},
+            "job_id": job_id,
         }
+        publish_progress(
+            job_id,
+            {
+                "operation": "weights",
+                "job_id": job_id,
+                "phase": "weights",
+                "percent": 90,
+                "imported": len(samples),
+                "enriched": 0,
+                "failed": 0,
+                "queued": 0,
+                "message": "Guardando pesos",
+            },
+        )
         self._set_json()
         self.wfile.write(json.dumps(resp).encode('utf-8'))
+        publish_progress(
+            job_id,
+            {
+                "operation": "weights",
+                "job_id": job_id,
+                "phase": "weights",
+                "percent": 100,
+                "imported": len(samples),
+                "enriched": 0,
+                "failed": 0,
+                "queued": 0,
+                "message": "Pesos IA completados",
+            },
+        )
 
     def handle_scoring_v2_auto_weights_stat(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -2621,7 +2880,23 @@ class RequestHandler(BaseHTTPRequestHandler):
         features = [f for f in (data.get("features") or WINNER_SCORE_FIELDS) if f in winner_calc.ALLOWED_FIELDS]
         samples_in = data.get("data_sample") or []
         target = data.get("target") or ""
+        job_id = f"weights-{int(time.time() * 1000)}"
         if not samples_in or not target or len(samples_in) < 2:
+            publish_progress(
+                job_id,
+                {
+                    "operation": "weights",
+                    "job_id": job_id,
+                    "phase": "weights",
+                    "percent": 100,
+                    "imported": 0,
+                    "enriched": 0,
+                    "failed": 0,
+                    "queued": 0,
+                    "status": "error",
+                    "message": "Datos insuficientes",
+                },
+            )
             self._set_json(400)
             self.wfile.write(json.dumps({"error": "Datos insuficientes"}).encode('utf-8'))
             return
@@ -2636,6 +2911,21 @@ class RequestHandler(BaseHTTPRequestHandler):
             num = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
             corr = abs(num / (denom_x * denom_y)) if denom_x and denom_y else 0.0
             weights[field] = corr
+
+        publish_progress(
+            job_id,
+            {
+                "operation": "weights",
+                "job_id": job_id,
+                "phase": "weights",
+                "percent": 40,
+                "imported": len(samples_in),
+                "enriched": 0,
+                "failed": 0,
+                "queued": 0,
+                "message": "Calculando correlaciones",
+            },
+        )
 
         # weights como correlación absoluta -> reescala a 0..100 independientes
         weights01 = {k: float(weights.get(k, 0.0)) for k in features}
@@ -2662,9 +2952,38 @@ class RequestHandler(BaseHTTPRequestHandler):
             "order": order,
             "method": "stat",
             "diagnostics": {"n": len(samples_in)},
+            "job_id": job_id,
         }
+        publish_progress(
+            job_id,
+            {
+                "operation": "weights",
+                "job_id": job_id,
+                "phase": "weights",
+                "percent": 85,
+                "imported": len(samples_in),
+                "enriched": 0,
+                "failed": 0,
+                "queued": 0,
+                "message": "Guardando pesos",
+            },
+        )
         self._set_json()
         self.wfile.write(json.dumps(resp).encode('utf-8'))
+        publish_progress(
+            job_id,
+            {
+                "operation": "weights",
+                "job_id": job_id,
+                "phase": "weights",
+                "percent": 100,
+                "imported": len(samples_in),
+                "enriched": 0,
+                "failed": 0,
+                "queued": 0,
+                "message": "Pesos estadísticos completados",
+            },
+        )
 
     def handle_scoring_v2_gpt_evaluate(self):
         """Endpoint that evaluates Winner Score variables via GPT."""
@@ -2927,17 +3246,91 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"error": "Missing or invalid ids"}).encode('utf-8'))
             return
         conn = ensure_db()
+        job_id = f"delete-{int(time.time() * 1000)}"
+        total = len(ids)
+        if total <= 0:
+            publish_progress(
+                job_id,
+                {
+                    "operation": "delete",
+                    "job_id": job_id,
+                    "phase": "delete",
+                    "percent": 100,
+                    "imported": 0,
+                    "enriched": 0,
+                    "failed": 0,
+                    "queued": 0,
+                    "message": "Sin elementos para eliminar",
+                },
+            )
+            self._set_json()
+            self.wfile.write(json.dumps({"deleted": 0}).encode('utf-8'))
+            return
+        publish_progress(
+            job_id,
+            {
+                "operation": "delete",
+                "job_id": job_id,
+                "phase": "delete",
+                "percent": 0,
+                "imported": 0,
+                "enriched": 0,
+                "failed": 0,
+                "queued": total,
+                "message": "Eliminando productos",
+            },
+        )
         deleted = 0
+        failures = 0
+        start = time.perf_counter()
         for pid in ids:
             try:
                 pid_int = int(pid)
             except Exception:
+                failures += 1
                 continue
             try:
                 database.delete_product(conn, pid_int)
                 deleted += 1
             except Exception:
+                failures += 1
                 continue
+            processed = deleted + failures
+            remaining = max(total - processed, 0)
+            elapsed = time.perf_counter() - start
+            eta_ms = None
+            if processed > 0 and remaining > 0:
+                eta_ms = int(max(0.0, (elapsed / processed) * remaining * 1000.0))
+            publish_progress(
+                job_id,
+                {
+                    "operation": "delete",
+                    "job_id": job_id,
+                    "phase": "delete",
+                    "percent": int(round((processed / total) * 100)) if total else 100,
+                    "imported": processed,
+                    "enriched": deleted,
+                    "failed": failures,
+                    "queued": remaining,
+                    "eta_ms": eta_ms,
+                    "message": f"Eliminando {processed}/{total}",
+                },
+            )
+        final_message = f"Eliminados {deleted} de {total}"
+        publish_progress(
+            job_id,
+            {
+                "operation": "delete",
+                "job_id": job_id,
+                "phase": "delete",
+                "percent": 100,
+                "imported": deleted + failures,
+                "enriched": deleted,
+                "failed": failures,
+                "queued": 0,
+                "message": final_message,
+            },
+        )
         self._set_json()
         self.wfile.write(json.dumps({"deleted": deleted}).encode('utf-8'))
 

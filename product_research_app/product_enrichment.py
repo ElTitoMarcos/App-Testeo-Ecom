@@ -25,6 +25,7 @@ import httpx
 
 from . import config, database
 from .db import get_db
+from .progress_events import publish_progress
 
 logger = logging.getLogger(__name__)
 
@@ -347,6 +348,9 @@ class EnrichmentPipeline:
     avg_tokens_per_item: Optional[float] = None
     budget_paused: bool = False
     total_items: int = 0
+    total_enriched: int = 0
+    total_failed: int = 0
+    last_emit: float = field(init=False, default=0.0)
 
     def __post_init__(self) -> None:
         self.batch_size = clamp(int(self.config.get("batch_size", DEFAULT_BATCH_SIZE)), MIN_BATCH_SIZE, MAX_BATCH_SIZE)
@@ -366,6 +370,7 @@ class EnrichmentPipeline:
         self.start_time = time.perf_counter()
         self.started_iso = datetime.utcnow().isoformat()
         self.lock = asyncio.Lock()
+        self.last_emit = time.perf_counter()
 
     @property
     def remaining(self) -> int:
@@ -420,8 +425,68 @@ class EnrichmentPipeline:
             "started_at": self.started_iso,
             "model": self.model,
             "total": self.total_items,
+            "enriched": self.total_enriched,
+            "failed": self.total_failed,
         }
 
+    def _estimate_eta_ms(self) -> Optional[int]:
+        if not self.total_items:
+            return 0
+        remaining = max(self.total_items - self.processed, 0)
+        if remaining <= 0:
+            return 0
+        if self.processed <= 0 or self.total_duration_ms <= 0:
+            return None
+        avg_ms = self.total_duration_ms / max(self.processed, 1)
+        if avg_ms <= 0:
+            return None
+        return int(max(0, round(avg_ms * remaining)))
+
+    def _emit_progress(
+        self,
+        *,
+        message: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> None:
+        try:
+            total = max(self.total_items, 0)
+            processed = max(self.processed, 0)
+            status_lower = str(status).lower() if status else None
+            if total > 0:
+                percent = int(round((processed / max(total, 1)) * 100))
+            elif status_lower in {"done", "completed", "error"}:
+                percent = 100
+            else:
+                percent = 0
+            percent = max(0, min(100, percent))
+            queued = max(total - processed, 0) if total else 0
+            payload: Dict[str, Any] = {
+                "operation": "enrich",
+                "phase": "enrich",
+                "percent": percent,
+                "imported": processed,
+                "processed": processed,
+                "total": total,
+                "enriched": self.total_enriched,
+                "failed": self.total_failed,
+                "queued": queued,
+                "cache_hits": self.cache_hits,
+                "triage_skipped": self.triage_skipped,
+            }
+            if status:
+                payload["status"] = status
+            elif self.budget_paused:
+                payload["status"] = "paused_by_budget"
+            if message:
+                payload["message"] = message
+            eta_ms = self._estimate_eta_ms()
+            if eta_ms is not None:
+                payload["eta_ms"] = eta_ms
+            publish_progress(self.job_id, payload)
+            self.last_emit = time.perf_counter()
+        except Exception:
+            self.logger.exception("Failed to publish enrichment progress")
+            
     def prepare(self) -> None:
         pending = database.list_items_by_state(self.conn, self.job_id, "pending_enrich")
         self.total_items = len(pending)
@@ -495,6 +560,7 @@ class EnrichmentPipeline:
         )
         self.cache_hits += 1
         self.processed += 1
+        self.total_enriched += 1
         self.logger.info(
             "enrich job=%s cache hit item=%s sig=%s",
             self.job_id,
@@ -604,6 +670,7 @@ class EnrichmentPipeline:
                 self.max_requests,
             )
             self.budget_paused = True
+            self._emit_progress(message="Máximo de peticiones alcanzado")
             return True
         projected_cost = self.cost_cents + (estimated_tokens / 1000.0) * self.cost_per_1k
         if self.max_cost_cents and projected_cost > self.max_cost_cents:
@@ -614,6 +681,7 @@ class EnrichmentPipeline:
                 self.max_cost_cents,
             )
             self.budget_paused = True
+            self._emit_progress(message="Pausado por presupuesto")
             return True
         return False
 
@@ -631,7 +699,10 @@ class EnrichmentPipeline:
                 self.job_id,
                 item.item_id,
             )
+        self.total_failed += len(skipped)
         self.conn.commit()
+        if skipped:
+            self._emit_progress(message="Triaged low priority items")
 
     async def dequeue_batch(self) -> Optional[List[PendingItem]]:
         async with self.lock:
@@ -680,6 +751,7 @@ class EnrichmentPipeline:
             elapsed_ms = (time.perf_counter() - start) * 1000.0
             self._update_metrics_after_batch(len(items), 0, failed, estimated_tokens, elapsed_ms)
             database.update_enrichment_metrics(self.conn, self.job_id, self.snapshot_metrics())
+            self._emit_progress(message=f"Lote con error ({failed} items)")
             return
         mapping = {entry["id"]: entry for entry in normalised}
         enriched, failed = await asyncio.to_thread(self._apply_results_sync, items, mapping)
@@ -699,6 +771,9 @@ class EnrichmentPipeline:
             self.cost_cents,
         )
         database.update_enrichment_metrics(self.conn, self.job_id, self.snapshot_metrics())
+        self._emit_progress(
+            message=f"Lote completado ({self.processed}/{self.total_items})",
+        )
 
     def _apply_results_sync(
         self, items: List[PendingItem], mapping: Dict[int, Dict[str, Any]]
@@ -760,7 +835,8 @@ class EnrichmentPipeline:
         if self.ai_items:
             self.avg_tokens_per_item = self.ai_tokens / self.ai_items
         self.processed += enriched + failed
-
+        self.total_enriched += enriched
+        self.total_failed += failed
 
 async def run_job(job_id: int, *, logger: logging.Logger = logger) -> None:
     conn = get_db()
@@ -781,6 +857,7 @@ async def run_job(job_id: int, *, logger: logging.Logger = logger) -> None:
     )
     pipeline.prepare()
     database.update_enrichment_metrics(conn, job_id, pipeline.snapshot_metrics())
+    pipeline._emit_progress(message="Cola preparada")
     if pipeline.remaining == 0:
         status = job["status"] if job["status"] in {"done", "paused_by_budget"} else "done"
         database.update_import_job_progress(
@@ -789,6 +866,7 @@ async def run_job(job_id: int, *, logger: logging.Logger = logger) -> None:
             phase="enrich",
             status=status,
         )
+        pipeline._emit_progress(message="Enriquecimiento completado", status=status)
         return
     api_key = resolve_api_key()
     if not api_key:
@@ -816,11 +894,19 @@ async def run_job(job_id: int, *, logger: logging.Logger = logger) -> None:
                 phase="enrich",
                 status="paused_by_budget",
             )
+            pipeline._emit_progress(
+                message="Enriquecimiento pausado por presupuesto",
+                status="paused_by_budget",
+            )
         else:
             database.update_import_job_progress(
                 conn,
                 job_id,
                 phase="enrich",
+                status="done",
+            )
+            pipeline._emit_progress(
+                message="Enriquecimiento completado",
                 status="done",
             )
     except Exception as exc:
@@ -832,6 +918,7 @@ async def run_job(job_id: int, *, logger: logging.Logger = logger) -> None:
             status="error",
             error=str(exc),
         )
+        pipeline._emit_progress(message=str(exc), status="error")
         raise
 
 

@@ -110,7 +110,18 @@ body.dark .skeleton{background:#333;}
         <button id="configBtn" title="Configuración avanzada">⚙️</button>
       </div>
     </div>
-    <div id="progress-slot-global" class="progress-slot" aria-live="polite"></div>
+    <div
+      id="global-progress-bar"
+      class="global-progress"
+      role="progressbar"
+      aria-valuemin="0"
+      aria-valuemax="100"
+      aria-valuenow="0"
+      aria-hidden="true"
+    >
+      <div class="global-progress__fill"></div>
+      <div class="global-progress__label" aria-live="polite"></div>
+    </div>
   </div>
   <!-- Search bar row with controls -->
   <div id="searchRow">
@@ -376,7 +387,7 @@ const IMPORT_START_URL = '/upload';
 let savedApiKeyHash = null;
 let savedApiKeyLength = 0;
 
-const getGlobalProgressHost = () => document.querySelector('#progress-slot-global');
+const getGlobalProgressHost = () => document.querySelector('#global-progress-bar');
 const getActionHost = () => document.querySelector('#bottomBar') || getGlobalProgressHost();
 
 function formatPrice(n) {
@@ -1424,24 +1435,18 @@ document.getElementById('imgOverlay').onclick = (e) => {
 
   // Delete a single product by ID
   async function deleteProduct(id){
-    const host = getActionHost();
-    const tracker = LoadingHelpers.start('Eliminando productos', { host });
     try {
       if (typeof currentGroupFilter !== 'undefined' && currentGroupFilter > 0) {
         const data = await fetchJson('/remove_from_list', {
           method:'POST',
-          body: JSON.stringify({list_id: currentGroupFilter, ids: [id]}),
-          __hostEl: host,
-          __skipLoadingHook: true
+          body: JSON.stringify({list_id: currentGroupFilter, ids: [id]})
         });
         if(data.error){ toast.error('Error al eliminar del grupo: '+data.error); }
-        await applyGroupFilter(currentGroupFilter, { skipProgress: true, host });
+        await applyGroupFilter(currentGroupFilter, { skipProgress: true });
       } else {
         const data = await fetchJson('/delete', {
           method:'POST',
-          body: JSON.stringify({ids: [id]}),
-          __hostEl: host,
-          __skipLoadingHook: true
+          body: JSON.stringify({ids: [id]})
         });
         if(data.error){ toast.error('Error al eliminar: '+data.error); }
         await fetchProducts();
@@ -1449,8 +1454,6 @@ document.getElementById('imgOverlay').onclick = (e) => {
     } catch(err){
       console.error(err);
       toast.error('Error al eliminar');
-    } finally {
-      tracker.done();
     }
   }
 
@@ -1459,24 +1462,18 @@ document.getElementById('btnDelete').onclick = () => {
   const ids = Array.from(selection, Number);
   if(!ids.length){ toast.info('Selecciona al menos un producto para eliminar'); return; }
   toast.info('¿Eliminar los productos seleccionados?', {actionText:'Eliminar', onAction: async () => {
-    const host = getActionHost();
-    const tracker = LoadingHelpers.start('Eliminando productos', { host });
     try{
       if (typeof currentGroupFilter !== 'undefined' && currentGroupFilter > 0) {
         const data = await fetchJson('/remove_from_list', {
           method:'POST',
-          body: JSON.stringify({list_id: currentGroupFilter, ids: ids}),
-          __hostEl: host,
-          __skipLoadingHook: true
+          body: JSON.stringify({list_id: currentGroupFilter, ids: ids})
         });
         if(data.error){ toast.error('Error al eliminar del grupo: '+data.error); } else { toast.success('Eliminados del grupo: '+data.removed); }
-        await applyGroupFilter(currentGroupFilter, { skipProgress: true, host });
+        await applyGroupFilter(currentGroupFilter, { skipProgress: true });
       } else {
         const data = await fetchJson('/delete', {
           method:'POST',
-          body: JSON.stringify({ids: ids}),
-          __hostEl: host,
-          __skipLoadingHook: true
+          body: JSON.stringify({ids: ids})
         });
         if(data.error){ toast.error('Error al eliminar: '+data.error); } else { toast.success('Productos eliminados: '+data.deleted); }
         await fetchProducts();
@@ -1484,8 +1481,6 @@ document.getElementById('btnDelete').onclick = () => {
     }catch(err){
       console.error(err);
       toast.error('Error al eliminar');
-    } finally {
-      tracker.done();
     }
   }});
 };
