@@ -91,6 +91,8 @@ async function processBatch(items) {
 }
 
 window.handleCompletarIA = async function(opts = {}) {
+  window.LiveStream?.bump?.();
+  window.LiveStream?.start?.();
   const ids = opts.ids;
   let all;
   if (ids && Array.isArray(ids)) {

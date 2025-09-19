@@ -1358,6 +1358,8 @@ fileInputEl.onchange = async (ev) => {
   const file = fileInputEl.files[0];
   if (!file) return;
   try {
+    window.LiveStream?.bump?.();
+    window.LiveStream?.start?.();
     await importCatalog(file, { startUrl: IMPORT_START_URL, statusUrl: IMPORT_STATUS_URL });
   } catch (err) {
     console.error(err);

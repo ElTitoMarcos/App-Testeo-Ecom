@@ -19,18 +19,155 @@
 
   let sinceProducts = new Date().toISOString();
   let sinceEnrich = new Date().toISOString();
-  let fallbackStarted = false;
-  let source = null;
+  const base = 2500;
+  const max = 20000;
+  let delay = base;
+  let emptyHits = 0;
+  let running = false;
+  let stopRequested = false;
+  let timerId = null;
+
+  const advanceCursor = (current, candidate) => {
+    if (typeof candidate !== 'string' || !candidate) return current;
+    if (!current || candidate > current) return candidate;
+    return current;
+  };
+
+  const resolveCursor = (payload, fallbackIso) => {
+    if (payload && typeof payload.next_since === 'string' && payload.next_since) {
+      return payload.next_since;
+    }
+    if (payload && typeof payload.server_now === 'string' && payload.server_now) {
+      return payload.server_now;
+    }
+    return fallbackIso;
+  };
+
+  function nextDelay(empty) {
+    if (empty) {
+      emptyHits += 1;
+      const exponent = Math.min(emptyHits, 3);
+      delay = Math.min(max, base * Math.pow(2, exponent));
+    } else {
+      emptyHits = 0;
+      delay = base;
+    }
+  }
+
+  async function pollOnce() {
+    if (stopRequested) return false;
+    let manualSchedule = false;
+    try {
+      const fetchOpts = { cache: 'no-store', __skipLoadingHook: true };
+      const [prod, enrich] = await Promise.all([
+        fetch(`/products/delta?since=${encodeURIComponent(sinceProducts)}&limit=1000`, fetchOpts)
+          .then((r) => (r && r.ok ? r.json() : null))
+          .catch(() => null),
+        fetch(`/enrich/delta?since=${encodeURIComponent(sinceEnrich)}&limit=2000`, fetchOpts)
+          .then((r) => (r && r.ok ? r.json() : null))
+          .catch(() => null),
+      ]);
+
+      let got = 0;
+      if (Array.isArray(prod?.rows) && prod.rows.length) {
+        window.LiveTable?.onImportBatch(prod.rows);
+        got += prod.rows.length;
+      }
+      if (Array.isArray(enrich?.rows) && enrich.rows.length) {
+        window.LiveTable?.onEnrichBatch(enrich.rows);
+        got += enrich.rows.length;
+      }
+
+      const fallbackNow = new Date().toISOString();
+      sinceProducts = advanceCursor(sinceProducts, resolveCursor(prod, fallbackNow));
+      sinceEnrich = advanceCursor(sinceEnrich, resolveCursor(enrich, fallbackNow));
+
+      const empty = got === 0;
+      nextDelay(empty);
+
+      const active = Boolean((prod && prod.active_jobs) || (enrich && enrich.active_jobs));
+      if (!active && empty && emptyHits >= 3) {
+        manualSchedule = true;
+        schedule();
+      }
+    } catch (err) {
+      console.warn('[poll error]', err);
+      nextDelay(true);
+    }
+    return !manualSchedule;
+  }
+
+  function schedule() {
+    if (stopRequested) return;
+    if (timerId) {
+      clearTimeout(timerId);
+    }
+    const wait = delay;
+    timerId = setTimeout(async function loop(){
+      timerId = null;
+      if (stopRequested) return;
+      if (running) {
+        schedule();
+        return;
+      }
+      running = true;
+      const shouldAuto = await pollOnce();
+      running = false;
+      if (stopRequested) return;
+      if (shouldAuto !== false && timerId === null) {
+        schedule();
+      }
+    }, wait);
+  }
+
+  window.LiveStream = {
+    start(){
+      stopRequested = false;
+      emptyHits = 0;
+      delay = base;
+      schedule();
+    },
+    stop(){
+      stopRequested = true;
+      if (timerId) {
+        clearTimeout(timerId);
+        timerId = null;
+      }
+      running = false;
+    },
+    bump(){
+      emptyHits = 0;
+      delay = base;
+      if (!stopRequested) {
+        schedule();
+      }
+    }
+  };
 
   const handleEvent = (data) => {
     if (!data || typeof data !== 'object') return;
     try {
       if (data.type === 'import.batch') {
-        window.LiveTable?.onImportBatch(data.rows || []);
+        const rows = Array.isArray(data.rows) ? data.rows : [];
+        if (rows.length) {
+          window.LiveTable?.onImportBatch(rows);
+        }
         return;
       }
       if (data.type === 'enrich.batch') {
-        window.LiveTable?.onEnrichBatch(data.updates || []);
+        const rows = Array.isArray(data.updates) ? data.updates : [];
+        if (rows.length) {
+          window.LiveTable?.onEnrichBatch(rows);
+        }
+        return;
+      }
+      if (data.type === 'job.started') {
+        window.LiveStream?.bump?.();
+        window.LiveStream?.start?.();
+        return;
+      }
+      if (data.type === 'job.finished') {
+        window.LiveStream?.bump?.();
         return;
       }
       if (data.type === 'import.done' || data.type === 'enrich.done') {
@@ -41,28 +178,10 @@
     }
   };
 
-  const poll = async () => {
-    try {
-      const prodUrl = `/products/delta?since=${encodeURIComponent(sinceProducts)}&limit=1000`;
-      const enrichUrl = `/enrich/delta?since=${encodeURIComponent(sinceEnrich)}&limit=2000`;
-      const [p, e] = await Promise.all([
-        fetch(prodUrl, { cache: 'no-store' }).then((r) => r.ok ? r.json() : {}),
-        fetch(enrichUrl, { cache: 'no-store' }).then((r) => r.ok ? r.json() : {}),
-      ]);
-      if (p && Array.isArray(p.rows) && p.rows.length) {
-        window.LiveTable?.onImportBatch(p.rows);
-        sinceProducts = p.next_since || new Date().toISOString();
-      }
-      if (e && Array.isArray(e.rows) && e.rows.length) {
-        window.LiveTable?.onEnrichBatch(e.rows);
-        sinceEnrich = e.next_since || new Date().toISOString();
-      }
-    } catch (err) {
-      console.warn('[poll error]', err);
-    } finally {
-      setTimeout(poll, 2500);
-    }
-  };
+  const unsubscribe = bus.on(handleEvent);
+
+  let fallbackStarted = false;
+  let source = null;
 
   const startPolling = () => {
     if (fallbackStarted) return;
@@ -70,7 +189,7 @@
     if (source && typeof source.close === 'function') {
       try { source.close(); } catch (err) { /* noop */ }
     }
-    poll();
+    window.LiveStream.start();
   };
 
   const startSSE = () => {
@@ -117,7 +236,6 @@
     return true;
   };
 
-  const unsubscribe = bus.on(handleEvent);
   if (!startSSE()) {
     startPolling();
   }
@@ -129,5 +247,6 @@
     if (source && typeof source.close === 'function') {
       try { source.close(); } catch (err) { /* noop */ }
     }
+    window.LiveStream.stop();
   });
 })();
