@@ -20,6 +20,7 @@ Then open http://host:port in a browser.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import io
@@ -37,7 +38,7 @@ import sqlite3
 import math
 import hashlib
 from datetime import date, datetime, timedelta
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from . import database
 from .db import get_db, get_last_performance_config
@@ -47,6 +48,7 @@ from .services import winner_score as winner_calc
 from .services import trends_service
 from .services.importer_fast import DEFAULT_BATCH_SIZE, fast_import, fast_import_records
 from . import gpt
+from .product_ai_enrichment import enrich_max_parallel
 from .prompts.registry import normalize_task
 from . import title_analyzer
 from . import product_enrichment
@@ -125,6 +127,25 @@ def ensure_db():
                 _DB_INIT_PATH = target_path
     return conn
 
+
+class _ProductAIDao:
+    """DAO wrapper used by the async enrichment scheduler."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    def get_products_pending_ai(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        return database.get_products_pending_ai(self.conn, limit=limit)
+
+    def upsert_ai_fields_bulk(self, rows: List[Dict[str, Any]]) -> None:
+        database.upsert_ai_fields_bulk(self.conn, rows)
+
+    def get_current_weights_or_none(self) -> Optional[Dict[str, Any]]:
+        try:
+            weights = config.get_weights()
+            return dict(weights) if isinstance(weights, dict) else None
+        except Exception:
+            return None
 
 def _update_import_status(task_id: str, **updates) -> Dict[str, Any]:
     with _IMPORT_STATUS_LOCK:
@@ -1505,6 +1526,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/api/ia/batch-columns":
             self.handle_ia_batch_columns()
             return
+        if path == "/api/ia/enrich-pending":
+            self.handle_ai_enrich_pending()
+            return
         if path == "/auto_weights":
             self.handle_auto_weights()
             return
@@ -2429,6 +2453,74 @@ class RequestHandler(BaseHTTPRequestHandler):
         except Exception:
             self._set_json(503)
             self.wfile.write(json.dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
+
+    def handle_ai_enrich_pending(self):
+        length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(length).decode('utf-8') if length else ''
+        limit = None
+        if body:
+            try:
+                payload = json.loads(body or "{}")
+                if not isinstance(payload, dict):
+                    raise ValueError
+            except Exception:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+                return
+            limit_val = payload.get("limit")
+            if limit_val is not None:
+                try:
+                    limit = int(limit_val)
+                    if limit <= 0:
+                        limit = None
+                except Exception:
+                    self._set_json(400)
+                    self.wfile.write(json.dumps({"error": "invalid_limit"}).encode('utf-8'))
+                    return
+        else:
+            payload = {}
+
+        api_key = (
+            config.get_api_key()
+            or os.environ.get('GPT_API_KEY')
+            or os.environ.get('OPENAI_API_KEY')
+            or os.environ.get('ENRICH_API_KEY')
+        )
+        if not api_key:
+            self._set_json(503)
+            self.wfile.write(json.dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
+            return
+
+        conn = ensure_db()
+        dao = _ProductAIDao(conn)
+        try:
+            items = dao.get_products_pending_ai(limit=limit)
+        except Exception as exc:
+            logger.exception("Error obteniendo productos pendientes de IA")
+            self._set_json(500)
+            self.wfile.write(json.dumps({"error": str(exc)}).encode('utf-8'))
+            return
+
+        if not items:
+            self._set_json()
+            self.wfile.write(json.dumps({"ok": True, "processed": 0, "total": 0}).encode('utf-8'))
+            return
+
+        weights = dao.get_current_weights_or_none()
+        try:
+            processed = asyncio.run(
+                enrich_max_parallel(items, dao, weights, api_key=api_key)
+            )
+        except Exception as exc:
+            logger.exception("IA enrichment scheduler crashed")
+            self._set_json(502)
+            self.wfile.write(json.dumps({"error": str(exc)}).encode('utf-8'))
+            return
+
+        self._set_json()
+        self.wfile.write(
+            json.dumps({"ok": True, "processed": processed, "total": len(items)}).encode('utf-8')
+        )
 
     def handle_auto_weights(self):
         """

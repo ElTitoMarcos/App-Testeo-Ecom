@@ -17,6 +17,7 @@ All date/time fields are stored as ISO 8601 strings for simplicity.
 """
 
 import json
+import re
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -454,6 +455,7 @@ def initialize_database(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+
 def insert_product(
     conn: sqlite3.Connection,
     name: str,
@@ -577,6 +579,325 @@ def list_products(conn: sqlite3.Connection) -> List[sqlite3.Row]:
         "SELECT * FROM products ORDER BY import_date DESC"
     )
     return cur.fetchall()
+
+
+_DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y", "%Y/%m/%d", "%m/%d/%Y")
+_TRI_LEVELS = ("Low", "Medium", "High")
+_AWARENESS_LEVELS = (
+    "Unaware",
+    "Problem-Aware",
+    "Solution-Aware",
+    "Product-Aware",
+    "Most Aware",
+)
+
+
+def _maybe_json(raw: Any) -> Dict[str, Any]:
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return dict(raw)
+    try:
+        obj = json.loads(raw)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+    return {}
+
+
+def _parse_number(value: Any) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return float(value)
+        except Exception:
+            return None
+    text = str(value).strip()
+    if not text:
+        return None
+    multiplier = 1.0
+    lowered = text.lower()
+    if lowered.endswith("k"):
+        multiplier = 1_000.0
+        text = text[:-1]
+    elif lowered.endswith("m"):
+        multiplier = 1_000_000.0
+        text = text[:-1]
+    cleaned = text.replace("€", "").replace("$", "").replace("%", "")
+    cleaned = cleaned.replace(",", ".")
+    cleaned = re.sub(r"[^0-9.+-]", "", cleaned)
+    if not cleaned:
+        return None
+    try:
+        return float(cleaned) * multiplier
+    except Exception:
+        return None
+
+
+def _first_nonempty(data: Dict[str, Any], keys: Sequence[str]) -> Optional[Any]:
+    for key in keys:
+        val = data.get(key)
+        if isinstance(val, str):
+            val = val.strip()
+        if val not in (None, "", []):
+            return val
+    return None
+
+
+def _parse_date_value(value: Any) -> Optional[datetime]:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value))
+        except Exception:
+            return None
+    text = str(value).strip()
+    if not text:
+        return None
+    # Remove trailing timezone info for ISO strings
+    try:
+        return datetime.fromisoformat(text)
+    except Exception:
+        pass
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(text[: len(fmt)], fmt)
+        except Exception:
+            continue
+    return None
+
+
+def _date_from_range(raw: Any) -> Optional[datetime]:
+    if not raw:
+        return None
+    text = str(raw)
+    if "~" in text:
+        candidate = text.split("~", 1)[0]
+    elif "-" in text and len(text.split("-")) >= 3:
+        candidate = "-".join(text.split("-")[:3])
+    else:
+        candidate = text
+    return _parse_date_value(candidate)
+
+
+def _compute_oldness(import_date: Any, date_range: Any, extras: Dict[str, Any]) -> Optional[int]:
+    candidates = [
+        _date_from_range(date_range),
+        _parse_date_value(import_date),
+    ]
+    candidates.extend(
+        _parse_date_value(_first_nonempty(extras, keys))
+        for keys in (
+            ("launch_date", "Launch Date"),
+            ("first_seen", "First Seen"),
+            ("created_at", "createdAt"),
+        )
+    )
+    resolved = [dt for dt in candidates if dt is not None]
+    if not resolved:
+        return None
+    oldest = min(resolved).date()
+    return max(0, (datetime.utcnow().date() - oldest).days)
+
+
+def get_products_pending_ai(
+    conn: sqlite3.Connection, *, limit: Optional[int] = None
+) -> List[Dict[str, Any]]:
+    """Return products missing AI enrichment fields."""
+
+    cur = conn.cursor()
+    sql = """
+        SELECT id, name, description, category, price, import_date, date_range, extra,
+               desire, desire_magnitude, awareness_level, competition_level, winner_score,
+               ai_columns_completed_at
+          FROM products
+         WHERE (ai_columns_completed_at IS NULL OR ai_columns_completed_at = '')
+           AND (
+                desire IS NULL OR TRIM(desire) = '' OR
+                desire_magnitude IS NULL OR TRIM(desire_magnitude) = '' OR
+                awareness_level IS NULL OR TRIM(awareness_level) = '' OR
+                competition_level IS NULL OR TRIM(competition_level) = '' OR
+                winner_score IS NULL OR winner_score = 0
+           )
+         ORDER BY id
+    """
+    params: Tuple[Any, ...] = ()
+    if limit is not None and int(limit) > 0:
+        sql += " LIMIT ?"
+        params = (int(limit),)
+    cur.execute(sql, params)
+    rows = cur.fetchall()
+
+    results: List[Dict[str, Any]] = []
+    for row in rows:
+        extras = _maybe_json(row["extra"])
+        title = row["name"] or _first_nonempty(
+            extras,
+            ("name", "title", "product_name", "Product Name"),
+        )
+        description = row["description"] or _first_nonempty(
+            extras,
+            ("description", "Description", "desc"),
+        )
+        category = row["category"] or _first_nonempty(
+            extras,
+            ("category", "Category", "niche", "segment"),
+        )
+        brand = _first_nonempty(
+            extras,
+            ("brand", "Brand", "seller", "Seller", "Marca"),
+        )
+        price = row["price"]
+        if price is None:
+            price = _parse_number(
+                _first_nonempty(extras, ("price", "Price", "product_price"))
+            )
+        rating = _parse_number(
+            _first_nonempty(
+                extras,
+                (
+                    "rating",
+                    "Rating",
+                    "Product Rating",
+                    "rating_avg",
+                    "review_rating",
+                ),
+            )
+        )
+        units_sold = _parse_number(
+            _first_nonempty(
+                extras,
+                (
+                    "units_sold",
+                    "Units Sold",
+                    "orders",
+                    "Orders",
+                    "items_sold",
+                    "Item Sold",
+                ),
+            )
+        )
+        if units_sold is not None:
+            units_sold = float(int(round(units_sold)))
+        revenue = _parse_number(
+            _first_nonempty(
+                extras,
+                (
+                    "revenue",
+                    "Revenue($)",
+                    "Revenue",
+                    "sales",
+                    "Sales",
+                ),
+            )
+        )
+        oldness = _compute_oldness(row["import_date"], row["date_range"], extras)
+
+        results.append(
+            {
+                "id": row["id"],
+                "title": title or "",
+                "description": description or "",
+                "category": category or "",
+                "brand": brand or "",
+                "price": price,
+                "rating": rating,
+                "units_sold": units_sold,
+                "revenue": revenue,
+                "oldness": oldness,
+            }
+        )
+    return results
+
+
+def _score_to_tri_label(value: Any) -> Optional[str]:
+    num = _parse_number(value)
+    if num is None:
+        return None
+    if num <= 33:
+        return _TRI_LEVELS[0]
+    if num <= 66:
+        return _TRI_LEVELS[1]
+    return _TRI_LEVELS[2]
+
+
+def _score_to_awareness_label(value: Any) -> Optional[str]:
+    num = _parse_number(value)
+    if num is None:
+        return None
+    idx = max(0, min(4, int(num // 20)))
+    return _AWARENESS_LEVELS[idx]
+
+
+def upsert_ai_fields_bulk(conn: sqlite3.Connection, rows: List[Dict[str, Any]]) -> None:
+    """Bulk update AI columns for products."""
+
+    if not rows:
+        return
+    cur = conn.cursor()
+    now = datetime.utcnow().isoformat()
+    payload: List[Tuple[Any, ...]] = []
+    for row in rows:
+        pid = row.get("id")
+        if pid is None:
+            continue
+        try:
+            pid_int = int(pid)
+        except Exception:
+            continue
+        desire_raw = row.get("desire")
+        desire_val: Optional[str]
+        if desire_raw is None:
+            desire_val = None
+        else:
+            parsed = _parse_number(desire_raw)
+            desire_val = str(int(round(parsed))) if parsed is not None else str(desire_raw)
+        desire_mag = _score_to_tri_label(row.get("desire_magnitude"))
+        awareness = _score_to_awareness_label(row.get("awareness_level"))
+        competition = _score_to_tri_label(row.get("competition_level"))
+        winner_score_val = _parse_number(row.get("winner_score"))
+        if winner_score_val is not None:
+            winner_score_int = max(0, min(100, int(round(winner_score_val))))
+            winner_score_raw = 8 + (winner_score_int / 100.0) * 32
+            updated_at = now
+        else:
+            winner_score_int = None
+            winner_score_raw = None
+            updated_at = None
+        payload.append(
+            (
+                desire_val,
+                desire_mag,
+                awareness,
+                competition,
+                winner_score_int,
+                winner_score_raw,
+                updated_at,
+                updated_at,
+                now,
+                pid_int,
+            )
+        )
+
+    cur.executemany(
+        """
+        UPDATE products
+           SET desire = ?,
+               desire_magnitude = ?,
+               awareness_level = ?,
+               competition_level = ?,
+               winner_score = COALESCE(?, winner_score),
+               winner_score_raw = COALESCE(?, winner_score_raw),
+               winner_score_updated_at = CASE WHEN ? IS NULL THEN winner_score_updated_at ELSE ? END,
+               ai_columns_completed_at = ?
+         WHERE id = ?
+        """,
+        payload,
+    )
+    conn.commit()
 
 
 def get_product(conn: sqlite3.Connection, product_id: int) -> Optional[sqlite3.Row]:
