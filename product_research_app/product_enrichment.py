@@ -486,7 +486,7 @@ class EnrichmentPipeline:
             self.last_emit = time.perf_counter()
         except Exception:
             self.logger.exception("Failed to publish enrichment progress")
-
+            
     def prepare(self) -> None:
         pending = database.list_items_by_state(self.conn, self.job_id, "pending_enrich")
         self.total_items = len(pending)
@@ -837,7 +837,6 @@ class EnrichmentPipeline:
         self.processed += enriched + failed
         self.total_enriched += enriched
         self.total_failed += failed
-
 
 async def run_job(job_id: int, *, logger: logging.Logger = logger) -> None:
     conn = get_db()
