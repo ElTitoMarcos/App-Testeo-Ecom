@@ -15,6 +15,24 @@ const chartOptsStable = {
 
 const charts = (window.__charts = window.__charts || {});
 
+function registerAction(name, fn) {
+  if (typeof window === 'undefined' || !name || typeof fn !== 'function') return;
+  if (typeof window.__registerAction === 'function') {
+    window.__registerAction(name, fn);
+    return;
+  }
+  const pending = window.__pendingActions || (window.__pendingActions = []);
+  const exists = pending.some((entry) => {
+    if (!entry) return false;
+    if (typeof entry.name === 'string') return entry.name === name;
+    if (Array.isArray(entry)) return entry[0] === name;
+    return false;
+  });
+  if (!exists) {
+    pending.push({ name, fn });
+  }
+}
+
 const $desde = document.querySelector('#fecha-desde');
 const $hasta = document.querySelector('#fecha-hasta');
 const $btnAplicar = document.querySelector('#btn-aplicar-tendencias');
@@ -417,10 +435,11 @@ export function mountTrendsToggle(){
     }
   };
 
-  document.addEventListener('click', (ev) => {
-    const btn = ev.target.closest('[data-action="toggle-trends"]');
-    if (btn) openClose();
-  }, { passive: true });
+  const toggleTrends = () => openClose();
+  if (typeof window !== 'undefined' && !window.toggleTrends) {
+    window.toggleTrends = toggleTrends;
+  }
+  registerAction('toggle-trends', toggleTrends);
 
   document.addEventListener('visible-products-changed', () => {
     const trendsSection = document.getElementById('trends');

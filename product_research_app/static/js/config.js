@@ -465,9 +465,33 @@ async function openConfigModal(){
   if (aiBtn) aiBtn.onclick = adjustWeightsAI;
 }
 
-window.openConfigModal = openConfigModal;
-window.loadWeights = hydrateSettingsModal;
-window.resetWeights = resetWeights;
-window.adjustWeightsAI = adjustWeightsAI;
-window.markDirty = markDirty;
-window.metricKeys = metricKeys;
+function registerAction(name, fn) {
+  if (typeof window === 'undefined' || !name || typeof fn !== 'function') return;
+  if (typeof window.__registerAction === 'function') {
+    window.__registerAction(name, fn);
+    return;
+  }
+  const pending = window.__pendingActions || (window.__pendingActions = []);
+  const exists = pending.some((entry) => {
+    if (!entry) return false;
+    if (typeof entry.name === 'string') return entry.name === name;
+    if (Array.isArray(entry)) return entry[0] === name;
+    return false;
+  });
+  if (!exists) pending.push({ name, fn });
+}
+
+function exposeFunction(prop, fn, actionName) {
+  if (typeof window === 'undefined' || typeof fn !== 'function') return;
+  if (!window[prop]) window[prop] = fn;
+  if (actionName) registerAction(actionName, fn);
+}
+
+if (typeof window !== 'undefined') {
+  exposeFunction('openConfigModal', openConfigModal, 'open-config-modal');
+  exposeFunction('loadWeights', hydrateSettingsModal);
+  exposeFunction('resetWeights', resetWeights, 'reset-weights');
+  exposeFunction('adjustWeightsAI', adjustWeightsAI, 'adjust-weights-ai');
+  exposeFunction('markDirty', markDirty);
+  window.metricKeys = metricKeys;
+}

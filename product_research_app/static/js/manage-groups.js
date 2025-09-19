@@ -142,4 +142,23 @@ export async function open(){
 const triggerBtn = document.getElementById('btnManageGroups');
 if(triggerBtn) triggerBtn.addEventListener('click', open);
 
-window.openManageGroups = open;
+function registerAction(name, fn) {
+  if (typeof window === 'undefined' || !name || typeof fn !== 'function') return;
+  if (typeof window.__registerAction === 'function') {
+    window.__registerAction(name, fn);
+    return;
+  }
+  const pending = window.__pendingActions || (window.__pendingActions = []);
+  const exists = pending.some((entry) => {
+    if (!entry) return false;
+    if (typeof entry.name === 'string') return entry.name === name;
+    if (Array.isArray(entry)) return entry[0] === name;
+    return false;
+  });
+  if (!exists) pending.push({ name, fn });
+}
+
+if (typeof window !== 'undefined') {
+  if (!window.openManageGroups) window.openManageGroups = open;
+  registerAction('open-manage-groups', open);
+}
