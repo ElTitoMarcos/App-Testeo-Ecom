@@ -17,7 +17,6 @@ try:  # Warm legacy services so imports continue working
 except Exception as exc:  # pragma: no cover - best effort
     app.logger.warning("legacy warmup failed: %s", exc)
 
-
 @app.get("/healthz")
 def healthz():
     """Return a JSON health report with a quick database connectivity test."""
