@@ -25,7 +25,7 @@ import httpx
 
 from . import config, database
 from .db import get_db
-from .progress_events import publish_progress
+from .sse import publish_progress
 from .student_model import StudentModelManager, build_feature_sample as build_student_sample
 from .similarity_engine import SimilarityEngine, SimilarityMatch
 
