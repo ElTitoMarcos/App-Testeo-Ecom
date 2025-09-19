@@ -287,8 +287,31 @@ body.dark .chip {
 }
 body.dark .chip button { color: #A9B4D0; }
 
-#topBar { position: sticky; top: 0; z-index: 50; background: #f8fbff; }
-body.dark #topBar { background: #1a1b2e; }
+header.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: #f8fbff;
+}
+body.dark header.app-header {
+  background: #1a1b2e;
+}
+#global-progress-wrapper,
+#global-progress-bar {
+  pointer-events: none;
+}
+.global-progress-overlay {
+  position: relative;
+  inset: auto;
+  width: auto;
+  height: auto;
+}
+.app-modal-backdrop {
+  z-index: 40;
+}
+header.app-header .progress-hitbox {
+  pointer-events: none;
+}
 #searchRow {
   display: flex;
   flex-wrap: wrap;
