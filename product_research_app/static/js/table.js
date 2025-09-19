@@ -1,5 +1,7 @@
 const selection = new Set();
 let currentPageIds = [];
+const TableStore = window.TableStore || null;
+window.currentPageIds = currentPageIds;
 let master = null;
 const bottomBar = document.getElementById('bottomBar');
 
@@ -68,6 +70,10 @@ if(bottomBar){
 }
 
 const tbody = table ? table.querySelector('tbody') : null;
+const tbodyElement = tbody;
+if (tbodyElement) {
+  window.tbodyElement = tbodyElement;
+}
 let lastClickedCheck = null;
 
 if (tbody) {

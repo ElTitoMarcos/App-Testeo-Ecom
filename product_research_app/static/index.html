@@ -351,6 +351,7 @@ body.dark .skeleton{background:#333;}
 <script type="module" src="/static/js/loading.js" defer></script>
 <script src="/static/js/overlay.js" defer></script>
 <script src="/static/js/toast.js" defer></script>
+<script src="/static/js/table-store.js" defer></script>
 <script src="/static/js/table.js" defer></script>
 <script src="/static/js/columns.js" defer></script>
 <script type="module" src="/static/js/add-group.js" defer></script>
@@ -373,6 +374,8 @@ const openConfigModal = window.openConfigModal;
 const saveIfDirty = window.saveIfDirty;
 window.fetchJson = fetchJson;
 window.groupsService = groupsService;
+window.applyFilters = applyFilters;
+window.readFilters = readFilters;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
 const IMPORT_UPLOAD_FRAC = 0.30;
 const IMPORT_POLL_MAX_FRAC = 0.99;
@@ -580,7 +583,12 @@ window.products = products;
 const gridRoot = document.getElementById('productTable');
 
 document.addEventListener('filters-changed', (e) => {
-  if (e && e.detail) ensureAppState().filters = e.detail;
+  const detail = e && e.detail ? e.detail : null;
+  if (detail) ensureAppState().filters = detail;
+  const activeFilters = detail || readFilters();
+  if (window.TableStore) {
+    window.TableStore.setFilters(activeFilters);
+  }
   selection.clear();
   renderTable();
 });
@@ -682,6 +690,319 @@ const columns = [
   { key: 'competition_level', label: 'Competition level', type: 'string', headerClass: 'ec-col ec-col-competition', cellClass: 'ec-col ec-col-competition', dataEcCol: 'competition_level' },
   { key: 'winner_score', label: 'Winner Score', type: 'number' },
 ];
+
+const columnsByKey = new Map(columns.map(col => [col.key, col]));
+
+function ensureRowElement(id) {
+  const rowId = `row-${id}`;
+  let tr = document.getElementById(rowId);
+  if (!tr) {
+    tr = document.createElement('tr');
+    tr.id = rowId;
+  } else {
+    tr.innerHTML = '';
+  }
+  tr.dataset.id = String(id ?? '');
+  tr.classList.remove('row-new', 'row-updated');
+  return tr;
+}
+
+function removeRowElement(id) {
+  const rowId = `row-${id}`;
+  const tr = document.getElementById(rowId);
+  if (tr && tr.parentNode) {
+    tr.parentNode.removeChild(tr);
+  }
+}
+
+function applyCellAttributes(td, col) {
+  td.setAttribute('data-key', col.key);
+  td.className = col.cellClass || '';
+  if (col.dataEcCol) td.setAttribute('data-ec-col', col.dataEcCol);
+  else td.removeAttribute('data-ec-col');
+  if (col.width) td.style.width = col.width + 'px';
+  else td.style.removeProperty('width');
+  if (col.minWidth) td.style.minWidth = col.minWidth + 'px';
+  else td.style.removeProperty('min-width');
+  if (col.maxWidth) td.style.maxWidth = col.maxWidth + 'px';
+  else td.style.removeProperty('max-width');
+  if (col.align) td.style.textAlign = col.align;
+  else td.style.removeProperty('text-align');
+}
+
+function resolveValue(item, key) {
+  if (key === 'name') {
+    return item.name || item.title || '';
+  }
+  if (['id', 'category', 'price', 'image_url', 'winner_score', 'awareness_level', 'competition_level', 'date_range'].includes(key)) {
+    return item[key];
+  }
+  if (item && item.extras) {
+    return item.extras[key];
+  }
+  return undefined;
+}
+
+function renderCell(td, col, item) {
+  if (!td || !col) return td;
+  td.innerHTML = '';
+  td.textContent = '';
+  td.removeAttribute('title');
+  applyCellAttributes(td, col);
+  const key = col.key;
+  let value = '';
+  if (key === 'desire') {
+    value = typeof item.desire === 'string' ? item.desire.trim() : (item.desire ?? '');
+  } else if (metricKeys.includes(key)) {
+    value = item.winner_score_breakdown && item.winner_score_breakdown.scores ? item.winner_score_breakdown.scores[key] : '';
+    if (item.winner_score_breakdown && item.winner_score_breakdown.justifications) {
+      const j = item.winner_score_breakdown.justifications[key];
+      if (j) td.title = 'Justificación: ' + j;
+    }
+  } else if (key === 'desire_magnitude') {
+    value = item.desire_magnitude;
+  } else if (['id', 'name', 'category', 'price', 'image_url', 'winner_score', 'awareness_level', 'competition_level', 'date_range'].includes(key)) {
+    value = resolveValue(item, key);
+  } else {
+    value = item.extras ? item.extras[key] : '';
+  }
+
+  if (col.render) {
+    try { td.textContent = col.render(item); } catch (e) { td.textContent = ''; }
+    return td;
+  }
+
+  const abbrFn = window.abbr || ((n) => n);
+  const winnerClass = window.winnerScoreClass || (() => '');
+
+  if (key === 'winner_score') {
+    const sc = parseFloat(value);
+    if (!isNaN(sc)) {
+      const scInt = Math.round(sc);
+      td.innerHTML = '<span class="' + winnerClass(scInt) + '">' + scInt.toLocaleString(undefined, { maximumFractionDigits: 0 }) + '</span>';
+      if (item.winner_score_breakdown && item.winner_score_breakdown.justifications) {
+        const j = item.winner_score_breakdown.justifications;
+        const tooltip = Object.entries(j).map(([k, v]) => `${k}: ${v}`).join('\n');
+        td.title = tooltip;
+      }
+    }
+    return td;
+  }
+
+  if (key === 'image_url' && value) {
+    const img = document.createElement('img');
+    img.src = value;
+    img.style.width = '100px';
+    img.style.height = '100px';
+    img.style.objectFit = 'cover';
+    img.style.cursor = 'pointer';
+    img.onclick = () => { showOverlay(value); };
+    td.appendChild(img);
+    return td;
+  }
+
+  if (key === 'name' && value) {
+    const fireCount = item.trending || 0;
+    const fireText = firesFor(fireCount);
+    const nameSpan = document.createElement('span');
+    nameSpan.textContent = value + (fireText ? ' ' : '');
+    td.appendChild(nameSpan);
+    if (fireCount > 0) {
+      const fireSpan = document.createElement('span');
+      fireSpan.className = 'fires';
+      fireSpan.textContent = fireText;
+      fireSpan.setAttribute('aria-label', `Tendencia: x${fireCount}`);
+      fireSpan.title = `Tendencia: x${fireCount}`;
+      td.appendChild(fireSpan);
+    }
+    const kal = item.extras && item.extras['KalodataUrl'];
+    if (kal) {
+      const btnCopy = document.createElement('button');
+      btnCopy.textContent = '📋';
+      btnCopy.title = 'Copiar link Kalodata';
+      btnCopy.style.marginLeft = '5px';
+      btnCopy.style.padding = '2px 6px';
+      btnCopy.style.fontSize = '12px';
+      btnCopy.onclick = () => {
+        navigator.clipboard.writeText(kal).then(() => {
+          toast.success('Link copiado al portapapeles');
+        });
+      };
+      td.appendChild(btnCopy);
+    }
+    return td;
+  }
+
+  if (key === 'desire') {
+    let current = value || '';
+    td.title = current;
+    const render = () => {
+      td.innerHTML = '';
+      const wrap = document.createElement('div');
+      wrap.className = 'desire-wrap';
+      wrap.textContent = current;
+      td.appendChild(wrap);
+      wrap.addEventListener('click', () => {
+        if (td.querySelector('textarea')) return;
+        const ta = document.createElement('textarea');
+        ta.className = 'desire-editor';
+        ta.rows = 4;
+        ta.value = current;
+        td.innerHTML = '';
+        td.appendChild(ta);
+        ta.focus();
+        ta.addEventListener('blur', async () => {
+          const val = ta.value.trim() || null;
+          try {
+            await fetch(`/api/products/${item.id}`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ desire: val })
+            });
+          } catch (e) {}
+          item.desire = val;
+          current = val || '';
+          render();
+          ecAutoFitColumns(gridRoot);
+        });
+      });
+    };
+    render();
+    return td;
+  }
+
+  if (key === 'desire_magnitude') {
+    const select = document.createElement('select');
+    ['', 'Low', 'Medium', 'High'].forEach(opt => {
+      const o = document.createElement('option');
+      o.value = opt;
+      o.textContent = opt || '—';
+      if (value === opt) o.selected = true;
+      select.appendChild(o);
+    });
+    select.addEventListener('change', async () => {
+      const val = select.value || null;
+      try { await api.updateProductField(item.id, { desire_magnitude: val }); } catch (e) {}
+      item.desire_magnitude = val;
+    });
+    td.appendChild(select);
+    return td;
+  }
+
+  if (key === 'awareness_level') {
+    const select = document.createElement('select');
+    ['', 'Unaware', 'Problem-Aware', 'Solution-Aware', 'Product-Aware', 'Most Aware'].forEach(opt => {
+      const o = document.createElement('option');
+      o.value = opt;
+      o.textContent = opt || '—';
+      if (value === opt) o.selected = true;
+      select.appendChild(o);
+    });
+    select.addEventListener('change', async () => {
+      const val = select.value || null;
+      try { await api.updateProductField(item.id, { awareness_level: val }); } catch (e) {}
+      item.awareness_level = val;
+    });
+    td.appendChild(select);
+    return td;
+  }
+
+  if (key === 'competition_level') {
+    const select = document.createElement('select');
+    ['', 'Low', 'Medium', 'High'].forEach(opt => {
+      const o = document.createElement('option');
+      o.value = opt;
+      o.textContent = opt || '—';
+      if (value === opt) o.selected = true;
+      select.appendChild(o);
+    });
+    select.addEventListener('change', async () => {
+      const val = select.value || null;
+      try { await api.updateProductField(item.id, { competition_level: val }); } catch (e) {}
+      item.competition_level = val;
+    });
+    td.appendChild(select);
+    return td;
+  }
+
+  if (col.type === 'number' && value !== null && value !== undefined && value !== '') {
+    let num = parseFloat(String(value).replace(/[^0-9.-]+/g, ''));
+    if (!isNaN(num)) {
+      if (key === 'Item Sold' || key === 'Revenue($)' || key === 'Creator Number') {
+        td.textContent = abbrFn(num);
+      } else {
+        td.textContent = num.toLocaleString();
+      }
+      return td;
+    }
+    td.textContent = '';
+    return td;
+  }
+
+  td.textContent = value || '';
+  return td;
+}
+
+function renderRow(tr, item) {
+  if (!tr || !item) return tr;
+  const rowId = String(item.id ?? '');
+  tr.dataset.id = rowId;
+  tr.classList.toggle('is-duplicate', !!item.isDuplicate);
+  tr.innerHTML = '';
+  const tdSel = document.createElement('td');
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.classList.add('rowCheck');
+  cb.dataset.id = rowId;
+  cb.checked = selection.has(rowId);
+  tr.classList.toggle('selected', cb.checked);
+  cb.addEventListener('change', () => {
+    const id = cb.dataset.id;
+    if (cb.checked) selection.add(id); else selection.delete(id);
+    tr.classList.toggle('selected', cb.checked);
+    updateMasterState();
+  });
+  tdSel.appendChild(cb);
+  tr.appendChild(tdSel);
+  columns.forEach(col => {
+    const td = document.createElement('td');
+    renderCell(td, col, item);
+    tr.appendChild(td);
+  });
+  const tdDel = document.createElement('td');
+  const btn = document.createElement('button');
+  btn.textContent = '✖';
+  btn.title = 'Eliminar producto';
+  btn.style.background = 'transparent';
+  btn.style.border = 'none';
+  btn.style.cursor = 'pointer';
+  btn.style.color = 'red';
+  btn.dataset.id = item.id;
+  btn.onclick = () => {
+    toast.info('¿Eliminar producto?', { actionText: 'Eliminar', onAction: () => deleteProduct(item.id) });
+  };
+  tdDel.appendChild(btn);
+  tr.appendChild(tdDel);
+  return tr;
+}
+
+function renderIAColumns(tr, item) {
+  if (!tr || !item) return;
+  const keys = ['desire', 'desire_magnitude', 'awareness_level', 'competition_level', 'winner_score'];
+  keys.forEach((key) => {
+    const col = columnsByKey.get(key);
+    if (!col) return;
+    const td = tr.querySelector(`td[data-key="${key}"]`);
+    if (!td) return;
+    renderCell(td, col, item);
+  });
+  tr.classList.toggle('is-duplicate', !!item.isDuplicate);
+}
+
+window.ensureRowElement = ensureRowElement;
+window.renderRow = renderRow;
+window.renderIAColumns = renderIAColumns;
+window.removeRowElement = removeRowElement;
 
 let trendingWords = [];
 
@@ -799,22 +1120,38 @@ async function fetchProducts(options = {}) {
   const prevSel = new Set(selection);
   const fetchOpts = options && options.skipProgress ? { __skipLoadingHook: true } : undefined;
   const data = await fetchJson('/products', fetchOpts);
-  if(data.length && data[0].desire !== undefined && window.ensureColumnVisible){
+  if (Array.isArray(data) && data.length && data[0].desire !== undefined && window.ensureColumnVisible) {
     ensureColumnVisible('desire');
   }
-  allProducts = data;
-  preprocessProducts(allProducts);
-  allProducts.sort((a,b)=> (Number(a.id)||0) - (Number(b.id)||0));
+  const rows = Array.isArray(data) ? data.slice() : [];
+  rows.forEach(row => {
+    if (row && row.title && !row.name) {
+      row.name = row.name || row.title;
+    }
+  });
+  preprocessProducts(rows);
+  rows.sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0));
   sortField = 'id';
   sortDir = 1;
   sortType = 'number';
+  if (window.TableStore) {
+    window.TableStore.replaceAll(rows);
+    if (typeof currentGroupFilter !== 'undefined') {
+      window.TableStore.setGroup(currentGroupFilter);
+    }
+    window.TableStore.setFilters(getActiveFilters());
+    allProducts = window.TableStore.entries().slice();
+  } else {
+    allProducts = rows;
+  }
   window.allProducts = allProducts;
+  selection.clear();
+  prevSel.forEach(id => selection.add(id));
   renderTable();
   const visibleIds = new Set(products.map(p => String(p.id)));
-  selection.clear();
-  for (const id of prevSel) {
-    if (visibleIds.has(id)) selection.add(id);
-  }
+  selection.forEach(id => {
+    if (!visibleIds.has(id)) selection.delete(id);
+  });
   updateMasterState();
   renderTable();
 }
@@ -826,22 +1163,22 @@ async function reloadRows(ids, options){ await fetchProducts(options); }
 function renderTable() {
   const headerRow = document.getElementById('headerRow');
   const tbody = document.querySelector('#productTable tbody');
-  const baseList = Array.isArray(allProducts) ? allProducts : [];
+  if (!tbody || !headerRow) return;
+  const baseList = window.TableStore ? window.TableStore.entries() : (Array.isArray(allProducts) ? allProducts : []);
   const filters = getActiveFilters();
-  const filtered = applyFilters(baseList, filters);
+  const filtered = window.TableStore ? baseList.filter(row => window.TableStore.shouldRender(row)) : applyFilters(baseList, filters);
   products = Array.isArray(filtered) ? [...filtered] : [];
   sortProducts();
   window.products = products;
-  // Build header if empty
+  allProducts = Array.isArray(baseList) ? [...baseList] : [];
+  window.allProducts = allProducts;
   if (!headerRow.hasChildNodes()) {
-    // Add select column header (no label)
     const thSel = document.createElement('th');
     const selectAll = document.createElement('input');
     selectAll.type = 'checkbox';
     selectAll.id = 'selectAll';
     thSel.appendChild(selectAll);
     headerRow.appendChild(thSel);
-    // Add dynamic columns
     columns.forEach(col => {
       const th = document.createElement('th');
       th.textContent = col.label;
@@ -857,238 +1194,25 @@ function renderTable() {
       th.onclick = () => sortBy(col.key, col.type);
       headerRow.appendChild(th);
     });
-    // Add delete column header
     const thDel = document.createElement('th');
     headerRow.appendChild(thDel);
   }
-  // Clear body
   tbody.innerHTML = '';
+  const frag = document.createDocumentFragment();
+  products.forEach(item => {
+    const tr = ensureRowElement(item.id);
+    renderRow(tr, item);
+    frag.appendChild(tr);
+  });
+  tbody.appendChild(frag);
   const visibleProducts = Array.isArray(products) ? [...products] : [];
   window.__visibleProducts = visibleProducts;
-  window.__allProducts = baseList && baseList.length ? baseList : visibleProducts;
+  window.__allProducts = baseList && baseList.length ? [...baseList] : visibleProducts;
   document.dispatchEvent(new CustomEvent('visible-products-changed', {
     detail: { count: visibleProducts.length }
   }));
-  // Render rows
-  products.forEach(item => {
-    const tr = document.createElement('tr');
-    if (item.isDuplicate) {
-      tr.classList.add('is-duplicate');
-    }
-    // Selection checkbox
-    const tdSel = document.createElement('td');
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.classList.add('rowCheck');
-    const rowId = String(item.id);
-    cb.dataset.id = rowId;
-    cb.checked = selection.has(rowId);
-    tr.classList.toggle('selected', cb.checked);
-    cb.addEventListener('change', () => {
-      const id = cb.dataset.id;
-      if (cb.checked) selection.add(id); else selection.delete(id);
-      tr.classList.toggle('selected', cb.checked);
-      updateMasterState();
-    });
-    tdSel.appendChild(cb);
-    tr.appendChild(tdSel);
-    columns.forEach(col => {
-      const td = document.createElement('td');
-      const key = col.key;
-      td.setAttribute('data-key', key);
-      if (col.cellClass) td.className = col.cellClass;
-      if (col.dataEcCol) td.setAttribute('data-ec-col', col.dataEcCol);
-      if (col.width) td.style.width = col.width + 'px';
-      if (col.minWidth) td.style.minWidth = col.minWidth + 'px';
-      if (col.maxWidth) td.style.maxWidth = col.maxWidth + 'px';
-      if (col.align) td.style.textAlign = col.align;
-      let value = '';
-      if (key === 'desire') {
-        // La columna textual "Desire" NUNCA debe tratarse como métrica
-        value = typeof item.desire === 'string' ? item.desire.trim() : (item.desire ?? '');
-      } else if (metricKeys.includes(key)) {
-        value = item.winner_score_breakdown && item.winner_score_breakdown.scores ? item.winner_score_breakdown.scores[key] : '';
-        if (item.winner_score_breakdown && item.winner_score_breakdown.justifications) {
-          const j = item.winner_score_breakdown.justifications[key];
-          if (j) td.title = 'Justificación: ' + j;
-        }
-      } else if (key === 'desire_magnitude') {
-        value = item.desire_magnitude;
-      } else if (['id','name','category','price','image_url','winner_score','awareness_level','competition_level','date_range'].includes(key)) {
-        value = item[key];
-      } else {
-        value = item.extras ? item.extras[key] : '';
-      }
-      if (col.render) {
-        try { td.textContent = col.render(item); } catch (e) { td.textContent = ''; }
-      } else if (key === 'winner_score') {
-        const sc = parseFloat(value);
-        if (!isNaN(sc)) {
-          const scInt = Math.round(sc);
-          td.innerHTML = '<span class="' + winnerScoreClass(scInt) + '">' + scInt.toLocaleString(undefined,{maximumFractionDigits:0}) + '</span>';
-          if (item.winner_score_breakdown && item.winner_score_breakdown.justifications) {
-            const j = item.winner_score_breakdown.justifications;
-            const tooltip = Object.entries(j).map(([k,v])=>`${k}: ${v}`).join('\n');
-            td.title = tooltip;
-          }
-        }
-      } else if (key === 'image_url' && value) {
-        const img = document.createElement('img');
-        img.src = value;
-        // Increase the preview size for better visibility
-        img.style.width = '100px';
-        img.style.height = '100px';
-        img.style.objectFit = 'cover';
-        // Show larger image on click
-        img.style.cursor = 'pointer';
-        img.onclick = () => {
-          showOverlay(value);
-        };
-        td.appendChild(img);
-      } else if (key === 'name' && value) {
-        const fireCount = item.trending || 0;
-        const fireText = firesFor(fireCount);
-        const nameSpan = document.createElement('span');
-        nameSpan.textContent = value + (fireText ? ' ' : '');
-        td.appendChild(nameSpan);
-        if (fireCount > 0) {
-          const fireSpan = document.createElement('span');
-          fireSpan.className = 'fires';
-          fireSpan.textContent = fireText;
-          fireSpan.setAttribute('aria-label', `Tendencia: x${fireCount}`);
-          fireSpan.title = `Tendencia: x${fireCount}`;
-          td.appendChild(fireSpan);
-        }
-        // If Kalodata URL exists, add copy link button
-        const kal = item.extras && item.extras['KalodataUrl'];
-        if (kal) {
-          const btnCopy = document.createElement('button');
-          btnCopy.textContent = '📋';
-          btnCopy.title = 'Copiar link Kalodata';
-          btnCopy.style.marginLeft = '5px';
-          btnCopy.style.padding = '2px 6px';
-          btnCopy.style.fontSize = '12px';
-          btnCopy.onclick = () => {
-            navigator.clipboard.writeText(kal).then(() => {
-              toast.success('Link copiado al portapapeles');
-            });
-          };
-          td.appendChild(btnCopy);
-        }
-      } else if (key === 'desire') {
-        let current = value || '';
-        td.title = current;
-        const render = () => {
-          td.innerHTML = '';
-          const wrap = document.createElement('div');
-          wrap.className = 'desire-wrap';
-          wrap.textContent = current;
-          td.appendChild(wrap);
-          wrap.addEventListener('click', () => {
-            if (td.querySelector('textarea')) return;
-            const ta = document.createElement('textarea');
-            ta.className = 'desire-editor';
-            ta.rows = 4;
-            ta.value = current;
-            td.innerHTML = '';
-            td.appendChild(ta);
-            ta.focus();
-            ta.addEventListener('blur', async () => {
-              const val = ta.value.trim() || null;
-              try {
-                await fetch(`/api/products/${item.id}`, {
-                  method: 'PATCH',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ desire: val })
-                });
-              } catch (e) {}
-              item.desire = val;
-              current = val || '';
-              render();
-              ecAutoFitColumns(gridRoot);
-            });
-          });
-        };
-        render();
-      } else if (key === 'desire_magnitude') {
-        const select = document.createElement('select');
-        ['', 'Low', 'Medium', 'High'].forEach(opt => {
-          const o = document.createElement('option');
-          o.value = opt;
-          o.textContent = opt || '—';
-          if (value === opt) o.selected = true;
-          select.appendChild(o);
-        });
-        select.addEventListener('change', async () => {
-          const val = select.value || null;
-          try { await api.updateProductField(item.id, { desire_magnitude: val }); } catch(e) {}
-          item.desire_magnitude = val;
-        });
-        td.appendChild(select);
-      } else if (key === 'awareness_level') {
-        const select = document.createElement('select');
-        ['', 'Unaware', 'Problem-Aware', 'Solution-Aware', 'Product-Aware', 'Most Aware'].forEach(opt => {
-          const o = document.createElement('option');
-          o.value = opt;
-          o.textContent = opt || '—';
-          if (value === opt) o.selected = true;
-          select.appendChild(o);
-        });
-        select.addEventListener('change', async () => {
-          const val = select.value || null;
-          try { await api.updateProductField(item.id, { awareness_level: val }); } catch(e) {}
-          item.awareness_level = val;
-        });
-        td.appendChild(select);
-      } else if (key === 'competition_level') {
-        const select = document.createElement('select');
-        ['', 'Low', 'Medium', 'High'].forEach(opt => {
-          const o = document.createElement('option');
-          o.value = opt;
-          o.textContent = opt || '—';
-          if (value === opt) o.selected = true;
-          select.appendChild(o);
-        });
-        select.addEventListener('change', async () => {
-          const val = select.value || null;
-          try { await api.updateProductField(item.id, { competition_level: val }); } catch(e) {}
-          item.competition_level = val;
-        });
-        td.appendChild(select);
-      } else if (col.type === 'number' && value !== null && value !== undefined && value !== '') {
-        let num = parseFloat(String(value).replace(/[^0-9.-]+/g, ''));
-        if (isNaN(num)) {
-          td.textContent = '';
-        } else {
-          if (key === 'Item Sold' || key === 'Revenue($)' || key === 'Creator Number') {
-            td.textContent = abbr(num);
-          } else {
-            td.textContent = num.toLocaleString();
-          }
-        }
-      } else {
-        td.textContent = value || '';
-      }
-      tr.appendChild(td);
-    });
-    // Delete button
-    const tdDel = document.createElement('td');
-    const btn = document.createElement('button');
-    btn.textContent = '✖';
-    btn.title = 'Eliminar producto';
-    btn.style.background = 'transparent';
-    btn.style.border = 'none';
-    btn.style.cursor = 'pointer';
-    btn.style.color = 'red';
-    btn.dataset.id = item.id;
-    btn.onclick = () => {
-      toast.info('¿Eliminar producto?', {actionText:'Eliminar', onAction: () => deleteProduct(item.id)});
-    };
-    tdDel.appendChild(btn);
-    tr.appendChild(tdDel);
-    tbody.appendChild(tr);
-  });
   currentPageIds = products.map(p => String(p.id));
+  window.currentPageIds = currentPageIds;
   updateResultsBadge(currentPageIds.length);
   if (window.refreshColumns) window.refreshColumns();
   if (window.applyColumnVisibility) window.applyColumnVisibility();
@@ -1636,6 +1760,9 @@ async function applyGroupFilter(id, { skipProgress = false, host = null } = {}){
   if(id === -1){
     // load all products
     currentGroupFilter = -1;
+    if (window.TableStore) {
+      window.TableStore.setGroup(-1);
+    }
     fetchProducts();
     // refresh lists to update active styling
     loadLists();
@@ -1643,9 +1770,26 @@ async function applyGroupFilter(id, { skipProgress = false, host = null } = {}){
   }
   try{
     currentGroupFilter = id;
+    if (window.TableStore) {
+      window.TableStore.setGroup(id);
+    }
     const fetchOpts = skipProgress ? { __skipLoadingHook: true, __hostEl: host } : (host ? { __hostEl: host } : undefined);
     const data = await fetchJson('/list/' + id, fetchOpts);
-    allProducts = data;
+    const rows = Array.isArray(data) ? data.slice() : [];
+    rows.forEach(row => {
+      if (row && row.title && !row.name) {
+        row.name = row.name || row.title;
+      }
+    });
+    preprocessProducts(rows);
+    rows.sort((a,b)=> (Number(a.id)||0) - (Number(b.id)||0));
+    if (window.TableStore) {
+      window.TableStore.upsertMany(rows);
+      window.TableStore.setFilters(getActiveFilters());
+      allProducts = window.TableStore.entries().slice();
+    } else {
+      allProducts = rows;
+    }
     window.allProducts = allProducts;
     selection.clear();
     renderTable();
@@ -1672,6 +1816,8 @@ window.addEventListener('DOMContentLoaded', () => {
 window.renderTable = renderTable;
 window.parseDate = parseDate;
 </script>
+<script src="/static/js/table-render.js" defer></script>
+<script src="/static/js/net-live.js" defer></script>
 <script type="module" src="/static/js/completar-ia.js" defer></script>
 <script type="module" src="/static/js/filters-panel.js" defer></script>
 </body>

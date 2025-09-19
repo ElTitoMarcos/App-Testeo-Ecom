@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import hashlib
 import logging
 import re
@@ -16,11 +17,15 @@ from product_research_app.database import (
     append_import_job_metrics,
     clear_staging_for_job,
     create_import_job,
+    get_products_minimal_by_ids,
     json_dump,
+    merge_staging_batch,
     merge_staging_into_products,
+    set_stream_cursor,
     transition_job_items,
     update_import_job_progress,
 )
+from product_research_app.sse import increment_import_batches, publish_progress
 
 logger = logging.getLogger(__name__)
 
@@ -230,7 +235,6 @@ class BulkImporter:
         self._start = time.perf_counter()
         self._update_status(phase="parse", status="running", processed=0, total=0)
         self.status_cb(stage="prepare", done=0, total=0)
-        self.write_conn.execute("BEGIN IMMEDIATE;")
         try:
             for record in rows:
                 prepared = self._prepare_record(record)
@@ -242,14 +246,9 @@ class BulkImporter:
                     self._flush_pending()
             if self.pending:
                 self._flush_pending()
-            transition_job_items(self.write_conn, self.job_id, "raw", "pending_enrich")
-            merge_staging_into_products(self.write_conn, self.job_id)
-            unique_rows = len(self._unique_hashes)
-            clear_staging_for_job(self.write_conn, self.job_id)
-            self.write_conn.execute("COMMIT;")
         except Exception:
-            self.write_conn.execute("ROLLBACK;")
             raise
+        self._finalize_import()
         total_ms = (time.perf_counter() - self._start) * 1000 if self._start else 0.0
         throughput = (self.processed / (total_ms / 1000.0)) if total_ms else 0.0
         self.status_cb(stage="commit", done=self.processed, total=self.processed)
@@ -270,6 +269,7 @@ class BulkImporter:
             self.batches,
             throughput,
         )
+        publish_progress({"type": "import.done", "total": self.processed})
         return self.summary
 
     def _prepare_record(self, record: Mapping[str, Any]) -> Optional[dict[str, Any]]:
@@ -402,55 +402,63 @@ class BulkImporter:
         now = datetime.utcnow().isoformat()
         batch = list(self.pending)
         self.pending.clear()
-        cur = self.write_conn.cursor()
-        items_payload = [
-            (self.job_id, row["sig_hash"], json_dump(row["raw"]), "raw", now)
-            for row in batch
-        ]
-        staging_payload = [
-            (
-                self.job_id,
-                row["sig_hash"],
-                row["name"],
-                row.get("description"),
-                row.get("category"),
-                row.get("price"),
-                row.get("currency"),
-                row.get("image_url"),
-                row.get("brand"),
-                row.get("asin"),
-                row.get("product_url"),
-                row["source"],
-                row["import_date"],
-                row.get("desire"),
-                row.get("desire_magnitude"),
-                row.get("awareness_level"),
-                row.get("competition_level"),
-                row.get("date_range"),
-                row.get("winner_score"),
-                json_dump(row["extra"]),
+        sig_hashes = [row["sig_hash"] for row in batch]
+        try:
+            self.write_conn.execute("BEGIN IMMEDIATE;")
+            cur = self.write_conn.cursor()
+            items_payload = [
+                (self.job_id, row["sig_hash"], json_dump(row["raw"]), "raw", now)
+                for row in batch
+            ]
+            staging_payload = [
+                (
+                    self.job_id,
+                    row["sig_hash"],
+                    row["name"],
+                    row.get("description"),
+                    row.get("category"),
+                    row.get("price"),
+                    row.get("currency"),
+                    row.get("image_url"),
+                    row.get("brand"),
+                    row.get("asin"),
+                    row.get("product_url"),
+                    row["source"],
+                    row["import_date"],
+                    row.get("desire"),
+                    row.get("desire_magnitude"),
+                    row.get("awareness_level"),
+                    row.get("competition_level"),
+                    row.get("date_range"),
+                    row.get("winner_score"),
+                    json_dump(row["extra"]),
+                )
+                for row in batch
+            ]
+            cur.executemany(
+                """
+                INSERT INTO items (job_id, sig_hash, raw, state, updated_at)
+                VALUES (?, ?, json(?), ?, ?)
+                """,
+                items_payload,
             )
-            for row in batch
-        ]
-        cur.executemany(
-            """
-            INSERT INTO items (job_id, sig_hash, raw, state, updated_at)
-            VALUES (?, ?, json(?), ?, ?)
-            """,
-            items_payload,
-        )
-        cur.executemany(
-            """
-            INSERT OR REPLACE INTO products_staging (
-                job_id, sig_hash, name, description, category, price, currency,
-                image_url, brand, asin, product_url, source, import_date,
-                desire, desire_magnitude, awareness_level, competition_level,
-                date_range, winner_score, extra
+            cur.executemany(
+                """
+                INSERT OR REPLACE INTO products_staging (
+                    job_id, sig_hash, name, description, category, price, currency,
+                    image_url, brand, asin, product_url, source, import_date,
+                    desire, desire_magnitude, awareness_level, competition_level,
+                    date_range, winner_score, extra
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
+                """,
+                staging_payload,
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
-            """,
-            staging_payload,
-        )
+            merged_rows = merge_staging_batch(self.write_conn, self.job_id, sig_hashes)
+            self.write_conn.execute("COMMIT;")
+        except Exception:
+            self.write_conn.execute("ROLLBACK;")
+            raise
         batch_size = len(batch)
         for row in batch:
             self._unique_hashes.add(row["sig_hash"])
@@ -487,9 +495,64 @@ class BulkImporter:
             total=self.processed,
             rows_imported=len(self._unique_hashes),
         )
+        product_ids = [row["id"] for row in merged_rows if row and row["id"]]
+        if product_ids:
+            minimal_rows = get_products_minimal_by_ids(self.write_conn, product_ids)
+            self._emit_import_events(minimal_rows)
 
     def _update_status(self, **kwargs: Any) -> None:
         update_import_job_progress(self.status_conn, self.job_id, **kwargs)
+
+    def _emit_import_events(self, rows: Sequence[dict[str, Any]]) -> None:
+        if not rows:
+            return
+        max_created: Optional[str] = None
+        for row in rows:
+            created = row.get("created_at")
+            if created and (max_created is None or str(created) > max_created):
+                max_created = str(created)
+        for idx in range(0, len(rows), 100):
+            chunk = rows[idx : idx + 100]
+            prep_start = time.perf_counter()
+            payload_rows: list[dict[str, Any]] = []
+            for entry in chunk:
+                event_row: dict[str, Any] = {
+                    "id": entry.get("id"),
+                    "title": entry.get("title"),
+                    "price": entry.get("price"),
+                    "rating": entry.get("rating"),
+                    "category": entry.get("category"),
+                    "brand": entry.get("brand"),
+                }
+                if entry.get("group_id") not in (None, ""):
+                    event_row["group_id"] = entry.get("group_id")
+                payload_rows.append(event_row)
+            payload = {"type": "import.batch", "rows": payload_rows, "count": len(payload_rows)}
+            message = json.dumps(payload, separators=(",", ":"))
+            size_bytes = len(message.encode("utf-8"))
+            publish_progress(payload)
+            increment_import_batches()
+            prep_ms = (time.perf_counter() - prep_start) * 1000.0
+            logger.info(
+                "SSE import.batch job=%s count=%d bytes=%d prep_ms=%.2f",
+                self.job_id,
+                len(payload_rows),
+                size_bytes,
+                prep_ms,
+            )
+        if max_created:
+            set_stream_cursor(self.write_conn, "products_since", max_created, commit=True)
+
+    def _finalize_import(self) -> None:
+        try:
+            self.write_conn.execute("BEGIN IMMEDIATE;")
+            transition_job_items(self.write_conn, self.job_id, "raw", "pending_enrich")
+            merge_staging_into_products(self.write_conn, self.job_id)
+            clear_staging_for_job(self.write_conn, self.job_id)
+            self.write_conn.execute("COMMIT;")
+        except Exception:
+            self.write_conn.execute("ROLLBACK;")
+            raise
 
 
 def _prepare_rows(records: Iterable[Mapping[str, Any]]) -> Iterator[Mapping[str, Any]]:

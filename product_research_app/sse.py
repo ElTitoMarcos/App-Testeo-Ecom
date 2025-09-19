@@ -19,6 +19,9 @@ logger = logging.getLogger(__name__)
 sse_bp = Blueprint("sse", __name__)
 _clients: set[queue.Queue[str]] = set()
 _clients_lock = threading.Lock()
+_metrics_lock = threading.Lock()
+_import_batches_emitted = 0
+_enrich_batches_emitted = 0
 
 
 def _headers() -> dict[str, str]:
@@ -64,6 +67,26 @@ def publish_progress(payload: dict[str, Any]) -> None:
         with _clients_lock:
             for q in dead:
                 _clients.discard(q)
+
+
+def increment_import_batches() -> None:
+    global _import_batches_emitted
+    with _metrics_lock:
+        _import_batches_emitted += 1
+
+
+def increment_enrich_batches() -> None:
+    global _enrich_batches_emitted
+    with _metrics_lock:
+        _enrich_batches_emitted += 1
+
+
+def get_emission_counters() -> dict[str, int]:
+    with _metrics_lock:
+        return {
+            "import_batches_emitted": _import_batches_emitted,
+            "enrich_batches_emitted": _enrich_batches_emitted,
+        }
 
 
 @sse_bp.route("/events")

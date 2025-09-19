@@ -177,6 +177,18 @@ body.dark .popover {
 .table tbody tr.selected { background: #cde8ff; }
 body.dark .table tbody tr.selected { background: #243150; }
 
+tr.row-new {
+  animation: rowGlow 0.8s ease-out;
+}
+tr.row-updated {
+  animation: rowGlow 0.6s ease-out;
+}
+
+@keyframes rowGlow {
+  from { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.5); }
+  to { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0); }
+}
+
 .cell-date-range {
   white-space: pre-line;
   min-width: 20ch;
