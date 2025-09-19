@@ -295,7 +295,6 @@ class _AsyncDBWriter:
         if ids_saved:
             self.last_processed_ids.update(ids_saved)
 
-
 async def _call_gpt(client, payload, model, timeout, n_items: int):
     max_tokens = min(8192, _estimate_output_tokens(n_items))
     body = {
@@ -320,7 +319,6 @@ async def _call_gpt(client, payload, model, timeout, n_items: int):
         except Exception:
             pass
     return data
-
 
 def _parse_openai_envelope(resp_json):
     try:
@@ -377,7 +375,6 @@ async def _score_batch_with_backfill(
 
     return parsed
 
-
 async def _run_batches_parallel(
     batches: List[List[Dict[str, Any]]],
     dao: Optional[_AsyncDBWriter],
@@ -395,7 +392,6 @@ async def _run_batches_parallel(
     limits = httpx.Limits(max_connections=conc, max_keepalive_connections=conc)
     headers = _GPT_HEADERS or None
     timeout = httpx.Timeout(TIMEOUT_REQUEST_SEC)
-
     processed = 0
     processed_ids: set[int] = set()
     retries = 0
