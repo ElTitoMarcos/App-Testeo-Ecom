@@ -54,10 +54,10 @@ from . import product_enrichment
 from . import student_model
 from .progress_events import (
     KEEPALIVE_INTERVAL,
-    publish_progress,
     subscribe as progress_subscribe,
     unsubscribe as progress_unsubscribe,
 )
+from .sse import publish_progress
 from .utils.db import row_to_dict, rget
 
 WINNER_SCORE_FIELDS = list(winner_calc.FEATURE_MAP.keys())
