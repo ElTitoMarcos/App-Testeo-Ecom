@@ -38,7 +38,6 @@ def _env_flag(name: str, default: bool = False) -> bool:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
-
 DEFAULT_BATCH_SIZE = int(os.getenv("ENRICH_BATCH_SIZE", "20"))
 DEFAULT_CONCURRENCY = int(os.getenv("ENRICH_CONCURRENCY", "12"))
 TARGET_INPUT_TOKENS = int(os.getenv("ENRICH_TARGET_INPUT_TOKENS", "6000"))
@@ -456,6 +455,7 @@ class EnrichmentPipeline:
             if not self.similarity_engine.enabled:
                 self.similarity_enabled = False
                 self.similarity_engine = None
+                
         self.start_time = time.perf_counter()
         self.started_iso = datetime.utcnow().isoformat()
         self.lock = asyncio.Lock()
@@ -620,6 +620,7 @@ class EnrichmentPipeline:
                 self.similarity_engine.prepare(base_rows)
             except Exception:
                 self.logger.exception("Failed to prepare similarity index")
+                
         sig_hashes = [row["sig_hash"] for row in pending]
         cache_rows = database.get_enrichment_cache(
             self.conn, sig_hashes, max_age_days=self.cache_ttl_days
@@ -676,6 +677,7 @@ class EnrichmentPipeline:
                         self.similarity_matches += 1
                         self._apply_local_enrichment(item, result)
                         continue
+
                 if low_priority and self.triage_enabled:
                     self.low_priority.append(item)
                 else:
@@ -1086,7 +1088,6 @@ class EnrichmentPipeline:
         self.processed += enriched + failed
         self.total_enriched += enriched
         self.total_failed += failed
-
 
 async def run_job(job_id: int, *, logger: logging.Logger = logger) -> None:
     conn = get_db()

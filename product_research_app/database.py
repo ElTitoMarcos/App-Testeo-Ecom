@@ -451,7 +451,6 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         """
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_import_job_metrics_job ON import_job_metrics(job_id)")
-
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS benchmark_runs (
@@ -1206,7 +1205,6 @@ def get_recent_import_metrics(conn: sqlite3.Connection, limit: int = 50) -> List
     )
     return cur.fetchall()
 
-
 def record_benchmark_run(
     conn: sqlite3.Connection,
     kind: str,
@@ -1243,7 +1241,6 @@ def get_recent_benchmark_runs(
     )
     return cur.fetchall()
 
-
 def transition_job_items(
     conn: sqlite3.Connection,
     job_id: int,
@@ -1261,8 +1258,7 @@ def transition_job_items(
     if commit:
         conn.commit()
     return cur.rowcount
-
-
+  
 def list_items_by_state(
     conn: sqlite3.Connection, job_id: int, state: str
 ) -> List[sqlite3.Row]:
@@ -1393,7 +1389,6 @@ def get_enrichment_cache(
     )
     return {row["sig_hash"]: row for row in cur.fetchall()}
 
-
 def get_enriched_items_for_similarity(
     conn: sqlite3.Connection, limit: int = 2000
 ) -> List[sqlite3.Row]:
@@ -1409,7 +1404,6 @@ def get_enriched_items_for_similarity(
         (int(limit),),
     )
     return cur.fetchall()
-
 
 def upsert_enrichment_cache(
     conn: sqlite3.Connection,
@@ -1528,7 +1522,6 @@ def get_enrichment_status(
         "updated_at": job["updated_at"],
     }
     return payload
-
 
 def merge_staging_into_products(conn: sqlite3.Connection, job_id: int) -> None:
     cur = conn.cursor()
