@@ -1,21 +1,387 @@
-import json
-import logging
 import os
-import asyncio
-import random
 import time
+import json
 import math
+import asyncio
+import logging
 import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .. import config, database, gpt
+import httpx
+
+from .. import config, database
 
 logger = logging.getLogger(__name__)
 
 APP_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = APP_DIR / "data.sqlite3"
+
+RPM_LIMIT = int(os.getenv("AI_RPM_LIMIT", "9999"))
+TPM_LIMIT = int(os.getenv("AI_TPM_LIMIT", "99999999"))
+REQ_TOKEN_HARD_MAX = int(os.getenv("AI_REQ_TOKEN_HARD_MAX", "240000"))
+TARGET_INPUT_TOKENS_PER_REQ = int(os.getenv("AI_TARGET_INPUT_TOKENS_PER_REQ", "120000"))
+MAX_ITEMS_PER_CALL = int(os.getenv("AI_MAX_ITEMS_PER_CALL", "512"))
+CONCURRENCY_MAX = int(os.getenv("AI_CONCURRENCY_MAX", "64"))
+TIMEOUT_REQUEST_SEC = float(os.getenv("AI_TIMEOUT_REQUEST_SEC", "45"))
+MAX_RETRIES = int(os.getenv("AI_MAX_RETRIES", "2"))
+DB_WRITE_BATCH = int(os.getenv("AI_DB_WRITE_BATCH", "500"))
+DB_WRITE_INTERVAL = float(os.getenv("AI_DB_WRITE_INTERVAL", "0.5"))
+GPT_URL = os.getenv("AI_GPT_URL") or os.getenv("GPT_URL")
+
+GPT_API_KEY = config.get_api_key() or os.environ.get("OPENAI_API_KEY")
+GPT_EXTRA_HEADERS_RAW = os.getenv("AI_GPT_HEADERS")
+GPT_MODEL_NAME = os.getenv("AI_GPT_MODEL")
+
+if not GPT_URL:
+    GPT_URL = "https://api.openai.com/v1/chat/completions"
+
+_GPT_HEADERS: Dict[str, str] = {}
+if GPT_API_KEY:
+    _GPT_HEADERS["Authorization"] = f"Bearer {GPT_API_KEY}"
+if GPT_EXTRA_HEADERS_RAW:
+    try:
+        extra_headers = json.loads(GPT_EXTRA_HEADERS_RAW)
+        if isinstance(extra_headers, dict):
+            _GPT_HEADERS.update({str(k): str(v) for k, v in extra_headers.items()})
+    except json.JSONDecodeError:
+        logger.warning("Invalid AI_GPT_HEADERS JSON; ignoring")
+
+
+def _tok_item(it: Dict[str, Any]) -> int:
+    title = (it.get("title", "")[:160])
+    desc = (it.get("description", "")[:400])
+    brand = (it.get("brand", "")[:40])
+    cat = (it.get("category", "")[:60])
+    nums = f"{it.get('price', '')}{it.get('rating', '')}{it.get('units_sold', '')}{it.get('revenue', '')}{it.get('oldness', '')}"
+    chars = len(title) + len(desc) + len(brand) + len(cat) + len(nums)
+    return max(28, chars // 4)
+
+
+def _tok_req(items: List[Dict[str, Any]]) -> int:
+    return 600 + sum(_tok_item(x) for x in items)
+
+
+def _best_K(items: List[Dict[str, Any]], cap: int) -> int:
+    if not items:
+        return 0
+    sample = items[: min(64, len(items))]
+    avg = max(28, sum(_tok_item(x) for x in sample) / len(sample))
+    budget = min(TARGET_INPUT_TOKENS_PER_REQ, REQ_TOKEN_HARD_MAX)
+    avail = max(0, budget - 600)
+    k = int(avail // avg) if avg else cap
+    return max(1, min(cap, k))
+
+
+def _chunk_maximal(items: List[Dict[str, Any]], K: int) -> List[List[Dict[str, Any]]]:
+    out: List[List[Dict[str, Any]]] = []
+    i = 0
+    limit = min(TARGET_INPUT_TOKENS_PER_REQ, REQ_TOKEN_HARD_MAX)
+    while i < len(items):
+        sub = items[i : i + K]
+        while len(sub) > 1 and _tok_req(sub) > limit:
+            mid = len(sub) // 2
+            left = sub[:mid]
+            right = sub[mid:]
+            if _tok_req(left) <= limit:
+                out.append(left)
+                sub = right
+            else:
+                sub = left
+        out.append(sub)
+        i += K
+    return [c for c in out if c]
+
+
+def _build_payload(batch: List[Dict[str, Any]], weights: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    items = [
+        {
+            "id": str(it["id"]),
+            "title": (it.get("title", "")[:160]),
+            "category": (it.get("category", "")[:60]),
+            "brand": (it.get("brand", "")[:40]),
+            "price": it.get("price"),
+            "rating": it.get("rating"),
+            "units_sold": it.get("units_sold"),
+            "revenue": it.get("revenue"),
+            "oldness": it.get("oldness"),
+            "desc": (it.get("description", "")[:400]),
+        }
+        for it in batch
+    ]
+    sys = {"role": "system", "content": "Eres estricto. Devuelves SOLO JSON válido."}
+    usr_content = (
+        "Devuelve SOLO JSON: {\"results\":[{\"id\":\"<id>\"," \
+        "\"desire\":0-100,\"desire_magnitude\":0-100," \
+        "\"awareness_level\":0-100,\"competition_level\":0-100," \
+        "\"winner_score\":0-100}]}\n"
+        f"Items: {json.dumps(items, ensure_ascii=False)}\n"
+    )
+    if weights:
+        usr_content += f"Weights: {json.dumps(weights)}"
+    usr = {"role": "user", "content": usr_content}
+    payload = {"messages": [sys, usr]}
+    model_name = GPT_MODEL_NAME
+    if model_name:
+        payload.setdefault("model", model_name)
+    return payload
+
+
+def _clamp(x: Any) -> int:
+    try:
+        v = int(round(float(x)))
+    except Exception:
+        v = 0
+    return max(0, min(100, v))
+
+
+def _parse(json_obj: Any) -> Dict[str, Dict[str, int]]:
+    res: Dict[str, Dict[str, int]] = {}
+    arr = json_obj.get("results") if isinstance(json_obj, dict) else None
+    if not isinstance(arr, list):
+        return res
+    for e in arr:
+        pid = str(e.get("id", "")).strip()
+        if not pid:
+            continue
+        res[pid] = {
+            "desire": _clamp(e.get("desire")),
+            "desire_magnitude": _clamp(e.get("desire_magnitude")),
+            "awareness_level": _clamp(e.get("awareness_level")),
+            "competition_level": _clamp(e.get("competition_level")),
+            "winner_score": _clamp(e.get("winner_score")),
+        }
+    return res
+
+
+class _TokenBucket:
+    def __init__(self, capacity: int, refill_per_minute: int) -> None:
+        if capacity <= 0 or refill_per_minute <= 0:
+            self.capacity = float("inf")
+            self.refill_per_sec = float("inf")
+        else:
+            self.capacity = float(capacity)
+            self.refill_per_sec = float(refill_per_minute) / 60.0
+        self.tokens = float(self.capacity if self.capacity != float("inf") else 0)
+        self.ts = time.monotonic()
+        self.lock = asyncio.Lock()
+
+    async def consume(self, amount: float) -> None:
+        if self.capacity == float("inf"):
+            return
+        need = max(0.0, float(amount))
+        if need <= 0:
+            return
+        while True:
+            async with self.lock:
+                now = time.monotonic()
+                delta = now - self.ts
+                self.ts = now
+                self.tokens = min(self.capacity, self.tokens + delta * self.refill_per_sec)
+                if self.tokens >= need:
+                    self.tokens -= need
+                    return
+                deficit = need - self.tokens
+            wait = deficit / self.refill_per_sec if self.refill_per_sec > 0 else 0.05
+            await asyncio.sleep(max(wait, 0.01))
+
+
+class _AsyncDBWriter:
+    def __init__(self, conn) -> None:
+        self.conn = conn
+
+    def upsert_ai_fields_bulk(self, rows: List[Dict[str, Any]]) -> None:
+        if not rows:
+            return
+        cur = self.conn.cursor()
+        now = datetime.utcnow().isoformat()
+        updates: List[tuple] = []
+        for row in rows:
+            pid = row.get("id")
+            if pid is None:
+                continue
+            desire = row.get("desire")
+            desire_mag = row.get("desire_magnitude")
+            awareness = row.get("awareness_level")
+            competition = row.get("competition_level")
+            updates.append(
+                (
+                    desire,
+                    desire_mag,
+                    awareness,
+                    competition,
+                    now,
+                    pid,
+                )
+            )
+        if not updates:
+            return
+        cur.executemany(
+            """
+            UPDATE products
+            SET desire = COALESCE(?, desire),
+                desire_magnitude = COALESCE(?, desire_magnitude),
+                awareness_level = COALESCE(?, awareness_level),
+                competition_level = COALESCE(?, competition_level),
+                ai_columns_completed_at = ?
+            WHERE id = ?
+            """,
+            updates,
+        )
+        self.conn.commit()
+
+
+async def _writer_loop(q: asyncio.Queue, dao: Optional[_AsyncDBWriter], logger: logging.Logger) -> None:
+    if dao is None:
+        # Drain queue without writing if dao missing.
+        while True:
+            try:
+                batch = await asyncio.wait_for(q.get(), timeout=DB_WRITE_INTERVAL)
+            except asyncio.TimeoutError:
+                continue
+            if batch is None:
+                break
+            q.task_done()
+        return
+
+    buf: List[Dict[str, Any]] = []
+    last = time.monotonic()
+    while True:
+        try:
+            batch = await asyncio.wait_for(q.get(), timeout=DB_WRITE_INTERVAL)
+        except asyncio.TimeoutError:
+            batch = None
+        if batch:
+            buf.extend(batch)
+        if batch is not None:
+            q.task_done()
+        now = time.monotonic()
+        if buf and (len(buf) >= DB_WRITE_BATCH or now - last >= DB_WRITE_INTERVAL):
+            try:
+                dao.upsert_ai_fields_bulk(buf)
+            except Exception:
+                logger.exception("DB writer flush failed")
+            buf.clear()
+            last = now
+
+
+async def _call_gpt(client: httpx.AsyncClient, payload: Dict[str, Any]) -> Any:
+    if not GPT_URL:
+        raise RuntimeError("AI_GPT_URL not configured")
+    response = await client.post(GPT_URL, json=payload, timeout=TIMEOUT_REQUEST_SEC)
+    response.raise_for_status()
+    try:
+        return response.json()
+    except Exception:
+        return json.loads(response.text)
+
+
+async def _run_batches_parallel(
+    batches: List[List[Dict[str, Any]]],
+    dao: Optional[_AsyncDBWriter],
+    weights: Optional[Dict[str, Any]],
+    logger: logging.Logger,
+    results_store: Optional[Dict[str, Dict[str, int]]] = None,
+    failure_reasons: Optional[Dict[str, str]] = None,
+    retry_counter: Optional[Dict[str, int]] = None,
+) -> int:
+    if not batches:
+        return 0
+    conc = max(1, min(CONCURRENCY_MAX, len(batches)))
+    rpm_bucket = _TokenBucket(RPM_LIMIT, RPM_LIMIT)
+    tpm_bucket = _TokenBucket(TPM_LIMIT, TPM_LIMIT)
+    limits = httpx.Limits(max_connections=conc, max_keepalive_connections=conc)
+    headers = _GPT_HEADERS or None
+    timeout = httpx.Timeout(TIMEOUT_REQUEST_SEC)
+    async with httpx.AsyncClient(http2=True, limits=limits, headers=headers, timeout=timeout) as client:
+        out_q: asyncio.Queue = asyncio.Queue()
+        writer = asyncio.create_task(_writer_loop(out_q, dao, logger))
+
+        async def one(batch: List[Dict[str, Any]], idx: int, attempt: int = 0) -> bool:
+            t0 = time.monotonic()
+            try:
+                tokens_est = max(600, _tok_req(batch))
+                await rpm_bucket.consume(1)
+                await tpm_bucket.consume(tokens_est)
+                payload = _build_payload(batch, weights)
+                obj = await _call_gpt(client, payload)
+                parsed = _parse(obj)
+                rows: List[Dict[str, Any]] = []
+                for it in batch:
+                    pid = str(it["id"])
+                    if pid in parsed:
+                        vals = parsed[pid]
+                        if results_store is not None:
+                            results_store[pid] = vals
+                        rows.append(
+                            {
+                                "id": it["id"],
+                                "desire": vals["desire"],
+                                "desire_magnitude": vals["desire_magnitude"],
+                                "awareness_level": vals["awareness_level"],
+                                "competition_level": vals["competition_level"],
+                                "winner_score": vals["winner_score"],
+                            }
+                        )
+                    elif failure_reasons is not None:
+                        failure_reasons[pid] = "missing_result"
+                if rows:
+                    await out_q.put(rows)
+                logger.info(
+                    "IA batch %d OK: items=%d in %.2fs",
+                    idx,
+                    len(batch),
+                    time.monotonic() - t0,
+                )
+                return True
+            except httpx.HTTPStatusError as exc:
+                response = exc.response
+                retry_after = response.headers.get("Retry-After") if response else None
+                try:
+                    wait = float(retry_after) if retry_after is not None else None
+                except (TypeError, ValueError):
+                    wait = None
+                if wait is None:
+                    wait = min(30, 2 ** min(5, attempt))
+                status = response.status_code if response else "?"
+                logger.warning("IA batch %d HTTP %s, retry in %.1fs", idx, status, wait)
+                if retry_counter is not None and attempt < MAX_RETRIES:
+                    retry_counter["count"] = retry_counter.get("count", 0) + 1
+                await asyncio.sleep(wait)
+                if attempt < MAX_RETRIES:
+                    return await one(batch, idx, attempt + 1)
+                logger.error("IA batch %d FAILED after %d retries", idx, attempt)
+                if failure_reasons is not None:
+                    reason = f"http_{status}" if status else "http_error"
+                    for it in batch:
+                        failure_reasons[str(it["id"])]=reason
+                return False
+            except Exception as exc:
+                logger.exception("IA batch %d error: %s", idx, exc)
+                if retry_counter is not None and attempt < MAX_RETRIES:
+                    retry_counter["count"] = retry_counter.get("count", 0) + 1
+                if attempt < MAX_RETRIES:
+                    await asyncio.sleep(1.0)
+                    return await one(batch, idx, attempt + 1)
+                if failure_reasons is not None:
+                    for it in batch:
+                        failure_reasons[str(it["id"])]="exception"
+                return False
+
+        tasks = [asyncio.create_task(one(batch, idx)) for idx, batch in enumerate(batches, start=1)]
+        results = await asyncio.gather(*tasks, return_exceptions=False)
+
+        await asyncio.sleep(DB_WRITE_INTERVAL * 1.5)
+        writer.cancel()
+        try:
+            await writer
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("DB writer terminated with error")
+
+    return sum(1 for r in results if r)
 
 
 def _ensure_conn():
@@ -186,28 +552,6 @@ def _classify_scores(
     return labels, dist, info
 
 
-async def _call_with_retries(api_key: str, model: str, items: List[Dict[str, Any]], max_retries: int) -> tuple[Dict[str, Any], Dict[str, str], int]:
-    retry = 0
-    base = 0.5
-    while True:
-        try:
-            ok, ko, usage, duration = await asyncio.to_thread(gpt.generate_batch_columns, api_key, model, items)
-            return ok, ko, retry
-        except gpt.OpenAIError as exc:
-            msg = str(exc)
-            status = 0
-            for tok in msg.split():
-                if tok.isdigit():
-                    status = int(tok)
-                    break
-            if status in (429, 500, 502, 503, 504) and retry < max_retries:
-                delay = base * (2**retry) + random.uniform(0.1, 0.4)
-                retry += 1
-                await asyncio.sleep(delay)
-                continue
-            return {}, {str(it["id"]): msg for it in items}, retry
-
-
 def fill_ai_columns(
     product_ids: List[int],
     *,
@@ -215,15 +559,22 @@ def fill_ai_columns(
     batch_mode: bool | None = None,
     cost_cap_usd: float | None = None,
 ) -> Dict[str, Any]:
-    start_time = time.time()
     conn = _ensure_conn()
 
-    cfg_batch = config.get_ai_batch_config()
     cfg_cost = config.get_ai_cost_config()
     api_key = config.get_api_key() or os.environ.get("OPENAI_API_KEY")
     model = model or cfg_cost.get("model")
     batch_mode = batch_mode if batch_mode is not None else (len(product_ids) >= cfg_cost.get("useBatchWhenCountGte", 300))
     cost_cap_usd = cost_cap_usd if cost_cap_usd is not None else cfg_cost.get("costCapUSD")
+
+    global GPT_MODEL_NAME, _GPT_HEADERS
+    if model:
+        GPT_MODEL_NAME = model
+
+    if api_key:
+        _GPT_HEADERS["Authorization"] = f"Bearer {api_key}"
+
+    dao = _AsyncDBWriter(conn)
 
     total_requested = len(product_ids)
     skipped_existing = 0
@@ -317,40 +668,68 @@ def fill_ai_columns(
             "ui_cost_message": cost_msg,
         }
 
-    batches = [to_process[i : i + cfg_batch.get("BATCH_SIZE", 10)] for i in range(0, len(to_process), cfg_batch.get("BATCH_SIZE", 10))]
+    weights: Optional[Dict[str, Any]] = None
+    try:
+        weights = config.get_weights()
+    except Exception:
+        weights = None
+
+    limit_tokens = min(TARGET_INPUT_TOKENS_PER_REQ, REQ_TOKEN_HARD_MAX)
+    total_tokens = _tok_req(to_process)
+    if total_tokens <= limit_tokens and count <= MAX_ITEMS_PER_CALL:
+        batches = [to_process]
+        approx_chunk = count
+    else:
+        approx_chunk = _best_K(to_process, MAX_ITEMS_PER_CALL)
+        batches = _chunk_maximal(to_process, approx_chunk)
+        if not batches and to_process:
+            batches = [to_process]
+    if batches:
+        first_batch = len(batches[0])
+    else:
+        first_batch = 0
+    logger.info(
+        "AI_PARALLEL: n_items=%d total_tokens≈%d batches=%d Kmax=%s conc=%d",
+        count,
+        total_tokens,
+        len(batches),
+        str(count) if len(batches) == 1 else str(first_batch),
+        min(CONCURRENCY_MAX, len(batches)) if batches else 1,
+    )
 
     ok_raw: Dict[str, Dict[str, Any]] = {}
     ko_all: Dict[str, str] = {}
-    n_retried = 0
+    retry_counter: Dict[str, int] = {}
+    results_store: Dict[str, Dict[str, int]] = {}
 
-    async def run_batches() -> None:
-        nonlocal n_retried
-        sem = asyncio.Semaphore(cfg_batch.get("MAX_CONCURRENCY", 2))
+    if batches:
+        asyncio.run(
+            _run_batches_parallel(
+                batches,
+                dao,
+                weights,
+                logger,
+                results_store=results_store,
+                failure_reasons=ko_all,
+                retry_counter=retry_counter,
+            )
+        )
 
-        async def worker(batch: List[Dict[str, Any]]):
-            async with sem:
-                ok, ko, retries = await _call_with_retries(api_key, model, batch, cfg_batch.get("MAX_RETRIES", 3))
-                return batch, ok, ko, retries
+    for pid, vals in results_store.items():
+        ok_raw[pid] = {
+            "desire": vals.get("desire"),
+            "desire_magnitude": vals.get("desire_magnitude"),
+            "awareness_level": vals.get("awareness_level"),
+            "competition_level": vals.get("competition_level"),
+            "winner_score": vals.get("winner_score"),
+        }
 
-        tasks = [asyncio.create_task(worker(b)) for b in batches]
-        done = 0
-        for coro in asyncio.as_completed(tasks):
-            if time.time() - start_time > cfg_batch.get("TIME_LIMIT_SECONDS", 300):
-                for t in tasks:
-                    t.cancel()
-                break
-            try:
-                batch, ok, ko, retries = await coro
-            except Exception:
-                continue
-            n_retried += retries
-            for pid, updates in ok.items():
-                ok_raw[str(pid)] = updates
-            for pid, reason in ko.items():
-                ko_all[str(pid)] = reason
-            done += len(batch)
+    for item in to_process:
+        pid_str = str(item["id"])
+        if pid_str not in ok_raw and pid_str not in ko_all:
+            ko_all[pid_str] = "no_result"
 
-    asyncio.run(run_batches())
+    n_retried = retry_counter.get("count", 0)
 
     cfg_calib = config.get_ai_calibration_config()
     dist_desire = {"Low": 0, "Medium": 0, "High": 0}
