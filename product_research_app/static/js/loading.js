@@ -1,5 +1,18 @@
 const SSE_SUPPORTED = typeof window !== 'undefined' && typeof window.EventSource === 'function';
 
+if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+  document.addEventListener('DOMContentLoaded', () => {
+    window.__domReady = true;
+  });
+  if (!window.__actionsHubReady) {
+    document.addEventListener('readystatechange', () => {
+      if (document.readyState === 'complete') {
+        window.__actionsHubReady = true;
+      }
+    });
+  }
+}
+
 const OP_LABELS = {
   import: 'Import',
   enrich: 'Enriq.',
