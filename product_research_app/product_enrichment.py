@@ -25,7 +25,7 @@ import httpx
 
 from . import config, database
 from .db import get_db
-from .sse import publish_progress
+from .sse import increment_enrich_batches, publish_progress
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,50 @@ SYSTEM_PROMPT = (
 )
 
 DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y", "%Y/%m/%d")
+
+TRI_LABELS = {
+    "low": "Low",
+    "medio": "Medium",
+    "medium": "Medium",
+    "high": "High",
+    "alto": "High",
+    "bajo": "Low",
+}
+
+AWARENESS_LABELS = {
+    "unaware": "Unaware",
+    "problem-aware": "Problem-Aware",
+    "problema": "Problem-Aware",
+    "solution-aware": "Solution-Aware",
+    "solucion": "Solution-Aware",
+    "product-aware": "Product-Aware",
+    "producto": "Product-Aware",
+    "most aware": "Most Aware",
+}
+
+
+def _norm_tri_label(value: Any) -> Optional[str]:
+    if not value:
+        return None
+    text = str(value).strip().lower()
+    return TRI_LABELS.get(text)
+
+
+def _norm_awareness_label(value: Any) -> Optional[str]:
+    if not value:
+        return None
+    text = str(value).strip().lower()
+    return AWARENESS_LABELS.get(text)
+
+
+def _parse_winner_score(value: Any) -> Optional[int]:
+    if value in (None, ""):
+        return None
+    try:
+        score = int(round(float(value)))
+    except Exception:
+        return None
+    return max(0, min(100, score))
 
 
 def clamp(value: int, low: int, high: int) -> int:
@@ -270,11 +314,25 @@ def normalize_results(data: Dict[str, Any]) -> List[Dict[str, Any]]:
             item_id = int(entry.get("id"))
         except (TypeError, ValueError):
             continue
-        desire = clamp_score(entry.get("desire"))
-        awareness = clamp_score(entry.get("awareness"))
+        desire_raw = entry.get("desire")
+        desire = clamp_score(desire_raw) if desire_raw is not None else None
+        awareness_raw = entry.get("awareness")
+        awareness = clamp_score(awareness_raw) if awareness_raw is not None else None
         reason = str(entry.get("reason") or "").strip()
         if len(reason) > 120:
             reason = reason[:117].rstrip() + "..."
+        desire_mag = _norm_tri_label(
+            entry.get("desire_magnitude") or entry.get("desireMagnitude")
+        )
+        competition = _norm_tri_label(
+            entry.get("competition_level") or entry.get("competitionLevel")
+        )
+        awareness_level = _norm_awareness_label(
+            entry.get("awareness_level") or entry.get("awarenessLevel")
+        )
+        if awareness_level is None:
+            awareness_level = _norm_awareness_label(entry.get("awareness_label"))
+        winner_score = _parse_winner_score(entry.get("winner_score") or entry.get("winnerScore"))
         normalised.append(
             {
                 "id": item_id,
@@ -282,6 +340,10 @@ def normalize_results(data: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "awareness": awareness,
                 "reason": reason,
                 "source": entry.get("source") or "ai",
+                "desire_magnitude": desire_mag,
+                "awareness_level": awareness_level,
+                "competition_level": competition,
+                "winner_score": winner_score,
             }
         )
     return normalised
@@ -344,6 +406,9 @@ class EnrichmentPipeline:
     low_priority: deque[PendingItem] = field(init=False, default_factory=deque)
     cache_hits: int = 0
     triage_skipped: int = 0
+    enriched_success: int = 0
+    enriched_failed: int = 0
+    cache_updates: list[Dict[str, Any]] = field(init=False, default_factory=list)
     processed: int = 0
     requests: int = 0
     tokens_sent: int = 0
@@ -445,11 +510,58 @@ class EnrichmentPipeline:
         payload.update(extra)
         _emit_enrich_progress(self.job_id, **payload)
 
+    def _emit_enrichment_updates(self, updates: Sequence[Dict[str, Any]]) -> None:
+        if not updates:
+            return
+        sorted_updates = sorted(
+            updates,
+            key=lambda row: ((row.get("enrichment_updated_at") or ""), row.get("id") or 0),
+        )
+        max_updated: Optional[str] = None
+        for row in sorted_updates:
+            stamp = row.get("enrichment_updated_at")
+            if stamp and (max_updated is None or str(stamp) > max_updated):
+                max_updated = str(stamp)
+        for idx in range(0, len(sorted_updates), 100):
+            chunk = sorted_updates[idx : idx + 100]
+            prep_start = time.perf_counter()
+            payload_updates = [
+                {
+                    "id": entry.get("id"),
+                    "desire": entry.get("desire"),
+                    "desire_magnitude": entry.get("desire_magnitude"),
+                    "awareness_level": entry.get("awareness_level"),
+                    "competition_level": entry.get("competition_level"),
+                    "winner_score": entry.get("winner_score"),
+                }
+                for entry in chunk
+            ]
+            payload = {
+                "type": "enrich.batch",
+                "updates": payload_updates,
+                "count": len(payload_updates),
+            }
+            message = json.dumps(payload, separators=(",", ":"))
+            size_bytes = len(message.encode("utf-8"))
+            publish_progress(payload)
+            increment_enrich_batches()
+            prep_ms = (time.perf_counter() - prep_start) * 1000.0
+            self.logger.info(
+                "SSE enrich.batch job=%s count=%d bytes=%d prep_ms=%.2f",
+                self.job_id,
+                len(payload_updates),
+                size_bytes,
+                prep_ms,
+            )
+        if max_updated:
+            database.set_stream_cursor(self.conn, "enrich_since", max_updated, commit=True)
+
     def prepare(self) -> None:
         pending = database.list_items_by_state(self.conn, self.job_id, "pending_enrich")
         self.total_items = len(pending)
         if not pending:
             return
+        self.cache_updates = []
         sig_hashes = [row["sig_hash"] for row in pending]
         cache_rows = database.get_enrichment_cache(
             self.conn, sig_hashes, max_age_days=self.cache_ttl_days
@@ -482,6 +594,9 @@ class EnrichmentPipeline:
                 else:
                     self.high_priority.append(item)
         self.conn.commit()
+        if self.cache_updates:
+            self._emit_enrichment_updates(self.cache_updates)
+            self.cache_updates.clear()
         if self.cache_hits:
             metrics = self.snapshot_metrics()
             database.update_enrichment_metrics(self.conn, self.job_id, metrics)
@@ -499,7 +614,7 @@ class EnrichmentPipeline:
         awareness = cache_row["awareness"]
         reason = cache_row["reason"]
         source = cache_row["source"] or "cache"
-        database.update_product_enrichment(
+        update = database.update_product_enrichment(
             self.conn,
             item.sig_hash,
             int(desire) if desire is not None else None,
@@ -507,6 +622,8 @@ class EnrichmentPipeline:
             reason,
             source=source,
         )
+        if update:
+            self.cache_updates.append(update)
         database.mark_item_enriched(
             self.conn,
             item.item_id,
@@ -519,6 +636,7 @@ class EnrichmentPipeline:
             },
         )
         self.cache_hits += 1
+        self.enriched_success += 1
         self.processed += 1
         self.logger.info(
             "enrich job=%s cache hit item=%s sig=%s",
@@ -703,13 +821,20 @@ class EnrichmentPipeline:
             self.logger.exception("enrich job=%s batch error: %s", self.job_id, exc)
             failed = await asyncio.to_thread(self._mark_batch_failed_sync, items, str(exc))
             elapsed_ms = (time.perf_counter() - start) * 1000.0
+            self.enriched_failed += failed
             self._update_metrics_after_batch(len(items), 0, failed, estimated_tokens, elapsed_ms)
             metrics = self.snapshot_metrics()
             database.update_enrichment_metrics(self.conn, self.job_id, metrics)
             self._emit_metrics(metrics=metrics)
             return
         mapping = {entry["id"]: entry for entry in normalised}
-        enriched, failed = await asyncio.to_thread(self._apply_results_sync, items, mapping)
+        enriched, failed, updates = await asyncio.to_thread(
+            self._apply_results_sync, items, mapping
+        )
+        self.enriched_success += enriched
+        self.enriched_failed += failed
+        if updates:
+            self._emit_enrichment_updates(updates)
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         self._update_metrics_after_batch(len(items), enriched, failed, estimated_tokens, elapsed_ms)
         throughput = (enriched + failed) / ((elapsed_ms / 1000.0) or 1.0)
@@ -731,20 +856,27 @@ class EnrichmentPipeline:
 
     def _apply_results_sync(
         self, items: List[PendingItem], mapping: Dict[int, Dict[str, Any]]
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, List[Dict[str, Any]]]:
         enriched = 0
         failed = 0
+        updates: List[Dict[str, Any]] = []
         for item in items:
             result = mapping.get(item.item_id)
             if result:
-                database.update_product_enrichment(
+                update = database.update_product_enrichment(
                     self.conn,
                     item.sig_hash,
                     result.get("desire"),
                     result.get("awareness"),
                     result.get("reason"),
+                    desire_magnitude=result.get("desire_magnitude"),
+                    awareness_level=result.get("awareness_level"),
+                    competition_level=result.get("competition_level"),
+                    winner_score=result.get("winner_score"),
                     source=result.get("source", "ai"),
                 )
+                if update:
+                    updates.append(update)
                 database.mark_item_enriched(self.conn, item.item_id, result)
                 database.upsert_enrichment_cache(
                     self.conn,
@@ -761,7 +893,7 @@ class EnrichmentPipeline:
                 )
                 failed += 1
         self.conn.commit()
-        return enriched, failed
+        return enriched, failed, updates
 
     def _mark_batch_failed_sync(
         self, items: List[PendingItem], error: str
@@ -822,6 +954,13 @@ async def run_job(job_id: int, *, logger: logging.Logger = logger) -> None:
             status=status,
         )
         pipeline._emit_metrics(status=status, metrics=metrics)
+        publish_progress(
+            {
+                "type": "enrich.done",
+                "enriched": pipeline.enriched_success,
+                "failed": pipeline.enriched_failed,
+            }
+        )
         return
     api_key = resolve_api_key()
     if not api_key:
@@ -870,6 +1009,14 @@ async def run_job(job_id: int, *, logger: logging.Logger = logger) -> None:
         )
         _emit_enrich_progress(job_id, phase="enrich", status="error", error=str(exc))
         raise
+    finally:
+        publish_progress(
+            {
+                "type": "enrich.done",
+                "enriched": pipeline.enriched_success,
+                "failed": pipeline.enriched_failed,
+            }
+        )
 
 
 def run_job_sync(job_id: int) -> None:

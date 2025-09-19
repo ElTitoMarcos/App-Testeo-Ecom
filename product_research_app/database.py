@@ -74,7 +74,10 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             extra JSON,
             winner_score_raw REAL,
             winner_score INTEGER NOT NULL DEFAULT 0,
-            winner_score_updated_at TEXT
+            winner_score_updated_at TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            enrichment_updated_at TEXT
         )
         """
     )
@@ -110,6 +113,23 @@ def initialize_database(conn: sqlite3.Connection) -> None:
     if "sig_hash" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN sig_hash TEXT")
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_products_sig_hash ON products(sig_hash)")
+    if "created_at" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN created_at TEXT")
+        cur.execute(
+            "UPDATE products SET created_at = COALESCE(import_date, datetime('now')) WHERE created_at IS NULL"
+        )
+    if "updated_at" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN updated_at TEXT")
+        cur.execute(
+            "UPDATE products SET updated_at = COALESCE(import_date, datetime('now')) WHERE updated_at IS NULL"
+        )
+    if "enrichment_updated_at" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN enrichment_updated_at TEXT")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_products_created_at ON products(created_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_products_updated_at ON products(updated_at)")
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_products_enrichment_updated ON products(enrichment_updated_at)"
+    )
     metric_text_cols = [
         "magnitud_deseo",
         "nivel_consciencia_headroom",
@@ -435,6 +455,15 @@ def initialize_database(conn: sqlite3.Connection) -> None:
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_enrichment_cache_updated ON enrichment_cache(updated_at)")
 
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS stream_cursors (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
+
     # Batch metrics for observability
     cur.execute(
         """
@@ -510,61 +539,59 @@ def insert_product(
     }
     if awareness_level not in allowed_awareness:
         awareness_level = None
+    extra_json = json_dump(extra) if extra is not None else "{}"
+    base_columns = [
+        "name",
+        "description",
+        "category",
+        "price",
+        "currency",
+        "image_url",
+        "source",
+        "import_date",
+        "desire",
+        "desire_magnitude",
+        "awareness_level",
+        "competition_level",
+        "date_range",
+        "extra",
+        "sig_hash",
+        "created_at",
+        "updated_at",
+        "enrichment_updated_at",
+    ]
+    base_values: List[Any] = [
+        name,
+        description,
+        category,
+        price,
+        currency,
+        image_url,
+        source,
+        import_date,
+        desire,
+        desire_magnitude,
+        awareness_level,
+        competition_level,
+        date_range,
+        extra_json,
+        sig_hash,
+        import_date,
+        import_date,
+        None,
+    ]
     if product_id is not None:
-        cur.execute(
-            """
-            INSERT INTO products (
-                id, name, description, category, price, currency, image_url, source,
-                import_date, desire, desire_magnitude, awareness_level,
-                competition_level, date_range, extra, sig_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?), ?)
-            """,
-            (
-                product_id,
-                name,
-                description,
-                category,
-                price,
-                currency,
-                image_url,
-                source,
-                import_date,
-                desire,
-                desire_magnitude,
-                awareness_level,
-                competition_level,
-                date_range,
-                json_dump(extra) if extra is not None else "{}",
-                sig_hash,
-            ),
-        )
+        columns = ["id", *base_columns]
+        values: Sequence[Any] = [product_id, *base_values]
     else:
-        cur.execute(
-            """
-            INSERT INTO products (
-                name, description, category, price, currency, image_url, source,
-                import_date, desire, desire_magnitude, awareness_level,
-                competition_level, date_range, extra, sig_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?), ?)
-            """,
-            (
-                name,
-                description,
-                category,
-                price,
-                currency,
-                image_url,
-                source,
-                import_date,
-                desire,
-                desire_magnitude,
-                awareness_level,
-                competition_level,
-                date_range,
-                json_dump(extra) if extra is not None else "{}",
-                sig_hash,
-            ),
-        )
+        columns = base_columns
+        values = base_values
+    placeholders = ["json(?)" if col == "extra" else "?" for col in columns]
+    sql = (
+        f"INSERT INTO products ({', '.join(columns)}) "
+        f"VALUES ({', '.join(placeholders)})"
+    )
+    cur.execute(sql, tuple(values))
     if commit:
         conn.commit()
     return product_id if product_id is not None else cur.lastrowid
@@ -643,6 +670,8 @@ def update_product(
     }
     if "awareness_level" in data and data["awareness_level"] not in aware_vals:
         data["awareness_level"] = None
+    now = datetime.utcnow().isoformat()
+    data["updated_at"] = now
     sets = ",".join([f"{k} = ?" for k in data.keys()])
     cur = conn.cursor()
     cur.execute(
@@ -868,6 +897,182 @@ def json_dump(obj: Any) -> str:
     import json
 
     return json.dumps(obj or {}, ensure_ascii=False)
+
+
+def _safe_json_loads(value: Any) -> Dict[str, Any]:
+    if not value:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    try:
+        return json.loads(value)
+    except Exception:
+        return {}
+
+
+def _trim_text(value: Optional[Any], limit: int) -> Optional[str]:
+    if value in (None, ""):
+        return None
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return text[:limit]
+
+
+def _extract_extra(extra: Dict[str, Any], *keys: str) -> Optional[Any]:
+    for key in keys:
+        if key in extra:
+            val = extra.get(key)
+            if val not in (None, "", []):
+                return val
+    return None
+
+
+def _row_value(row: Any, key: str) -> Any:
+    if isinstance(row, sqlite3.Row):
+        try:
+            return row[key]
+        except (KeyError, IndexError):
+            return None
+    if isinstance(row, dict):
+        return row.get(key)
+    try:
+        return row[key]
+    except Exception:
+        return None
+
+
+def _minimal_product_payload(row: sqlite3.Row) -> Dict[str, Any]:
+    extra = _safe_json_loads(_row_value(row, "extra"))
+    title = _trim_text(_row_value(row, "name"), 120) or ""
+    category = _trim_text(_row_value(row, "category"), 40)
+    brand_raw = _extract_extra(extra, "brand", "Brand", "seller", "Seller")
+    brand = _trim_text(brand_raw, 30)
+    rating_raw = _extract_extra(
+        extra,
+        "rating",
+        "Rating",
+        "product_rating",
+        "Product Rating",
+    )
+    try:
+        rating = float(rating_raw) if rating_raw not in (None, "") else None
+    except Exception:
+        rating = None
+    group_id = _extract_extra(extra, "group_id", "GroupId", "groupId")
+    payload: Dict[str, Any] = {
+        "id": _row_value(row, "id"),
+        "title": title,
+        "price": _row_value(row, "price"),
+        "rating": rating,
+        "category": category,
+        "brand": brand,
+        "created_at": _row_value(row, "created_at"),
+    }
+    if group_id not in (None, ""):
+        payload["group_id"] = group_id
+    return payload
+
+
+def get_products_minimal_by_ids(
+    conn: sqlite3.Connection, product_ids: Sequence[int]
+) -> List[Dict[str, Any]]:
+    if not product_ids:
+        return []
+    cur = conn.cursor()
+    rows: List[Dict[str, Any]] = []
+    chunk = 200
+    for idx in range(0, len(product_ids), chunk):
+        part = product_ids[idx : idx + chunk]
+        placeholders = ",".join("?" for _ in part)
+        cur.execute(
+            f"""
+            SELECT id, name, price, category, extra, created_at
+            FROM products
+            WHERE id IN ({placeholders})
+            """,
+            tuple(part),
+        )
+        for row in cur.fetchall():
+            rows.append(_minimal_product_payload(row))
+    rows.sort(key=lambda r: ((r.get("created_at") or ""), r.get("id") or 0))
+    return rows
+
+
+def list_products_since(
+    conn: sqlite3.Connection, since: str, limit: int
+) -> List[Dict[str, Any]]:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, name, price, category, extra, created_at
+        FROM products
+        WHERE created_at IS NOT NULL AND created_at > ?
+        ORDER BY created_at ASC, id ASC
+        LIMIT ?
+        """,
+        (since, int(limit)),
+    )
+    return [_minimal_product_payload(row) for row in cur.fetchall()]
+
+
+def list_enrichment_updates_since(
+    conn: sqlite3.Connection, since: str, limit: int
+) -> List[Dict[str, Any]]:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, desire, desire_magnitude, awareness_level, competition_level,
+               winner_score, enrichment_updated_at
+        FROM products
+        WHERE enrichment_updated_at IS NOT NULL AND enrichment_updated_at > ?
+        ORDER BY enrichment_updated_at ASC, id ASC
+        LIMIT ?
+        """,
+        (since, int(limit)),
+    )
+    rows: List[Dict[str, Any]] = []
+    for row in cur.fetchall():
+        payload = {
+            "id": row["id"],
+            "desire": row["desire"],
+            "desire_magnitude": row["desire_magnitude"],
+            "awareness_level": row["awareness_level"],
+            "competition_level": row["competition_level"],
+            "winner_score": row["winner_score"],
+            "enrichment_updated_at": row["enrichment_updated_at"],
+        }
+        desire_val = payload.get("desire")
+        if desire_val not in (None, ""):
+            try:
+                payload["desire"] = int(desire_val)
+            except Exception:
+                pass
+        rows.append(payload)
+    return rows
+
+
+def get_stream_cursor(conn: sqlite3.Connection, key: str) -> Optional[str]:
+    cur = conn.cursor()
+    cur.execute("SELECT value FROM stream_cursors WHERE key=?", (key,))
+    row = cur.fetchone()
+    return row["value"] if row else None
+
+
+def set_stream_cursor(
+    conn: sqlite3.Connection, key: str, value: str, *, commit: bool = False
+) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO stream_cursors(key, value)
+        VALUES(?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        """,
+        (key, value),
+    )
+    if commit:
+        conn.commit()
 
 
 def find_product_by_name(conn: sqlite3.Connection, name: str) -> Optional[sqlite3.Row]:
@@ -1284,12 +1489,16 @@ def update_product_enrichment(
     awareness: Optional[int],
     reason: Optional[str],
     *,
+    desire_magnitude: Optional[str] = None,
+    awareness_level: Optional[str] = None,
+    competition_level: Optional[str] = None,
+    winner_score: Optional[int] = None,
     source: str = "ai",
     commit: bool = False,
-) -> bool:
+) -> Optional[Dict[str, Any]]:
     row = get_product_by_sig_hash(conn, sig_hash)
     if row is None:
-        return False
+        return None
     extra_payload: Dict[str, Any] = {}
     raw_extra = row["extra"]
     if raw_extra:
@@ -1297,27 +1506,98 @@ def update_product_enrichment(
             extra_payload = json.loads(raw_extra)
         except Exception:
             extra_payload = {}
+    now = datetime.utcnow().isoformat()
     enrichment = {
         "desire_score": desire,
         "awareness_score": awareness,
         "reason": reason,
         "source": source,
-        "updated_at": datetime.utcnow().isoformat(),
+        "updated_at": now,
     }
     extra_payload.setdefault("enrichment", {}).update(
         {k: v for k, v in enrichment.items() if v is not None}
     )
-    cur = conn.cursor()
     desire_value: Optional[str] = None
     if desire is not None:
-        desire_value = str(int(desire))
+        try:
+            desire_value = str(int(desire))
+        except Exception:
+            desire_value = None
+    allowed_tri = {"Low", "Medium", "High"}
+    if desire_magnitude not in allowed_tri:
+        desire_magnitude = None
+    if competition_level not in allowed_tri:
+        competition_level = None
+    allowed_awareness = {
+        "Unaware",
+        "Problem-Aware",
+        "Solution-Aware",
+        "Product-Aware",
+        "Most Aware",
+    }
+    if awareness_level not in allowed_awareness:
+        awareness_level = None
+    winner_score_value: Optional[int] = None
+    if winner_score is not None:
+        try:
+            winner_score_value = max(0, min(100, int(round(float(winner_score)))))
+        except Exception:
+            winner_score_value = None
+    cur = conn.cursor()
     cur.execute(
-        "UPDATE products SET desire=?, extra=json(?) WHERE id=?",
-        (desire_value, json_dump(extra_payload), row["id"]),
+        """
+        UPDATE products SET
+            desire=?,
+            desire_magnitude=?,
+            awareness_level=?,
+            competition_level=?,
+            winner_score=COALESCE(?, winner_score),
+            extra=json(?),
+            enrichment_updated_at=?,
+            updated_at=?
+        WHERE id=?
+        """,
+        (
+            desire_value,
+            desire_magnitude,
+            awareness_level,
+            competition_level,
+            winner_score_value,
+            json_dump(extra_payload),
+            now,
+            now,
+            row["id"],
+        ),
     )
     if commit:
         conn.commit()
-    return True
+    cur.execute(
+        """
+        SELECT id, desire, desire_magnitude, awareness_level, competition_level,
+               winner_score, enrichment_updated_at
+        FROM products WHERE id=?
+        """,
+        (row["id"],),
+    )
+    updated = cur.fetchone()
+    if updated is None:
+        return None
+    payload: Dict[str, Any] = {
+        "id": updated["id"],
+        "desire": updated["desire"],
+        "desire_magnitude": updated["desire_magnitude"],
+        "awareness_level": updated["awareness_level"],
+        "competition_level": updated["competition_level"],
+        "winner_score": updated["winner_score"],
+        "enrichment_updated_at": updated["enrichment_updated_at"] or now,
+    }
+    desire_raw = payload.get("desire")
+    if desire_raw not in (None, ""):
+        try:
+            payload["desire"] = int(desire_raw)
+        except Exception:
+            pass
+    return payload
 
 
 def get_enrichment_cache(
@@ -1467,12 +1747,14 @@ def merge_staging_into_products(conn: sqlite3.Connection, job_id: int) -> None:
         INSERT INTO products (
             name, description, category, price, currency, image_url, source,
             import_date, desire, desire_magnitude, awareness_level,
-            competition_level, date_range, winner_score, extra, sig_hash
+            competition_level, date_range, winner_score, extra, sig_hash,
+            created_at, updated_at
         )
         SELECT
             name, description, category, price, currency, image_url, source,
             import_date, desire, desire_magnitude, awareness_level,
-            competition_level, date_range, winner_score, extra, sig_hash
+            competition_level, date_range, winner_score, extra, sig_hash,
+            datetime('now'), datetime('now')
         FROM products_staging
         WHERE job_id=?
         ON CONFLICT(sig_hash) DO UPDATE SET
@@ -1490,10 +1772,69 @@ def merge_staging_into_products(conn: sqlite3.Connection, job_id: int) -> None:
             competition_level=excluded.competition_level,
             date_range=excluded.date_range,
             winner_score=COALESCE(excluded.winner_score, products.winner_score),
-            extra=excluded.extra
+            extra=excluded.extra,
+            updated_at=datetime('now')
         """,
         (job_id,),
     )
+
+
+def merge_staging_batch(
+    conn: sqlite3.Connection, job_id: int, sig_hashes: Sequence[str]
+) -> List[sqlite3.Row]:
+    if not sig_hashes:
+        return []
+    cur = conn.cursor()
+    merged: List[sqlite3.Row] = []
+    chunk_size = 200
+    for idx in range(0, len(sig_hashes), chunk_size):
+        part = sig_hashes[idx : idx + chunk_size]
+        placeholders = ",".join("?" for _ in part)
+        cur.execute(
+            f"""
+            INSERT INTO products (
+                name, description, category, price, currency, image_url, source,
+                import_date, desire, desire_magnitude, awareness_level,
+                competition_level, date_range, winner_score, extra, sig_hash,
+                created_at, updated_at
+            )
+            SELECT
+                name, description, category, price, currency, image_url, source,
+                import_date, desire, desire_magnitude, awareness_level,
+                competition_level, date_range, winner_score, extra, sig_hash,
+                datetime('now'), datetime('now')
+            FROM products_staging
+            WHERE job_id=? AND sig_hash IN ({placeholders})
+            ON CONFLICT(sig_hash) DO UPDATE SET
+                name=excluded.name,
+                description=excluded.description,
+                category=excluded.category,
+                price=excluded.price,
+                currency=excluded.currency,
+                image_url=excluded.image_url,
+                source=excluded.source,
+                import_date=excluded.import_date,
+                desire=excluded.desire,
+                desire_magnitude=excluded.desire_magnitude,
+                awareness_level=excluded.awareness_level,
+                competition_level=excluded.competition_level,
+                date_range=excluded.date_range,
+                winner_score=COALESCE(excluded.winner_score, products.winner_score),
+                extra=excluded.extra,
+                updated_at=datetime('now')
+            """,
+            (job_id, *part),
+        )
+        cur.execute(
+            f"SELECT id, sig_hash, created_at FROM products WHERE sig_hash IN ({placeholders})",
+            tuple(part),
+        )
+        merged.extend(cur.fetchall())
+        cur.execute(
+            f"DELETE FROM products_staging WHERE job_id=? AND sig_hash IN ({placeholders})",
+            (job_id, *part),
+        )
+    return merged
 
 
 def clear_staging_for_job(conn: sqlite3.Connection, job_id: int, *, commit: bool = False) -> None:

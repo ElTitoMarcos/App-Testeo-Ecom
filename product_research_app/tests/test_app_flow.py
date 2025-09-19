@@ -665,7 +665,8 @@ def test_logging_and_explain_endpoint(tmp_path, monkeypatch):
     resp = json.loads(handler2.wfile.getvalue().decode("utf-8"))
     info = resp[str(pid)]
     assert "rating" in info["present"]
-    assert "oldness" in info["missing"]
+    assert "oldness" in info["present"]
+    assert "oldness" not in info["missing"]
     eff = info["effective_weights"]
     assert set(eff.keys()) == set(winner_score.ALLOWED_FIELDS)
     assert abs(sum(eff.values()) - 1.0) < 1e-2

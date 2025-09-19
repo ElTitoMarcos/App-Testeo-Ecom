@@ -37,7 +37,7 @@ import sqlite3
 import math
 import hashlib
 from datetime import date, datetime, timedelta
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from . import database
 from .db import get_db, get_last_performance_config
@@ -50,7 +50,7 @@ from . import gpt
 from .prompts.registry import normalize_task
 from . import title_analyzer
 from . import product_enrichment
-from .sse import publish_progress
+from .sse import get_emission_counters, publish_progress
 from .utils.db import row_to_dict, rget
 
 WINNER_SCORE_FIELDS = list(winner_calc.FEATURE_MAP.keys())
@@ -98,6 +98,16 @@ def _parse_date(s: str):
         except ValueError:
             continue
     return None
+
+
+def _parse_iso8601(s: str) -> Optional[str]:
+    text = (s or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text).isoformat()
+    except ValueError:
+        return None
 
 def ensure_db():
     global _DB_INIT, _DB_INIT_PATH
@@ -819,6 +829,73 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._set_json()
             self.wfile.write(json.dumps({"path": str(LOG_PATH)}).encode("utf-8"))
             return
+        if path == "/products/delta":
+            params = parse_qs(parsed.query)
+            try:
+                limit = int(params.get("limit", ["1000"])[0])
+            except Exception:
+                limit = 1000
+            limit = max(1, min(limit, 1000))
+            since_param = params.get("since", [""])[0]
+            conn = ensure_db()
+            since = _parse_iso8601(since_param) or database.get_stream_cursor(conn, "products_since")
+            if since is None:
+                since = (datetime.utcnow() - timedelta(minutes=10)).isoformat()
+            rows = database.list_products_since(conn, since, limit)
+            next_since = since
+            payload_rows: List[Dict[str, Any]] = []
+            for row in rows:
+                created_at = row.get("created_at")
+                if created_at and created_at > next_since:
+                    next_since = created_at
+                payload = {
+                    "id": row.get("id"),
+                    "title": row.get("title"),
+                    "price": row.get("price"),
+                    "rating": row.get("rating"),
+                    "category": row.get("category"),
+                    "brand": row.get("brand"),
+                }
+                if row.get("group_id") is not None:
+                    payload["group_id"] = row.get("group_id")
+                payload_rows.append(payload)
+            self.safe_write(
+                lambda: self.send_json({"rows": payload_rows, "next_since": next_since})
+            )
+            return
+        if path == "/enrich/delta":
+            params = parse_qs(parsed.query)
+            try:
+                limit = int(params.get("limit", ["2000"])[0])
+            except Exception:
+                limit = 2000
+            limit = max(1, min(limit, 2000))
+            since_param = params.get("since", [""])[0]
+            conn = ensure_db()
+            since = _parse_iso8601(since_param) or database.get_stream_cursor(conn, "enrich_since")
+            if since is None:
+                since = (datetime.utcnow() - timedelta(minutes=10)).isoformat()
+            updates_rows = database.list_enrichment_updates_since(conn, since, limit)
+            next_since = since
+            payload_updates: List[Dict[str, Any]] = []
+            for row in updates_rows:
+                updated_at = row.get("enrichment_updated_at")
+                if updated_at and updated_at > next_since:
+                    next_since = updated_at
+                payload_updates.append(
+                    {
+                        "id": row.get("id"),
+                        "desire": row.get("desire"),
+                        "desire_magnitude": row.get("desire_magnitude"),
+                        "awareness_level": row.get("awareness_level"),
+                        "competition_level": row.get("competition_level"),
+                        "winner_score": row.get("winner_score"),
+                    }
+                )
+            self.safe_write(
+                lambda: self.send_json({"updates": payload_updates, "next_since": next_since})
+            )
+            return
         if path == "/api/auth/has-key":
             has_key = bool(config.get_api_key())
             self._set_json()
@@ -975,9 +1052,15 @@ class RequestHandler(BaseHTTPRequestHandler):
                 "pragmas": get_last_performance_config(),
                 "default_batch_size": DEFAULT_BATCH_SIZE,
             }
+            sse_counters = get_emission_counters()
             self.safe_write(
                 lambda: self.send_json(
-                    {"jobs": jobs_payload, "batches": batches, "config": config_payload}
+                    {
+                        "jobs": jobs_payload,
+                        "batches": batches,
+                        "config": config_payload,
+                        "sse": sse_counters,
+                    }
                 )
             )
             return
