@@ -49,13 +49,21 @@
         fetch(prodUrl, { cache: 'no-store' }).then((r) => r.ok ? r.json() : {}),
         fetch(enrichUrl, { cache: 'no-store' }).then((r) => r.ok ? r.json() : {}),
       ]);
+      if (p && typeof p.next_since === 'string') {
+        sinceProducts = p.next_since;
+      } else if (!p || typeof p !== 'object') {
+        sinceProducts = new Date().toISOString();
+      }
+      if (e && typeof e.next_since === 'string') {
+        sinceEnrich = e.next_since;
+      } else if (!e || typeof e !== 'object') {
+        sinceEnrich = new Date().toISOString();
+      }
       if (p && Array.isArray(p.rows) && p.rows.length) {
         window.LiveTable?.onImportBatch(p.rows);
-        sinceProducts = p.next_since || new Date().toISOString();
       }
       if (e && Array.isArray(e.rows) && e.rows.length) {
         window.LiveTable?.onEnrichBatch(e.rows);
-        sinceEnrich = e.next_since || new Date().toISOString();
       }
     } catch (err) {
       console.warn('[poll error]', err);
