@@ -451,6 +451,19 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         """
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_import_job_metrics_job ON import_job_metrics(job_id)")
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS benchmark_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL,
+            job_id INTEGER,
+            payload JSON NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY(job_id) REFERENCES import_jobs(id) ON DELETE SET NULL
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_benchmark_runs_kind ON benchmark_runs(kind)")
     conn.commit()
 
 
@@ -1192,6 +1205,41 @@ def get_recent_import_metrics(conn: sqlite3.Connection, limit: int = 50) -> List
     )
     return cur.fetchall()
 
+def record_benchmark_run(
+    conn: sqlite3.Connection,
+    kind: str,
+    payload: Dict[str, Any],
+    *,
+    job_id: Optional[int] = None,
+    commit: bool = True,
+) -> int:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO benchmark_runs (kind, job_id, payload)
+        VALUES (?, ?, json(?))
+        """,
+        (kind, job_id, json_dump(payload)),
+    )
+    if commit:
+        conn.commit()
+    return cur.lastrowid
+
+
+def get_recent_benchmark_runs(
+    conn: sqlite3.Connection, limit: int = 20
+) -> List[sqlite3.Row]:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, kind, job_id, payload, created_at
+        FROM benchmark_runs
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (int(limit),),
+    )
+    return cur.fetchall()
 
 def transition_job_items(
     conn: sqlite3.Connection,
@@ -1210,7 +1258,7 @@ def transition_job_items(
     if commit:
         conn.commit()
     return cur.rowcount
-
+  
 def list_items_by_state(
     conn: sqlite3.Connection, job_id: int, state: str
 ) -> List[sqlite3.Row]:
@@ -1341,6 +1389,21 @@ def get_enrichment_cache(
     )
     return {row["sig_hash"]: row for row in cur.fetchall()}
 
+def get_enriched_items_for_similarity(
+    conn: sqlite3.Connection, limit: int = 2000
+) -> List[sqlite3.Row]:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, sig_hash, raw, result, updated_at
+        FROM items
+        WHERE state='enriched' AND result IS NOT NULL
+        ORDER BY updated_at DESC
+        LIMIT ?
+        """,
+        (int(limit),),
+    )
+    return cur.fetchall()
 
 def upsert_enrichment_cache(
     conn: sqlite3.Connection,

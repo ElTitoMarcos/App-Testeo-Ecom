@@ -3,3 +3,4 @@ beautifulsoup4
 Pillow
 openpyxl
 httpx
+scikit-learn

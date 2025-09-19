@@ -51,6 +51,7 @@ from . import gpt
 from .prompts.registry import normalize_task
 from . import title_analyzer
 from . import product_enrichment
+from . import student_model
 from .progress_events import (
     KEEPALIVE_INTERVAL,
     publish_progress,
@@ -1120,13 +1121,33 @@ class RequestHandler(BaseHTTPRequestHandler):
                 payload = _job_payload_from_row(row)
                 if payload:
                     jobs_payload.append(payload)
+            benchmarks = []
+            for row in database.get_recent_benchmark_runs(conn, limit):
+                try:
+                    payload = json.loads(row["payload"]) if row["payload"] else {}
+                except Exception:
+                    payload = {}
+                benchmarks.append(
+                    {
+                        "id": row["id"],
+                        "kind": row["kind"],
+                        "job_id": row["job_id"],
+                        "payload": payload,
+                        "created_at": row["created_at"],
+                    }
+                )
             config_payload = {
                 "pragmas": get_last_performance_config(),
                 "default_batch_size": DEFAULT_BATCH_SIZE,
             }
             self.safe_write(
                 lambda: self.send_json(
-                    {"jobs": jobs_payload, "batches": batches, "config": config_payload}
+                    {
+                        "jobs": jobs_payload,
+                        "batches": batches,
+                        "benchmarks": benchmarks,
+                        "config": config_payload,
+                    }
                 )
             )
             return
@@ -1689,6 +1710,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/add_to_list":
             self.handle_add_to_list()
+            return
+        if path == "/student/retrain":
+            self.handle_student_retrain()
             return
         if path == "/shutdown":
             self.handle_shutdown()
@@ -3218,6 +3242,47 @@ class RequestHandler(BaseHTTPRequestHandler):
             database.add_product_to_list(conn, lid, pid)
         self._set_json()
         self.wfile.write(json.dumps({"added": len(ids)}).encode('utf-8'))
+
+    def handle_student_retrain(self):
+        length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(length).decode('utf-8') if length else ''
+        payload: Dict[str, Any]
+        try:
+            payload = json.loads(body) if body else {}
+            if not isinstance(payload, dict):
+                payload = {}
+        except Exception:
+            payload = {}
+        limit = payload.get("limit")
+        retrain_kwargs: Dict[str, Any] = {}
+        if limit is not None:
+            try:
+                retrain_kwargs["limit"] = int(limit)
+            except Exception:
+                pass
+        confidence = payload.get("confidence_threshold")
+        if confidence is not None:
+            try:
+                retrain_kwargs["confidence_threshold"] = float(confidence)
+            except Exception:
+                pass
+        conn = ensure_db()
+        try:
+            metrics = student_model.train_student_models(conn, **retrain_kwargs)
+        except ValueError as exc:
+            self.safe_write(lambda: self.send_json({"error": str(exc)}, status=400))
+            return
+        except Exception as exc:
+            logger.exception("Student retraining failed")
+            self.safe_write(lambda: self.send_json({"error": str(exc)}, status=500))
+            return
+        logger.info(
+            "student retrain limit=%s confidence=%s samples=%s", 
+            retrain_kwargs.get("limit"),
+            retrain_kwargs.get("confidence_threshold"),
+            metrics.get("samples"),
+        )
+        self.safe_write(lambda: self.send_json({"ok": True, "metrics": metrics}))
 
     def handle_shutdown(self):
         """Shutdown the HTTP server."""
