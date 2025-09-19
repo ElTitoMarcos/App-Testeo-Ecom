@@ -37,7 +37,7 @@ import sqlite3
 import math
 import hashlib
 from datetime import date, datetime, timedelta
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Iterable, Optional
 
 from . import database
 from .db import get_db, get_last_performance_config
@@ -52,6 +52,7 @@ from . import title_analyzer
 from . import product_enrichment
 from .sse import publish_progress
 from .utils.db import row_to_dict, rget
+from product_ai_enrichment_parallel import enrich_min_calls
 
 WINNER_SCORE_FIELDS = list(winner_calc.FEATURE_MAP.keys())
 
@@ -125,6 +126,308 @@ def ensure_db():
                 _DB_INIT_PATH = target_path
     return conn
 
+
+class _ParallelEnrichmentDAO:
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+        model = config.get_model()
+        if not model:
+            model = os.getenv("GPT_MODEL") or os.getenv("ENRICH_MODEL") or "ai-parallel"
+        self.model = model
+        self._weights_cache: Optional[Dict[str, Any]] = None
+
+    @staticmethod
+    def _parse_extra(raw: Any) -> Dict[str, Any]:
+        if not raw:
+            return {}
+        if isinstance(raw, dict):
+            return dict(raw)
+        if isinstance(raw, (bytes, bytearray)):
+            try:
+                raw = raw.decode("utf-8")
+            except Exception:
+                return {}
+        if isinstance(raw, str):
+            try:
+                return json.loads(raw)
+            except Exception:
+                return {}
+        return {}
+
+    @staticmethod
+    def _first(mapping: Dict[str, Any], keys: Iterable[str]) -> Any:
+        for key in keys:
+            if key in mapping:
+                val = mapping.get(key)
+                if val not in (None, ""):
+                    return val
+        return None
+
+    @staticmethod
+    def _norm_text(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @staticmethod
+    def _as_float(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            try:
+                return float(value)
+            except Exception:
+                return None
+        if isinstance(value, str):
+            txt = value.strip()
+            if not txt:
+                return None
+            txt = txt.replace("%", "")
+            txt = txt.replace(" ", "")
+            txt = txt.replace(",", ".")
+            try:
+                return float(txt)
+            except ValueError:
+                filtered = "".join(ch for ch in txt if ch.isdigit() or ch in {".", "-"})
+                if not filtered:
+                    return None
+                try:
+                    return float(filtered)
+                except ValueError:
+                    return None
+        return None
+
+    @classmethod
+    def _as_int(cls, value: Any) -> Optional[int]:
+        num = cls._as_float(value)
+        if num is None:
+            return None
+        try:
+            return int(round(num))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _parse_date_any(value: Any) -> Optional[date]:
+        if value is None:
+            return None
+        if isinstance(value, date) and not isinstance(value, datetime):
+            return value
+        if isinstance(value, datetime):
+            return value.date()
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text).date()
+        except Exception:
+            pass
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d/%m/%Y"):
+            try:
+                return datetime.strptime(text[:10], fmt).date()
+            except Exception:
+                continue
+        return None
+
+    def _compute_oldness(self, product: Dict[str, Any], extra: Dict[str, Any]) -> Optional[int]:
+        candidates: List[date] = []
+        date_range = (product.get("date_range") or extra.get("date_range") or "").strip()
+        if date_range and "~" in date_range:
+            first = date_range.split("~", 1)[0].strip()
+            dt = self._parse_date_any(first)
+            if dt:
+                candidates.append(dt)
+        for key in ("first_seen", "created_at", "createdAt", "firstSeen", "launch_date", "launchDate"):
+            dt = self._parse_date_any(extra.get(key))
+            if dt:
+                candidates.append(dt)
+        import_dt = self._parse_date_any(product.get("import_date"))
+        if import_dt:
+            candidates.append(import_dt)
+        if not candidates:
+            return None
+        reference = min(candidates)
+        delta = datetime.utcnow().date() - reference
+        return max(0, delta.days)
+
+    @staticmethod
+    def _missing_text(value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str) and not value.strip():
+            return True
+        return False
+
+    def _needs_enrichment(self, product: Dict[str, Any]) -> bool:
+        if self._missing_text(product.get("desire")):
+            return True
+        if self._missing_text(product.get("desire_magnitude")):
+            return True
+        if self._missing_text(product.get("awareness_level")):
+            return True
+        if self._missing_text(product.get("competition_level")):
+            return True
+        if self._missing_text(product.get("ai_columns_completed_at")):
+            return True
+        if self._missing_text(product.get("winner_score_updated_at")):
+            return True
+        try:
+            score_val = int(product.get("winner_score"))
+        except Exception:
+            score_val = None
+        if score_val is None or score_val <= 0:
+            return True
+        if product.get("score_id") is None:
+            return True
+        return False
+
+    def get_products_pending_ai(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        cur = self.conn.cursor()
+        rows = cur.execute(
+            """
+            SELECT
+                p.id, p.name, p.description, p.category, p.price, p.extra,
+                p.import_date, p.date_range, p.desire, p.desire_magnitude,
+                p.awareness_level, p.competition_level,
+                p.winner_score, p.winner_score_updated_at, p.ai_columns_completed_at,
+                s.id AS score_id
+            FROM products p
+            LEFT JOIN (
+                SELECT product_id, MAX(id) AS id FROM scores GROUP BY product_id
+            ) s ON s.product_id = p.id
+            ORDER BY p.import_date DESC
+            """
+        ).fetchall()
+        items: List[Dict[str, Any]] = []
+        for row in rows:
+            data = row_to_dict(row)
+            if not self._needs_enrichment(data):
+                continue
+            extra = self._parse_extra(data.get("extra"))
+            item = {
+                "id": data.get("id"),
+                "title": data.get("name", ""),
+                "description": data.get("description") or "",
+                "category": data.get("category") or "",
+                "brand": self._norm_text(self._first(extra, ("brand", "Brand", "manufacturer"))) or "",
+                "price": self._as_float(data.get("price")),
+                "rating": self._as_float(self._first(extra, ("rating", "avg_rating", "average_rating"))),
+                "units_sold": self._as_int(self._first(extra, ("units_sold", "unitsSold", "sales_volume"))),
+                "revenue": self._as_float(self._first(extra, ("revenue", "gmv", "gross_revenue", "total_revenue"))),
+                "oldness": self._compute_oldness(data, extra),
+            }
+            items.append(item)
+            if limit is not None and len(items) >= limit:
+                break
+        return items
+
+    def get_current_weights_or_none(self) -> Optional[Dict[str, Any]]:
+        try:
+            weights = config.get_weights()
+        except Exception:
+            weights = None
+        if weights:
+            self._weights_cache = dict(weights)
+        else:
+            self._weights_cache = None
+        return self._weights_cache
+
+    @staticmethod
+    def _coerce_score(value: Any) -> Optional[int]:
+        try:
+            num = int(round(float(value)))
+        except Exception:
+            return None
+        return max(0, min(100, num))
+
+    def upsert_ai_fields_bulk(self, rows: Iterable[Dict[str, Any]]) -> None:
+        rows_list = list(rows)
+        if not rows_list:
+            return
+        cur = self.conn.cursor()
+        now = datetime.utcnow().isoformat()
+        updates: List[tuple] = []
+        deletes: List[tuple] = []
+        inserts: List[tuple] = []
+        weights = self._weights_cache or {}
+        for entry in rows_list:
+            pid = entry.get("id")
+            score = self._coerce_score(entry.get("winner_score"))
+            if pid is None or score is None:
+                continue
+            desire = self._norm_text(entry.get("desire"))
+            desire_mag = self._norm_text(entry.get("desire_magnitude"))
+            awareness = self._norm_text(entry.get("awareness_level"))
+            competition = self._norm_text(entry.get("competition_level"))
+            winner_raw = 8 + (score / 100.0) * 32
+            updates.append(
+                (
+                    desire,
+                    desire_mag,
+                    awareness,
+                    competition,
+                    score,
+                    winner_raw,
+                    now,
+                    now,
+                    pid,
+                )
+            )
+            deletes.append((pid,))
+            breakdown = {
+                "source": "ai_parallel",
+                "weights": weights,
+                "scores": {
+                    "winner_score": score,
+                    "desire": desire,
+                    "desire_magnitude": desire_mag,
+                    "awareness_level": awareness,
+                    "competition_level": competition,
+                },
+                "justifications": {},
+            }
+            inserts.append(
+                (
+                    pid,
+                    self.model,
+                    now,
+                    winner_raw,
+                    score,
+                    json.dumps(breakdown, ensure_ascii=False),
+                )
+            )
+        if not updates:
+            return
+        cur.executemany(
+            """
+            UPDATE products
+            SET desire = COALESCE(?, desire),
+                desire_magnitude = COALESCE(?, desire_magnitude),
+                awareness_level = COALESCE(?, awareness_level),
+                competition_level = COALESCE(?, competition_level),
+                winner_score = ?,
+                winner_score_raw = ?,
+                winner_score_updated_at = ?,
+                ai_columns_completed_at = ?
+            WHERE id = ?
+            """,
+            updates,
+        )
+        if deletes:
+            cur.executemany("DELETE FROM scores WHERE product_id = ?", deletes)
+        if inserts:
+            cur.executemany(
+                """
+                INSERT INTO scores (
+                    product_id, model, total_score, momentum, saturation, differentiation,
+                    social_proof, margin, logistics, summary, explanations, created_at,
+                    winner_score_raw, winner_score, winner_score_breakdown
+                ) VALUES (?, ?, 0, 0, 0, 0, 0, 0, 0, '', '{}', ?, ?, ?, ?)
+                """,
+                inserts,
+            )
+        self.conn.commit()
 
 def _update_import_status(task_id: str, **updates) -> Dict[str, Any]:
     with _IMPORT_STATUS_LOCK:
@@ -2186,70 +2489,29 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def handle_evaluate_all(self):
         conn = ensure_db()
-        api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
-        model = config.get_model()
-        evaluated = 0
-        weights_map = config.get_weights()
-        for p_row in database.list_products(conn):
-            p = row_to_dict(p_row)
-            pid = rget(p, 'id')
-            if database.get_scores_for_product(conn, pid):
-                continue
-            if not (api_key and model):
-                continue
-            try:
-                try:
-                    extra = json.loads(rget(p, "extra") or "{}")
-                except Exception:
-                    extra = {}
-                resp = gpt.evaluate_winner_score(
-                    api_key,
-                    model,
-                    {
-                        "title": rget(p, "name"),
-                        "description": rget(p, "description"),
-                        "category": rget(p, "category"),
-                        "metrics": extra,
-                    },
-                )
-                scores = resp.get("scores", {})
-                justifs = resp.get("justifications", {})
-                weighted = sum(
-                    scores.get(f, 3) * weights_map.get(f, 0.0)
-                    for f in WINNER_SCORE_FIELDS
-                )
-                raw_score = weighted * 8.0
-                pct = ((raw_score - 8.0) / 32.0) * 100.0
-                pct = max(0, min(100, round(pct)))
-                breakdown = {
-                    "scores": scores,
-                    "justifications": justifs,
-                    "weights": weights_map,
-                }
-                database.insert_score(
-                    conn,
-                    product_id=pid,
-                    model=model,
-                    total_score=0,
-                    momentum=0,
-                    saturation=0,
-                    differentiation=0,
-                    social_proof=0,
-                    margin=0,
-                    logistics=0,
-                    summary="",
-                    explanations={},
-                    winner_score_raw=raw_score,
-                    winner_score=pct,
-                    winner_score_breakdown=breakdown,
-                )
-                evaluated += 1
-            except Exception:
-                continue
-            self._set_json()
-            self.wfile.write(json.dumps({"evaluated": evaluated}).encode('utf-8'))
+        dao = _ParallelEnrichmentDAO(conn)
+        try:
+            items = dao.get_products_pending_ai()
+        except Exception as exc:
+            logger.exception("Failed to load products pending AI enrichment")
+            self._set_json(500)
+            self.wfile.write(json.dumps({"error": "load_failed", "detail": str(exc)}).encode('utf-8'))
             return
-        # Legacy evaluation removed; always use Winner Score above
+        total = len(items)
+        if total == 0:
+            self._set_json()
+            self.wfile.write(json.dumps({"evaluated": 0, "total": 0}).encode('utf-8'))
+            return
+        weights = dao.get_current_weights_or_none()
+        try:
+            processed = enrich_min_calls(items, dao, weights)
+        except Exception as exc:
+            logger.exception("Parallel AI enrichment failed")
+            self._set_json(500)
+            self.wfile.write(json.dumps({"error": "enrichment_failed", "detail": str(exc)}).encode('utf-8'))
+            return
+        self._set_json()
+        self.wfile.write(json.dumps({"evaluated": processed, "total": total}).encode('utf-8'))
 
     def handle_setconfig(self):
         length = int(self.headers.get('Content-Length', 0))
