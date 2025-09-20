@@ -100,7 +100,6 @@ def _download_image(url: str) -> BytesIO | None:
         except Exception:
             return None
 
-
 def _set_col_width_px(ws, col_letter: str, px: int) -> None:
     width_chars = max(8, (px - 5) / 7.0)
     ws.column_dimensions[col_letter].width = width_chars

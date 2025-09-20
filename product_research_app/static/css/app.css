@@ -397,6 +397,10 @@ body.dark .chip button { color: #A9B4D0; }
 .progress-track.is-cancelled {
   background: #6c7280 !important;
 }
+
+.btn-cancel[hidden] { display: none !important; }
+
+.progress-bar.is-cancelled { background: #6c7280 !important; }
 #searchRow {
   display: flex;
   flex-wrap: wrap;
