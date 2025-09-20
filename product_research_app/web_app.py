@@ -80,17 +80,25 @@ DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y")
 
 IMG_BASE = 64
 IMG_SCALE = 2.5
-IMG_MAX_PX = 256
+IMG_MAX = 320
+ROW_PAD = 18
+UA_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120 Safari/537.36"
+}
 
 
-def _fetch_img_bytes(url: str) -> BytesIO | None:
+def _download_image(url: str) -> BytesIO | None:
     try:
-        resp = requests.get(url, timeout=6)
+        resp = requests.get(url, headers=UA_HEADERS, timeout=8)
         resp.raise_for_status()
+        return BytesIO(resp.content)
     except Exception:
-        return None
-    return BytesIO(resp.content)
-
+        try:
+            resp = requests.get(url, headers=UA_HEADERS, timeout=8, verify=False)
+            resp.raise_for_status()
+            return BytesIO(resp.content)
+        except Exception:
+            return None
 
 def _set_col_width_px(ws, col_letter: str, px: int) -> None:
     width_chars = max(8, (px - 5) / 7.0)
@@ -104,7 +112,7 @@ def _add_img_cell(ws, col_letter: str, row_idx: int, url: str) -> bool:
     except Exception:
         return False
 
-    bio = _fetch_img_bytes(url)
+    bio = _download_image(url)
     if not bio:
         return False
 
@@ -114,7 +122,7 @@ def _add_img_cell(ws, col_letter: str, row_idx: int, url: str) -> bool:
         return False
 
     w, h = img.size
-    target_w = min(int(IMG_BASE * IMG_SCALE), IMG_MAX_PX)
+    target_w = min(int(IMG_BASE * IMG_SCALE), IMG_MAX)
     if w and w != target_w:
         ratio = target_w / float(w)
         img = img.resize((target_w, max(1, int(h * ratio))), PILImage.LANCZOS)
@@ -132,7 +140,7 @@ def _add_img_cell(ws, col_letter: str, row_idx: int, url: str) -> bool:
         return False
 
     _set_col_width_px(ws, col_letter, target_w + 16)
-    ws.row_dimensions[row_idx].height = target_w + 18
+    ws.row_dimensions[row_idx].height = target_w + ROW_PAD
     ws.add_image(xlimg, f"{col_letter}{row_idx}")
     return True
 
@@ -1484,7 +1492,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 ws.append(headers)
                 col_index = {key: idx for idx, (key, _) in enumerate(columns, start=1)}
                 col_letter_by_key = {key: get_column_letter(idx) for key, idx in col_index.items()}
-                img_key = next((k for k in ('image', 'image_url', 'img') if k in col_index), None)
+                img_key = next((k for k in ('image', 'image_url', 'img', 'thumbnail') if k in col_index), None)
                 for r_idx, item in enumerate(row_dicts, start=2):
                     for key, _ in columns:
                         ws.cell(row=r_idx, column=col_index[key], value=item.get(key))

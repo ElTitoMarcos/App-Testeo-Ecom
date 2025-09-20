@@ -99,29 +99,35 @@ body.dark .skeleton{background:#333;}
 <body class="dark">
 <header id="topBar" class="app-header">
   <div id="app-header">
-    <div class="app-toolbar topbar" style="padding:8px 15px; display:flex; align-items:center; justify-content:space-between; position:relative;">
-      <div style="display:flex; align-items:center; gap:8px;">
-        <h1 style="margin:0; font-size:1.4rem;">Ecom Testing App</h1>
-        <p style="margin:0;font-size:12px; opacity:0.8;">By El Tito 🤙</p>
+    <div class="app-toolbar topbar" style="padding:8px 15px; display:flex; flex-direction:column; gap:6px; position:relative;">
+      <div class="topbar-main" style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
+        <div style="display:flex; align-items:center; gap:8px;">
+          <h1 style="margin:0; font-size:1.4rem;">Ecom Testing App</h1>
+          <p style="margin:0;font-size:12px; opacity:0.8;">By El Tito 🤙</p>
+        </div>
+        <div style="flex:1; display:flex; justify-content:flex-end; gap:8px; align-items:center;">
+          <input type="file" id="fileInput" style="display:none;" />
+          <button id="uploadBtn" title="Subir archivo">📤</button>
+          <button id="refreshBtn" title="Actualizar lista">🔄</button>
+          <button id="btn-ver-tendencias" title="Ver tendencias" data-action="toggle-trends">📊</button>
+          <button id="darkToggle" title="Modo oscuro">🌙</button>
+          <button id="configBtn" title="Configuración avanzada">⚙️</button>
+        </div>
       </div>
-      <div style="flex:1; display:flex; justify-content:flex-end; gap:8px; align-items:center;">
-        <input type="file" id="fileInput" style="display:none;" />
-        <button id="uploadBtn" title="Subir archivo">📤</button>
-        <button id="refreshBtn" title="Actualizar lista">🔄</button>
-        <button id="btn-ver-tendencias" title="Ver tendencias" data-action="toggle-trends">📊</button>
-        <button id="darkToggle" title="Modo oscuro">🌙</button>
-        <button id="configBtn" title="Configuración avanzada">⚙️</button>
-      </div>
-    </div>
-    <div id="global-progress" class="progress-host" role="status" aria-live="polite">
-      <div id="progress-slot-global" class="progress-bar progress-slot">
-        <span class="progress-label">Importando catálogo…</span>
+      <div id="top-progress-slot">
+        <div id="global-progress" class="progress-host" role="status" aria-live="polite" hidden>
+          <div id="progress-slot-global" class="progress-track">
+            <div class="progress-fill" style="width:0%"></div>
+            <span class="progress-label">Cargando…</span>
+          </div>
+          <button id="btn-cancel-import" class="btn-cancel" hidden>Cancelar</button>
+        </div>
       </div>
       <button id="btn-cancel-import" class="btn-cancel" hidden>Cancelar</button>
     </div>
   </div>
   <!-- Search bar row with controls -->
-  <div id="searchRow">
+  <div id="searchRow" class="toolbar">
     <input type="text" id="searchInput" placeholder="Buscar producto o palabra clave..." aria-label="Buscar productos" />
     <button id="searchBtn">Buscar</button>
     <button id="btnFilters">Filtros</button>
@@ -394,22 +400,39 @@ const IMPORT_START_URL = '/upload';
 let savedApiKeyHash = null;
 let savedApiKeyLength = 0;
 
-(function dropProgressDuplicates(){
-  document.querySelectorAll('#global-progress ~ .progress-text, #global-progress .status-text, .progress-info')
-    .forEach(n => n.remove());
-})();
-
+const progressHost = document.getElementById('global-progress');
+const progressTrack = progressHost?.querySelector('.progress-track');
+const progressFill = progressHost?.querySelector('.progress-fill');
+const progressLabel = progressHost?.querySelector('.progress-label');
 const cancelBtn = document.getElementById('btn-cancel-import');
-const pbar = document.querySelector('#global-progress .progress-bar');
-const plabel = document.querySelector('#global-progress .progress-label');
+let currentProgressPct = 0;
 
-function showCancel(v){ if(cancelBtn) cancelBtn.hidden = !v; }
-function setStatusLabel(t){ if(plabel) plabel.textContent = t || ''; }
-function resetProgressState(){ pbar?.classList.remove('is-cancelled'); }
+function progressShow(show){
+  if(progressHost){
+    progressHost.hidden = !show;
+    if(!show){
+      progressTrack?.classList.remove('is-cancelled');
+      currentProgressPct = 0;
+      if(progressFill) progressFill.style.width = '0%';
+    }
+  }
+}
+
+function progressSet(pct, text){
+  if(pct !== undefined && pct !== null){
+    const num = Number(pct);
+    const clamped = Math.max(0, Math.min(100, Number.isFinite(num) ? num : 0));
+    if(progressFill) progressFill.style.width = clamped + '%';
+    currentProgressPct = clamped;
+  }
+  if(text !== undefined){
+    if(progressLabel) progressLabel.textContent = text || '';
+  }
+}
 
 async function cancelImport(){
-  if(!cancelBtn || !window.currentTaskId) return;
-  cancelBtn.disabled = true;
+  if(!progressHost || !window.currentTaskId) return;
+  cancelBtn?.setAttribute('disabled', 'true');
   try{
     await fetch('/_import_cancel', {
       method:'POST', headers:{'Content-Type':'application/json'},
@@ -417,29 +440,40 @@ async function cancelImport(){
     });
   }catch(e){}
   stopImportPolling?.();
-  pbar?.classList.add('is-cancelled');
-  setStatusLabel('Cancelado');
-  showCancel(false);
-  cancelBtn.disabled = false;
+  progressTrack?.classList.add('is-cancelled');
+  progressSet(100, 'Cancelado');
+  cancelBtn?.removeAttribute('disabled');
+  const endImport = () => window.onImportEnd?.();
+  setTimeout(endImport, 600);
   window.currentTaskId = null;
-  window.onImportEnd?.();
 }
 cancelBtn?.addEventListener('click', cancelImport);
 
+window.progressShow = progressShow;
+window.progressSet = progressSet;
+
 window.onImportStart = (taskId)=>{
   window.currentTaskId = taskId;
-  resetProgressState();
-  showCancel(true);
-  setStatusLabel('Importando catálogo…');
+  progressTrack?.classList.remove('is-cancelled');
+  if(cancelBtn) cancelBtn.hidden = false;
+  progressSet(0, 'Importando…');
+  progressShow(true);
+};
+window.onImportTick = (pct, text)=>{
+  progressSet(pct, text || '');
 };
 window.onImportEnd = ()=>{
   window.currentTaskId = null;
-  showCancel(false);
+  progressShow(false);
+  if(cancelBtn){
+    cancelBtn.hidden = true;
+    cancelBtn.removeAttribute('disabled');
+  }
 };
 
-setStatusLabel('');
-showCancel(false);
-resetProgressState();
+progressShow(false);
+progressSet(0, '');
+if(cancelBtn) cancelBtn.hidden = true;
 
 const getGlobalProgressHost = () => document.querySelector('#progress-slot-global');
 const getActionHost = () => document.querySelector('#bottomBar') || getGlobalProgressHost();
@@ -499,8 +533,9 @@ async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL
     if (!Number.isFinite(serverPct)) serverPct = 0;
     serverPct = Math.max(0, Math.min(100, serverPct));
     const stage = (data.message || data.stage || data.state || '').toString() || 'Procesando…';
-    tracker?.step(mapServerFraction(serverPct), stage);
-    setStatusLabel(stage);
+    const mapped = mapServerFraction(serverPct);
+    tracker?.step(mapped, stage);
+    progressSet(Math.round(mapped * 100), stage);
 
     const statusVal = String(data.state || data.status || '').toLowerCase();
     if (statusVal === 'error' || data.error) {
@@ -512,7 +547,7 @@ async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL
     if (serverPct >= 100 || statusVal === 'done' || statusVal === 'completed' || statusVal === 'finished') {
       await reloadTable({ skipProgress: true });
       hideImportBanner();
-      setStatusLabel('Completado');
+      progressSet(100, 'Completado');
       return data;
     }
     await sleep(450);
@@ -521,8 +556,8 @@ async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL
 
 async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IMPORT_STATUS_URL } = {}) {
   if (!file) throw new Error('Archivo no válido');
-  resetProgressState();
-  setStatusLabel('Preparando importación…');
+  progressSet(0, 'Preparando importación…');
+  progressShow(true);
   const host = getGlobalProgressHost();
   const tracker = LoadingHelpers.start('Importando catálogo', { host });
   tracker.setStage('Subiendo archivo…');
@@ -540,7 +575,7 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
         if (!event.lengthComputable) return;
         const frac = Math.min(IMPORT_UPLOAD_FRAC, (event.loaded / event.total) * IMPORT_UPLOAD_FRAC);
         tracker.step(frac, 'Subiendo archivo…');
-        setStatusLabel('Subiendo archivo…');
+        progressSet(Math.round(frac * 100), 'Subiendo archivo…');
       };
       xhr.onerror = () => reject(new Error('Error de red subiendo archivo'));
       xhr.onload = () => {
@@ -566,12 +601,13 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
 
     if (startResult.kind === 'sync') {
       tracker.step(1, 'Completado');
+      progressSet(100, 'Completado');
       await reloadTable({ skipProgress: true });
       const importedCount = startResult.data?.imported ?? startResult.data?.rows_imported;
       if (Number.isFinite(importedCount) && importedCount > 0) {
         toast.success(`Importados ${importedCount}`);
       }
-      setStatusLabel('Completado');
+      progressSet(100, 'Completado');
       return startResult.data;
     }
 
@@ -579,7 +615,7 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     const idStr = typeof taskId === 'string' ? taskId : String(taskId);
     window.onImportStart?.(idStr);
     tracker.step(IMPORT_UPLOAD_FRAC, 'Archivo subido');
-    setStatusLabel('Archivo subido');
+    progressSet(Math.round(IMPORT_UPLOAD_FRAC * 100), 'Archivo subido');
     localStorage.setItem(IMPORT_TASK_LS_KEY, idStr);
 
     lastResult = await followImportTask(idStr, tracker, { statusUrl, host });
@@ -589,12 +625,12 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
       toast.success(`Importados ${importedCount}`);
     }
     tracker.step(1, 'Completado');
-    setStatusLabel('Completado');
+    progressSet(100, 'Completado');
     return lastResult;
   } catch (err) {
     tracker.step(1, 'Error');
     toast.error(err?.message || 'Error al importar catálogo');
-    setStatusLabel('Error');
+    progressSet(currentProgressPct, 'Error');
     throw err;
   } finally {
     tracker.done();
@@ -1226,8 +1262,7 @@ window.onload = async () => {
     const tracker = LoadingHelpers.start('Importando catálogo', { host });
     tracker.step(IMPORT_UPLOAD_FRAC, 'Reanudando…');
     window.onImportStart?.(tid);
-    resetProgressState();
-    setStatusLabel('Reanudando…');
+    progressSet(Math.round(IMPORT_UPLOAD_FRAC * 100), 'Reanudando…');
     try {
       const result = await followImportTask(tid, tracker, { host });
       const importedCount = result?.imported ?? result?.rows_imported;
@@ -1235,11 +1270,11 @@ window.onload = async () => {
         toast.success(`Importados ${importedCount}`);
       }
       tracker.step(1, 'Completado');
-      setStatusLabel('Completado');
+      progressSet(100, 'Completado');
     } catch (err) {
       tracker.step(1, 'Error');
       toast.error(err?.message || 'Error en importación');
-      setStatusLabel('Error');
+      progressSet(currentProgressPct, 'Error');
     } finally {
       localStorage.removeItem(IMPORT_TASK_LS_KEY);
       tracker.done();

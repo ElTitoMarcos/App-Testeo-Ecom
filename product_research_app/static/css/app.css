@@ -9,8 +9,9 @@ body {
 
 :root {
   --topbar-h: 56px;
+  --toolbar-h: 48px;
   --progress-h: 0px;
-  --sticky-offset: calc(var(--topbar-h) + var(--progress-h));
+  --sticky-offset: calc(var(--topbar-h) + var(--toolbar-h) + var(--progress-h));
   --thead-bg: #12142a;
   --dup-bg: #ffe5e5;
   --dup-accent: #ff3b30;
@@ -342,70 +343,59 @@ body.dark .chip {
 }
 body.dark .chip button { color: #A9B4D0; }
 
-header.app-header {
-  position: sticky;
-  top: 0;
-  z-index: 50;
-  background: #f8fbff;
-}
-body.dark header.app-header {
-  background: #1a1b2e;
-}
+#top-progress-slot { width: 100%; }
 
-#global-progress {
+.progress-host[hidden] { display: none !important; }
+
+.progress-host {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 4px 15px 10px;
+  padding: 6px 8px 0;
 }
 
-.progress-host { display: flex; align-items: center; gap: 10px; }
-
-.progress-bar {
+.progress-track {
   flex: 1;
-  position: relative;
-  min-height: 26px;
-  padding: 4px 14px;
+  height: 6px;
   border-radius: 999px;
-  border: 1px solid rgba(255,255,255,0.08);
-  background: rgba(27,31,58,0.65);
-  color: #e6e6f0;
-  font-size: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  background: rgba(255, 255, 255, .12);
+  position: relative;
   overflow: hidden;
 }
 
-.progress-bar .progress-label {
-  position: relative;
-  z-index: 2;
-  font-size: 12px;
-  opacity: .9;
-}
-
-.progress-bar .progress-rail {
-  position: absolute;
-  inset: 0;
+.progress-fill {
   height: 100%;
-  border-radius: inherit;
+  width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #9b8cff, #6ea5ff);
+  transform: translateZ(0);
 }
 
-.progress-bar .progress-meta,
-.progress-bar .progress-percent {
-  opacity: 0;
+.progress-label {
+  position: absolute;
+  right: 8px;
+  top: -18px;
+  font-size: 11px;
+  color: #e9e9f5;
+  opacity: .85;
 }
 
 .btn-cancel {
-  padding: 6px 12px;
-  min-width: 92px;
+  padding: 4px 10px;
+  min-width: 86px;
   border-radius: 999px;
-  border: 1px solid #6b6f86;
-  background: #1b1f3a;
-  color: #e6e6f0;
+  border: 1px solid rgba(255, 255, 255, .35);
+  background: rgba(0, 0, 0, .2);
+  color: #fff;
   font-weight: 600;
   line-height: 1;
   cursor: pointer;
+}
+
+.btn-cancel[hidden] { display: none !important; }
+
+.progress-track.is-cancelled {
+  background: #6c7280 !important;
 }
 
 .btn-cancel[hidden] { display: none !important; }
@@ -1346,3 +1336,13 @@ th[aria-sort="descending"]::after{ content:" ▼"; opacity:.6; }
   padding: 12px;
   position: relative;
 }
+header.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: #f8fbff;
+}
+body.dark header.app-header {
+  background: #1a1b2e;
+}
+

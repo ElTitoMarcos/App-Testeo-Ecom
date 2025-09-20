@@ -13,6 +13,9 @@
 // ===== ProgressRail: una barra por "host" (slot). host = elemento contenedor (header, modal, etc.)
 function createRailInHost(host) {
   if (!host) return null;
+  if (host.id === 'progress-slot-global') {
+    return host;
+  }
   let rail = host.querySelector(':scope > .progress-rail');
   if (rail) return rail;
 
@@ -52,11 +55,26 @@ function getRailState(host) {
   if (state) return state;
   const rail = createRailInHost(host);
   if (!rail) return null;
-  const fill = rail.querySelector('.progress-fill');
-  const pctEl = rail.querySelector('.progress-percent');
-  const titleEl = rail.querySelector('.progress-title');
-  const stageEl = rail.querySelector('.progress-stage');
-  state = { rail, fill, pctEl, titleEl, stageEl, tasks: new Map(), hideTimer: null };
+  if (host.id === 'progress-slot-global') {
+    const globalLabel = document.querySelector('#global-progress .progress-label');
+    const globalFill = document.querySelector('#global-progress .progress-fill');
+    state = {
+      rail,
+      fill: globalFill,
+      pctEl: null,
+      titleEl: globalLabel,
+      stageEl: globalLabel,
+      tasks: new Map(),
+      hideTimer: null,
+      isGlobal: true,
+    };
+  } else {
+    const fill = rail.querySelector('.progress-fill');
+    const pctEl = rail.querySelector('.progress-percent');
+    const titleEl = rail.querySelector('.progress-title');
+    const stageEl = rail.querySelector('.progress-stage');
+    state = { rail, fill, pctEl, titleEl, stageEl, tasks: new Map(), hideTimer: null, isGlobal: false };
+  }
   Rails.set(host, state);
   return state;
 }
@@ -64,6 +82,25 @@ function getRailState(host) {
 function refreshHost(host) {
   const s = getRailState(host); if (!s) return;
   const tasks = s.tasks;
+  if (s.isGlobal) {
+    const showFn = window.progressShow;
+    const setFn = window.progressSet;
+    if (tasks.size === 0) {
+      clearTimeout(s.hideTimer);
+      if (typeof showFn === 'function') {
+        s.hideTimer = setTimeout(() => showFn(false), 250);
+      }
+      return;
+    }
+    let sum = 0, last;
+    for (const t of tasks.values()) { sum += (t.progress || 0); last = t; }
+    const avg = Math.max(0, Math.min(0.99, sum / tasks.size));
+    const pct = Math.round(avg * 100);
+    const label = (last && (last.stage || last.title)) || '';
+    if (typeof showFn === 'function') showFn(true);
+    if (typeof setFn === 'function') setFn(pct, label);
+    return;
+  }
   if (tasks.size === 0) {
     // completar al 100% brevemente y colapsar el slot
     s.fill.style.width = '100%';
