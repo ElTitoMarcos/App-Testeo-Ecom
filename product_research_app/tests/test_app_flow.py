@@ -9,7 +9,8 @@ from urllib.parse import urlparse
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from product_research_app import web_app, database, config
+from product_research_app import web_app, database, config, routes_export_minimal
+from product_research_app.routes_export_minimal import COLUMNS as EXPORT_COLUMNS
 from product_research_app.services import winner_score
 from product_research_app.services import config as cfg_service
 from product_research_app.utils.db import row_to_dict
@@ -731,3 +732,263 @@ def test_weights_eff_stable_when_touching_missing_metric(tmp_path, monkeypatch):
     assert resp2["weights_all"] != hash_all1
     assert resp2["weights_eff"] != hash_eff1
     assert resp2["diag"]["sum_filtered"] > sum1
+
+
+def _make_export_dummy(body: str):
+    class Dummy:
+        def __init__(self, payload: str):
+            self.headers = {"Content-Length": str(len(payload))}
+            self.rfile = io.BytesIO(payload.encode("utf-8"))
+            self.wfile = io.BytesIO()
+            self.sent_headers = {}
+            self.status = None
+            self.json_payload = None
+            self.path = "/api/export/kalodata-minimal"
+
+        def send_json(self, obj, status=200):
+            self.status = status
+            self.json_payload = obj
+
+        def send_response(self, code):
+            self.status = code
+
+        def send_header(self, key, value):
+            self.sent_headers[key] = value
+
+        def end_headers(self):
+            pass
+
+    return Dummy(body)
+
+
+def test_export_kalodata_minimal_requires_ids(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(web_app, "ensure_db", lambda: conn)
+
+    handler = _make_export_dummy(json.dumps({}))
+    web_app.RequestHandler.handle_export_kalodata_minimal(handler)
+
+    assert handler.status == 400
+    assert handler.json_payload == {"error": "ids_required"}
+
+
+def test_export_kalodata_minimal_not_found(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(web_app, "ensure_db", lambda: conn)
+
+    handler = _make_export_dummy(json.dumps({"ids": [999]}))
+    web_app.RequestHandler.handle_export_kalodata_minimal(handler)
+
+    assert handler.status == 404
+    assert handler.json_payload == {"error": "products_not_found"}
+
+
+def test_export_kalodata_minimal_success(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(web_app, "ensure_db", lambda: conn)
+
+    extra1 = {
+        "TikTokUrl": "https://tiktok.example/alpha",
+        "KalodataUrl": "https://kalodata.example/alpha",
+        "Img_url": "https://img.example/alpha.jpg",
+        "Category": "Beauty",
+        "Price($)": "$19.99",
+        "Product Rating": "4.8",
+        "Item Sold": "1,200",
+        "Revenue($)": "1000",
+        "Live Revenue($)": "200",
+        "Video Revenue($)": "300",
+        "Shopping Mall Revenue($)": "50",
+        "Launch Date": "2024-01-01",
+        "desire_score": 0.8,
+        "awareness_level": 2,
+        "competition": 0.3,
+    }
+    extra2 = {
+        "tiktok_url": "https://tiktok.example/beta",
+        "KalodataUrl": "https://kalodata.example/beta",
+        "image_url": "https://img.example/beta.png",
+        "Category": "Home",
+        "price": "29",
+        "rating": 4.1,
+        "units_sold": 80,
+        "Revenue($)": "400",
+        "Video Revenue($)": "100",
+        "Launch Date": "2023-12-15",
+        "desire_magnitude": 65,
+        "customer_desire": "Resuelve dolor",
+        "awareness_level_label": "Product-aware",
+        "competition_level_label": "Medium",
+    }
+    extra3 = {
+        "tiktok_url": "https://tiktok.example/gamma",
+        "KalodataUrl": "https://kalodata.example/gamma",
+        "Img_url": "https://img.example/gamma-missing.png",
+        "Category": "Kitchen",
+        "price": "15.50",
+        "rating": 4.5,
+        "units_sold": 500,
+        "Revenue($)": "250",
+        "Live Revenue($)": "30",
+        "Video Revenue($)": "20",
+        "Launch Date": "2023-11-30",
+        "desires": "Resolver frustración",
+        "awareness_level": 4,
+        "competition_level": 80,
+    }
+
+    pid1 = database.insert_product(
+        conn,
+        name="Alpha",
+        description="",
+        category="Beauty",
+        price=19.99,
+        currency="USD",
+        image_url="https://img.example/alpha.jpg",
+        source="kalodata",
+        desire="Fuerte deseo",
+        desire_magnitude=None,
+        awareness_level=None,
+        competition_level=None,
+        extra=extra1,
+    )
+    pid2 = database.insert_product(
+        conn,
+        name="Beta",
+        description="",
+        category="Home",
+        price=None,
+        currency=None,
+        image_url="https://img.example/beta.png",
+        source="kalodata",
+        desire=None,
+        desire_magnitude=None,
+        awareness_level=None,
+        competition_level=None,
+        extra=extra2,
+    )
+    pid3 = database.insert_product(
+        conn,
+        name="Gamma",
+        description="",
+        category="Kitchen",
+        price=None,
+        currency=None,
+        image_url="https://img.example/gamma-missing.png",
+        source="kalodata",
+        desire=None,
+        desire_magnitude=None,
+        awareness_level=None,
+        competition_level=None,
+        extra=extra3,
+    )
+
+    routes_export_minimal._IMG_CACHE.clear()
+
+    from PIL import Image as PILImage
+
+    def fake_fetch(url):
+        if url and "missing" not in str(url):
+            img = PILImage.new("RGB", (400, 260), color=(255, 0, 0))
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            buf.seek(0)
+            return buf
+        return None
+
+    monkeypatch.setattr(routes_export_minimal, "_fetch_and_resize", fake_fetch)
+
+    handler = _make_export_dummy(json.dumps({"ids": [pid1, pid2, pid3]}))
+    web_app.RequestHandler.handle_export_kalodata_minimal(handler)
+
+    assert handler.status == 200
+    assert "kalodata_for_analysis_" in handler.sent_headers.get("Content-Disposition", "")
+
+    payload = handler.wfile.getvalue()
+    assert payload
+
+    from openpyxl import load_workbook
+
+    wb = load_workbook(io.BytesIO(payload))
+    assert wb.sheetnames == ["products"]
+    ws = wb["products"]
+    header = list(next(ws.iter_rows(min_row=1, max_row=1, values_only=True)))
+    assert header == list(EXPORT_COLUMNS)
+
+    assert ws.freeze_panes == "A2"
+    assert ws.auto_filter.ref == ws.dimensions
+
+    rows = list(ws.iter_rows(min_row=2, values_only=True))
+    assert len(rows) == 3
+    row1, row2, row3 = rows
+
+    assert row1[0] == "Alpha"
+    assert row2[0] == "Beta"
+    assert row3[0] == "Gamma"
+    assert row1[4] is None
+    assert row3[4] == "(no image)"
+    assert row1[5] == "Beauty"
+    assert row1[6] == 19.99
+    assert row1[7] == 4.8
+    assert row1[8] == 1200
+    assert row1[9] == 1550.0
+    assert row1[10].strftime("%Y-%m-%d") == "2024-01-01"
+    assert row1[11] == "Fuerte deseo"
+    assert row1[12] == 80
+    assert row1[13] == "Solution-aware"
+    assert row1[14] == "Low"
+
+    assert row2[5] == "Home"
+    assert row2[6] == 29.0
+    assert row2[7] == 4.1
+    assert row2[8] == 80
+    assert row2[9] == 500.0
+    assert row2[10].strftime("%Y-%m-%d") == "2023-12-15"
+    assert row2[11] == "Resuelve dolor"
+    assert row2[12] == 65
+    assert row2[13] == "Product-aware"
+    assert row2[14] == "Medium"
+
+    assert row3[5] == "Kitchen"
+    assert row3[6] == 15.5
+    assert row3[7] == 4.5
+    assert row3[8] == 500
+    assert row3[9] == 300.0
+    assert row3[10].strftime("%Y-%m-%d") == "2023-11-30"
+    assert row3[11] == "Resolver frustración"
+    assert row3[12] == 50
+    assert row3[13] == "Most aware"
+    assert row3[14] == "High"
+
+    assert ws.column_dimensions["A"].width == 40
+    assert ws.column_dimensions["E"].width == 38
+    assert ws.column_dimensions["L"].width == 45
+    assert "tbl_products" in ws.tables
+    assert ws.tables["tbl_products"].ref == "A1:O4"
+
+    dv_ranges = [dv.sqref for dv in ws.data_validations.dataValidation]
+    assert any(str(dv) == "M2:M4" for dv in dv_ranges)
+
+    cf_ranges = list(ws.conditional_formatting)
+
+    def _cfvo_values(cfvo):
+        values = []
+        for obj in cfvo:
+            try:
+                raw = getattr(obj, "value", getattr(obj, "val", None))
+                values.append(float(raw))
+            except (TypeError, ValueError):
+                values.append(None)
+        return values
+
+    assert any(
+        getattr(rule, "type", "") == "dataBar"
+        and rule.dataBar is not None
+        and _cfvo_values(rule.dataBar.cfvo) == [0.0, 100.0]
+        for cf in cf_ranges
+        for rule in cf.rules
+    )
+
+    assert len(getattr(ws, "_images", [])) == 2
+    assert ws.row_dimensions[2].height == routes_export_minimal._IMG_ROW_HEIGHT
+    assert ws.row_dimensions[4].height == 45

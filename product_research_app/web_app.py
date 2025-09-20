@@ -1455,6 +1455,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/api/analyze/titles":
             self.handle_analyze_titles()
             return
+        if path == "/api/export/kalodata-minimal":
+            self.handle_export_kalodata_minimal()
+            return
         if path == "/api/auth/set-key":
             length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(length).decode('utf-8')
@@ -1784,6 +1787,15 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(resp).encode('utf-8'))
             return
         self.send_error(404)
+
+    def handle_export_kalodata_minimal(self):
+        from .routes_export_minimal import export_kalodata_minimal
+
+        try:
+            export_kalodata_minimal(self, ensure_db)
+        except Exception:
+            logger.exception("Error exportando kalodata minimal")
+            self.send_json({"error": "internal_error"}, 500)
 
     def handle_analyze_titles(self):
         """Endpoint for Title Analyzer.

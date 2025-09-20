@@ -244,7 +244,7 @@ body.dark .skeleton{background:#333;}
   <button id="btnAddToGroup" class="bar-btn" disabled title="Añadir seleccionados al grupo" aria-label="Añadir seleccionados al grupo">Añadir a grupo</button>
   <button id="btnManageGroups" class="bar-btn" title="Gestionar grupos" aria-label="Gestionar grupos">Gestionar grupos</button>
   <button id="btnDelete" class="bar-btn" disabled title="Eliminar seleccionados" aria-label="Eliminar seleccionados">Eliminar</button>
-  <button id="btnExport" class="bar-btn" disabled title="Exportar seleccionados" aria-label="Exportar seleccionados">Exportar</button>
+        <button id="btnExport" class="bar-btn" disabled title="Exportar seleccionados" aria-label="Exportar seleccionados">Exportar</button>
   <button id="btnColumns" class="bar-btn" title="Gestionar columnas" aria-label="Gestionar columnas">Columnas</button>
   </div>
   <div id="legendPop" class="popover hidden">
@@ -1496,30 +1496,41 @@ document.getElementById('btnDelete').onclick = () => {
   }});
 };
 
-// Export selected products as CSV
+// Export selected products as formatted XLSX
 document.getElementById('btnExport').onclick = async () => {
-  const ids = Array.from(selection, Number);
+  const ids = getSelectedProductIds();
   if(!ids.length){ toast.info('Selecciona productos para exportar'); return; }
-  // Build query string
-  const params = new URLSearchParams();
-  params.set('ids', ids.join(','));
-  // request export file
+  const btn = document.getElementById('btnExport');
   const host = getActionHost();
-  const tracker = LoadingHelpers.start('Exportando productos', { host });
+  const tracker = LoadingHelpers.start('Preparando exportación', { host });
+  btn.disabled = true;
   try{
-    tracker.setStage('Preparando archivo…');
-    const res = await fetch('/export?'+params.toString(), {method:'GET', __hostEl: host, __skipLoadingHook: true});
-    if(res.status !== 200){ toast.error('Error al exportar'); return; }
+    tracker.setStage('Generando XLSX…');
+    const res = await fetch('/api/export/kalodata-minimal', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ ids }),
+      __hostEl: host,
+      __skipLoadingHook: true,
+    });
+    if(!res.ok){
+      let message = 'Error al exportar';
+      try{
+        const payload = await res.json();
+        if(payload && payload.error){ message = payload.error; }
+      }catch(_err){/* ignore */}
+      toast.error(message);
+      tracker.step(1, 'Error');
+      return;
+    }
+    tracker.setStage('Descargando…');
     const blob = await res.blob();
-    // determine filename from header or default
     const disposition = res.headers.get('Content-Disposition');
-    let filename = 'export.csv';
+    let filename = 'kalodata_for_analysis.xlsx';
     if(disposition){
       const match = disposition.match(/filename="?([^\"]+)"?/);
-      if(match) filename = match[1];
+      if(match){ filename = match[1]; }
     }
-    tracker.step(0.7, 'Descargando…');
-    // trigger download
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -1528,12 +1539,14 @@ document.getElementById('btnExport').onclick = async () => {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+    toast.success('Archivo exportado');
     tracker.step(1, 'Completado');
   } catch(err){
     console.error(err);
     toast.error('Error al exportar');
     tracker.step(1, 'Error');
   } finally {
+    btn.disabled = getSelectedProductIds().length===0;
     tracker.done();
   }
 };
