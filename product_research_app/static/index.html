@@ -8,13 +8,26 @@
 <link rel="stylesheet" href="/static/css/loading.css">
 <script type="module" src="/static/js/config.js" defer></script>
 <script type="module" src="/static/js/net.js" defer></script>
+<script type="module" src="/static/js/layout.js" defer></script>
 <script defer src="/static/js/legacy-progress-shim.js"></script>
 <style>
 /* Basic layout */
 body { margin:0; padding:0; font-family: 'Segoe UI', Tahoma, sans-serif; color:#222; background: linear-gradient(to bottom, #f8fbff, #e9f0ff); }
 body.dark { background: #1a1b2e; color:#eaeaea; }
-#app-header .app-toolbar { padding:20px; text-align:center; background: linear-gradient(90deg, #0062ff, #00c8ff); color:#fff; box-shadow:0 2px 5px rgba(0,0,0,0.3); }
-body.dark #app-header .app-toolbar { background: linear-gradient(90deg, #2e2e78, #6547a6); }
+.topbar {
+  padding: 8px 15px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: linear-gradient(90deg, #0062ff, #00c8ff);
+  color: #fff;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+}
+body.dark .topbar { background: linear-gradient(90deg, #2e2e78, #6547a6); }
+.topbar .brand { font-size: 1.4rem; font-weight: 600; }
+.topbar .by { font-size: 12px; opacity: 0.8; white-space: nowrap; }
+.topbar .app-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 .container { max-width: 1200px; margin: 0 auto; padding: 10px; }
 .card { background:#121426; border:1px solid #222642; border-radius:10px; padding:12px; margin-bottom:15px; }
 body.dark .card { background:#121426; border-color:#222642; }
@@ -97,29 +110,34 @@ body.dark .skeleton{background:#333;}
 </head>
 <body class="dark">
 <header id="topBar" class="app-header">
-  <div id="app-header">
-    <div class="app-toolbar" style="padding:8px 15px; display:flex; align-items:center; justify-content:space-between; position:relative;">
-      <div style="display:flex; align-items:center; gap:8px;">
-        <h1 style="margin:0; font-size:1.4rem;">Ecom Testing App</h1>
-        <p style="margin:0;font-size:12px; opacity:0.8;">By El Tito 🤙</p>
-      </div>
-      <div style="flex:1; display:flex; justify-content:flex-end; gap:8px; align-items:center;">
-        <input type="file" id="fileInput" style="display:none;" />
-        <button id="uploadBtn" title="Subir archivo">📤</button>
-        <button id="refreshBtn" title="Actualizar lista">🔄</button>
-        <button id="btn-ver-tendencias" title="Ver tendencias" data-action="toggle-trends">📊</button>
-        <button id="darkToggle" title="Modo oscuro">🌙</button>
-        <button id="configBtn" title="Configuración avanzada">⚙️</button>
+  <div class="topbar">
+    <div class="app-title">
+      <span class="brand">Ecom Testing App</span>
+      <span class="by">By El Tito 👑</span>
+
+      <!-- ÚNICO host de progreso inline -->
+      <div id="progress-info" class="pi" hidden aria-live="polite">
+        <div class="pi-text">
+          <span class="pi-phase">Importando catálogo</span>
+          <span class="pi-sep">·</span>
+          <span class="pi-sub">Completando columnas con IA</span>
+        </div>
+        <div class="pi-track"><div class="pi-fill" style="width:0%"></div></div>
+        <span class="pi-pct">0%</span>
+        <button id="btn-cancel-import" class="pi-cancel">Cancelar</button>
       </div>
     </div>
-    <div id="global-progress-wrapper">
-      <div id="global-progress-bar" class="progress-hitbox">
-        <div id="progress-slot-global" class="progress-slot" aria-live="polite"></div>
-      </div>
+    <div class="app-actions">
+      <input type="file" id="fileInput" style="display:none;" />
+      <button id="uploadBtn" title="Subir archivo">📤</button>
+      <button id="refreshBtn" title="Actualizar lista">🔄</button>
+      <button id="btn-ver-tendencias" title="Ver tendencias" data-action="toggle-trends">📊</button>
+      <button id="darkToggle" title="Modo oscuro">🌙</button>
+      <button id="configBtn" title="Configuración avanzada">⚙️</button>
     </div>
   </div>
   <!-- Search bar row with controls -->
-  <div id="searchRow">
+  <div id="searchRow" class="toolbar">
     <input type="text" id="searchInput" placeholder="Buscar producto o palabra clave..." aria-label="Buscar productos" />
     <button id="searchBtn">Buscar</button>
     <button id="btnFilters">Filtros</button>
@@ -231,25 +249,27 @@ body.dark .skeleton{background:#333;}
 </section>
 
 <section id="section-products">
-  <table id="productTable">
-  <thead class="sticky-thead">
-    <tr id="headerRow"></tr>
-  </thead>
-  <tbody></tbody>
-  </table>
+  <div class="table-wrap">
+    <table id="productTable" class="products-table table">
+      <thead>
+        <tr id="headerRow"></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
   <div id="bottomBar" class="bottombar hidden">
-  <button id="legendBtn" class="legend-btn" title="Mostrar leyenda" aria-label="Mostrar leyenda">ℹ️</button>
-  <span id="selCount"></span>
-  <select id="groupSelect" aria-label="Filtrar por grupo"></select>
-  <button id="btnAddToGroup" class="bar-btn" disabled title="Añadir seleccionados al grupo" aria-label="Añadir seleccionados al grupo">Añadir a grupo</button>
-  <button id="btnManageGroups" class="bar-btn" title="Gestionar grupos" aria-label="Gestionar grupos">Gestionar grupos</button>
-  <button id="btnDelete" class="bar-btn" disabled title="Eliminar seleccionados" aria-label="Eliminar seleccionados">Eliminar</button>
-  <button id="btnExport" class="bar-btn" disabled title="Exportar seleccionados" aria-label="Exportar seleccionados">Exportar</button>
-  <button id="btnColumns" class="bar-btn" title="Gestionar columnas" aria-label="Gestionar columnas">Columnas</button>
+    <button id="legendBtn" class="legend-btn" title="Mostrar leyenda" aria-label="Mostrar leyenda">ℹ️</button>
+    <span id="selCount"></span>
+    <select id="groupSelect" aria-label="Filtrar por grupo"></select>
+    <button id="btnAddToGroup" class="bar-btn" disabled title="Añadir seleccionados al grupo" aria-label="Añadir seleccionados al grupo">Añadir a grupo</button>
+    <button id="btnManageGroups" class="bar-btn" title="Gestionar grupos" aria-label="Gestionar grupos">Gestionar grupos</button>
+    <button id="btnDelete" class="bar-btn" disabled title="Eliminar seleccionados" aria-label="Eliminar seleccionados">Eliminar</button>
+    <button id="btnExport" class="bar-btn" disabled title="Exportar seleccionados" aria-label="Exportar seleccionados">Exportar</button>
+    <button id="btnColumns" class="bar-btn" title="Gestionar columnas" aria-label="Gestionar columnas">Columnas</button>
   </div>
   <div id="legendPop" class="popover hidden">
-  <div>• Fila roja: duplicado</div>
-  <div>• 🔥 x1–x5: tendencia en el nombre</div>
+    <div>• Fila roja: duplicado</div>
+    <div>• 🔥 x1–x5: tendencia en el nombre</div>
   </div>
   <div id="columnsPanel" class="popover hidden"></div>
 </section>
@@ -382,6 +402,27 @@ const IMPORT_START_URL = '/upload';
 let savedApiKeyHash = null;
 let savedApiKeyLength = 0;
 
+const importUI = {
+  start(taskId, phase = 'Importando catálogo', sub = 'Preparando…') {
+    window.onImportStart?.(taskId);
+    window.onImportTick?.(0, phase, sub);
+  },
+  tick(pct, phase, sub) {
+    window.onImportTick?.(pct, phase, sub);
+  },
+  end() {
+    window.onImportEnd?.();
+    window.currentTaskId = null;
+  }
+};
+
+const IMPORT_CANCEL_CODE = 'IMPORT_CANCELLED';
+const makeImportCancelError = () => {
+  const err = new Error('Importación cancelada');
+  err.code = IMPORT_CANCEL_CODE;
+  return err;
+};
+
 const getGlobalProgressHost = () => document.querySelector('#progress-slot-global');
 const getActionHost = () => document.querySelector('#bottomBar') || getGlobalProgressHost();
 
@@ -419,64 +460,78 @@ function mapServerFraction(serverPct) {
   return Math.min(IMPORT_POLL_MAX_FRAC, frac);
 }
 
-async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL, host = getGlobalProgressHost() } = {}) {
+async function followImportTask(taskId, { statusUrl = IMPORT_STATUS_URL, onTick } = {}) {
   const id = typeof taskId === 'string' ? taskId : String(taskId || '');
   if (!id) return null;
-  while (true) {
-    let data;
-    try {
-      const resp = await fetch(`${statusUrl}?task_id=${encodeURIComponent(id)}&t=${Date.now()}`,
-        { __skipLoadingHook: true, __hostEl: host, cache: 'no-store' }
-      );
-      if (!resp.ok) throw new Error('Estado no disponible');
-      data = await resp.json();
-    } catch (err) {
-      await sleep(900);
-      continue;
-    }
-    if (data.ui_cost_message) showImportBanner(data.ui_cost_message);
-    const raw = data.pct ?? data.percent ?? data.percentage ?? data.progress ?? (data.done ? 100 : undefined);
-    let serverPct = Number(raw);
-    if (!Number.isFinite(serverPct)) serverPct = 0;
-    serverPct = Math.max(0, Math.min(100, serverPct));
-    const stage = (data.message || data.stage || data.state || '').toString() || 'Procesando…';
-    tracker?.step(mapServerFraction(serverPct), stage);
+  let aborted = false;
+  const stop = () => { aborted = true; };
+  window.stopImportPolling = stop;
+  try {
+    while (true) {
+      if (aborted) throw makeImportCancelError();
+      let data;
+      try {
+        const resp = await fetch(`${statusUrl}?task_id=${encodeURIComponent(id)}&t=${Date.now()}`,
+          { __skipLoadingHook: true, cache: 'no-store' }
+        );
+        if (!resp.ok) throw new Error('Estado no disponible');
+        data = await resp.json();
+      } catch (err) {
+        if (aborted) throw makeImportCancelError();
+        await sleep(900);
+        continue;
+      }
+      if (aborted) throw makeImportCancelError();
+      if (data.ui_cost_message) showImportBanner(data.ui_cost_message);
+      const raw = data.pct ?? data.percent ?? data.percentage ?? data.progress ?? (data.done ? 100 : undefined);
+      let serverPct = Number(raw);
+      if (!Number.isFinite(serverPct)) serverPct = 0;
+      serverPct = Math.max(0, Math.min(100, serverPct));
+      const phase = (data.phase || data.title || 'Importando catálogo').toString() || 'Importando catálogo';
+      const stage = (data.message || data.stage || data.state || '').toString() || 'Procesando…';
+      const pct = Math.round(mapServerFraction(serverPct) * 100);
+      onTick?.(pct, phase, stage);
 
-    const statusVal = String(data.state || data.status || '').toLowerCase();
-    if (statusVal === 'error' || data.error) {
-      throw new Error(data.error || 'Error en importación');
+      const statusVal = String(data.state || data.status || '').toLowerCase();
+      if (statusVal === 'error' || data.error) {
+        throw new Error(data.error || 'Error en importación');
+      }
+      if (statusVal === 'unknown' || !statusVal) {
+        throw new Error('Estado de importación desconocido');
+      }
+      if (serverPct >= 100 || statusVal === 'done' || statusVal === 'completed' || statusVal === 'finished') {
+        onTick?.(100, phase, stage || 'Completado');
+        await reloadTable({ skipProgress: true });
+        hideImportBanner();
+        return data;
+      }
+      await sleep(450);
     }
-    if (statusVal === 'unknown' || !statusVal) {
-      throw new Error('Estado de importación desconocido');
+  } finally {
+    if (window.stopImportPolling === stop) {
+      window.stopImportPolling = null;
     }
-    if (serverPct >= 100 || statusVal === 'done' || statusVal === 'completed' || statusVal === 'finished') {
-      await reloadTable({ skipProgress: true });
-      hideImportBanner();
-      return data;
-    }
-    await sleep(450);
   }
 }
 
 async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IMPORT_STATUS_URL } = {}) {
   if (!file) throw new Error('Archivo no válido');
-  const host = getGlobalProgressHost();
-  const tracker = LoadingHelpers.start('Importando catálogo', { host });
-  tracker.setStage('Subiendo archivo…');
+  importUI.start(undefined, 'Importando catálogo', 'Subiendo archivo…');
+  importUI.tick(0, 'Importando catálogo', 'Subiendo archivo…');
   let lastResult = null;
+  let wasCancelled = false;
   try {
     const fd = new FormData();
     fd.append('file', file);
     const xhr = new XMLHttpRequest();
     xhr.responseType = 'json';
     xhr.__skipLoadingHook = true;
-    xhr.__hostEl = host;
     const startResult = await new Promise((resolve, reject) => {
       xhr.open('POST', startUrl, true);
       xhr.upload.onprogress = (event) => {
         if (!event.lengthComputable) return;
         const frac = Math.min(IMPORT_UPLOAD_FRAC, (event.loaded / event.total) * IMPORT_UPLOAD_FRAC);
-        tracker.step(frac, 'Subiendo archivo…');
+        importUI.tick(Math.round(frac * 100), 'Importando catálogo', 'Subiendo archivo…');
       };
       xhr.onerror = () => reject(new Error('Error de red subiendo archivo'));
       xhr.onload = () => {
@@ -501,7 +556,7 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     });
 
     if (startResult.kind === 'sync') {
-      tracker.step(1, 'Completado');
+      importUI.tick(100, 'Importando catálogo', 'Completado');
       await reloadTable({ skipProgress: true });
       const importedCount = startResult.data?.imported ?? startResult.data?.rows_imported;
       if (Number.isFinite(importedCount) && importedCount > 0) {
@@ -512,23 +567,35 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
 
     const taskId = startResult.taskId;
     const idStr = typeof taskId === 'string' ? taskId : String(taskId);
-    tracker.step(IMPORT_UPLOAD_FRAC, 'Archivo subido');
+    window.currentTaskId = idStr;
+    importUI.tick(Math.round(IMPORT_UPLOAD_FRAC * 100), 'Importando catálogo', 'Archivo subido');
     localStorage.setItem(IMPORT_TASK_LS_KEY, idStr);
 
-    lastResult = await followImportTask(idStr, tracker, { statusUrl, host });
+    lastResult = await followImportTask(idStr, {
+      statusUrl,
+      onTick: (pct, phase, sub) => importUI.tick(pct, phase || 'Importando catálogo', sub)
+    });
 
     const importedCount = lastResult?.imported ?? lastResult?.rows_imported;
     if (Number.isFinite(importedCount) && importedCount > 0) {
       toast.success(`Importados ${importedCount}`);
     }
-    tracker.step(1, 'Completado');
+    importUI.tick(100, 'Importando catálogo', 'Completado');
     return lastResult;
   } catch (err) {
-    tracker.step(1, 'Error');
-    toast.error(err?.message || 'Error al importar catálogo');
+    wasCancelled = err?.code === IMPORT_CANCEL_CODE;
+    if (wasCancelled) {
+      toast.info('Importación cancelada');
+    } else {
+      toast.error(err?.message || 'Error al importar catálogo');
+    }
     throw err;
   } finally {
-    tracker.done();
+    if (wasCancelled) {
+      window.currentTaskId = null;
+    } else {
+      importUI.end();
+    }
     localStorage.removeItem(IMPORT_TASK_LS_KEY);
     hideImportBanner();
   }
@@ -1152,22 +1219,32 @@ window.onload = async () => {
   const tid = localStorage.getItem(IMPORT_TASK_LS_KEY);
   if (tid) {
     toast.info('Reanudando importación previa…');
-    const host = getGlobalProgressHost();
-    const tracker = LoadingHelpers.start('Importando catálogo', { host });
-    tracker.step(IMPORT_UPLOAD_FRAC, 'Reanudando…');
+    importUI.start(tid, 'Importando catálogo', 'Reanudando…');
+    importUI.tick(Math.round(IMPORT_UPLOAD_FRAC * 100), 'Importando catálogo', 'Reanudando…');
+    let resumedCancelled = false;
     try {
-      const result = await followImportTask(tid, tracker, { host });
+      const result = await followImportTask(tid, {
+        onTick: (pct, phase, sub) => importUI.tick(pct, phase || 'Importando catálogo', sub)
+      });
       const importedCount = result?.imported ?? result?.rows_imported;
       if (Number.isFinite(importedCount) && importedCount > 0) {
         toast.success(`Importados ${importedCount}`);
       }
-      tracker.step(1, 'Completado');
+      importUI.tick(100, 'Importando catálogo', 'Completado');
     } catch (err) {
-      tracker.step(1, 'Error');
-      toast.error(err?.message || 'Error en importación');
+      resumedCancelled = err?.code === IMPORT_CANCEL_CODE;
+      if (resumedCancelled) {
+        toast.info('Importación cancelada');
+      } else {
+        toast.error(err?.message || 'Error en importación');
+      }
     } finally {
       localStorage.removeItem(IMPORT_TASK_LS_KEY);
-      tracker.done();
+      if (resumedCancelled) {
+        window.currentTaskId = null;
+      } else {
+        importUI.end();
+      }
       hideImportBanner();
     }
   }
@@ -1500,16 +1577,48 @@ document.getElementById('btnDelete').onclick = () => {
 document.getElementById('btnExport').onclick = async () => {
   const ids = Array.from(selection, Number);
   if(!ids.length){ toast.info('Selecciona productos para exportar'); return; }
-  // Build query string
-  const params = new URLSearchParams();
-  params.set('ids', ids.join(','));
-  // request export file
   const host = getActionHost();
   const tracker = LoadingHelpers.start('Exportando productos', { host });
   try{
     tracker.setStage('Preparando archivo…');
-    const res = await fetch('/export?'+params.toString(), {method:'GET', __hostEl: host, __skipLoadingHook: true});
+    const visibleColumns = Array.from(document.querySelectorAll('.products-table thead th'))
+      .filter(th => {
+        const key = th.dataset?.key || th.getAttribute('data-key');
+        if (!key) return false;
+        if (th.classList.contains('col-hidden') || th.classList.contains('is-hidden')) return false;
+        if (th.hasAttribute('hidden')) return false;
+        const style = window.getComputedStyle(th);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        return true;
+      })
+      .map(th => ({
+        key: (th.dataset?.key || th.getAttribute('data-key') || th.textContent || '').trim(),
+        title: (th.textContent || '').trim()
+      }));
+
+    const norm = s => (s || '').toLowerCase();
+    visibleColumns.forEach(c => {
+      const k = norm(c.key);
+      if (/imagen|image|img|thumbnail/.test(k)) c.key = 'image';
+      if (/winner/.test(k)) c.key = 'winner_score';
+      if (/price|precio/.test(k)) c.key = 'price';
+      if (/category|categoría/.test(k)) c.key = 'category';
+      if (/desire/.test(k) && !/magnitude/.test(k)) c.key = 'desire';
+      if (/magnitude|magnet/.test(k)) c.key = 'desire_magnitude';
+      if (/awareness/.test(k)) c.key = 'awareness_level';
+      if (/competition/.test(k)) c.key = 'competition_level';
+    });
+
+    tracker.step(0.3, 'Solicitando exportación…');
+    const res = await fetch('/api/export', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ ids, columns: visibleColumns }),
+      __hostEl: host,
+      __skipLoadingHook: true
+    });
     if(res.status !== 200){ toast.error('Error al exportar'); return; }
+    tracker.step(0.6, 'Generando archivo…');
     const blob = await res.blob();
     // determine filename from header or default
     const disposition = res.headers.get('Content-Disposition');
