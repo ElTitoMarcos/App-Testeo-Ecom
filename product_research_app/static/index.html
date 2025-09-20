@@ -96,7 +96,7 @@ body.dark .skeleton{background:#333;}
 </style>
 </head>
 <body class="dark">
-<header id="topBar" class="app-header">
+<header id="topBar" class="app-header topbar">
   <div id="app-header">
     <div class="app-toolbar" style="padding:8px 15px; display:flex; align-items:center; justify-content:space-between; position:relative;">
       <div style="display:flex; align-items:center; gap:8px;">
@@ -112,10 +112,12 @@ body.dark .skeleton{background:#333;}
         <button id="configBtn" title="Configuración avanzada">⚙️</button>
       </div>
     </div>
-    <div id="global-progress-wrapper">
-      <div id="global-progress-bar" class="progress-hitbox">
+    <div id="global-progress" class="progress-host" hidden>
+      <div class="progress-bar">
         <div id="progress-slot-global" class="progress-slot" aria-live="polite"></div>
+        <span class="progress-label">Cargando…</span>
       </div>
+      <button id="btn-cancel-import" class="btn-cancel" hidden title="Cancelar importación">✕</button>
     </div>
   </div>
   <!-- Search bar row with controls -->
@@ -231,12 +233,34 @@ body.dark .skeleton{background:#333;}
 </section>
 
 <section id="section-products">
-  <table id="productTable">
-  <thead class="sticky-thead">
-    <tr id="headerRow"></tr>
-  </thead>
-  <tbody></tbody>
-  </table>
+  <div class="table-wrap">
+    <table id="productTable" class="products-table">
+      <colgroup>
+        <col class="sel">
+        <col class="id">
+        <col class="imagen">
+        <col class="nombre">
+        <col class="categoria">
+        <col class="price">
+        <col class="rating">
+        <col class="unidades">
+        <col class="ingresos">
+        <col class="conv">
+        <col class="fecha">
+        <col class="rango">
+        <col class="desire">
+        <col class="magnet">
+        <col class="aware">
+        <col class="comp">
+        <col class="wscore">
+        <col class="actions">
+      </colgroup>
+      <thead>
+        <tr id="headerRow"></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
   <div id="bottomBar" class="bottombar hidden">
   <button id="legendBtn" class="legend-btn" title="Mostrar leyenda" aria-label="Mostrar leyenda">ℹ️</button>
   <span id="selCount"></span>
@@ -385,6 +409,91 @@ let savedApiKeyLength = 0;
 const getGlobalProgressHost = () => document.querySelector('#progress-slot-global');
 const getActionHost = () => document.querySelector('#bottomBar') || getGlobalProgressHost();
 
+const getProgressBar = () => document.querySelector('#global-progress .progress-bar');
+const getProgressLabel = () => document.querySelector('#global-progress .progress-label');
+const cancelBtn = document.getElementById('btn-cancel-import');
+
+function showCancel(visible) {
+  if (!cancelBtn) return;
+  cancelBtn.hidden = !visible;
+  if (!visible) {
+    cancelBtn.disabled = false;
+  }
+}
+
+function markCancelled() {
+  const bar = getProgressBar();
+  const label = getProgressLabel();
+  bar?.classList.add('is-cancelled');
+  if (label) label.textContent = 'Cancelado';
+}
+
+let importPollController = null;
+let importPollingCancelled = false;
+
+function stopImportPolling() {
+  importPollingCancelled = true;
+  if (importPollController) {
+    try { importPollController.abort(); }
+    catch (e) {}
+  }
+}
+
+window.stopImportPolling = stopImportPolling;
+
+async function cancelImport() {
+  if (!cancelBtn || !window.currentTaskId) return;
+  cancelBtn.disabled = true;
+  try {
+    await fetch('/_import_cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: window.currentTaskId })
+    });
+  } catch (e) {}
+  stopImportPolling();
+  markCancelled();
+  showCancel(false);
+  cancelBtn.disabled = false;
+}
+
+cancelBtn?.addEventListener('click', cancelImport);
+
+window.onImportStart = function(taskId) {
+  const bar = getProgressBar();
+  const label = getProgressLabel();
+  bar?.classList.remove('is-cancelled');
+  if (label) label.textContent = 'Importando…';
+  window.currentTaskId = taskId ? String(taskId) : '';
+  importPollingCancelled = false;
+  showCancel(Boolean(taskId));
+};
+
+window.onImportEnd = function() {
+  window.currentTaskId = '';
+  showCancel(false);
+  const bar = getProgressBar();
+  const label = getProgressLabel();
+  bar?.classList.remove('is-cancelled');
+  if (label) label.textContent = 'Listo';
+  if (cancelBtn) cancelBtn.disabled = false;
+};
+
+(function stickyOffsets(){
+  const root = document.documentElement;
+  const px = (n) => `${n || 0}px`;
+  function update(){
+    const topbar = document.querySelector('.topbar');
+    const progress = document.querySelector('#global-progress');
+    root.style.setProperty('--topbar-h', px(topbar?.offsetHeight || 0));
+    const progressVisible = progress && progress.offsetParent !== null && !progress.hidden;
+    root.style.setProperty('--progress-h', px(progressVisible ? progress.offsetHeight : 0));
+  }
+  window.addEventListener('resize', update);
+  new MutationObserver(update).observe(document.body, { subtree: true, attributes: true, attributeFilter: ['style','class','hidden'] });
+  requestAnimationFrame(update);
+})();
+
 function formatPrice(n) {
   const num = Number(n);
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 })
@@ -422,39 +531,72 @@ function mapServerFraction(serverPct) {
 async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL, host = getGlobalProgressHost() } = {}) {
   const id = typeof taskId === 'string' ? taskId : String(taskId || '');
   if (!id) return null;
-  while (true) {
-    let data;
-    try {
-      const resp = await fetch(`${statusUrl}?task_id=${encodeURIComponent(id)}&t=${Date.now()}`,
-        { __skipLoadingHook: true, __hostEl: host, cache: 'no-store' }
-      );
-      if (!resp.ok) throw new Error('Estado no disponible');
-      data = await resp.json();
-    } catch (err) {
-      await sleep(900);
-      continue;
-    }
-    if (data.ui_cost_message) showImportBanner(data.ui_cost_message);
-    const raw = data.pct ?? data.percent ?? data.percentage ?? data.progress ?? (data.done ? 100 : undefined);
-    let serverPct = Number(raw);
-    if (!Number.isFinite(serverPct)) serverPct = 0;
-    serverPct = Math.max(0, Math.min(100, serverPct));
-    const stage = (data.message || data.stage || data.state || '').toString() || 'Procesando…';
-    tracker?.step(mapServerFraction(serverPct), stage);
+  const controller = new AbortController();
+  importPollController = controller;
+  importPollingCancelled = false;
 
-    const statusVal = String(data.state || data.status || '').toLowerCase();
-    if (statusVal === 'error' || data.error) {
-      throw new Error(data.error || 'Error en importación');
+  const makeCancelledError = () => {
+    const err = new Error('Importación cancelada');
+    err.name = 'ImportCancelledError';
+    err.isCancelled = true;
+    return err;
+  };
+
+  try {
+    while (true) {
+      if (importPollingCancelled) {
+        throw makeCancelledError();
+      }
+      let data;
+      try {
+        const resp = await fetch(`${statusUrl}?task_id=${encodeURIComponent(id)}&t=${Date.now()}`,
+          { __skipLoadingHook: true, __hostEl: host, cache: 'no-store', signal: controller.signal }
+        );
+        if (!resp.ok) throw new Error('Estado no disponible');
+        data = await resp.json();
+      } catch (err) {
+        if (controller.signal.aborted || importPollingCancelled) {
+          throw makeCancelledError();
+        }
+        await sleep(900);
+        continue;
+      }
+      if (data.ui_cost_message) showImportBanner(data.ui_cost_message);
+      const raw = data.pct ?? data.percent ?? data.percentage ?? data.progress ?? (data.done ? 100 : undefined);
+      let serverPct = Number(raw);
+      if (!Number.isFinite(serverPct)) serverPct = 0;
+      serverPct = Math.max(0, Math.min(100, serverPct));
+      const stage = (data.message || data.stage || data.state || '').toString() || 'Procesando…';
+      tracker?.step(mapServerFraction(serverPct), stage);
+
+      const statusVal = String(data.state || data.status || '').toLowerCase();
+      if (statusVal === 'error' || data.error) {
+        throw new Error(data.error || 'Error en importación');
+      }
+      if (statusVal === 'unknown' || !statusVal) {
+        throw new Error('Estado de importación desconocido');
+      }
+      if (statusVal === 'cancelled' || statusVal === 'canceled' || data.cancelled) {
+        markCancelled();
+        showCancel(false);
+        throw makeCancelledError();
+      }
+      if (serverPct >= 100 || statusVal === 'done' || statusVal === 'completed' || statusVal === 'finished') {
+        await reloadTable({ skipProgress: true });
+        hideImportBanner();
+        return data;
+      }
+      await sleep(450);
     }
-    if (statusVal === 'unknown' || !statusVal) {
-      throw new Error('Estado de importación desconocido');
+  } finally {
+    if (importPollController === controller) {
+      importPollController = null;
     }
-    if (serverPct >= 100 || statusVal === 'done' || statusVal === 'completed' || statusVal === 'finished') {
-      await reloadTable({ skipProgress: true });
-      hideImportBanner();
-      return data;
+    importPollingCancelled = false;
+    if (!controller.signal.aborted) {
+      try { controller.abort(); }
+      catch (e) {}
     }
-    await sleep(450);
   }
 }
 
@@ -512,6 +654,7 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
 
     const taskId = startResult.taskId;
     const idStr = typeof taskId === 'string' ? taskId : String(taskId);
+    window.onImportStart?.(idStr);
     tracker.step(IMPORT_UPLOAD_FRAC, 'Archivo subido');
     localStorage.setItem(IMPORT_TASK_LS_KEY, idStr);
 
@@ -524,6 +667,11 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     tracker.step(1, 'Completado');
     return lastResult;
   } catch (err) {
+    if (err?.name === 'ImportCancelledError' || err?.isCancelled) {
+      tracker.step(1, 'Cancelado');
+      markCancelled();
+      return null;
+    }
     tracker.step(1, 'Error');
     toast.error(err?.message || 'Error al importar catálogo');
     throw err;
@@ -531,6 +679,7 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     tracker.done();
     localStorage.removeItem(IMPORT_TASK_LS_KEY);
     hideImportBanner();
+    window.onImportEnd?.();
   }
 }
 
@@ -663,25 +812,28 @@ function ecAutoFitColumns(gridRoot) {
   gridRoot.querySelectorAll('td.ec-col-competition select').forEach(el => el.style.width = (co - EC_LIMITS.competition.pad) + 'px');
 }
 const columns = [
-  { key: 'id', label: 'ID', type: 'number' },
-  { key: 'image_url', label: 'Imagen', type: 'image' },
+  { key: 'id', label: 'ID', type: 'number', align: 'center' },
+  { key: 'image_url', label: 'Imagen', type: 'image', align: 'center' },
   { key: 'name', label: 'Nombre', type: 'string' },
   { key: 'category', label: 'Categoría', type: 'string' },
-  { key: 'price', label: 'Price', type: 'number', align: 'center', editable: false,
+  { key: 'price', label: 'Price', type: 'number', align: 'right', editable: false,
     headerClass:'price-col', cellClass:'price-col',
     render: row => new Intl.NumberFormat('en-US', { style:'currency', currency:'USD', maximumFractionDigits: 2 }).format(row.price ?? 0) },
-  { key: 'Product Rating', label: 'Rating', type: 'number' },
-  { key: 'Item Sold', label: 'Unidades Vendidas', type: 'number' },
-  { key: 'Revenue($)', label: 'Ingresos', type: 'number' },
-  { key: 'Creator Conversion Ratio', label: 'Tasa Conversión', type: 'string' },
+  { key: 'Product Rating', label: 'Rating', type: 'number', align: 'center' },
+  { key: 'Item Sold', label: 'Unidades Vendidas', type: 'number', align: 'right' },
+  { key: 'Revenue($)', label: 'Ingresos', type: 'number', align: 'right' },
+  { key: 'Creator Conversion Ratio', label: 'Tasa Conversión', type: 'string', align: 'right' },
   { key: 'Launch Date', label: 'Fecha Lanzamiento', type: 'string' },
   { key: 'date_range', label: 'Rango Fechas', type: 'string', headerClass: 'cell-date-range', cellClass: 'cell-date-range' },
   { key: 'desire', label: 'Desire', type: 'string', headerClass: 'ec-col ec-col-desire col-desire', cellClass: 'ec-col ec-col-desire col-desire', dataEcCol: 'desire' },
   { key: 'desire_magnitude', label: 'Desire magnetitude', type: 'string', headerClass: 'ec-col ec-col-desire-mag', cellClass: 'ec-col ec-col-desire-mag', dataEcCol: 'desire_magnitude' },
   { key: 'awareness_level', label: 'Awerness Level', type: 'string', headerClass: 'ec-col ec-col-awareness', cellClass: 'ec-col ec-col-awareness', dataEcCol: 'awareness_level' },
   { key: 'competition_level', label: 'Competition level', type: 'string', headerClass: 'ec-col ec-col-competition', cellClass: 'ec-col ec-col-competition', dataEcCol: 'competition_level' },
-  { key: 'winner_score', label: 'Winner Score', type: 'number' },
+  { key: 'winner_score', label: 'Winner Score', type: 'number', align: 'right' },
 ];
+
+const rightAlignedKeys = new Set(['price', 'Item Sold', 'Revenue($)', 'Creator Conversion Ratio', 'winner_score']);
+const centerAlignedKeys = new Set(['id', 'image_url', 'Product Rating']);
 
 let trendingWords = [];
 
@@ -840,6 +992,7 @@ function renderTable() {
     selectAll.type = 'checkbox';
     selectAll.id = 'selectAll';
     thSel.appendChild(selectAll);
+    thSel.classList.add('center');
     headerRow.appendChild(thSel);
     // Add dynamic columns
     columns.forEach(col => {
@@ -847,12 +1000,16 @@ function renderTable() {
       th.textContent = col.label;
       th.style.cursor = 'pointer';
       th.setAttribute('data-key', col.key);
-      if (col.headerClass) th.className = col.headerClass;
+      if (col.headerClass) {
+        col.headerClass.split(/\s+/).forEach(cls => { if (cls) th.classList.add(cls); });
+      }
       if (col.dataEcCol) th.setAttribute('data-ec-col', col.dataEcCol);
       if (col.width) th.style.width = col.width + 'px';
       if (col.minWidth) th.style.minWidth = col.minWidth + 'px';
       if (col.maxWidth) th.style.maxWidth = col.maxWidth + 'px';
       if (col.align) th.style.textAlign = col.align;
+      if (rightAlignedKeys.has(col.key)) th.classList.add('num');
+      if (centerAlignedKeys.has(col.key)) th.classList.add('center');
       if (col.key === 'winner_score') th.title = 'Suma ponderada de 10 métricas normalizadas';
       th.onclick = () => sortBy(col.key, col.type);
       headerRow.appendChild(th);
@@ -891,17 +1048,22 @@ function renderTable() {
       updateMasterState();
     });
     tdSel.appendChild(cb);
+    tdSel.classList.add('center');
     tr.appendChild(tdSel);
     columns.forEach(col => {
       const td = document.createElement('td');
       const key = col.key;
       td.setAttribute('data-key', key);
-      if (col.cellClass) td.className = col.cellClass;
+      if (col.cellClass) {
+        col.cellClass.split(/\s+/).forEach(cls => { if (cls) td.classList.add(cls); });
+      }
       if (col.dataEcCol) td.setAttribute('data-ec-col', col.dataEcCol);
       if (col.width) td.style.width = col.width + 'px';
       if (col.minWidth) td.style.minWidth = col.minWidth + 'px';
       if (col.maxWidth) td.style.maxWidth = col.maxWidth + 'px';
       if (col.align) td.style.textAlign = col.align;
+      if (rightAlignedKeys.has(key)) td.classList.add('num');
+      if (centerAlignedKeys.has(key)) td.classList.add('center');
       let value = '';
       if (key === 'desire') {
         // La columna textual "Desire" NUNCA debe tratarse como métrica
@@ -935,9 +1097,9 @@ function renderTable() {
       } else if (key === 'image_url' && value) {
         const img = document.createElement('img');
         img.src = value;
-        // Increase the preview size for better visibility
-        img.style.width = '100px';
-        img.style.height = '100px';
+        img.loading = 'lazy';
+        img.style.width = '84px';
+        img.style.height = '84px';
         img.style.objectFit = 'cover';
         // Show larger image on click
         img.style.cursor = 'pointer';
@@ -1155,6 +1317,7 @@ window.onload = async () => {
     const host = getGlobalProgressHost();
     const tracker = LoadingHelpers.start('Importando catálogo', { host });
     tracker.step(IMPORT_UPLOAD_FRAC, 'Reanudando…');
+    window.onImportStart?.(tid);
     try {
       const result = await followImportTask(tid, tracker, { host });
       const importedCount = result?.imported ?? result?.rows_imported;
@@ -1163,12 +1326,18 @@ window.onload = async () => {
       }
       tracker.step(1, 'Completado');
     } catch (err) {
-      tracker.step(1, 'Error');
-      toast.error(err?.message || 'Error en importación');
+      if (err?.name === 'ImportCancelledError' || err?.isCancelled) {
+        tracker.step(1, 'Cancelado');
+        markCancelled();
+      } else {
+        tracker.step(1, 'Error');
+        toast.error(err?.message || 'Error en importación');
+      }
     } finally {
       localStorage.removeItem(IMPORT_TASK_LS_KEY);
       tracker.done();
       hideImportBanner();
+      window.onImportEnd?.();
     }
   }
 };
@@ -1508,12 +1677,24 @@ document.getElementById('btnExport').onclick = async () => {
   const tracker = LoadingHelpers.start('Exportando productos', { host });
   try{
     tracker.setStage('Preparando archivo…');
-    const res = await fetch('/export?'+params.toString(), {method:'GET', __hostEl: host, __skipLoadingHook: true});
-    if(res.status !== 200){ toast.error('Error al exportar'); return; }
-    const blob = await res.blob();
+    params.set('format', 'xlsx');
+    let response = await fetch('/api/export?' + params.toString(), { method:'GET', __hostEl: host, __skipLoadingHook: true });
+    let usedFallback = false;
+    if (!response.ok) {
+      tracker.setStage('Generando fallback…');
+      params.set('format', 'html');
+      const fallbackRes = await fetch('/api/export?' + params.toString(), { method:'GET', __hostEl: host, __skipLoadingHook: true });
+      if (!fallbackRes.ok) {
+        toast.error('Error al exportar');
+        return;
+      }
+      response = fallbackRes;
+      usedFallback = true;
+    }
+    const blob = await response.blob();
     // determine filename from header or default
-    const disposition = res.headers.get('Content-Disposition');
-    let filename = 'export.csv';
+    const disposition = response.headers.get('Content-Disposition');
+    let filename = usedFallback ? 'export.html' : 'export.xlsx';
     if(disposition){
       const match = disposition.match(/filename="?([^\"]+)"?/);
       if(match) filename = match[1];
