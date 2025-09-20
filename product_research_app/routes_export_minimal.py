@@ -291,7 +291,6 @@ def _apply_sheet_format(ws) -> None:
     )
     ws.add_table(table)
 
-
 def _convert_row(row: Mapping[str, Any]) -> tuple[List[Any], List[str]]:
     extras = _ensure_dict(row.get("extra"))
     sources = _prepare_sources(row, extras)
@@ -511,7 +510,6 @@ def _parse_money(value: Any) -> float:
     if num is None:
         return 0.0
     return float(num)
-
 
 def _parse_number(value: Any) -> Optional[float]:
     if value is None:

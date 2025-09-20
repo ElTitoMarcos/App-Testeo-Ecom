@@ -871,7 +871,6 @@ def test_export_kalodata_minimal_success(tmp_path, monkeypatch):
 
     assert ws.freeze_panes == "A2"
     assert ws.auto_filter.ref == ws.dimensions
-
     rows = list(ws.iter_rows(min_row=2, values_only=True))
     assert len(rows) == 2
     row1, row2 = rows

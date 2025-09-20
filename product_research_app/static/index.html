@@ -1551,6 +1551,54 @@ document.getElementById('btnExport').onclick = async () => {
   }
 };
 
+const btnExportKalodataMinimal = document.getElementById('btn-export-kalodata-minimal');
+if(btnExportKalodataMinimal){
+  btnExportKalodataMinimal.onclick = async () => {
+    const ids = getSelectedProductIds();
+    if(!ids.length){ toast.info('Selecciona productos para exportar'); return; }
+    btnExportKalodataMinimal.disabled = true;
+    try{
+      const res = await fetch('/api/export/kalodata-minimal', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ ids }),
+        __skipLoadingHook: true,
+      });
+      if(!res.ok){
+        let message = 'Error al preparar archivo';
+        try{
+          const payload = await res.json();
+          if(payload && payload.error){ message = payload.error; }
+        }catch(_err){/* ignore */}
+        toast.error(message);
+        return;
+      }
+      const blob = await res.blob();
+      const disposition = res.headers.get('Content-Disposition');
+      let filename = 'kalodata_for_analysis.xlsx';
+      if(disposition){
+        const match = disposition.match(/filename="?([^\"]+)"?/);
+        if(match){ filename = match[1]; }
+      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast.success('Archivo listo');
+    }catch(err){
+      console.error(err);
+      toast.error('Error al preparar archivo');
+    }finally{
+      const hasSelection = getSelectedProductIds().length>0;
+      btnExportKalodataMinimal.disabled = !hasSelection;
+    }
+  };
+}
+
 function getSelectedProductIds(){ return Array.from(selection, Number); }
 
 // Generate Winner Score for selected or all products
