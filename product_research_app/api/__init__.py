@@ -6,10 +6,12 @@ app = Flask(__name__)
 
 # Import API modules which attach routes to ``app``.
 from . import config  # noqa: E402,F401
+from .export import export_api  # noqa: E402
 from .winner_score import winner_score_api  # noqa: E402
 from ..sse import sse_bp  # noqa: E402
 
 app.register_blueprint(winner_score_api, url_prefix="/api")
+app.register_blueprint(export_api, url_prefix="/api")
 app.register_blueprint(sse_bp)
 
 
