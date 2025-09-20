@@ -105,7 +105,6 @@ body:not(.dark) .btn-cancel {
 .btn-cancel[hidden] {
   display: none !important;
 }
-
 .btn-cancel[disabled] {
   opacity: .6;
   cursor: not-allowed;

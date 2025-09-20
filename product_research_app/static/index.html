@@ -420,7 +420,6 @@ const ensureGlobalProgressHost = () => {
 
 const getGlobalProgressHost = () => ensureGlobalProgressHost();
 const getActionHost = () => document.querySelector('#bottomBar') || getGlobalProgressHost();
-
 const cancelBtn = document.getElementById('btn-cancel-import');
 const pbar = document.querySelector('#global-progress .progress-bar');
 const plabel = document.querySelector('#global-progress .progress-label');

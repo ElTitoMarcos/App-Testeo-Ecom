@@ -297,7 +297,6 @@ def _get_import_status(task_id: str) -> Dict[str, Any] | None:
         snapshot.setdefault("task_id", task_id)
     return snapshot
 
-
 def _normalize_export_key(raw: Any) -> str:
     if raw is None:
         return ""
@@ -431,7 +430,6 @@ def _prepare_export_columns(payload: Any | None) -> list[dict[str, str]]:
         columns.append({"key": "winner_score", "title": "Winner Score"})
     return columns
 
-
 def _collect_export_rows(
     conn: sqlite3.Connection,
     ids: Sequence[int] | None = None,
@@ -448,7 +446,6 @@ def _collect_export_rows(
 
     active_columns = columns or EXPORT_COLUMNS
     column_keys = [str(col.get("key", "")) for col in active_columns]
-
     rows: list[Dict[str, Any]] = []
     for db_row in _iter_rows():
         product = row_to_dict(db_row)
@@ -511,7 +508,6 @@ def _add_img_cell(ws, col_letter: str, row_idx: int, url: str) -> bool:
     ws.row_dimensions[row_idx].height = XLSX_ROW_HEIGHT
     return True
 
-
 def _get_winner_score(item: Mapping[str, Any]) -> Any:
     for key in ("winner_score", "winnerScore", "score", "winner", "winner_score_int"):
         if key in item and item[key] is not None:
@@ -520,7 +516,6 @@ def _get_winner_score(item: Mapping[str, Any]) -> Any:
             except Exception:
                 return item[key]
     return 0
-
 
 def _render_export_xlsx(columns: Sequence[dict[str, str]], rows: Sequence[Dict[str, Any]]) -> bytes:
     wb = Workbook()
@@ -1976,6 +1971,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(payload)
             return
+          
         if path == "/_import_cancel":
             length = int(self.headers.get('Content-Length', 0))
             payload: Dict[str, Any] = {}
