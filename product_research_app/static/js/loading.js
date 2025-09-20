@@ -28,8 +28,23 @@ function createRailInHost(host) {
   return rail;
 }
 
+function ensureGlobalSlot() {
+  const bar = document.querySelector('#global-progress .progress-bar');
+  if (!bar) return null;
+  let slot = bar.querySelector('#progress-slot-global') || bar.querySelector('.progress-slot');
+  if (!slot) {
+    slot = document.createElement('div');
+    slot.id = 'progress-slot-global';
+    slot.className = 'progress-slot';
+    bar.insertBefore(slot, bar.firstChild || null);
+  } else if (!slot.id) {
+    slot.id = 'progress-slot-global';
+  }
+  return slot;
+}
+
 function ensureSlot(el) {
-  // Si el host es un modal o un hijo suyo, usa/crea .modal-progress-slot. Si no, usa #progress-slot-global.
+  // Si el host es un modal o un hijo suyo, usa/crea .modal-progress-slot. Si no, usa el slot global.
   let host = el && (el.closest('.modal')?.querySelector('.modal-progress-slot'));
   if (!host) host = document.querySelector('#progress-slot-global');
 
@@ -41,6 +56,7 @@ function ensureSlot(el) {
     host.className = 'modal-progress-slot progress-slot active';
     header.appendChild(host);
   }
+  if (!host) host = ensureGlobalSlot();
   return host;
 }
 
@@ -63,16 +79,22 @@ function getRailState(host) {
 
 function refreshHost(host) {
   const s = getRailState(host); if (!s) return;
+  clearTimeout(s.hideTimer);
+  const progressBar = host?.closest('.progress-bar') || null;
+  const progressHost = progressBar?.closest('.progress-host') || null;
+  const label = progressHost?.querySelector('.progress-label') || progressBar?.querySelector('.progress-label') || null;
   const tasks = s.tasks;
   if (tasks.size === 0) {
     // completar al 100% brevemente y colapsar el slot
     s.fill.style.width = '100%';
     s.pctEl.textContent = '100%';
-    clearTimeout(s.hideTimer);
     s.hideTimer = setTimeout(() => {
       s.fill.style.width = '0%';
       s.pctEl.textContent = '0%';
       host.classList.remove('active'); // colapsa el slot (height:0)
+      progressBar?.classList.remove('is-cancelled');
+      if (progressHost) progressHost.hidden = true;
+      if (label) label.textContent = 'Listo';
     }, 300);
     return;
   }
@@ -83,10 +105,19 @@ function refreshHost(host) {
   const pct = Math.round(avg * 100);
   s.fill.style.width = pct + '%';
   s.pctEl.textContent = pct + '%';
+  if (progressHost) progressHost.hidden = false;
   host.classList.add('active');
+  progressBar?.classList.remove('is-cancelled');
   if (last) {
     if (last.title) s.titleEl.textContent = last.title;
-    if (last.stage) s.stageEl.textContent = last.stage;
+    if (last.stage) {
+      s.stageEl.textContent = last.stage;
+      if (label) label.textContent = last.stage;
+    } else if (label) {
+      label.textContent = last.title;
+    }
+  } else if (label) {
+    label.textContent = 'Procesando…';
   }
 }
 

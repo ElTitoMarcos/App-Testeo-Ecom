@@ -24,6 +24,11 @@ from product_research_app.database import (
 
 logger = logging.getLogger(__name__)
 
+
+class ImportCancelledError(RuntimeError):
+    """Raised when an import operation is cancelled by the caller."""
+
+
 StatusCallback = Callable[..., None]
 DEFAULT_BATCH_SIZE = 2000
 
@@ -191,6 +196,7 @@ class BulkImporter:
         batch_size: int = DEFAULT_BATCH_SIZE,
         source: Optional[str] = None,
         status_cb: Optional[StatusCallback] = None,
+        should_abort: Optional[Callable[[], bool]] = None,
     ) -> None:
         self.db_path = db_path
         self.job_id = job_id
@@ -205,6 +211,7 @@ class BulkImporter:
         self._unique_hashes: set[str] = set()
         self._summary: Optional[ImportSummary] = None
         self._start = 0.0
+        self._should_abort = should_abort or (lambda: False)
 
     def _open_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, check_same_thread=False, isolation_level=None)
@@ -220,6 +227,16 @@ class BulkImporter:
             except Exception:
                 pass
 
+    def _raise_if_cancelled(self) -> None:
+        try:
+            if bool(self._should_abort()):
+                raise ImportCancelledError("Import cancelled")
+        except ImportCancelledError:
+            raise
+        except Exception:
+            # If the callback itself fails we ignore the error and continue.
+            return
+
     @property
     def summary(self) -> ImportSummary:
         if self._summary is None:
@@ -232,7 +249,9 @@ class BulkImporter:
         self.status_cb(stage="prepare", done=0, total=0)
         self.write_conn.execute("BEGIN IMMEDIATE;")
         try:
+            self._raise_if_cancelled()
             for record in rows:
+                self._raise_if_cancelled()
                 prepared = self._prepare_record(record)
                 if not prepared:
                     continue
@@ -242,7 +261,9 @@ class BulkImporter:
                     self._flush_pending()
             if self.pending:
                 self._flush_pending()
+            self._raise_if_cancelled()
             transition_job_items(self.write_conn, self.job_id, "raw", "pending_enrich")
+            self._raise_if_cancelled()
             merge_staging_into_products(self.write_conn, self.job_id)
             unique_rows = len(self._unique_hashes)
             clear_staging_for_job(self.write_conn, self.job_id)
@@ -398,6 +419,7 @@ class BulkImporter:
     def _flush_pending(self) -> None:
         if not self.pending:
             return
+        self._raise_if_cancelled()
         batch_start = time.perf_counter()
         now = datetime.utcnow().isoformat()
         batch = list(self.pending)
@@ -506,6 +528,7 @@ def fast_import(
     job_id: Optional[int] = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
     db_path: Optional[str] = None,
+    should_abort: Optional[Callable[[], bool]] = None,
 ) -> int:
     base_conn = get_db()
     resolved_path = db_path or _resolve_db_path(base_conn)
@@ -530,6 +553,7 @@ def fast_import(
         batch_size=batch_size,
         source=source,
         status_cb=status_cb,
+        should_abort=should_abort,
     )
     try:
         summary = importer.run(_iter_csv_bytes(csv_bytes))
@@ -551,6 +575,19 @@ def fast_import(
             },
         )
         return summary.unique_rows
+    except ImportCancelledError:
+        logger.info("Fast import cancelled job=%s", job_id)
+        update_import_job_progress(
+            base_conn,
+            job_id,
+            status="cancelled",
+            phase="cancelled",
+            processed=importer.processed,
+            total=importer.processed,
+            rows_imported=0,
+            error=None,
+        )
+        raise
     except Exception as exc:
         logger.exception("Fast import failed job=%s", job_id)
         update_import_job_progress(
@@ -575,6 +612,7 @@ def fast_import_records(
     job_id: Optional[int] = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
     db_path: Optional[str] = None,
+    should_abort: Optional[Callable[[], bool]] = None,
 ) -> int:
     base_conn = get_db()
     resolved_path = db_path or _resolve_db_path(base_conn)
@@ -599,6 +637,7 @@ def fast_import_records(
         batch_size=batch_size,
         source=source,
         status_cb=status_cb,
+        should_abort=should_abort,
     )
     try:
         summary = importer.run(_prepare_rows(records))
@@ -620,6 +659,19 @@ def fast_import_records(
             },
         )
         return summary.unique_rows
+    except ImportCancelledError:
+        logger.info("Fast record import cancelled job=%s", job_id)
+        update_import_job_progress(
+            base_conn,
+            job_id,
+            status="cancelled",
+            phase="cancelled",
+            processed=importer.processed,
+            total=importer.processed,
+            rows_imported=0,
+            error=None,
+        )
+        raise
     except Exception as exc:
         logger.exception("Fast record import failed job=%s", job_id)
         update_import_job_progress(

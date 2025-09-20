@@ -20,6 +20,10 @@ body {
   --ws-thumb: var(--ws-accent);
   --ws-pill-bg: rgba(167,139,250,.15);
   --ws-pill-border: rgba(167,139,250,.45);
+  --topbar-h: 56px;
+  --progress-h: 0px;
+  --sticky-offset: calc(var(--topbar-h) + var(--progress-h));
+  --thead-bg: #12142a;
 }
 
 body.dark {
@@ -31,6 +35,7 @@ body.dark {
   --bar-btn-border: #34456B;
   --bar-btn-color: #E5EAF5;
   --bar-btn-focus: #3A6FD8;
+  --thead-bg: #0f1226;
 }
 
 table {
@@ -38,6 +43,81 @@ table {
   border-collapse: collapse;
   border-spacing: 0;
   margin-top: 0;
+}
+
+.progress-host {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 15px 8px;
+}
+
+.progress-host[hidden] {
+  display: none;
+}
+
+.progress-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+}
+
+.progress-bar .progress-slot {
+  flex: 1;
+}
+
+.progress-bar .progress-label {
+  font-size: 12px;
+  color: #e6e6f0;
+  opacity: 0.9;
+}
+
+body:not(.dark) .progress-bar .progress-label {
+  color: #1f2344;
+  opacity: 0.75;
+}
+
+.btn-cancel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 12px;
+  min-width: 92px;
+  border-radius: 999px;
+  border: 1px solid #6b6f86;
+  background: #1b1f3a;
+  color: #e6e6f0;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+
+body:not(.dark) .btn-cancel {
+  background: #f4f5fc;
+  color: #1b1f3a;
+}
+
+.btn-cancel:hover {
+  filter: brightness(1.1);
+}
+
+.btn-cancel[hidden] {
+  display: none !important;
+}
+
+.btn-cancel[disabled] {
+  opacity: .6;
+  cursor: not-allowed;
+}
+
+.progress-bar.is-cancelled {
+  background: #6c7280 !important;
+}
+
+.progress-bar.is-cancelled .progress-slot .progress-rail {
+  background: #6c7280 !important;
+  outline-color: #6c7280;
 }
 
 .table-toolbar {
@@ -57,6 +137,102 @@ body.dark .table-toolbar {
   background: #131A2E;
   border-bottom: 1px solid #243150;
   color: #E5EAF5;
+}
+
+.table-wrap {
+  position: relative;
+  overflow: auto;
+  max-height: calc(100vh - var(--topbar-h) - 12px);
+}
+
+.products-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
+  background: rgba(17, 20, 38, 0.65);
+  color: #eef1ff;
+  backdrop-filter: blur(10px);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+body:not(.dark) .products-table {
+  background: rgba(255, 255, 255, 0.86);
+  color: #1f2344;
+}
+
+.products-table thead th {
+  position: sticky;
+  top: var(--sticky-offset);
+  z-index: 5;
+  background: var(--thead-bg);
+  color: #f0f3ff;
+  box-shadow: 0 1px 0 rgba(255,255,255,.06), 0 6px 12px rgba(0,0,0,.25);
+}
+
+body:not(.dark) .products-table thead th {
+  color: #f8f9ff;
+}
+
+.products-table th,
+.products-table td {
+  padding: 10px 12px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  border: 0;
+  vertical-align: top;
+}
+
+.products-table tbody td {
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+
+body:not(.dark) .products-table tbody td {
+  border-bottom: 1px solid rgba(26,36,64,0.1);
+}
+
+.page-root,
+.main-content {
+  overflow: initial;
+}
+
+.products-table col.sel { width: 48px; }
+.products-table col.id { width: 56px; }
+.products-table col.imagen { width: 96px; }
+.products-table col.nombre { width: 320px; }
+.products-table col.categoria { width: 220px; }
+.products-table col.price { width: 96px; }
+.products-table col.rating { width: 80px; }
+.products-table col.unidades { width: 120px; }
+.products-table col.ingresos { width: 120px; }
+.products-table col.conv { width: 120px; }
+.products-table col.fecha { width: 120px; }
+.products-table col.rango { width: 140px; }
+.products-table col.desire { width: 380px; }
+.products-table col.magnet { width: 120px; }
+.products-table col.aware { width: 140px; }
+.products-table col.comp { width: 120px; }
+.products-table col.wscore { width: 110px; }
+.products-table col.actions { width: 92px; }
+
+.products-table td.num,
+.products-table th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.products-table td.center,
+.products-table th.center {
+  text-align: center;
+}
+
+.products-table tbody tr.selected {
+  background: #cde8ff;
+}
+
+body.dark .products-table tbody tr.selected {
+  background: #243150;
 }
 
 .table-toolbar > :first-child { justify-self: start; }
@@ -295,22 +471,6 @@ header.app-header {
 }
 body.dark header.app-header {
   background: #1a1b2e;
-}
-#global-progress-wrapper,
-#global-progress-bar {
-  pointer-events: none;
-}
-.global-progress-overlay {
-  position: relative;
-  inset: auto;
-  width: auto;
-  height: auto;
-}
-.app-modal-backdrop {
-  z-index: 40;
-}
-header.app-header .progress-hitbox {
-  pointer-events: none;
 }
 #searchRow {
   display: flex;

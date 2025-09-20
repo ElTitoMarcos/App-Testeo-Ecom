@@ -20,6 +20,8 @@ Then open http://host:port in a browser.
 
 from __future__ import annotations
 
+import csv
+import html
 import json
 import os
 import io
@@ -37,7 +39,14 @@ import sqlite3
 import math
 import hashlib
 from datetime import date, datetime, timedelta
-from typing import Dict, Any, List
+from io import BytesIO
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+
+from openpyxl import Workbook
+from openpyxl.drawing.image import Image as XLImage
+from openpyxl.styles import Font
+from openpyxl.utils import get_column_letter
+from PIL import Image as PILImage
 
 from . import database
 from .db import get_db, get_last_performance_config
@@ -45,7 +54,12 @@ from . import config
 from .services import ai_columns
 from .services import winner_score as winner_calc
 from .services import trends_service
-from .services.importer_fast import DEFAULT_BATCH_SIZE, fast_import, fast_import_records
+from .services.importer_fast import (
+    DEFAULT_BATCH_SIZE,
+    ImportCancelledError,
+    fast_import,
+    fast_import_records,
+)
 from . import gpt
 from .prompts.registry import normalize_task
 from . import title_analyzer
@@ -54,6 +68,28 @@ from .sse import publish_progress
 from .utils.db import row_to_dict, rget
 
 WINNER_SCORE_FIELDS = list(winner_calc.FEATURE_MAP.keys())
+
+EXPORT_COLUMNS: Sequence[dict[str, str]] = (
+    {"key": "id", "title": "ID"},
+    {"key": "image_url", "title": "Imagen"},
+    {"key": "name", "title": "Nombre"},
+    {"key": "category", "title": "Categoría"},
+    {"key": "price", "title": "Precio"},
+    {"key": "rating", "title": "Rating"},
+    {"key": "units_sold", "title": "Unidades vendidas"},
+    {"key": "revenue", "title": "Ingresos"},
+    {"key": "conversion_rate", "title": "Tasa conversión"},
+    {"key": "launch_date", "title": "Fecha lanzamiento"},
+    {"key": "date_range", "title": "Rango fechas"},
+    {"key": "desire", "title": "Desire"},
+    {"key": "desire_magnitude", "title": "Desire magnitude"},
+    {"key": "awareness_level", "title": "Awareness level"},
+    {"key": "competition_level", "title": "Competition level"},
+    {"key": "winner_score", "title": "Winner Score"},
+)
+
+MAX_XLSX_IMG_WIDTH = 64
+XLSX_ROW_HEIGHT = 54
 
 APP_DIR = Path(__file__).resolve().parent
 DB_PATH = APP_DIR / "data.sqlite3"
@@ -86,6 +122,35 @@ _IMPORT_STATUS_LOCK = threading.Lock()
 
 _ENRICH_WORKERS: Dict[int, threading.Thread] = {}
 _ENRICH_LOCK = threading.Lock()
+
+
+class ImportCancellationManager:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cancelled: set[str] = set()
+
+    def cancel(self, task_id: str) -> None:
+        if not task_id:
+            return
+        with self._lock:
+            self._cancelled.add(str(task_id))
+
+    def is_cancelled(self, task_id: str | int | None) -> bool:
+        if task_id in (None, ""):
+            return False
+        tid = str(task_id)
+        with self._lock:
+            return tid in self._cancelled
+
+    def clear(self, task_id: str | int | None) -> None:
+        if task_id in (None, ""):
+            return
+        tid = str(task_id)
+        with self._lock:
+            self._cancelled.discard(tid)
+
+
+IMPORT_CANCEL_MANAGER = ImportCancellationManager()
 
 
 def _parse_date(s: str):
@@ -233,6 +298,345 @@ def _get_import_status(task_id: str) -> Dict[str, Any] | None:
     return snapshot
 
 
+def _normalize_export_key(raw: Any) -> str:
+    if raw is None:
+        return ""
+    key = str(raw)
+    slug = re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
+    aliases = {
+        "id": "id",
+        "image": "image_url",
+        "image_url": "image_url",
+        "imagen": "image_url",
+        "img": "image_url",
+        "name": "name",
+        "nombre": "name",
+        "category": "category",
+        "categoria": "category",
+        "price": "price",
+        "precio": "price",
+        "product_rating": "rating",
+        "rating": "rating",
+        "item_sold": "units_sold",
+        "units_sold": "units_sold",
+        "revenue": "revenue",
+        "creator_conversion_ratio": "conversion_rate",
+        "conversion_rate": "conversion_rate",
+        "launch_date": "launch_date",
+        "fecha_lanzamiento": "launch_date",
+        "date_range": "date_range",
+        "rango_fechas": "date_range",
+        "desire": "desire",
+        "desire_magnitude": "desire_magnitude",
+        "desire_magnetitude": "desire_magnitude",
+        "awareness_level": "awareness_level",
+        "competition_level": "competition_level",
+        "winner_score": "winner_score",
+        "winnerscore": "winner_score",
+        "winner": "winner_score",
+        "score": "winner_score",
+        "wscore": "winner_score",
+    }
+    return aliases.get(slug, key)
+
+
+def _export_value(key: str, product: Dict[str, Any], extras: Dict[str, Any]) -> Any:
+    norm_key = _normalize_export_key(key)
+    if norm_key == "id":
+        return product.get("id")
+    if norm_key == "image_url":
+        return (
+            product.get("image_url")
+            or extras.get("image_url")
+            or extras.get("image")
+            or extras.get("imagen")
+            or extras.get("img")
+        )
+    if norm_key == "name":
+        return product.get("name") or extras.get("name")
+    if norm_key == "category":
+        return product.get("category") or extras.get("category")
+    if norm_key == "price":
+        return product.get("price") or extras.get("price")
+    if norm_key == "rating":
+        return (
+            extras.get("Product Rating")
+            or extras.get("product_rating")
+            or extras.get("rating")
+            or product.get("rating")
+        )
+    if norm_key == "units_sold":
+        return extras.get("Item Sold") or extras.get("units_sold") or product.get("units_sold")
+    if norm_key == "revenue":
+        return extras.get("Revenue($)") or extras.get("revenue") or product.get("revenue")
+    if norm_key == "conversion_rate":
+        return (
+            extras.get("Creator Conversion Ratio")
+            or extras.get("Creator Conversion Ratio (%)")
+            or extras.get("conversion_rate")
+            or product.get("conversion_rate")
+        )
+    if norm_key == "launch_date":
+        return extras.get("Launch Date") or extras.get("launch_date") or product.get("launch_date")
+    if norm_key == "date_range":
+        return product.get("date_range") or extras.get("date_range") or extras.get("Date Range")
+    if norm_key == "desire":
+        return product.get("desire") or extras.get("desire")
+    if norm_key == "desire_magnitude":
+        return (
+            product.get("desire_magnitude")
+            or extras.get("desire_magnitude")
+            or extras.get("Desire magnetitude")
+        )
+    if norm_key == "awareness_level":
+        return product.get("awareness_level") or extras.get("awareness_level")
+    if norm_key == "competition_level":
+        return product.get("competition_level") or extras.get("competition_level")
+    if norm_key == "winner_score":
+        return (
+            product.get("winner_score")
+            or extras.get("winner_score")
+            or extras.get("Winner Score")
+            or extras.get("winnerScore")
+        )
+    return (
+        product.get(norm_key)
+        or extras.get(norm_key)
+        or product.get(key)
+        or extras.get(key)
+    )
+
+
+def _prepare_export_columns(payload: Any | None) -> list[dict[str, str]]:
+    columns: list[dict[str, str]] = []
+    seen_norm: set[str] = set()
+    if isinstance(payload, Sequence):
+        for entry in payload:
+            if not isinstance(entry, dict):
+                continue
+            raw_key = entry.get("key")
+            if not raw_key:
+                continue
+            key = str(raw_key)
+            norm = _normalize_export_key(key)
+            if norm in seen_norm:
+                continue
+            seen_norm.add(norm)
+            title_val = entry.get("title") or entry.get("label") or key
+            title = str(title_val).strip() or key
+            columns.append({"key": key, "title": title})
+    if not columns:
+        columns = [dict(col) for col in EXPORT_COLUMNS]
+    if not any(_normalize_export_key(col["key"]) == "winner_score" for col in columns):
+        columns.append({"key": "winner_score", "title": "Winner Score"})
+    return columns
+
+
+def _collect_export_rows(
+    conn: sqlite3.Connection,
+    ids: Sequence[int] | None = None,
+    columns: Sequence[dict[str, Any]] | None = None,
+) -> list[Dict[str, Any]]:
+    def _iter_rows() -> Iterable[sqlite3.Row]:
+        if ids:
+            for pid in ids:
+                row = database.get_product(conn, int(pid))
+                if row is not None:
+                    yield row
+        else:
+            yield from database.list_products(conn)
+
+    active_columns = columns or EXPORT_COLUMNS
+    column_keys = [str(col.get("key", "")) for col in active_columns]
+
+    rows: list[Dict[str, Any]] = []
+    for db_row in _iter_rows():
+        product = row_to_dict(db_row)
+        extra_raw = product.get("extra")
+        if isinstance(extra_raw, dict):
+            extras: Dict[str, Any] = dict(extra_raw)
+        elif isinstance(extra_raw, str):
+            extras = _maybe_json(extra_raw) or {}
+        else:
+            extras = {}
+        product["desire"] = _ensure_desire(product, extras)
+        record: Dict[str, Any] = {}
+        for raw_key in column_keys:
+            if not raw_key:
+                continue
+            record[raw_key] = _export_value(raw_key, product, extras)
+        # Ensure canonical values are present for fallbacks
+        record.setdefault("winner_score", _export_value("winner_score", product, extras))
+        record.setdefault("winnerScore", record.get("winner_score"))
+        for key, value in extras.items():
+            record.setdefault(key, value)
+        for key, value in product.items():
+            if key == "extra":
+                continue
+            record.setdefault(key, value)
+        rows.append(record)
+    return rows
+
+
+def _fetch_img_bytes(url: str) -> BytesIO | None:
+    try:
+        resp = requests.get(url, timeout=6)
+        resp.raise_for_status()
+    except Exception:
+        return None
+    return BytesIO(resp.content)
+
+
+def _add_img_cell(ws, col_letter: str, row_idx: int, url: str) -> bool:
+    bio = _fetch_img_bytes(url)
+    if not bio:
+        return False
+    try:
+        pil_img = PILImage.open(bio).convert("RGBA")
+    except Exception:
+        return False
+    width, height = pil_img.size
+    if width > MAX_XLSX_IMG_WIDTH and width > 0:
+        ratio = MAX_XLSX_IMG_WIDTH / float(width)
+        pil_img = pil_img.resize((MAX_XLSX_IMG_WIDTH, max(1, int(height * ratio))))
+    out = BytesIO()
+    try:
+        pil_img.save(out, format="PNG")
+    except Exception:
+        return False
+    out.seek(0)
+    xl_img = XLImage(out)
+    xl_img.anchor = f"{col_letter}{row_idx}"
+    ws.add_image(xl_img)
+    ws.row_dimensions[row_idx].height = XLSX_ROW_HEIGHT
+    return True
+
+
+def _get_winner_score(item: Mapping[str, Any]) -> Any:
+    for key in ("winner_score", "winnerScore", "score", "winner", "winner_score_int"):
+        if key in item and item[key] is not None:
+            try:
+                return int(float(item[key]))
+            except Exception:
+                return item[key]
+    return 0
+
+
+def _render_export_xlsx(columns: Sequence[dict[str, str]], rows: Sequence[Dict[str, Any]]) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Productos"
+    header_font = Font(bold=True)
+    col_index: Dict[str, int] = {}
+    norm_map: Dict[str, str] = {}
+    for idx, col in enumerate(columns, start=1):
+        title = str(col.get("title") or col.get("label") or col.get("key") or "")
+        cell = ws.cell(row=1, column=idx, value=title)
+        cell.font = header_font
+        key = str(col.get("key") or "")
+        if key:
+            col_index[key] = idx
+            norm_map[key] = _normalize_export_key(key)
+    ws.freeze_panes = "A2"
+
+    col_letters = {key: get_column_letter(idx) for key, idx in col_index.items()}
+    col_letters_norm: Dict[str, str] = {}
+    for raw_key, letter in col_letters.items():
+        norm_key = norm_map.get(raw_key, raw_key)
+        col_letters_norm.setdefault(norm_key, letter)
+
+    for row_idx, row in enumerate(rows, start=2):
+        for key, col_idx in col_index.items():
+            norm_key = norm_map.get(key, key)
+            value = row.get(key)
+            if (value is None or value == "") and norm_key != key:
+                value = row.get(norm_key)
+            if norm_key == "winner_score" and (value is None or value == ""):
+                value = _get_winner_score(row)
+            if value is None:
+                continue
+            cell_value = value
+            if norm_key == "winner_score":
+                try:
+                    if isinstance(cell_value, str):
+                        cell_value = int(float(cell_value))
+                    elif isinstance(cell_value, float):
+                        cell_value = int(cell_value)
+                except Exception:
+                    pass
+            cell = ws.cell(row=row_idx, column=col_idx, value=cell_value)
+            if norm_key == "winner_score":
+                try:
+                    cell.number_format = "0"
+                except Exception:
+                    pass
+        image_letter = col_letters_norm.get("image_url")
+        if image_letter:
+            img_keys = [raw for raw, norm in norm_map.items() if norm == "image_url"]
+            img_url = None
+            for raw_key in img_keys:
+                img_url = row.get(raw_key)
+                if img_url:
+                    break
+            if not img_url:
+                img_url = row.get("image_url")
+            if isinstance(img_url, str) and img_url.strip():
+                ok = _add_img_cell(ws, image_letter, row_idx, img_url.strip())
+                if ok:
+                    target_key = img_keys[0] if img_keys else "image_url"
+                    clear_idx = col_index.get(target_key)
+                    if clear_idx is not None:
+                        ws.cell(row=row_idx, column=clear_idx, value=None)
+
+    bio = BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
+
+
+def _render_export_html(columns: Sequence[dict[str, str]], rows: Sequence[Dict[str, Any]]) -> bytes:
+    head_cells = "".join(f"<th>{html.escape(col['title'])}</th>" for col in columns)
+    body_parts: list[str] = []
+    for row in rows:
+        cells: list[str] = []
+        for col in columns:
+            key = col["key"]
+            val = row.get(key)
+            if key == "image_url" and isinstance(val, str) and val:
+                url = html.escape(val)
+                cells.append(
+                    "<td><img src=\"{0}\" alt=\"Imagen\" style=\"max-width:96px; max-height:96px;\"><br><a href=\"{0}\">{0}</a></td>".format(
+                        url
+                    )
+                )
+            else:
+                text = "" if val in (None, "") else html.escape(str(val))
+                cells.append(f"<td>{text}</td>")
+        body_parts.append("<tr>" + "".join(cells) + "</tr>")
+    table_html = "".join(body_parts)
+    doc = (
+        "<!DOCTYPE html><html lang=\"es\"><head><meta charset=\"utf-8\"><title>Exportación</title>"
+        "<style>body{font-family:Segoe UI,Tahoma,sans-serif;background:#0f1424;color:#f1f5ff;padding:20px;}"
+        "table{border-collapse:collapse;width:100%;background:#131a2e;}th,td{border:1px solid rgba(255,255,255,0.1);"
+        "padding:8px;text-align:left;}th{position:sticky;top:0;background:#1c2342;}tr:nth-child(even){background:#10162b;}"
+        "img{display:block;border-radius:4px;}</style></head><body>"
+        f"<h1>Exportación de productos</h1><table><thead><tr>{head_cells}</tr></thead><tbody>{table_html}</tbody></table>"
+        "</body></html>"
+    )
+    return doc.encode("utf-8")
+
+
+def _render_export_csv(columns: Sequence[dict[str, str]], rows: Sequence[Dict[str, Any]]) -> bytes:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([col["title"] for col in columns])
+    for row in rows:
+        writer.writerow([
+            "" if row.get(col["key"]) in (None, "") else row.get(col["key"])
+            for col in columns
+        ])
+    return output.getvalue().encode("utf-8")
+
+
 def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> str:
     """Return desire value from known sources.
 
@@ -343,7 +747,13 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
     rows_imported = 0
     inserted_ids: List[int] = []
     task_key = str(job_id)
+
+    def ensure_not_cancelled() -> None:
+        if IMPORT_CANCEL_MANAGER.is_cancelled(task_key):
+            raise ImportCancelledError("Import cancelled")
+
     try:
+        ensure_not_cancelled()
         _set_import_progress(
             task_key,
             pct=2,
@@ -362,6 +772,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
         used_cols: set[str] = set()
 
         def find_key(keys, patterns):
+            ensure_not_cancelled()
             for k in keys:
                 if k in used_cols:
                     continue
@@ -451,6 +862,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             base_id = 0 if is_empty else (max_id + 1)
             rows_validas = []
             for row in records:
+                ensure_not_cancelled()
                 name = (row.get(name_col) or '').strip() if name_col else None
                 if not name:
                     continue
@@ -564,6 +976,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                     total=total_valid,
                 )
             for idx, (name, description, category, price, currency, image_url, date_range, extra_cols, metrics) in enumerate(rows_validas, start=1):
+                ensure_not_cancelled()
                 row_id = base_id + idx
                 database.insert_product(
                     conn,
@@ -594,6 +1007,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                             done=idx,
                             total=total_valid,
                         )
+            ensure_not_cancelled()
             conn.commit()
             _set_import_progress(
                 task_key,
@@ -604,6 +1018,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             )
 
         if inserted_ids and config.is_auto_fill_ia_on_import_enabled():
+            ensure_not_cancelled()
             _set_import_progress(task_key, pct=88, message="Completando columnas con IA")
             database.start_import_job_ai(conn, job_id, len(inserted_ids))
             cfg_cost = config.get_ai_cost_config()
@@ -618,6 +1033,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             database.set_import_job_ai_counts(conn, job_id, counts, res.get("pending_ids", []))
             if res.get("error"):
                 database.set_import_job_ai_error(conn, job_id, "No se pudieron completar las columnas con IA: revisa la API.")
+        ensure_not_cancelled()
         _set_import_progress(task_key, pct=92, message="Calculando Winner Score")
         res_scores = winner_calc.generate_winner_scores(conn, product_ids=inserted_ids)
         updated_scores = int(res_scores.get("updated", 0))
@@ -636,6 +1052,29 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             imported=rows_imported,
             finished_at=time.time(),
         )
+    except ImportCancelledError:
+        logger.info("Import job cancelled job_id=%s", job_id)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        database.update_import_job_progress(
+            conn,
+            job_id,
+            status="cancelled",
+            phase="cancelled",
+            processed=rows_imported,
+            total=rows_imported,
+            rows_imported=0,
+        )
+        _set_import_progress(
+            task_key,
+            pct=100,
+            message="Cancelado",
+            state="cancelled",
+            stage="cancelled",
+            finished_at=time.time(),
+        )
     except Exception as exc:
         try:
             conn.rollback()
@@ -652,6 +1091,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             finished_at=time.time(),
         )
     finally:
+        IMPORT_CANCEL_MANAGER.clear(task_key)
         try:
             tmp_path.unlink()
         except Exception:
@@ -1361,83 +1801,62 @@ class RequestHandler(BaseHTTPRequestHandler):
                 "scatter_price_revenue": scatter_price_revenue,
             }).encode("utf-8"))
             return
-# export selected or all products
-        if path == "/export":
-            qs = parse_qs(parsed.query)
-            fmt = qs.get('format', ['csv'])[0]
-            id_str = qs.get('ids', [None])[0]
-            conn = ensure_db()
-            items: list[sqlite3.Row] = []
-            if id_str:
+        if path in {"/api/export", "/export"}:
+            params = parse_qs(parsed.query)
+            ids_param = params.get("ids", [""])[0] or ""
+            ids: list[int] = []
+            if ids_param:
                 try:
-                    ids = [int(x) for x in id_str.split(',') if x]
+                    ids = [int(x) for x in ids_param.split(",") if x.strip()]
                 except Exception:
                     ids = []
-                for pid in ids:
-                    p = database.get_product(conn, pid)
-                    if p:
-                        items.append(p)
-            else:
-                items = database.list_products(conn)
-            rows = []
-            for p in items:
-                scores = database.get_scores_for_product(conn, p['id'])
-                score_val = None
-                if scores:
-                    sc = scores[0]
-                    if 'winner_score' in sc.keys():
-                        score_val = sc['winner_score']
-                rows.append(
-                    [
-                        p['id'],
-                        p['name'],
-                        score_val,
-                        p['desire'],
-                        p['desire_magnitude'],
-                        p['awareness_level'],
-                        p['competition_level'],
-                        p['date_range'],
-                    ]
-                )
-            headers = ["id", "name", "Winner Score", "Desire", "Desire Magnitude", "Awareness Level", "Competition Level", "Date Range"]
-            if fmt == 'xlsx':
-                try:
-                    from openpyxl import Workbook
-                except Exception:
-                    self._set_json(500)
-                    self.wfile.write(json.dumps({"error": "openpyxl not installed"}).encode('utf-8'))
-                    return
-                wb = Workbook()
-                ws = wb.active
-                ws.append(headers)
-                for r in rows:
-                    ws.append(r)
-                from io import BytesIO
-                bio = BytesIO()
-                wb.save(bio)
-                data = bio.getvalue()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-                self.send_header("Content-Disposition", "attachment; filename=export.xlsx")
-                self.end_headers()
-                self.wfile.write(data)
+            conn = ensure_db()
+            columns = _prepare_export_columns(None)
+            rows = _collect_export_rows(conn, ids if ids else None, columns)
+            if not rows:
+                self.safe_write(lambda: self.send_json({"error": "no_rows"}, status=404))
                 return
-            else:
-                import csv
-                from io import StringIO
-                output = StringIO()
-                writer = csv.writer(output)
-                writer.writerow(headers)
-                writer.writerows(rows)
-                csv_data = output.getvalue().encode('utf-8')
+            fmt_default = "csv" if path == "/export" else "xlsx"
+            fmt = (params.get("format", [fmt_default])[0] or fmt_default).lower()
+            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            if fmt == "html":
+                payload = _render_export_html(columns, rows)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Disposition", f"attachment; filename=export_{timestamp}.html")
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            if fmt == "csv":
+                payload = _render_export_csv(columns, rows)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/csv; charset=utf-8")
-                self.send_header("Content-Disposition", "attachment; filename=export.csv")
+                self.send_header("Content-Disposition", f"attachment; filename=export_{timestamp}.csv")
                 self.end_headers()
-                self.wfile.write(csv_data)
+                self.wfile.write(payload)
                 return
-        # unknown
-        self.send_error(404)
+            try:
+                payload = _render_export_xlsx(columns, rows)
+            except Exception as exc:
+                logger.exception("Export XLSX failed")
+                self.safe_write(
+                    lambda: self.send_json(
+                        {"error": "export_failed", "detail": str(exc)}, status=500
+                    )
+                )
+                return
+            self.send_response(200)
+            self.send_header(
+                "Content-Type",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+            self.send_header(
+                "Content-Disposition",
+                f"attachment; filename=export_{timestamp}.xlsx",
+            )
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         # unknown
         self.send_error(404)
 
@@ -1486,6 +1905,115 @@ class RequestHandler(BaseHTTPRequestHandler):
             config.save_config(cfg)
             self._set_json()
             self.wfile.write(json.dumps({"ok": True, "has_key": True}).encode('utf-8'))
+            return
+        if path == "/api/export":
+            try:
+                length = int(self.headers.get('Content-Length', 0))
+            except Exception:
+                length = 0
+            raw = self.rfile.read(length) if length else b""
+            try:
+                data = json.loads(raw.decode('utf-8') or "{}")
+                if not isinstance(data, dict):
+                    data = {}
+            except Exception:
+                data = {}
+            ids_raw = data.get("ids")
+            id_values: list[Any] = []
+            if isinstance(ids_raw, Sequence) and not isinstance(ids_raw, (str, bytes, bytearray)):
+                id_values = list(ids_raw)
+            elif ids_raw is not None:
+                id_values = [ids_raw]
+            ids: list[int] = []
+            for item in id_values:
+                try:
+                    ids.append(int(item))
+                except Exception:
+                    continue
+            columns = _prepare_export_columns(data.get("columns"))
+            conn = ensure_db()
+            rows = _collect_export_rows(conn, ids if ids else None, columns)
+            if not rows:
+                self.safe_write(lambda: self.send_json({"error": "no_rows"}, status=404))
+                return
+            fmt = str(data.get("format") or "xlsx").lower()
+            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            if fmt == "html":
+                payload = _render_export_html(columns, rows)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Disposition", f"attachment; filename=export_{timestamp}.html")
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            if fmt == "csv":
+                payload = _render_export_csv(columns, rows)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header("Content-Disposition", f"attachment; filename=export_{timestamp}.csv")
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            try:
+                payload = _render_export_xlsx(columns, rows)
+            except Exception as exc:
+                logger.exception("Export XLSX failed")
+                self.safe_write(
+                    lambda: self.send_json(
+                        {"error": "export_failed", "detail": str(exc)}, status=500
+                    )
+                )
+                return
+            self.send_response(200)
+            self.send_header(
+                "Content-Type",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+            self.send_header(
+                "Content-Disposition",
+                f"attachment; filename=export_{timestamp}.xlsx",
+            )
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        if path == "/_import_cancel":
+            length = int(self.headers.get('Content-Length', 0))
+            payload: Dict[str, Any] = {}
+            if length:
+                raw = self.rfile.read(length)
+                try:
+                    payload = json.loads(raw.decode('utf-8') or "{}")
+                    if not isinstance(payload, dict):
+                        payload = {}
+                except Exception:
+                    payload = {}
+            task_raw = payload.get("task_id") or payload.get("job_id") or ""
+            task_id = str(task_raw).strip()
+            if not task_id:
+                self.safe_write(lambda: self.send_json({"ok": False, "error": "missing_task_id"}, status=400))
+                return
+            IMPORT_CANCEL_MANAGER.cancel(task_id)
+            try:
+                job_id = int(task_id)
+            except Exception:
+                job_id = None
+            if job_id is not None:
+                conn = ensure_db()
+                database.update_import_job_progress(
+                    conn,
+                    job_id,
+                    status="cancelling",
+                    phase="cancelling",
+                )
+            updates = {
+                "state": "cancelling",
+                "stage": "cancelling",
+                "message": "Cancelando…",
+            }
+            if job_id is not None:
+                updates["job_id"] = job_id
+            snapshot = _update_import_status(task_id, **updates)
+            self.safe_write(lambda: self.send_json({"ok": True, "status": snapshot}))
             return
         if path == "/upload":
             self.handle_upload()
@@ -1923,6 +2451,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 f.write(data)
             conn = ensure_db()
             job_id = database.create_import_job(conn, str(tmp_path))
+            IMPORT_CANCEL_MANAGER.clear(job_id)
             threading.Thread(target=_process_import_job, args=(job_id, tmp_path, filename), daemon=True).start()
             self.safe_write(lambda: self.send_json({"task_id": job_id}, status=202))
             return
@@ -1939,6 +2468,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 config=job_config,
             )
             task_id = str(job_id)
+            IMPORT_CANCEL_MANAGER.clear(task_id)
             _update_import_status(
                 task_id,
                 job_id=job_id,
@@ -2006,6 +2536,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         job_id=job_id,
                         status_cb=cb,
                         source=filename,
+                        should_abort=lambda: IMPORT_CANCEL_MANAGER.is_cancelled(task_id),
                     )
                     job_row = database.get_import_job(conn, job_id)
                     snapshot = _job_payload_from_row(job_row) or {}
@@ -2031,6 +2562,32 @@ class RequestHandler(BaseHTTPRequestHandler):
                         pct=100,
                         message="Completado",
                     )
+                except ImportCancelledError:
+                    logger.info("Fast CSV import cancelled: filename=%s job_id=%s", filename, job_id)
+                    job_row = database.get_import_job(conn, job_id)
+                    snapshot = _job_payload_from_row(job_row) or {}
+                    done_val = int(snapshot.get("processed") or 0)
+                    total_val = int(snapshot.get("total") or done_val)
+                    _set_import_progress(
+                        task_id,
+                        pct=100,
+                        message="Cancelado",
+                        state="cancelled",
+                        done=done_val,
+                        total=total_val,
+                    )
+                    _update_import_status(
+                        task_id,
+                        job_id=job_id,
+                        state="cancelled",
+                        stage="cancelled",
+                        done=done_val,
+                        total=total_val,
+                        imported=0,
+                        finished_at=time.time(),
+                        pct=100,
+                        message="Cancelado",
+                    )
                 except Exception as exc:
                     logger.exception("Fast CSV import failed: filename=%s", filename)
                     _update_import_status(
@@ -2043,6 +2600,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                         pct=100,
                         message=f"Error: {exc}",
                     )
+                finally:
+                    IMPORT_CANCEL_MANAGER.clear(task_id)
 
             threading.Thread(target=run_csv, daemon=True).start()
             self.safe_write(lambda: self.send_json({"task_id": task_id, "job_id": job_id}, status=202))
@@ -2074,6 +2633,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 config=job_config,
             )
             task_id = str(job_id)
+            IMPORT_CANCEL_MANAGER.clear(task_id)
             _update_import_status(
                 task_id,
                 job_id=job_id,
@@ -2140,6 +2700,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         job_id=job_id,
                         status_cb=cb,
                         source=filename,
+                        should_abort=lambda: IMPORT_CANCEL_MANAGER.is_cancelled(task_id),
                     )
                     job_row = database.get_import_job(conn, job_id)
                     snapshot = _job_payload_from_row(job_row) or {}
@@ -2165,6 +2726,32 @@ class RequestHandler(BaseHTTPRequestHandler):
                         pct=100,
                         message="Completado",
                     )
+                except ImportCancelledError:
+                    logger.info("Fast JSON import cancelled: filename=%s job_id=%s", filename, job_id)
+                    job_row = database.get_import_job(conn, job_id)
+                    snapshot = _job_payload_from_row(job_row) or {}
+                    done_val = int(snapshot.get("processed") or 0)
+                    total_val = int(snapshot.get("total") or total_records)
+                    _set_import_progress(
+                        task_id,
+                        pct=100,
+                        message="Cancelado",
+                        state="cancelled",
+                        done=done_val,
+                        total=total_val,
+                    )
+                    _update_import_status(
+                        task_id,
+                        job_id=job_id,
+                        state="cancelled",
+                        stage="cancelled",
+                        done=done_val,
+                        total=total_val,
+                        imported=0,
+                        finished_at=time.time(),
+                        pct=100,
+                        message="Cancelado",
+                    )
                 except Exception as exc:
                     logger.exception("Fast JSON import failed: filename=%s", filename)
                     _update_import_status(
@@ -2177,6 +2764,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                         pct=100,
                         message=f"Error: {exc}",
                     )
+                finally:
+                    IMPORT_CANCEL_MANAGER.clear(task_id)
 
             threading.Thread(target=run_json, daemon=True).start()
             self.safe_write(lambda: self.send_json({"task_id": task_id, "job_id": job_id}, status=202))
