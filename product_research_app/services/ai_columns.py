@@ -32,6 +32,8 @@ GPT_API_KEY = config.get_api_key() or os.environ.get("OPENAI_API_KEY")
 GPT_EXTRA_HEADERS_RAW = os.getenv("AI_GPT_HEADERS")
 GPT_MODEL_NAME = os.getenv("AI_GPT_MODEL")
 
+RNG_SENTINEL = "<<<RANGES_TXT>>>"
+
 if not GPT_URL:
     GPT_URL = "https://api.openai.com/v1/chat/completions"
 
@@ -155,19 +157,27 @@ def _build_payload(
     ranges_txt = "0-100" if not force_brief else "0-1"
     instructions_template = (
         "Devuelve SOLO JSON válido con este formato: "
-        '{"results":[{"id":"<id>","desire":RANGE_VALUE,'
-        '"desire_magnitude":"Low|Medium|High",'
-        '"awareness_level":RANGE_VALUE,"competition_level":RANGE_VALUE,'
-        '"winner_score":RANGE_VALUE}]}'
-        "\n"
+        + (
+            '{"results":[{"id":"<id>","desire":'
+            + RNG_SENTINEL
+            + ',"desire_magnitude":"Low|Medium|High","awareness_level":'
+            + RNG_SENTINEL
+            + ',"competition_level":'
+            + RNG_SENTINEL
+            + ',"winner_score":'
+            + RNG_SENTINEL
+            + "}]}\n"
+        )
     )
-    instructions = instructions_template.replace("RANGE_VALUE", ranges_txt)
+    instructions = instructions_template.replace(RNG_SENTINEL, ranges_txt)
     if force_brief:
         instructions += "Responde con números compactos (máx 2 decimales).\n"
 
-    usr_content = instructions + f"Items: {json.dumps(items, ensure_ascii=False)}\n"
+    usr_content = (
+        instructions + "Items: " + json.dumps(items, ensure_ascii=False) + "\n"
+    )
     if weights:
-        usr_content += f"Weights: {json.dumps(weights)}"
+        usr_content += "Weights: " + json.dumps(weights)
 
     usr = {"role": "user", "content": usr_content}
     payload = {"messages": [sys, usr]}
