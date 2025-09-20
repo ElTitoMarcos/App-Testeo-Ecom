@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from product_research_app import web_app, database, config
+from product_research_app.routes_export_minimal import COLUMNS as EXPORT_COLUMNS
 from product_research_app.services import winner_score
 from product_research_app.services import config as cfg_service
 from product_research_app.utils.db import row_to_dict
@@ -731,3 +732,163 @@ def test_weights_eff_stable_when_touching_missing_metric(tmp_path, monkeypatch):
     assert resp2["weights_all"] != hash_all1
     assert resp2["weights_eff"] != hash_eff1
     assert resp2["diag"]["sum_filtered"] > sum1
+
+
+def _make_export_dummy(body: str):
+    class Dummy:
+        def __init__(self, payload: str):
+            self.headers = {"Content-Length": str(len(payload))}
+            self.rfile = io.BytesIO(payload.encode("utf-8"))
+            self.wfile = io.BytesIO()
+            self.sent_headers = {}
+            self.status = None
+            self.json_payload = None
+            self.path = "/api/export/kalodata-minimal"
+
+        def send_json(self, obj, status=200):
+            self.status = status
+            self.json_payload = obj
+
+        def send_response(self, code):
+            self.status = code
+
+        def send_header(self, key, value):
+            self.sent_headers[key] = value
+
+        def end_headers(self):
+            pass
+
+    return Dummy(body)
+
+
+def test_export_kalodata_minimal_requires_ids(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(web_app, "ensure_db", lambda: conn)
+
+    handler = _make_export_dummy(json.dumps({}))
+    web_app.RequestHandler.handle_export_kalodata_minimal(handler)
+
+    assert handler.status == 400
+    assert handler.json_payload == {"error": "ids_required"}
+
+
+def test_export_kalodata_minimal_not_found(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(web_app, "ensure_db", lambda: conn)
+
+    handler = _make_export_dummy(json.dumps({"ids": [999]}))
+    web_app.RequestHandler.handle_export_kalodata_minimal(handler)
+
+    assert handler.status == 404
+    assert handler.json_payload == {"error": "products_not_found"}
+
+
+def test_export_kalodata_minimal_success(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(web_app, "ensure_db", lambda: conn)
+
+    extra1 = {
+        "TikTokUrl": "https://tiktok.example/alpha",
+        "KalodataUrl": "https://kalodata.example/alpha",
+        "Img_url": "https://img.example/alpha.jpg",
+        "Category": "Beauty",
+        "Price($)": "$19.99",
+        "Product Rating": "4.8",
+        "Item Sold": "1,200",
+        "Revenue($)": "1000",
+        "Live Revenue($)": "200",
+        "Video Revenue($)": "300",
+        "Shopping Mall Revenue($)": "50",
+        "Launch Date": "2024-01-01",
+        "desire_score": 0.8,
+        "awareness_level": 2,
+        "competition": 0.3,
+    }
+    extra2 = {
+        "tiktok_url": "https://tiktok.example/beta",
+        "KalodataUrl": "https://kalodata.example/beta",
+        "image_url": "https://img.example/beta.png",
+        "Category": "Home",
+        "price": "29",
+        "rating": 4.1,
+        "units_sold": 80,
+        "Revenue($)": "400",
+        "Video Revenue($)": "100",
+        "Launch Date": "2023-12-15",
+        "desire_magnitude": 65,
+        "customer_desire": "Resuelve dolor",
+        "awareness_level_label": "Product-aware",
+        "competition_level_label": "Medium",
+    }
+
+    pid1 = database.insert_product(
+        conn,
+        name="Alpha",
+        description="",
+        category="Beauty",
+        price=19.99,
+        currency="USD",
+        image_url="https://img.example/alpha.jpg",
+        source="kalodata",
+        desire="Fuerte deseo",
+        desire_magnitude=None,
+        awareness_level=None,
+        competition_level=None,
+        extra=extra1,
+    )
+    pid2 = database.insert_product(
+        conn,
+        name="Beta",
+        description="",
+        category="Home",
+        price=None,
+        currency=None,
+        image_url="https://img.example/beta.png",
+        source="kalodata",
+        desire=None,
+        desire_magnitude=None,
+        awareness_level=None,
+        competition_level=None,
+        extra=extra2,
+    )
+
+    handler = _make_export_dummy(json.dumps({"ids": [pid1, pid2]}))
+    web_app.RequestHandler.handle_export_kalodata_minimal(handler)
+
+    assert handler.status == 200
+    assert "kalodata_for_analysis_" in handler.sent_headers.get("Content-Disposition", "")
+
+    payload = handler.wfile.getvalue()
+    assert payload
+
+    from openpyxl import load_workbook
+
+    wb = load_workbook(io.BytesIO(payload))
+    assert wb.sheetnames == ["products"]
+    ws = wb["products"]
+    header = list(next(ws.iter_rows(min_row=1, max_row=1, values_only=True)))
+    assert header == list(EXPORT_COLUMNS)
+
+    rows = list(ws.iter_rows(min_row=2, values_only=True))
+    assert len(rows) == 2
+    row1, row2 = rows
+
+    assert row1[0] == "Alpha"
+    assert row2[0] == "Beta"
+    assert row1[5] == 19.99
+    assert row1[6] == 4.8
+    assert row1[7] == 1200
+    assert row1[8] == 1550.0
+    assert row1[10] == "Fuerte deseo"
+    assert row1[11] == 80
+    assert row1[12] == "Solution-aware"
+    assert row1[13] == "Low"
+
+    assert row2[5] == 29.0
+    assert row2[6] == 4.1
+    assert row2[7] == 80
+    assert row2[8] == 500.0
+    assert row2[10] == "Resuelve dolor"
+    assert row2[11] == 65
+    assert row2[12] == "Product-aware"
+    assert row2[13] == "Medium"

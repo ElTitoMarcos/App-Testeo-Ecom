@@ -245,6 +245,7 @@ body.dark .skeleton{background:#333;}
   <button id="btnManageGroups" class="bar-btn" title="Gestionar grupos" aria-label="Gestionar grupos">Gestionar grupos</button>
   <button id="btnDelete" class="bar-btn" disabled title="Eliminar seleccionados" aria-label="Eliminar seleccionados">Eliminar</button>
   <button id="btnExport" class="bar-btn" disabled title="Exportar seleccionados" aria-label="Exportar seleccionados">Exportar</button>
+  <button id="btn-export-kalodata-minimal" class="bar-btn" disabled title="Preparar análisis (.xlsx)" aria-label="Preparar análisis (.xlsx)">Preparar análisis (.xlsx)</button>
   <button id="btnColumns" class="bar-btn" title="Gestionar columnas" aria-label="Gestionar columnas">Columnas</button>
   </div>
   <div id="legendPop" class="popover hidden">
@@ -1537,6 +1538,54 @@ document.getElementById('btnExport').onclick = async () => {
     tracker.done();
   }
 };
+
+const btnExportKalodataMinimal = document.getElementById('btn-export-kalodata-minimal');
+if(btnExportKalodataMinimal){
+  btnExportKalodataMinimal.onclick = async () => {
+    const ids = getSelectedProductIds();
+    if(!ids.length){ toast.info('Selecciona productos para exportar'); return; }
+    btnExportKalodataMinimal.disabled = true;
+    try{
+      const res = await fetch('/api/export/kalodata-minimal', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ ids }),
+        __skipLoadingHook: true,
+      });
+      if(!res.ok){
+        let message = 'Error al preparar archivo';
+        try{
+          const payload = await res.json();
+          if(payload && payload.error){ message = payload.error; }
+        }catch(_err){/* ignore */}
+        toast.error(message);
+        return;
+      }
+      const blob = await res.blob();
+      const disposition = res.headers.get('Content-Disposition');
+      let filename = 'kalodata_for_analysis.xlsx';
+      if(disposition){
+        const match = disposition.match(/filename="?([^\"]+)"?/);
+        if(match){ filename = match[1]; }
+      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast.success('Archivo listo');
+    }catch(err){
+      console.error(err);
+      toast.error('Error al preparar archivo');
+    }finally{
+      const hasSelection = getSelectedProductIds().length>0;
+      btnExportKalodataMinimal.disabled = !hasSelection;
+    }
+  };
+}
 
 function getSelectedProductIds(){ return Array.from(selection, Number); }
 
