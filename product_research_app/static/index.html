@@ -8,6 +8,7 @@
 <link rel="stylesheet" href="/static/css/loading.css">
 <script type="module" src="/static/js/config.js" defer></script>
 <script type="module" src="/static/js/net.js" defer></script>
+<script src="/static/js/layout.js" defer></script>
 <script defer src="/static/js/legacy-progress-shim.js"></script>
 <style>
 /* Basic layout */
@@ -98,7 +99,7 @@ body.dark .skeleton{background:#333;}
 <body class="dark">
 <header id="topBar" class="app-header">
   <div id="app-header">
-    <div class="app-toolbar" style="padding:8px 15px; display:flex; align-items:center; justify-content:space-between; position:relative;">
+    <div class="app-toolbar topbar" style="padding:8px 15px; display:flex; align-items:center; justify-content:space-between; position:relative;">
       <div style="display:flex; align-items:center; gap:8px;">
         <h1 style="margin:0; font-size:1.4rem;">Ecom Testing App</h1>
         <p style="margin:0;font-size:12px; opacity:0.8;">By El Tito 🤙</p>
@@ -112,10 +113,11 @@ body.dark .skeleton{background:#333;}
         <button id="configBtn" title="Configuración avanzada">⚙️</button>
       </div>
     </div>
-    <div id="global-progress-wrapper">
-      <div id="global-progress-bar" class="progress-hitbox">
-        <div id="progress-slot-global" class="progress-slot" aria-live="polite"></div>
+    <div id="global-progress" class="progress-host" role="status" aria-live="polite">
+      <div id="progress-slot-global" class="progress-bar progress-slot">
+        <span class="progress-label">Importando catálogo…</span>
       </div>
+      <button id="btn-cancel-import" class="btn-cancel" hidden>Cancelar</button>
     </div>
   </div>
   <!-- Search bar row with controls -->
@@ -231,12 +233,22 @@ body.dark .skeleton{background:#333;}
 </section>
 
 <section id="section-products">
-  <table id="productTable">
-  <thead class="sticky-thead">
-    <tr id="headerRow"></tr>
-  </thead>
-  <tbody></tbody>
-  </table>
+  <div class="table-wrap">
+    <table id="productTable" class="products-table">
+      <colgroup>
+        <col class="select">
+        <col class="id"><col class="imagen"><col class="nombre"><col class="categoria">
+        <col class="price"><col class="rating"><col class="unidades"><col class="ingresos">
+        <col class="conv"><col class="fecha"><col class="rango"><col class="desire">
+        <col class="magnet"><col class="aware"><col class="comp"><col class="wscore">
+        <col class="actions">
+      </colgroup>
+      <thead>
+        <tr id="headerRow"></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
   <div id="bottomBar" class="bottombar hidden">
   <button id="legendBtn" class="legend-btn" title="Mostrar leyenda" aria-label="Mostrar leyenda">ℹ️</button>
   <span id="selCount"></span>
@@ -382,6 +394,53 @@ const IMPORT_START_URL = '/upload';
 let savedApiKeyHash = null;
 let savedApiKeyLength = 0;
 
+(function dropProgressDuplicates(){
+  document.querySelectorAll('#global-progress ~ .progress-text, #global-progress .status-text, .progress-info')
+    .forEach(n => n.remove());
+})();
+
+const cancelBtn = document.getElementById('btn-cancel-import');
+const pbar = document.querySelector('#global-progress .progress-bar');
+const plabel = document.querySelector('#global-progress .progress-label');
+
+function showCancel(v){ if(cancelBtn) cancelBtn.hidden = !v; }
+function setStatusLabel(t){ if(plabel) plabel.textContent = t || ''; }
+function resetProgressState(){ pbar?.classList.remove('is-cancelled'); }
+
+async function cancelImport(){
+  if(!cancelBtn || !window.currentTaskId) return;
+  cancelBtn.disabled = true;
+  try{
+    await fetch('/_import_cancel', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ task_id: window.currentTaskId })
+    });
+  }catch(e){}
+  stopImportPolling?.();
+  pbar?.classList.add('is-cancelled');
+  setStatusLabel('Cancelado');
+  showCancel(false);
+  cancelBtn.disabled = false;
+  window.currentTaskId = null;
+  window.onImportEnd?.();
+}
+cancelBtn?.addEventListener('click', cancelImport);
+
+window.onImportStart = (taskId)=>{
+  window.currentTaskId = taskId;
+  resetProgressState();
+  showCancel(true);
+  setStatusLabel('Importando catálogo…');
+};
+window.onImportEnd = ()=>{
+  window.currentTaskId = null;
+  showCancel(false);
+};
+
+setStatusLabel('');
+showCancel(false);
+resetProgressState();
+
 const getGlobalProgressHost = () => document.querySelector('#progress-slot-global');
 const getActionHost = () => document.querySelector('#bottomBar') || getGlobalProgressHost();
 
@@ -441,6 +500,7 @@ async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL
     serverPct = Math.max(0, Math.min(100, serverPct));
     const stage = (data.message || data.stage || data.state || '').toString() || 'Procesando…';
     tracker?.step(mapServerFraction(serverPct), stage);
+    setStatusLabel(stage);
 
     const statusVal = String(data.state || data.status || '').toLowerCase();
     if (statusVal === 'error' || data.error) {
@@ -452,6 +512,7 @@ async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL
     if (serverPct >= 100 || statusVal === 'done' || statusVal === 'completed' || statusVal === 'finished') {
       await reloadTable({ skipProgress: true });
       hideImportBanner();
+      setStatusLabel('Completado');
       return data;
     }
     await sleep(450);
@@ -460,6 +521,8 @@ async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL
 
 async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IMPORT_STATUS_URL } = {}) {
   if (!file) throw new Error('Archivo no válido');
+  resetProgressState();
+  setStatusLabel('Preparando importación…');
   const host = getGlobalProgressHost();
   const tracker = LoadingHelpers.start('Importando catálogo', { host });
   tracker.setStage('Subiendo archivo…');
@@ -477,6 +540,7 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
         if (!event.lengthComputable) return;
         const frac = Math.min(IMPORT_UPLOAD_FRAC, (event.loaded / event.total) * IMPORT_UPLOAD_FRAC);
         tracker.step(frac, 'Subiendo archivo…');
+        setStatusLabel('Subiendo archivo…');
       };
       xhr.onerror = () => reject(new Error('Error de red subiendo archivo'));
       xhr.onload = () => {
@@ -507,12 +571,15 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
       if (Number.isFinite(importedCount) && importedCount > 0) {
         toast.success(`Importados ${importedCount}`);
       }
+      setStatusLabel('Completado');
       return startResult.data;
     }
 
     const taskId = startResult.taskId;
     const idStr = typeof taskId === 'string' ? taskId : String(taskId);
+    window.onImportStart?.(idStr);
     tracker.step(IMPORT_UPLOAD_FRAC, 'Archivo subido');
+    setStatusLabel('Archivo subido');
     localStorage.setItem(IMPORT_TASK_LS_KEY, idStr);
 
     lastResult = await followImportTask(idStr, tracker, { statusUrl, host });
@@ -522,15 +589,18 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
       toast.success(`Importados ${importedCount}`);
     }
     tracker.step(1, 'Completado');
+    setStatusLabel('Completado');
     return lastResult;
   } catch (err) {
     tracker.step(1, 'Error');
     toast.error(err?.message || 'Error al importar catálogo');
+    setStatusLabel('Error');
     throw err;
   } finally {
     tracker.done();
     localStorage.removeItem(IMPORT_TASK_LS_KEY);
     hideImportBanner();
+    window.onImportEnd?.();
   }
 }
 
@@ -1155,6 +1225,9 @@ window.onload = async () => {
     const host = getGlobalProgressHost();
     const tracker = LoadingHelpers.start('Importando catálogo', { host });
     tracker.step(IMPORT_UPLOAD_FRAC, 'Reanudando…');
+    window.onImportStart?.(tid);
+    resetProgressState();
+    setStatusLabel('Reanudando…');
     try {
       const result = await followImportTask(tid, tracker, { host });
       const importedCount = result?.imported ?? result?.rows_imported;
@@ -1162,13 +1235,16 @@ window.onload = async () => {
         toast.success(`Importados ${importedCount}`);
       }
       tracker.step(1, 'Completado');
+      setStatusLabel('Completado');
     } catch (err) {
       tracker.step(1, 'Error');
       toast.error(err?.message || 'Error en importación');
+      setStatusLabel('Error');
     } finally {
       localStorage.removeItem(IMPORT_TASK_LS_KEY);
       tracker.done();
       hideImportBanner();
+      window.onImportEnd?.();
     }
   }
 };

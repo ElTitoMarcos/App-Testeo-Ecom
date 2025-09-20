@@ -5,7 +5,7 @@
 .progress-slot { height: 0; overflow: clip; transition: height 160ms ease; }
 
 /* Cuando hay progreso, el slot se expande y empuja el contenido (sin solapar) */
-.progress-slot.active { height: 18px; }
+.progress-slot.active { height: 30px; }
 
 /* ======= RAIL ======= */
 .progress-rail {
