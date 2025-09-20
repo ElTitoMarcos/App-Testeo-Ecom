@@ -270,6 +270,171 @@ def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> str:
     return desire_val
 
 
+def _normalize_extras(extra: Any) -> Dict[str, Any]:
+    if not extra:
+        return {}
+    if isinstance(extra, dict):
+        return dict(extra)
+    if isinstance(extra, str):
+        try:
+            parsed = json.loads(extra)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            return {}
+    return {}
+
+
+def _parse_export_columns(columns_payload: Any) -> list[dict[str, str]]:
+    parsed: list[dict[str, str]] = []
+    if not isinstance(columns_payload, (list, tuple)):
+        return parsed
+    for item in columns_payload:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "").strip()
+        if not key:
+            continue
+        title_val = item.get("title")
+        title = str(title_val).strip() if title_val not in (None, "") else key
+        if not title:
+            title = key
+        parsed.append({"key": key, "title": title})
+    return parsed
+
+
+def _product_payload_for_export(p_row: Any) -> Dict[str, Any]:
+    product = row_to_dict(p_row) or {}
+    extras = _normalize_extras(rget(product, "extra"))
+    if "rating" in extras and "Product Rating" not in extras:
+        extras["Product Rating"] = extras["rating"]
+    if "units_sold" in extras and "Item Sold" not in extras:
+        extras["Item Sold"] = extras["units_sold"]
+    if "revenue" in extras and "Revenue($)" not in extras:
+        extras["Revenue($)"] = extras["revenue"]
+    if "conversion_rate" in extras and "Creator Conversion Ratio" not in extras:
+        extras["Creator Conversion Ratio"] = extras["conversion_rate"]
+    if "launch_date" in extras and "Launch Date" not in extras:
+        extras["Launch Date"] = extras["launch_date"]
+    desire_val = rget(product, "desire")
+    if desire_val in (None, ""):
+        desire_val = _ensure_desire(product, extras)
+    date_range_val = rget(product, "date_range") or extras.get("date_range") or ""
+    return {
+        "id": rget(product, "id"),
+        "name": rget(product, "name") or "",
+        "category": rget(product, "category") or "",
+        "price": rget(product, "price"),
+        "image_url": rget(product, "image_url"),
+        "desire": desire_val or "",
+        "desire_magnitude": rget(product, "desire_magnitude"),
+        "awareness_level": rget(product, "awareness_level"),
+        "competition_level": rget(product, "competition_level"),
+        "date_range": date_range_val,
+        "winner_score": rget(product, "winner_score"),
+        "extras": extras,
+    }
+
+
+def _parse_number_like(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            num = float(value)
+        except Exception:
+            return None
+        return num if math.isfinite(num) else None
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip()
+    if not trimmed:
+        return None
+    has_comma = "," in trimmed
+    has_dot = "." in trimmed
+    normalized = trimmed
+    if has_comma and has_dot:
+        if trimmed.rfind(",") > trimmed.rfind("."):
+            normalized = normalized.replace(".", "").replace(",", ".")
+        else:
+            normalized = normalized.replace(",", "")
+    elif has_comma:
+        normalized = normalized.replace(",", ".")
+    normalized = "".join(ch for ch in normalized if ch.isdigit() or ch in ".-")
+    try:
+        num = float(normalized)
+    except Exception:
+        return None
+    return num if math.isfinite(num) else None
+
+
+def _resolve_export_value(product: Dict[str, Any], key: str) -> Any:
+    extras = product.get("extras") or {}
+    if not isinstance(extras, dict):
+        extras = {}
+    if key == "desire":
+        return product.get("desire") or _ensure_desire(product, extras) or ""
+    if key == "price":
+        val = product.get("price")
+        if val in (None, ""):
+            val = extras.get("price") or extras.get("Price")
+        return val
+    if key == "image_url":
+        return product.get("image_url") or extras.get("image_url") or extras.get("Image URL") or ""
+    if key == "winner_score":
+        return product.get("winner_score")
+    if key == "name":
+        return product.get("name") or extras.get("name") or ""
+    if key == "category":
+        return product.get("category") or extras.get("category") or ""
+    if key in {"desire_magnitude", "desire magnetitude"}:
+        return (
+            product.get("desire_magnitude")
+            or extras.get("desire_magnitude")
+            or extras.get("Desire magnetitude")
+        )
+    if key == "awareness_level":
+        return product.get("awareness_level") or extras.get("awareness_level")
+    if key == "competition_level":
+        return product.get("competition_level") or extras.get("competition_level")
+    if key == "date_range":
+        return product.get("date_range") or extras.get("date_range")
+    if key == "Launch Date":
+        return extras.get("Launch Date") or extras.get("launch_date")
+    if key in product:
+        return product.get(key)
+    if key in extras:
+        return extras[key]
+    spaced = key.replace("_", " ")
+    if spaced in extras:
+        return extras[spaced]
+    underscored = key.replace(" ", "_")
+    if underscored in extras:
+        return extras[underscored]
+    return ""
+
+
+def _format_export_value(key: str, value: Any) -> Any:
+    if value is None:
+        return ""
+    if isinstance(value, (list, dict)):
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except Exception:
+            return str(value)
+    if key == "price":
+        num = _parse_number_like(value)
+        if num is not None:
+            return f"${num:,.2f}"
+    if key == "winner_score":
+        num = _parse_number_like(value)
+        if num is not None:
+            return str(int(round(num)))
+    if isinstance(value, bool):
+        return "Sí" if value else "No"
+    return str(value)
+
+
 def parse_xlsx(binary: bytes):
     """Parse a minimal XLSX file into a list of dictionaries."""
     import zipfile
@@ -1486,6 +1651,88 @@ class RequestHandler(BaseHTTPRequestHandler):
             config.save_config(cfg)
             self._set_json()
             self.wfile.write(json.dumps({"ok": True, "has_key": True}).encode('utf-8'))
+            return
+        if path == "/api/export":
+            try:
+                length = int(self.headers.get('Content-Length', 0))
+            except (TypeError, ValueError):
+                length = 0
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body.decode('utf-8') or "{}")
+            except Exception:
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            columns = _parse_export_columns(payload.get("columns"))
+            if not columns:
+                self.safe_write(lambda: self.send_json({"error": "columns_required"}, status=400))
+                return
+            ids = payload.get("ids") or []
+            try:
+                conn = ensure_db()
+            except Exception:
+                self.safe_write(lambda: self.send_json({"error": "db_unavailable"}, status=500))
+                return
+            products_data: list[Dict[str, Any]] = []
+            if ids:
+                seen_ids: set[int] = set()
+                for raw_id in ids:
+                    try:
+                        pid = int(raw_id)
+                    except Exception:
+                        continue
+                    if pid in seen_ids:
+                        continue
+                    seen_ids.add(pid)
+                    row = database.get_product(conn, pid)
+                    if row:
+                        products_data.append(_product_payload_for_export(row))
+            else:
+                for row in database.list_products(conn):
+                    products_data.append(_product_payload_for_export(row))
+            try:
+                from openpyxl import Workbook
+                from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+            except Exception:
+                self.safe_write(lambda: self.send_json({"error": "openpyxl_missing"}, status=500))
+                return
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Productos"
+            hdr_fill = PatternFill("solid", fgColor="1f2347")
+            hdr_font = Font(color="FFFFFF", bold=True)
+            header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell_align = Alignment(vertical="top", wrap_text=True)
+            thin = Side(style="thin", color="333333")
+            border = Border(top=thin, left=thin, right=thin, bottom=thin)
+            for idx, col in enumerate(columns, start=1):
+                cell = ws.cell(row=1, column=idx, value=col["title"])
+                cell.fill = hdr_fill
+                cell.font = hdr_font
+                cell.alignment = header_align
+                cell.border = border
+                ws.column_dimensions[cell.column_letter].width = 18
+            for r_idx, product in enumerate(products_data, start=2):
+                for c_idx, col in enumerate(columns, start=1):
+                    raw_value = _resolve_export_value(product, col["key"])
+                    formatted = _format_export_value(col["key"], raw_value)
+                    cell = ws.cell(row=r_idx, column=c_idx, value=formatted)
+                    cell.alignment = cell_align
+                    cell.border = border
+            ws.freeze_panes = "A2"
+            bio = io.BytesIO()
+            wb.save(bio)
+            data = bio.getvalue()
+            filename = f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}" + ".xlsx"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            self.send_header("Content-Disposition", f"attachment; filename={filename}")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
+            self.end_headers()
+            self.wfile.write(data)
             return
         if path == "/upload":
             self.handle_upload()

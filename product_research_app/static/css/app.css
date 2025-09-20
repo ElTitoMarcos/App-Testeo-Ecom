@@ -20,6 +20,10 @@ body {
   --ws-thumb: var(--ws-accent);
   --ws-pill-bg: rgba(167,139,250,.15);
   --ws-pill-border: rgba(167,139,250,.45);
+  --topbar-h: 56px;
+  --progress-h: 0px;
+  --sticky-offset: calc(var(--topbar-h) + var(--progress-h));
+  --tbl-header-bg: #12142a;
 }
 
 body.dark {
@@ -63,17 +67,46 @@ body.dark .table-toolbar {
 .table-toolbar > :nth-child(2) { justify-self: center; }
 .table-toolbar > :last-child { justify-self: end; display: flex; gap: 8px; }
 
-.sticky-thead {
-  position: sticky;
-  top: var(--header-h, 60px);
-  background: #f8fbff;
-  z-index: 15;
+.table-wrap {
+  position: relative;
+  overflow: auto;
+  max-height: calc(100vh - var(--topbar-h) - 16px);
+  scrollbar-gutter: stable both-edges;
 }
-body.dark .sticky-thead {
-  background: #1a1b2e;
+
+.products-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
 }
+
+.products-table thead th,
 .sticky-thead th {
+  position: sticky;
+  top: var(--sticky-offset);
+  z-index: 5;
+  background: var(--tbl-header-bg);
   border-top: 0;
+  box-shadow: 0 1px 0 rgba(255,255,255,0.06), 0 6px 12px rgba(0,0,0,0.25);
+}
+
+body:not(.dark) {
+  --tbl-header-bg: #f8fbff;
+}
+
+.main-content,
+.page-root {
+  overflow: initial;
+}
+
+.topbar .progress-host,
+#global-progress-wrapper {
+  height: auto;
+}
+
+.progress-bar.is-cancelled {
+  background: #6c7280 !important;
 }
 
 .drawer.right {

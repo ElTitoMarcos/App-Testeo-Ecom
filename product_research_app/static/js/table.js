@@ -2,6 +2,36 @@ const selection = new Set();
 let currentPageIds = [];
 let master = null;
 const bottomBar = document.getElementById('bottomBar');
+const tableWrap = document.querySelector('.table-wrap');
+
+(function stickyHeaderOffsets(){
+  const root = document.documentElement;
+  function px(n){ return `${n || 0}px`; }
+  function isVisible(el){
+    if(!el) return false;
+    if(el.offsetParent === null && getComputedStyle(el).position !== 'fixed') return false;
+    return el.offsetHeight > 0 && el.getClientRects().length > 0;
+  }
+  function updateOffsets(){
+    const topbar = document.querySelector('#topBar') || document.querySelector('.topbar');
+    const toolbar = topbar ? topbar.querySelector('.app-toolbar') : null;
+    const topH = toolbar ? toolbar.offsetHeight : (topbar ? topbar.offsetHeight : 0);
+    const progress = document.querySelector('#global-progress-wrapper') || document.querySelector('#global-progress-bar');
+    const progH = isVisible(progress) ? progress.offsetHeight : 0;
+    root.style.setProperty('--topbar-h', px(topH));
+    root.style.setProperty('--progress-h', px(progH));
+  }
+  const resize = () => updateOffsets();
+  window.addEventListener('resize', resize);
+  const observed = [document.querySelector('#topBar'), document.querySelector('#global-progress-wrapper'), document.querySelector('#global-progress-bar')].filter(Boolean);
+  if('ResizeObserver' in window){
+    const ro = new ResizeObserver(updateOffsets);
+    observed.forEach(el => ro.observe(el));
+  }
+  const mo = new MutationObserver(updateOffsets);
+  mo.observe(document.body, {subtree: true, attributes: true, attributeFilter: ['class','style','hidden']});
+  requestAnimationFrame(updateOffsets);
+})();
 
 import('./format.js').then(m => {
   window.abbr = m.abbr;
@@ -42,9 +72,12 @@ function updateMasterState(){
     if(selEl) selEl.textContent = `${selection.size} seleccionados`;
     bottomBar.classList.toggle('hidden', noneSelected);
     if(!noneSelected){
-      document.body.style.paddingBottom = bottomBar.offsetHeight + 'px';
+      const pad = bottomBar.offsetHeight;
+      document.body.style.paddingBottom = pad + 'px';
+      if(tableWrap) tableWrap.style.paddingBottom = pad + 'px';
     } else {
       document.body.style.paddingBottom = '';
+      if(tableWrap) tableWrap.style.paddingBottom = '';
     }
   }
 }

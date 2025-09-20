@@ -231,12 +231,14 @@ body.dark .skeleton{background:#333;}
 </section>
 
 <section id="section-products">
-  <table id="productTable">
-  <thead class="sticky-thead">
-    <tr id="headerRow"></tr>
-  </thead>
-  <tbody></tbody>
-  </table>
+  <div class="table-wrap">
+    <table id="productTable" class="products-table">
+      <thead class="sticky-thead">
+        <tr id="headerRow"></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
   <div id="bottomBar" class="bottombar hidden">
   <button id="legendBtn" class="legend-btn" title="Mostrar leyenda" aria-label="Mostrar leyenda">ℹ️</button>
   <span id="selCount"></span>
@@ -1496,43 +1498,249 @@ document.getElementById('btnDelete').onclick = () => {
   }});
 };
 
-// Export selected products as CSV
+function timestampedFilename(ext){
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `export_${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.${ext}`;
+}
+
+function extractFilenameFromDisposition(disposition){
+  if(!disposition) return null;
+  const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if(utf8Match && utf8Match[1]){
+    try { return decodeURIComponent(utf8Match[1]); }
+    catch(_){}
+  }
+  const match = disposition.match(/filename="?([^";]+)"?/i);
+  return match ? match[1] : null;
+}
+
+function getVisibleColumnsMeta(){
+  const ths = Array.from(document.querySelectorAll('#productTable thead th[data-key]'));
+  return ths
+    .filter(th => !th.classList.contains('col-hidden'))
+    .map(th => {
+      const key = th.dataset.key;
+      if(!key) return null;
+      const title = (th.textContent || '').trim() || key;
+      return { key, title };
+    })
+    .filter(Boolean);
+}
+
+function downloadBlob(blob, filename){
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function getRowsDataByIds(ids){
+  const ordered = ids.map(id => String(id));
+  const sources = [window.allProducts, window.__allProducts, window.products, window.__visibleProducts];
+  const map = new Map();
+  sources.forEach(list => {
+    if(Array.isArray(list)){
+      list.forEach(item => {
+        if(!item) return;
+        const key = String(item.id ?? '');
+        if(!key) return;
+        if(!map.has(key)) map.set(key, item);
+      });
+    }
+  });
+  const rows = [];
+  const seen = new Set();
+  ordered.forEach(id => {
+    if(seen.has(id)) return;
+    seen.add(id);
+    const row = map.get(id);
+    if(row) rows.push(row);
+  });
+  return rows;
+}
+
+function parseNumberLike(value){
+  if(typeof value === 'number' && Number.isFinite(value)) return value;
+  if(typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if(!trimmed) return null;
+  const hasComma = trimmed.includes(',');
+  const hasDot = trimmed.includes('.');
+  let normalized = trimmed;
+  if(hasComma && hasDot){
+    const lastComma = trimmed.lastIndexOf(',');
+    const lastDot = trimmed.lastIndexOf('.');
+    if(lastComma > lastDot){
+      normalized = normalized.replace(/\./g, '').replace(/,/g, '.');
+    } else {
+      normalized = normalized.replace(/,/g, '');
+    }
+  } else if(hasComma){
+    normalized = normalized.replace(/,/g, '.');
+  }
+  normalized = normalized.replace(/[^0-9.-]/g, '');
+  const num = Number(normalized);
+  return Number.isFinite(num) ? num : null;
+}
+
+function resolveCellValueForExport(row, key){
+  if(!row) return '';
+  const extrasRaw = row.extras;
+  const extras = (extrasRaw && typeof extrasRaw === 'object') ? extrasRaw : {};
+  if(key === 'desire'){
+    return row.desire ?? extras.desire ?? row.ai_desire ?? row.ai_desire_label ?? row.desire_magnitude ?? '';
+  }
+  if(key === 'price'){
+    const primary = row.price ?? row.price_display ?? extras.price ?? extras.Price;
+    return primary ?? '';
+  }
+  if(key === 'image_url'){
+    return row.image_url ?? extras.image_url ?? extras['Image URL'] ?? '';
+  }
+  if(key === 'winner_score'){
+    return row.winner_score ?? '';
+  }
+  if(key === 'name'){
+    const base = row.name ?? extras.name ?? '';
+    const trend = Number(row.trending ?? extras.trending ?? 0);
+    if(Number.isFinite(trend) && trend > 0){
+      return `${base} ${'🔥'.repeat(Math.max(0, Math.round(trend)))}`.trim();
+    }
+    return base;
+  }
+  if(key === 'category'){
+    return row.category ?? extras.category ?? '';
+  }
+  if(['desire_magnitude','desire magnetitude'].includes(key)){
+    return row.desire_magnitude ?? extras.desire_magnitude ?? extras['Desire magnetitude'] ?? '';
+  }
+  if(key === 'awareness_level'){
+    return row.awareness_level ?? extras.awareness_level ?? '';
+  }
+  if(key === 'competition_level'){
+    return row.competition_level ?? extras.competition_level ?? '';
+  }
+  if(key === 'date_range'){
+    return row.date_range ?? extras.date_range ?? '';
+  }
+  if(key === 'Launch Date'){
+    return extras['Launch Date'] ?? extras.launch_date ?? '';
+  }
+  if(key in row && row[key] !== undefined && row[key] !== null){
+    return row[key];
+  }
+  if(key in extras){
+    return extras[key];
+  }
+  const spaceKey = key.replace(/_/g, ' ');
+  if(spaceKey in extras){
+    return extras[spaceKey];
+  }
+  const underscoreKey = key.replace(/\s+/g, '_');
+  if(underscoreKey in extras){
+    return extras[underscoreKey];
+  }
+  return '';
+}
+
+function formatValueForExport(value, key){
+  if(value === null || value === undefined) return '';
+  if(key === 'price'){
+    const num = parseNumberLike(value);
+    if(num !== null){
+      return new Intl.NumberFormat('en-US', { style:'currency', currency:'USD', maximumFractionDigits: 2 }).format(num);
+    }
+  }
+  if(key === 'winner_score'){
+    const num = parseNumberLike(value);
+    if(num !== null){
+      return String(Math.round(num));
+    }
+  }
+  if(typeof value === 'boolean'){ return value ? 'Sí' : 'No'; }
+  if(typeof value === 'object'){
+    try { return JSON.stringify(value, null, 2); }
+    catch(_) { return String(value); }
+  }
+  return String(value);
+}
+
+function escapeHtml(str){
+  return String(str).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[ch] || ch));
+}
+
+function exportAsHTML(ids, cols){
+  const rows = getRowsDataByIds(ids);
+  const head = cols.map(col => `<th style="padding:8px 12px;text-align:left;background:#12142a;color:#fff;border-bottom:1px solid #333;">${escapeHtml(col.title)}</th>`).join('');
+  const body = rows.map(row => {
+    const cells = cols.map(col => {
+      const raw = resolveCellValueForExport(row, col.key);
+      const display = formatValueForExport(raw, col.key);
+      const safe = escapeHtml(display).replace(/\n/g, '<br>');
+      return `<td style="padding:8px 12px;border-bottom:1px solid #2a2e4e;vertical-align:top;color:#e6e6e6;">${safe}</td>`;
+    }).join('');
+    return `<tr>${cells}</tr>`;
+  }).join('');
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Export</title></head><body style="margin:0;font-family:Segoe UI,Roboto,Arial,sans-serif;background:#0e1022;color:#e6e6e6;padding:16px;"><table style="width:100%;border-collapse:separate;border-spacing:0;table-layout:fixed;">
+    <thead><tr>${head}</tr></thead>
+    <tbody>${body}</tbody>
+  </table></body></html>`;
+}
+
+// Export selected products as XLSX with HTML fallback
 document.getElementById('btnExport').onclick = async () => {
-  const ids = Array.from(selection, Number);
+  const ids = getSelectedProductIds();
   if(!ids.length){ toast.info('Selecciona productos para exportar'); return; }
-  // Build query string
-  const params = new URLSearchParams();
-  params.set('ids', ids.join(','));
-  // request export file
+  const columnsMeta = getVisibleColumnsMeta();
+  if(!columnsMeta.length){ toast.info('No hay columnas visibles para exportar'); return; }
   const host = getActionHost();
   const tracker = LoadingHelpers.start('Exportando productos', { host });
-  try{
-    tracker.setStage('Preparando archivo…');
-    const res = await fetch('/export?'+params.toString(), {method:'GET', __hostEl: host, __skipLoadingHook: true});
-    if(res.status !== 200){ toast.error('Error al exportar'); return; }
-    const blob = await res.blob();
-    // determine filename from header or default
-    const disposition = res.headers.get('Content-Disposition');
-    let filename = 'export.csv';
-    if(disposition){
-      const match = disposition.match(/filename="?([^\"]+)"?/);
-      if(match) filename = match[1];
+  try {
+    tracker.setStage('Preparando Excel…');
+    const res = await fetch('/api/export', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ ids, columns: columnsMeta }),
+      __hostEl: host,
+      __skipLoadingHook: true
+    });
+    if(!res.ok){
+      let detail = '';
+      try {
+        const payload = await res.json();
+        detail = payload?.error || payload?.message || '';
+      } catch(_){ }
+      throw new Error(detail || `HTTP ${res.status}`);
     }
-    tracker.step(0.7, 'Descargando…');
-    // trigger download
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    tracker.step(0.6, 'Generando archivo…');
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition');
+    let filename = extractFilenameFromDisposition(disposition) || timestampedFilename('xlsx');
+    if(!/\.xlsx$/i.test(filename)){ filename += '.xlsx'; }
+    tracker.step(0.9, 'Descargando…');
+    downloadBlob(blob, filename);
     tracker.step(1, 'Completado');
-  } catch(err){
+    toast.success('Exportación lista');
+  } catch(err) {
     console.error(err);
-    toast.error('Error al exportar');
-    tracker.step(1, 'Error');
+    tracker.setStage('Generando HTML alternativo…');
+    toast.info('No se pudo generar Excel. Se descargará un HTML alternativo.');
+    try {
+      const html = exportAsHTML(ids, columnsMeta);
+      tracker.step(0.85, 'Preparando HTML…');
+      downloadBlob(new Blob([html], {type:'text/html;charset=utf-8'}), timestampedFilename('html'));
+      tracker.step(1, 'Completado');
+      toast.success('Exportación HTML lista');
+    } catch(fallbackErr) {
+      console.error(fallbackErr);
+      tracker.step(1, 'Error');
+      toast.error('No se pudo exportar los productos');
+    }
   } finally {
     tracker.done();
   }
