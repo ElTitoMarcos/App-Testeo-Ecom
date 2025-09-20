@@ -8,6 +8,10 @@ body {
 }
 
 :root {
+  --topbar-h: 56px;
+  --toolbar-h: 0px;
+  --sticky-offset: calc(var(--topbar-h) + var(--toolbar-h));
+  --thead-bg: #12142a;
   --dup-bg: #ffe5e5;
   --dup-accent: #ff3b30;
   --bar-btn-bg: #e0f0ff;
@@ -33,11 +37,52 @@ body.dark {
   --bar-btn-focus: #3A6FD8;
 }
 
+.page-root,
+.main-content {
+  overflow: initial;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
   border-spacing: 0;
   margin-top: 0;
+}
+
+.table-wrap {
+  position: relative;
+  overflow: auto;
+  max-height: calc(100vh - var(--topbar-h));
+  margin-top: 0;
+}
+
+.table-wrap,
+.products-table,
+.products-table thead {
+  transform: none !important;
+}
+
+.products-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.products-table thead th {
+  position: sticky;
+  top: var(--sticky-offset);
+  z-index: 1000;
+  background: var(--thead-bg);
+  color: #f7f8ff;
+  border-top: none;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.06), 0 6px 12px rgba(0, 0, 0, 0.25);
+}
+
+.products-table tbody td {
+  position: relative;
+  z-index: 1;
 }
 
 .table-toolbar {
@@ -290,11 +335,140 @@ body.dark .chip button { color: #A9B4D0; }
 header.app-header {
   position: sticky;
   top: 0;
-  z-index: 50;
-  background: #f8fbff;
+  z-index: 1200;
+  background: transparent;
 }
 body.dark header.app-header {
-  background: #1a1b2e;
+  background: transparent;
+}
+
+.topbar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 18px;
+  min-height: 56px;
+  color: #fff;
+  background: linear-gradient(90deg, #0062ff, #00c8ff);
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.35);
+}
+
+body.dark .topbar {
+  background: linear-gradient(90deg, #2e2e78, #6547a6);
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.45);
+}
+
+.topbar .app-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-wrap: nowrap;
+}
+
+#progress-info[hidden] {
+  display: none !important;
+}
+
+.topbar .brand {
+  margin: 0;
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: #fff;
+  white-space: nowrap;
+}
+
+.topbar .by {
+  font-size: 0.9rem;
+  color: rgba(255, 255, 255, 0.85);
+  white-space: nowrap;
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.progress-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: 12px;
+  flex: 0 0 auto;
+  max-width: 44vw;
+  white-space: nowrap;
+  overflow: hidden;
+  flex-wrap: nowrap;
+}
+
+.progress-info .pi-text {
+  display: flex;
+  gap: 6px;
+  color: #e9e9f5;
+  font-size: 12px;
+  opacity: 0.9;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.progress-info .pi-track {
+  position: relative;
+  width: 260px;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+
+.progress-info .pi-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #A08CFF, #6EA5FF);
+  transform: translateZ(0);
+}
+
+.progress-info .pi-pct {
+  position: absolute;
+  right: 8px;
+  top: -18px;
+  font-size: 11px;
+  color: #e9e9f5;
+  opacity: 0.85;
+}
+
+.progress-info .pi-cancel {
+  padding: 6px 12px;
+  border-radius: 999px;
+  min-width: 92px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  background: rgba(0, 0, 0, 0.22);
+  color: #fff;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.progress-info .pi-cancel:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.progress-host,
+.progress-text,
+.status-text,
+.progress-info-legacy {
+  display: none !important;
 }
 #global-progress-wrapper,
 #global-progress-bar {
@@ -312,17 +486,28 @@ body.dark header.app-header {
 header.app-header .progress-hitbox {
   pointer-events: none;
 }
-#searchRow {
+.toolbar {
+  position: sticky;
+  top: var(--topbar-h);
+  z-index: 980;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  padding: 8px 15px 0 15px;
+  padding: 10px 16px;
   background: #f8fbff;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+  margin-bottom: 0;
 }
-body.dark #searchRow { background: #1a1b2e; }
 
-#searchRow > * { flex: 0 0 auto; }
+body.dark .toolbar {
+  background: #1a1b2e;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
+}
+
+.toolbar > * {
+  flex: 0 0 auto;
+}
 
 #searchInput {
   flex: 1 0 300px;

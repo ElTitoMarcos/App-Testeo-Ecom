@@ -9,6 +9,7 @@
 <script type="module" src="/static/js/config.js" defer></script>
 <script type="module" src="/static/js/net.js" defer></script>
 <script defer src="/static/js/legacy-progress-shim.js"></script>
+<script src="/static/js/layout.js" defer></script>
 <style>
 /* Basic layout */
 body { margin:0; padding:0; font-family: 'Segoe UI', Tahoma, sans-serif; color:#222; background: linear-gradient(to bottom, #f8fbff, #e9f0ff); }
@@ -95,15 +96,27 @@ body.dark .skeleton{background:#333;}
 
 </style>
 </head>
-<body class="dark">
+<body class="dark page-root">
 <header id="topBar" class="app-header">
   <div id="app-header">
-    <div class="app-toolbar" style="padding:8px 15px; display:flex; align-items:center; justify-content:space-between; position:relative;">
-      <div style="display:flex; align-items:center; gap:8px;">
-        <h1 style="margin:0; font-size:1.4rem;">Ecom Testing App</h1>
-        <p style="margin:0;font-size:12px; opacity:0.8;">By El Tito 🤙</p>
+    <div class="topbar">
+      <div class="app-title">
+        <span class="brand">Ecom Testing App</span>
+        <span class="by">By El Tito 👑</span>
+        <div id="progress-info" class="progress-info" hidden aria-live="polite">
+          <div class="pi-text">
+            <span class="pi-phase">Importando catálogo</span>
+            <span class="pi-sep">·</span>
+            <span class="pi-sub">Completando columnas con IA</span>
+          </div>
+          <div class="pi-track">
+            <div class="pi-fill" style="width:0%"></div>
+            <span class="pi-pct">0%</span>
+          </div>
+          <button id="btn-cancel-import" class="pi-cancel" type="button">Cancelar</button>
+        </div>
       </div>
-      <div style="flex:1; display:flex; justify-content:flex-end; gap:8px; align-items:center;">
+      <div class="topbar-actions">
         <input type="file" id="fileInput" style="display:none;" />
         <button id="uploadBtn" title="Subir archivo">📤</button>
         <button id="refreshBtn" title="Actualizar lista">🔄</button>
@@ -112,14 +125,10 @@ body.dark .skeleton{background:#333;}
         <button id="configBtn" title="Configuración avanzada">⚙️</button>
       </div>
     </div>
-    <div id="global-progress-wrapper">
-      <div id="global-progress-bar" class="progress-hitbox">
-        <div id="progress-slot-global" class="progress-slot" aria-live="polite"></div>
-      </div>
-    </div>
   </div>
-  <!-- Search bar row with controls -->
-  <div id="searchRow">
+</header>
+<main class="main-content">
+  <div id="searchRow" class="toolbar">
     <input type="text" id="searchInput" placeholder="Buscar producto o palabra clave..." aria-label="Buscar productos" />
     <button id="searchBtn">Buscar</button>
     <button id="btnFilters">Filtros</button>
@@ -135,7 +144,6 @@ body.dark .skeleton{background:#333;}
       <div id="listMeta">0 resultados</div>
     </div>
   </div>
-</header>
 <div id="importBanner" style="display:none; padding:8px; text-align:center;"></div>
 <div id="config" style="display:none;">
   <div class="config-controls">
@@ -231,12 +239,14 @@ body.dark .skeleton{background:#333;}
 </section>
 
 <section id="section-products">
-  <table id="productTable">
-  <thead class="sticky-thead">
-    <tr id="headerRow"></tr>
-  </thead>
-  <tbody></tbody>
-  </table>
+  <div class="table-wrap">
+    <table id="productTable" class="products-table">
+      <thead>
+        <tr id="headerRow"></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
   <div id="bottomBar" class="bottombar hidden">
   <button id="legendBtn" class="legend-btn" title="Mostrar leyenda" aria-label="Mostrar leyenda">ℹ️</button>
   <span id="selCount"></span>
@@ -348,6 +358,7 @@ body.dark .skeleton{background:#333;}
     <button id="clearFilters" style="flex:1;">Limpiar</button>
   </div>
 </div>
+</main>
 <script type="module" src="/static/js/loading.js" defer></script>
 <script src="/static/js/overlay.js" defer></script>
 <script src="/static/js/toast.js" defer></script>
@@ -379,7 +390,61 @@ const IMPORT_POLL_MAX_FRAC = 0.99;
 const IMPORT_SERVER_SPAN = IMPORT_POLL_MAX_FRAC - IMPORT_UPLOAD_FRAC;
 const IMPORT_STATUS_URL = '/_import_status';
 const IMPORT_START_URL = '/upload';
-let savedApiKeyHash = null;
+let stopImportPolling = null;
+window.stopImportPolling = null;
+
+const IMPORT_PROGRESS_DEFAULT_PHASE = 'Importando catálogo';
+const IMPORT_PHASE_LABELS = {
+  parse: 'Importando catálogo',
+  ingest: 'Importando catálogo',
+  upload: 'Importando catálogo',
+  queued: 'Importando catálogo',
+  running: 'Importando catálogo',
+  enrich: 'Completando columnas con IA',
+  ai: 'Completando columnas con IA',
+  augment: 'Completando columnas con IA',
+  enhance: 'Completando columnas con IA',
+  finalize: 'Finalizando catálogo',
+  final: 'Finalizando catálogo',
+  finalizing: 'Finalizando catálogo',
+  finish: 'Finalizando catálogo',
+  done: 'Importación completada',
+  completed: 'Importación completada',
+  success: 'Importación completada',
+  error: 'Error en importación',
+  failed: 'Error en importación',
+  cancel: 'Importación cancelada'
+};
+
+function resolveImportPhase(phase, state, fallback = IMPORT_PROGRESS_DEFAULT_PHASE) {
+  const candidates = [phase, state];
+  for (const raw of candidates) {
+    if (!raw) continue;
+    const key = String(raw).toLowerCase();
+    if (IMPORT_PHASE_LABELS[key]) return IMPORT_PHASE_LABELS[key];
+  }
+  for (const raw of candidates) {
+    if (!raw) continue;
+    const text = String(raw).trim();
+    if (text) return text;
+  }
+  return fallback;
+}
+
+function pickProgressDetail(...values) {
+  for (const val of values) {
+    if (val === undefined || val === null) continue;
+    const text = String(val).trim();
+    if (text) return text;
+  }
+  return '';
+}
+
+function emitImportProgress(pct, info = {}) {
+  const phaseText = info.phaseLabel ? String(info.phaseLabel) : resolveImportPhase(info.phase, info.state);
+  const detailText = pickProgressDetail(info.detail, info.sub, info.message, info.stage, info.statusText);
+  window.onImportTick?.(pct, phaseText, detailText);
+}
 let savedApiKeyLength = 0;
 
 const getGlobalProgressHost = () => document.querySelector('#progress-slot-global');
@@ -422,39 +487,88 @@ function mapServerFraction(serverPct) {
 async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL, host = getGlobalProgressHost() } = {}) {
   const id = typeof taskId === 'string' ? taskId : String(taskId || '');
   if (!id) return null;
-  while (true) {
-    let data;
-    try {
-      const resp = await fetch(`${statusUrl}?task_id=${encodeURIComponent(id)}&t=${Date.now()}`,
-        { __skipLoadingHook: true, __hostEl: host, cache: 'no-store' }
-      );
-      if (!resp.ok) throw new Error('Estado no disponible');
-      data = await resp.json();
-    } catch (err) {
-      await sleep(900);
-      continue;
+  const makeAbortError = () => {
+    const err = new Error('Importación cancelada');
+    err.name = 'AbortError';
+    return err;
+  };
+  let aborted = false;
+  let controller = null;
+  stopImportPolling = () => {
+    aborted = true;
+    if (controller) {
+      try {
+        controller.abort();
+      } catch (e) {}
     }
-    if (data.ui_cost_message) showImportBanner(data.ui_cost_message);
-    const raw = data.pct ?? data.percent ?? data.percentage ?? data.progress ?? (data.done ? 100 : undefined);
-    let serverPct = Number(raw);
-    if (!Number.isFinite(serverPct)) serverPct = 0;
-    serverPct = Math.max(0, Math.min(100, serverPct));
-    const stage = (data.message || data.stage || data.state || '').toString() || 'Procesando…';
-    tracker?.step(mapServerFraction(serverPct), stage);
+  };
+  window.stopImportPolling = stopImportPolling;
+  try {
+    while (true) {
+      if (aborted) {
+        throw makeAbortError();
+      }
+      controller = new AbortController();
+      let data;
+      try {
+        const resp = await fetch(`${statusUrl}?task_id=${encodeURIComponent(id)}&t=${Date.now()}`, {
+          __skipLoadingHook: true,
+          __hostEl: host,
+          cache: 'no-store',
+          signal: controller.signal
+        });
+        if (!resp.ok) throw new Error('Estado no disponible');
+        data = await resp.json();
+      } catch (err) {
+        if (aborted || err?.name === 'AbortError') {
+          throw makeAbortError();
+        }
+        await sleep(900);
+        continue;
+      } finally {
+        controller = null;
+      }
+      if (data.ui_cost_message) showImportBanner(data.ui_cost_message);
+      const raw = data.pct ?? data.percent ?? data.percentage ?? data.progress ?? (data.done ? 100 : undefined);
+      let serverPct = Number(raw);
+      if (!Number.isFinite(serverPct)) serverPct = 0;
+      serverPct = Math.max(0, Math.min(100, serverPct));
+      const stage = (data.message || data.stage || data.state || '').toString() || 'Procesando…';
+      const frac = mapServerFraction(serverPct);
+      const phaseLabel = data.phase_label || data.phaseTitle;
+      const detail = data.detail || data.description || data.submessage || data.status_text;
+      tracker?.step(frac, stage);
+      emitImportProgress(frac * 100, {
+        phase: data.phase,
+        state: data.state,
+        phaseLabel,
+        message: stage,
+        detail
+      });
 
-    const statusVal = String(data.state || data.status || '').toLowerCase();
-    if (statusVal === 'error' || data.error) {
-      throw new Error(data.error || 'Error en importación');
+      const statusVal = String(data.state || data.status || '').toLowerCase();
+      if (statusVal === 'error' || data.error) {
+        throw new Error(data.error || 'Error en importación');
+      }
+      if (statusVal === 'unknown' || !statusVal) {
+        throw new Error('Estado de importación desconocido');
+      }
+      if (serverPct >= 100 || statusVal === 'done' || statusVal === 'completed' || statusVal === 'finished') {
+        await reloadTable({ skipProgress: true });
+        hideImportBanner();
+        emitImportProgress(100, {
+          phase: data.phase,
+          state: data.state || 'done',
+          message: data.message || stage,
+          detail
+        });
+        return data;
+      }
+      await sleep(450);
     }
-    if (statusVal === 'unknown' || !statusVal) {
-      throw new Error('Estado de importación desconocido');
-    }
-    if (serverPct >= 100 || statusVal === 'done' || statusVal === 'completed' || statusVal === 'finished') {
-      await reloadTable({ skipProgress: true });
-      hideImportBanner();
-      return data;
-    }
-    await sleep(450);
+  } finally {
+    stopImportPolling = null;
+    window.stopImportPolling = null;
   }
 }
 
@@ -463,6 +577,7 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
   const host = getGlobalProgressHost();
   const tracker = LoadingHelpers.start('Importando catálogo', { host });
   tracker.setStage('Subiendo archivo…');
+  window.onImportStart?.('upload');
   let lastResult = null;
   try {
     const fd = new FormData();
@@ -477,6 +592,11 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
         if (!event.lengthComputable) return;
         const frac = Math.min(IMPORT_UPLOAD_FRAC, (event.loaded / event.total) * IMPORT_UPLOAD_FRAC);
         tracker.step(frac, 'Subiendo archivo…');
+        emitImportProgress(frac * 100, {
+          phase: 'upload',
+          phaseLabel: IMPORT_PROGRESS_DEFAULT_PHASE,
+          detail: 'Subiendo archivo…'
+        });
       };
       xhr.onerror = () => reject(new Error('Error de red subiendo archivo'));
       xhr.onload = () => {
@@ -502,6 +622,11 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
 
     if (startResult.kind === 'sync') {
       tracker.step(1, 'Completado');
+      emitImportProgress(100, {
+        phase: 'done',
+        state: 'done',
+        detail: 'Completado'
+      });
       await reloadTable({ skipProgress: true });
       const importedCount = startResult.data?.imported ?? startResult.data?.rows_imported;
       if (Number.isFinite(importedCount) && importedCount > 0) {
@@ -513,9 +638,20 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     const taskId = startResult.taskId;
     const idStr = typeof taskId === 'string' ? taskId : String(taskId);
     tracker.step(IMPORT_UPLOAD_FRAC, 'Archivo subido');
+    emitImportProgress(IMPORT_UPLOAD_FRAC * 100, {
+      phase: 'upload',
+      phaseLabel: IMPORT_PROGRESS_DEFAULT_PHASE,
+      detail: 'Archivo subido'
+    });
     localStorage.setItem(IMPORT_TASK_LS_KEY, idStr);
 
+    window.currentTaskId = idStr;
     lastResult = await followImportTask(idStr, tracker, { statusUrl, host });
+    emitImportProgress(100, {
+      phase: lastResult?.phase || 'done',
+      state: lastResult?.state || 'done',
+      detail: 'Completado'
+    });
 
     const importedCount = lastResult?.imported ?? lastResult?.rows_imported;
     if (Number.isFinite(importedCount) && importedCount > 0) {
@@ -524,6 +660,11 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     tracker.step(1, 'Completado');
     return lastResult;
   } catch (err) {
+    if (err?.name === 'AbortError') {
+      tracker.step(1, 'Cancelado');
+      toast.info('Importación cancelada');
+      return null;
+    }
     tracker.step(1, 'Error');
     toast.error(err?.message || 'Error al importar catálogo');
     throw err;
@@ -531,6 +672,7 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     tracker.done();
     localStorage.removeItem(IMPORT_TASK_LS_KEY);
     hideImportBanner();
+    window.onImportEnd?.();
   }
 }
 
@@ -1155,6 +1297,13 @@ window.onload = async () => {
     const host = getGlobalProgressHost();
     const tracker = LoadingHelpers.start('Importando catálogo', { host });
     tracker.step(IMPORT_UPLOAD_FRAC, 'Reanudando…');
+    window.onImportStart?.(tid);
+    emitImportProgress(IMPORT_UPLOAD_FRAC * 100, {
+      phase: 'upload',
+      phaseLabel: IMPORT_PROGRESS_DEFAULT_PHASE,
+      detail: 'Reanudando…'
+    });
+    window.currentTaskId = tid;
     try {
       const result = await followImportTask(tid, tracker, { host });
       const importedCount = result?.imported ?? result?.rows_imported;
@@ -1163,12 +1312,18 @@ window.onload = async () => {
       }
       tracker.step(1, 'Completado');
     } catch (err) {
-      tracker.step(1, 'Error');
-      toast.error(err?.message || 'Error en importación');
+      if (err?.name === 'AbortError') {
+        tracker.step(1, 'Cancelado');
+        toast.info('Importación cancelada');
+      } else {
+        tracker.step(1, 'Error');
+        toast.error(err?.message || 'Error en importación');
+      }
     } finally {
       localStorage.removeItem(IMPORT_TASK_LS_KEY);
       tracker.done();
       hideImportBanner();
+      window.onImportEnd?.();
     }
   }
 };
@@ -1499,27 +1654,66 @@ document.getElementById('btnDelete').onclick = () => {
 // Export selected products as CSV
 document.getElementById('btnExport').onclick = async () => {
   const ids = Array.from(selection, Number);
-  if(!ids.length){ toast.info('Selecciona productos para exportar'); return; }
-  // Build query string
-  const params = new URLSearchParams();
-  params.set('ids', ids.join(','));
-  // request export file
+  if (!ids.length) {
+    toast.info('Selecciona productos para exportar');
+    return;
+  }
+  const columns = [...document.querySelectorAll('.products-table thead th')]
+    .filter(th => !th.classList.contains('is-hidden'))
+    .map(th => {
+      const keyAttr = (th.dataset.key ?? th.getAttribute('data-key') ?? '').toString().trim();
+      const title = th.textContent.trim();
+      return {
+        key: keyAttr || title,
+        title,
+      };
+    })
+    .filter(col => (col.key && col.key.trim()) || (col.title && col.title.trim()));
+
+  if (!columns.length) {
+    toast.error('Sin columnas visibles para exportar');
+    return;
+  }
+
+  const imgCol = columns.find(c => /imagen|image|img|thumbnail/i.test(c.key || '') || /imagen|image|thumbnail/i.test(c.title || ''));
+  if (imgCol && !/^(image|image_url|img|thumbnail)$/i.test(imgCol.key || '')) {
+    imgCol.key = 'image';
+  }
+
   const host = getActionHost();
   const tracker = LoadingHelpers.start('Exportando productos', { host });
-  try{
+  try {
     tracker.setStage('Preparando archivo…');
-    const res = await fetch('/export?'+params.toString(), {method:'GET', __hostEl: host, __skipLoadingHook: true});
-    if(res.status !== 200){ toast.error('Error al exportar'); return; }
-    const blob = await res.blob();
-    // determine filename from header or default
-    const disposition = res.headers.get('Content-Disposition');
-    let filename = 'export.csv';
-    if(disposition){
-      const match = disposition.match(/filename="?([^\"]+)"?/);
-      if(match) filename = match[1];
+    const res = await fetch('/api/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids, columns }),
+      __hostEl: host,
+      __skipLoadingHook: true,
+    });
+
+    if (!res.ok) {
+      let message = 'Error al exportar';
+      try {
+        const payload = await res.json();
+        if (payload?.error) message = payload.error;
+      } catch (e) {}
+      tracker.step(1, 'Error');
+      toast.error(message);
+      return;
     }
-    tracker.step(0.7, 'Descargando…');
-    // trigger download
+
+    tracker.step(0.6, 'Generando archivo…');
+    const blob = await res.blob();
+    tracker.step(0.85, 'Descargando…');
+
+    let filename = 'export.xlsx';
+    const disposition = res.headers.get('Content-Disposition');
+    if (disposition) {
+      const match = disposition.match(/filename="?([^";]+)"?/i);
+      if (match) filename = match[1];
+    }
+
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -1529,10 +1723,11 @@ document.getElementById('btnExport').onclick = async () => {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
     tracker.step(1, 'Completado');
-  } catch(err){
+    toast.success('Exportación lista');
+  } catch (err) {
     console.error(err);
-    toast.error('Error al exportar');
     tracker.step(1, 'Error');
+    toast.error('Error al exportar');
   } finally {
     tracker.done();
   }
