@@ -116,6 +116,7 @@ body.dark .skeleton{background:#333;}
       <div id="global-progress-bar" class="progress-hitbox">
         <div id="progress-slot-global" class="progress-slot" aria-live="polite"></div>
       </div>
+      <button id="btn-cancel-import" type="button" title="Cancelar importación" aria-label="Cancelar importación">Cancelar</button>
     </div>
   </div>
   <!-- Search bar row with controls -->
@@ -231,12 +232,14 @@ body.dark .skeleton{background:#333;}
 </section>
 
 <section id="section-products">
-  <table id="productTable">
-  <thead class="sticky-thead">
-    <tr id="headerRow"></tr>
-  </thead>
-  <tbody></tbody>
-  </table>
+  <div class="table-scroll">
+    <table id="productTable" class="table products-table">
+      <thead class="sticky-thead">
+        <tr id="headerRow"></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
   <div id="bottomBar" class="bottombar hidden">
   <button id="legendBtn" class="legend-btn" title="Mostrar leyenda" aria-label="Mostrar leyenda">ℹ️</button>
   <span id="selCount"></span>
@@ -382,6 +385,96 @@ const IMPORT_START_URL = '/upload';
 let savedApiKeyHash = null;
 let savedApiKeyLength = 0;
 
+const cancelBtn = document.getElementById('btn-cancel-import');
+let currentImportPoller = null;
+let importCancelRequested = false;
+window.currentTaskId = window.currentTaskId || null;
+
+function updateTopbarOffset() {
+  const header = document.querySelector('header.app-header');
+  if (!header) return;
+  const rect = header.getBoundingClientRect();
+  const height = Math.ceil(rect.height);
+  if (height > 0) {
+    document.documentElement.style.setProperty('--topbar-offset', `${height}px`);
+  }
+}
+
+const headerEl = document.querySelector('header.app-header');
+if (headerEl) {
+  const observer = new MutationObserver(() => updateTopbarOffset());
+  observer.observe(headerEl, { attributes: true, childList: true, subtree: true });
+}
+window.addEventListener('resize', updateTopbarOffset);
+updateTopbarOffset();
+
+function setCancelVisible(visible) {
+  if (!cancelBtn) return;
+  cancelBtn.style.display = visible ? 'inline-flex' : 'none';
+  if (!visible) {
+    cancelBtn.disabled = false;
+  }
+  updateTopbarOffset();
+}
+
+function clearProgressCancelled() {
+  const slot = document.querySelector('#progress-slot-global');
+  if (!slot) return;
+  slot.classList.remove('is-cancelled');
+  const rail = slot.querySelector('.progress-rail');
+  rail?.classList.remove('is-cancelled');
+  const fill = slot.querySelector('.progress-fill');
+  fill?.classList.remove('is-cancelled');
+  updateTopbarOffset();
+}
+
+function setProgressCancelled() {
+  const slot = document.querySelector('#progress-slot-global');
+  if (!slot) return;
+  slot.classList.add('active');
+  slot.classList.add('is-cancelled');
+  const rail = slot.querySelector('.progress-rail');
+  if (rail) rail.classList.add('is-cancelled');
+  const fill = slot.querySelector('.progress-fill');
+  if (fill) {
+    if (!fill.style.width) fill.style.width = '0%';
+    fill.classList.add('is-cancelled');
+  }
+  const stage = slot.querySelector('.progress-stage');
+  if (stage) stage.textContent = 'Cancelado';
+  const pctEl = slot.querySelector('.progress-percent');
+  if (pctEl && !pctEl.textContent) pctEl.textContent = '0%';
+  updateTopbarOffset();
+}
+
+function stopImportPolling() {
+  if (currentImportPoller) {
+    currentImportPoller.abort = true;
+  }
+}
+
+async function cancelImport() {
+  if (!cancelBtn || !window.currentTaskId) return;
+  importCancelRequested = true;
+  cancelBtn.disabled = true;
+  try {
+    await fetch(`/_import_cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: window.currentTaskId })
+    });
+  } catch (err) {
+    console.error('Cancel import failed', err);
+  }
+  stopImportPolling();
+  setProgressCancelled();
+  setCancelVisible(false);
+}
+
+cancelBtn?.addEventListener('click', cancelImport);
+window.stopImportPolling = stopImportPolling;
+setCancelVisible(false);
+
 const getGlobalProgressHost = () => document.querySelector('#progress-slot-global');
 const getActionHost = () => document.querySelector('#bottomBar') || getGlobalProgressHost();
 
@@ -422,44 +515,83 @@ function mapServerFraction(serverPct) {
 async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL, host = getGlobalProgressHost() } = {}) {
   const id = typeof taskId === 'string' ? taskId : String(taskId || '');
   if (!id) return null;
-  while (true) {
-    let data;
-    try {
-      const resp = await fetch(`${statusUrl}?task_id=${encodeURIComponent(id)}&t=${Date.now()}`,
-        { __skipLoadingHook: true, __hostEl: host, cache: 'no-store' }
-      );
-      if (!resp.ok) throw new Error('Estado no disponible');
-      data = await resp.json();
-    } catch (err) {
-      await sleep(900);
-      continue;
-    }
-    if (data.ui_cost_message) showImportBanner(data.ui_cost_message);
-    const raw = data.pct ?? data.percent ?? data.percentage ?? data.progress ?? (data.done ? 100 : undefined);
-    let serverPct = Number(raw);
-    if (!Number.isFinite(serverPct)) serverPct = 0;
-    serverPct = Math.max(0, Math.min(100, serverPct));
-    const stage = (data.message || data.stage || data.state || '').toString() || 'Procesando…';
-    tracker?.step(mapServerFraction(serverPct), stage);
+  window.currentTaskId = id;
+  const poller = { abort: false };
+  currentImportPoller = poller;
+  try {
+    while (true) {
+      if (poller.abort) {
+        importCancelRequested = true;
+        setProgressCancelled();
+        return { status: 'cancelled', cancelled: true };
+      }
+      let data;
+      try {
+        const resp = await fetch(`${statusUrl}?task_id=${encodeURIComponent(id)}&t=${Date.now()}`,
+          { __skipLoadingHook: true, __hostEl: host, cache: 'no-store' }
+        );
+        if (!resp.ok) throw new Error('Estado no disponible');
+        data = await resp.json();
+      } catch (err) {
+        if (poller.abort) {
+          importCancelRequested = true;
+          setProgressCancelled();
+          return { status: 'cancelled', cancelled: true };
+        }
+        await sleep(900);
+        continue;
+      }
+      if (data.ui_cost_message) showImportBanner(data.ui_cost_message);
+      const raw = data.pct ?? data.percent ?? data.percentage ?? data.progress ?? (data.done ? 100 : undefined);
+      let serverPct = Number(raw);
+      if (!Number.isFinite(serverPct)) serverPct = 0;
+      serverPct = Math.max(0, Math.min(100, serverPct));
+      const stage = (data.message || data.stage || data.state || '').toString() || 'Procesando…';
+      tracker?.step(mapServerFraction(serverPct), stage);
 
-    const statusVal = String(data.state || data.status || '').toLowerCase();
-    if (statusVal === 'error' || data.error) {
-      throw new Error(data.error || 'Error en importación');
+      const statusVal = String(data.state || data.status || '').toLowerCase();
+      if (statusVal === 'cancelled') {
+        importCancelRequested = true;
+        setProgressCancelled();
+        setCancelVisible(false);
+        return { ...data, status: 'cancelled' };
+      }
+      if (statusVal === 'error' || data.error) {
+        throw new Error(data.error || 'Error en importación');
+      }
+      if (statusVal === 'unknown' || !statusVal) {
+        throw new Error('Estado de importación desconocido');
+      }
+      if (poller.abort) {
+        importCancelRequested = true;
+        setProgressCancelled();
+        return { status: 'cancelled', cancelled: true };
+      }
+      if (serverPct >= 100 || statusVal === 'done' || statusVal === 'completed' || statusVal === 'finished' || statusVal === 'success') {
+        await reloadTable({ skipProgress: true });
+        hideImportBanner();
+        setCancelVisible(false);
+        importCancelRequested = false;
+        return data;
+      }
+      await sleep(450);
     }
-    if (statusVal === 'unknown' || !statusVal) {
-      throw new Error('Estado de importación desconocido');
+  } finally {
+    if (currentImportPoller === poller) {
+      currentImportPoller = null;
     }
-    if (serverPct >= 100 || statusVal === 'done' || statusVal === 'completed' || statusVal === 'finished') {
-      await reloadTable({ skipProgress: true });
-      hideImportBanner();
-      return data;
+    if (window.currentTaskId === id) {
+      window.currentTaskId = null;
     }
-    await sleep(450);
   }
 }
 
 async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IMPORT_STATUS_URL } = {}) {
   if (!file) throw new Error('Archivo no válido');
+  clearProgressCancelled();
+  importCancelRequested = false;
+  setCancelVisible(false);
+  updateTopbarOffset();
   const host = getGlobalProgressHost();
   const tracker = LoadingHelpers.start('Importando catálogo', { host });
   tracker.setStage('Subiendo archivo…');
@@ -514,8 +646,18 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     const idStr = typeof taskId === 'string' ? taskId : String(taskId);
     tracker.step(IMPORT_UPLOAD_FRAC, 'Archivo subido');
     localStorage.setItem(IMPORT_TASK_LS_KEY, idStr);
+    window.currentTaskId = idStr;
+    importCancelRequested = false;
+    setCancelVisible(true);
 
     lastResult = await followImportTask(idStr, tracker, { statusUrl, host });
+
+    if (lastResult?.status === 'cancelled') {
+      importCancelRequested = true;
+      tracker.setStage?.('Cancelado');
+      setProgressCancelled();
+      return lastResult;
+    }
 
     const importedCount = lastResult?.imported ?? lastResult?.rows_imported;
     if (Number.isFinite(importedCount) && importedCount > 0) {
@@ -531,6 +673,12 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     tracker.done();
     localStorage.removeItem(IMPORT_TASK_LS_KEY);
     hideImportBanner();
+    if (importCancelRequested) {
+      setProgressCancelled();
+    }
+    setCancelVisible(false);
+    window.currentTaskId = null;
+    updateTopbarOffset();
   }
 }
 
@@ -1155,13 +1303,23 @@ window.onload = async () => {
     const host = getGlobalProgressHost();
     const tracker = LoadingHelpers.start('Importando catálogo', { host });
     tracker.step(IMPORT_UPLOAD_FRAC, 'Reanudando…');
+    clearProgressCancelled();
+    importCancelRequested = false;
+    window.currentTaskId = tid;
+    setCancelVisible(true);
     try {
       const result = await followImportTask(tid, tracker, { host });
-      const importedCount = result?.imported ?? result?.rows_imported;
-      if (Number.isFinite(importedCount) && importedCount > 0) {
-        toast.success(`Importados ${importedCount}`);
+      if (result?.status === 'cancelled') {
+        importCancelRequested = true;
+        tracker.setStage?.('Cancelado');
+        setProgressCancelled();
+      } else {
+        const importedCount = result?.imported ?? result?.rows_imported;
+        if (Number.isFinite(importedCount) && importedCount > 0) {
+          toast.success(`Importados ${importedCount}`);
+        }
+        tracker.step(1, 'Completado');
       }
-      tracker.step(1, 'Completado');
     } catch (err) {
       tracker.step(1, 'Error');
       toast.error(err?.message || 'Error en importación');
@@ -1169,6 +1327,12 @@ window.onload = async () => {
       localStorage.removeItem(IMPORT_TASK_LS_KEY);
       tracker.done();
       hideImportBanner();
+      if (importCancelRequested) {
+        setProgressCancelled();
+      }
+      setCancelVisible(false);
+      window.currentTaskId = null;
+      updateTopbarOffset();
     }
   }
 };

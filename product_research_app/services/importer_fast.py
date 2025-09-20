@@ -21,6 +21,10 @@ from product_research_app.database import (
     transition_job_items,
     update_import_job_progress,
 )
+from product_research_app.services.import_manager import (
+    CancelledImport,
+    manager as import_manager,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +209,7 @@ class BulkImporter:
         self._unique_hashes: set[str] = set()
         self._summary: Optional[ImportSummary] = None
         self._start = 0.0
+        self.task_id = str(job_id) if job_id is not None else ""
 
     def _open_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, check_same_thread=False, isolation_level=None)
@@ -212,6 +217,10 @@ class BulkImporter:
         conn.execute("PRAGMA foreign_keys=ON;")
         init_db_performance(self.db_path, connection=conn)
         return conn
+
+    def _ensure_not_cancelled(self) -> None:
+        if self.task_id and import_manager.is_cancelled(self.task_id):
+            raise CancelledImport()
 
     def close(self) -> None:
         for conn in (self.write_conn, self.status_conn):
@@ -232,7 +241,9 @@ class BulkImporter:
         self.status_cb(stage="prepare", done=0, total=0)
         self.write_conn.execute("BEGIN IMMEDIATE;")
         try:
+            self._ensure_not_cancelled()
             for record in rows:
+                self._ensure_not_cancelled()
                 prepared = self._prepare_record(record)
                 if not prepared:
                     continue
@@ -240,9 +251,11 @@ class BulkImporter:
                 self.processed += 1
                 if len(self.pending) >= self.batch_size:
                     self._flush_pending()
+                    self._ensure_not_cancelled()
             if self.pending:
                 self._flush_pending()
             transition_job_items(self.write_conn, self.job_id, "raw", "pending_enrich")
+            self._ensure_not_cancelled()
             merge_staging_into_products(self.write_conn, self.job_id)
             unique_rows = len(self._unique_hashes)
             clear_staging_for_job(self.write_conn, self.job_id)
@@ -398,6 +411,7 @@ class BulkImporter:
     def _flush_pending(self) -> None:
         if not self.pending:
             return
+        self._ensure_not_cancelled()
         batch_start = time.perf_counter()
         now = datetime.utcnow().isoformat()
         batch = list(self.pending)
@@ -551,6 +565,19 @@ def fast_import(
             },
         )
         return summary.unique_rows
+    except CancelledImport:
+        logger.info("Fast import cancelled job=%s", job_id)
+        update_import_job_progress(
+            base_conn,
+            job_id,
+            status="cancelled",
+            phase="done",
+            processed=importer.processed,
+            total=importer.processed,
+            rows_imported=len(importer._unique_hashes),
+        )
+        import_manager.set_status(str(job_id), "cancelled", message="Cancelado")
+        raise
     except Exception as exc:
         logger.exception("Fast import failed job=%s", job_id)
         update_import_job_progress(
@@ -620,6 +647,19 @@ def fast_import_records(
             },
         )
         return summary.unique_rows
+    except CancelledImport:
+        logger.info("Fast record import cancelled job=%s", job_id)
+        update_import_job_progress(
+            base_conn,
+            job_id,
+            status="cancelled",
+            phase="done",
+            processed=importer.processed,
+            total=importer.processed,
+            rows_imported=len(importer._unique_hashes),
+        )
+        import_manager.set_status(str(job_id), "cancelled", message="Cancelado")
+        raise
     except Exception as exc:
         logger.exception("Fast record import failed job=%s", job_id)
         update_import_job_progress(

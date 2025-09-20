@@ -46,6 +46,7 @@ from .services import ai_columns
 from .services import winner_score as winner_calc
 from .services import trends_service
 from .services.importer_fast import DEFAULT_BATCH_SIZE, fast_import, fast_import_records
+from .services.import_manager import CancelledImport, manager as import_manager
 from . import gpt
 from .prompts.registry import normalize_task
 from . import title_analyzer
@@ -126,11 +127,81 @@ def ensure_db():
     return conn
 
 
+def _normalize_status(value: str | None) -> str | None:
+    if not value:
+        return None
+    val = str(value).strip().lower()
+    if not val:
+        return None
+    if val in {"done", "finished", "completed", "success"}:
+        return "success"
+    if val in {"error", "failed", "failure"}:
+        return "error"
+    if val in {"cancelled", "canceled"}:
+        return "cancelled"
+    if val in {"queued", "pending"}:
+        return "queued"
+    if val in {"running", "processing", "in-progress"}:
+        return "running"
+    return val
+
+
+def _merge_manager_state(task_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    result = dict(payload)
+    manager_state = import_manager.get(task_id)
+    base_status = result.get("status") or result.get("state")
+    normalized = _normalize_status(base_status)
+    if normalized:
+        result["status"] = normalized
+    if manager_state:
+        for key, value in manager_state.items():
+            if value is None:
+                continue
+            if key == "status":
+                norm = _normalize_status(str(value))
+                if norm:
+                    result["status"] = norm
+                    if norm == "cancelled":
+                        result.setdefault("state", "cancelled")
+                else:
+                    result[key] = value
+            elif key == "message":
+                if not result.get("message"):
+                    result["message"] = value
+            else:
+                result.setdefault(key, value)
+        if manager_state.get("cancelled"):
+            result["cancelled"] = True
+            result.setdefault("message", manager_state.get("message") or "Cancelado")
+            result["status"] = "cancelled"
+            result.setdefault("state", "cancelled")
+    elif normalized:
+        result["status"] = normalized
+    return result
+
+
 def _update_import_status(task_id: str, **updates) -> Dict[str, Any]:
+    status_hint = updates.get("status") or updates.get("state")
+    normalized = _normalize_status(status_hint)
     with _IMPORT_STATUS_LOCK:
         state = IMPORT_STATUS.setdefault(task_id, {})
         state.update(updates)
+        if normalized:
+            state["status"] = normalized
+        elif "status" in state:
+            state["status"] = _normalize_status(state.get("status")) or state.get("status")
         snapshot = dict(state)
+    try:
+        import_manager.update(
+            task_id,
+            status=snapshot.get("status") or normalized,
+            message=snapshot.get("message"),
+            progress=snapshot.get("pct"),
+            done=snapshot.get("done"),
+            total=snapshot.get("total"),
+        )
+    except Exception:
+        pass
     publish_progress({"event": "import", "task_id": task_id, **snapshot})
     return snapshot
 
@@ -222,15 +293,18 @@ def _get_import_status(task_id: str) -> Dict[str, Any] | None:
             payload.update(snapshot)
             payload["job_id"] = payload.get("job_id") or job_id
             payload["task_id"] = payload.get("task_id") or (str(job_id) if job_id is not None else task_id)
-            return payload
+            return _merge_manager_state(str(payload.get("task_id") or task_id), payload)
     if not snapshot:
+        merged = import_manager.get(task_id)
+        if merged:
+            return _merge_manager_state(task_id, {"task_id": task_id, **merged})
         return None
     if job_id is not None:
         snapshot.setdefault("job_id", job_id)
         snapshot.setdefault("task_id", str(job_id))
     else:
         snapshot.setdefault("task_id", task_id)
-    return snapshot
+    return _merge_manager_state(snapshot.get("task_id", task_id), snapshot)
 
 
 def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> str:
@@ -343,6 +417,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
     rows_imported = 0
     inserted_ids: List[int] = []
     task_key = str(job_id)
+    import_manager.start(task_key, status="running", message="Inicializando importación")
     try:
         _set_import_progress(
             task_key,
@@ -355,6 +430,8 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
         )
         data = tmp_path.read_bytes()
         records = parse_xlsx(data)
+        if import_manager.is_cancelled(task_key):
+            raise CancelledImport()
         total_records = len(records)
         if total_records:
             _set_import_progress(task_key, pct=5, message="Analizando archivo", total=total_records)
@@ -450,10 +527,12 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             is_empty = count == 0
             base_id = 0 if is_empty else (max_id + 1)
             rows_validas = []
-            for row in records:
-                name = (row.get(name_col) or '').strip() if name_col else None
-                if not name:
-                    continue
+        for row in records:
+            if import_manager.is_cancelled(task_key):
+                raise CancelledImport()
+            name = (row.get(name_col) or '').strip() if name_col else None
+            if not name:
+                continue
                 description = (row.get(desc_col) or '').strip() if desc_col else None
                 category = (row.get(cat_col) or '').strip() if cat_col else None
                 price = None
@@ -551,49 +630,51 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                     if k not in recognized:
                         extras[k] = v
 
-                rows_validas.append(
-                    (name, description, category, price, currency, image_url, date_range, extras, metrics)
-                )
-            total_valid = len(rows_validas)
+            rows_validas.append(
+                (name, description, category, price, currency, image_url, date_range, extras, metrics)
+            )
+        total_valid = len(rows_validas)
+        if total_valid:
+            _set_import_progress(
+                task_key,
+                pct=20,
+                message="Preparando inserción",
+                done=0,
+                total=total_valid,
+            )
+        for idx, (name, description, category, price, currency, image_url, date_range, extra_cols, metrics) in enumerate(rows_validas, start=1):
+            if import_manager.is_cancelled(task_key):
+                raise CancelledImport()
+            row_id = base_id + idx
+            database.insert_product(
+                conn,
+                name=name,
+                description=description,
+                category=category,
+                price=price,
+                currency=currency,
+                image_url=image_url,
+                date_range=date_range,
+                source=filename,
+                extra=extra_cols,
+                commit=False,
+                product_id=row_id,
+            )
+            if metrics:
+                database.update_product(conn, row_id, **metrics)
+            rows_imported += 1
+            inserted_ids.append(row_id)
             if total_valid:
-                _set_import_progress(
-                    task_key,
-                    pct=20,
-                    message="Preparando inserción",
-                    done=0,
-                    total=total_valid,
-                )
-            for idx, (name, description, category, price, currency, image_url, date_range, extra_cols, metrics) in enumerate(rows_validas, start=1):
-                row_id = base_id + idx
-                database.insert_product(
-                    conn,
-                    name=name,
-                    description=description,
-                    category=category,
-                    price=price,
-                    currency=currency,
-                    image_url=image_url,
-                    date_range=date_range,
-                    source=filename,
-                    extra=extra_cols,
-                    commit=False,
-                    product_id=row_id,
-                )
-                if metrics:
-                    database.update_product(conn, row_id, **metrics)
-                rows_imported += 1
-                inserted_ids.append(row_id)
-                if total_valid:
-                    if idx == total_valid or idx % 50 == 0:
-                        frac = idx / max(total_valid, 1)
-                        pct = 20 + min(60, 60 * frac)
-                        _set_import_progress(
-                            task_key,
-                            pct=pct,
-                            message=f"Insertando registros {idx}/{total_valid}",
-                            done=idx,
-                            total=total_valid,
-                        )
+                if idx == total_valid or idx % 50 == 0:
+                    frac = idx / max(total_valid, 1)
+                    pct = 20 + min(60, 60 * frac)
+                    _set_import_progress(
+                        task_key,
+                        pct=pct,
+                        message=f"Insertando registros {idx}/{total_valid}",
+                        done=idx,
+                        total=total_valid,
+                    )
             conn.commit()
             _set_import_progress(
                 task_key,
@@ -604,6 +685,8 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             )
 
         if inserted_ids and config.is_auto_fill_ia_on_import_enabled():
+            if import_manager.is_cancelled(task_key):
+                raise CancelledImport()
             _set_import_progress(task_key, pct=88, message="Completando columnas con IA")
             database.start_import_job_ai(conn, job_id, len(inserted_ids))
             cfg_cost = config.get_ai_cost_config()
@@ -618,6 +701,8 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             database.set_import_job_ai_counts(conn, job_id, counts, res.get("pending_ids", []))
             if res.get("error"):
                 database.set_import_job_ai_error(conn, job_id, "No se pudieron completar las columnas con IA: revisa la API.")
+        if import_manager.is_cancelled(task_key):
+            raise CancelledImport()
         _set_import_progress(task_key, pct=92, message="Calculando Winner Score")
         res_scores = winner_calc.generate_winner_scores(conn, product_ids=inserted_ids)
         updated_scores = int(res_scores.get("updated", 0))
@@ -636,6 +721,22 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             imported=rows_imported,
             finished_at=time.time(),
         )
+    except CancelledImport:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        database.cancel_import_job(conn, job_id, processed=rows_imported, total=rows_imported, rows_imported=rows_imported)
+        _set_import_progress(
+            task_key,
+            pct=100,
+            message="Cancelado",
+            state="cancelled",
+            stage="cancelled",
+            imported=rows_imported,
+            finished_at=time.time(),
+        )
+        import_manager.set_status(task_key, "cancelled", message="Cancelado")
     except Exception as exc:
         try:
             conn.rollback()
@@ -1487,6 +1588,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._set_json()
             self.wfile.write(json.dumps({"ok": True, "has_key": True}).encode('utf-8'))
             return
+        if path in {"/_import_cancel", "/import/cancel", "/api/import/cancel"}:
+            self.handle_import_cancel()
+            return
         if path == "/upload":
             self.handle_upload()
             return
@@ -1923,6 +2027,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 f.write(data)
             conn = ensure_db()
             job_id = database.create_import_job(conn, str(tmp_path))
+            import_manager.start(str(job_id), status="queued", message="Preparando importación")
             threading.Thread(target=_process_import_job, args=(job_id, tmp_path, filename), daemon=True).start()
             self.safe_write(lambda: self.send_json({"task_id": job_id}, status=202))
             return
@@ -1951,9 +2056,21 @@ class RequestHandler(BaseHTTPRequestHandler):
                 filename=filename,
             )
             _set_import_progress(task_id, pct=0, message="En cola", state="queued")
+            import_manager.start(task_id, status="queued", message="En cola")
             csv_bytes = data
 
             def run_csv():
+                if import_manager.is_cancelled(task_id):
+                    import_manager.set_status(task_id, "cancelled", message="Cancelado")
+                    _update_import_status(
+                        task_id,
+                        job_id=job_id,
+                        state="cancelled",
+                        stage="cancelled",
+                        pct=100,
+                        message="Cancelado",
+                    )
+                    return
                 _update_import_status(
                     task_id,
                     job_id=job_id,
@@ -1962,8 +2079,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                     started_at=time.time(),
                 )
                 _set_import_progress(task_id, pct=5, message="Preparando importación")
+                import_manager.set_status(task_id, "running", message="Preparando importación")
                 try:
                     def cb(**kwargs):
+                        if import_manager.is_cancelled(task_id):
+                            raise CancelledImport()
                         stage = kwargs.get("stage")
                         done = int(kwargs.get("done", 0) or 0)
                         total = int(kwargs.get("total", 0) or 0)
@@ -2031,6 +2151,33 @@ class RequestHandler(BaseHTTPRequestHandler):
                         pct=100,
                         message="Completado",
                     )
+                except CancelledImport:
+                    logger.info("Fast CSV import cancelled: filename=%s", filename)
+                    job_row = database.get_import_job(conn, job_id)
+                    snapshot = _job_payload_from_row(job_row) or {}
+                    done_val = int(snapshot.get("processed") or 0)
+                    total_val = int(snapshot.get("total") or done_val)
+                    imported_val = int(snapshot.get("rows_imported") or done_val)
+                    database.cancel_import_job(
+                        conn,
+                        job_id,
+                        processed=done_val,
+                        total=total_val,
+                        rows_imported=imported_val,
+                    )
+                    _update_import_status(
+                        task_id,
+                        job_id=job_id,
+                        state="cancelled",
+                        stage="cancelled",
+                        done=done_val,
+                        total=total_val,
+                        imported=imported_val,
+                        finished_at=time.time(),
+                        pct=100,
+                        message="Cancelado",
+                    )
+                    import_manager.set_status(task_id, "cancelled", message="Cancelado")
                 except Exception as exc:
                     logger.exception("Fast CSV import failed: filename=%s", filename)
                     _update_import_status(
@@ -2086,8 +2233,20 @@ class RequestHandler(BaseHTTPRequestHandler):
                 filename=filename,
             )
             _set_import_progress(task_id, pct=0, message="En cola", state="queued")
+            import_manager.start(task_id, status="queued", message="En cola")
 
             def run_json():
+                if import_manager.is_cancelled(task_id):
+                    import_manager.set_status(task_id, "cancelled", message="Cancelado")
+                    _update_import_status(
+                        task_id,
+                        job_id=job_id,
+                        state="cancelled",
+                        stage="cancelled",
+                        pct=100,
+                        message="Cancelado",
+                    )
+                    return
                 _update_import_status(
                     task_id,
                     job_id=job_id,
@@ -2096,8 +2255,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                     started_at=time.time(),
                 )
                 _set_import_progress(task_id, pct=5, message="Preparando importación", total=total_records)
+                import_manager.set_status(task_id, "running", message="Preparando importación")
                 try:
                     def cb(**kwargs):
+                        if import_manager.is_cancelled(task_id):
+                            raise CancelledImport()
                         stage = kwargs.get("stage")
                         done = int(kwargs.get("done", 0) or 0)
                         total = int(kwargs.get("total", total_records) or total_records)
@@ -2165,6 +2327,33 @@ class RequestHandler(BaseHTTPRequestHandler):
                         pct=100,
                         message="Completado",
                     )
+                except CancelledImport:
+                    logger.info("Fast JSON import cancelled: filename=%s", filename)
+                    job_row = database.get_import_job(conn, job_id)
+                    snapshot = _job_payload_from_row(job_row) or {}
+                    done_val = int(snapshot.get("processed") or 0)
+                    total_val = int(snapshot.get("total") or total_records)
+                    imported_val = int(snapshot.get("rows_imported") or done_val)
+                    database.cancel_import_job(
+                        conn,
+                        job_id,
+                        processed=done_val,
+                        total=total_val,
+                        rows_imported=imported_val,
+                    )
+                    _update_import_status(
+                        task_id,
+                        job_id=job_id,
+                        state="cancelled",
+                        stage="cancelled",
+                        done=done_val,
+                        total=total_val,
+                        imported=imported_val,
+                        finished_at=time.time(),
+                        pct=100,
+                        message="Cancelado",
+                    )
+                    import_manager.set_status(task_id, "cancelled", message="Cancelado")
                 except Exception as exc:
                     logger.exception("Fast JSON import failed: filename=%s", filename)
                     _update_import_status(
@@ -2183,6 +2372,25 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
 
         self.safe_write(lambda: self.send_json({"error": "unsupported_format"}, status=400))
+
+    def handle_import_cancel(self):
+        length = int(self.headers.get("Content-Length", 0))
+        raw_body = self.rfile.read(length).decode("utf-8") if length else ""
+        try:
+            payload = json.loads(raw_body or "{}") if raw_body else {}
+        except Exception:
+            payload = {}
+        task_id = ""
+        if isinstance(payload, dict):
+            task_id = str(payload.get("task_id", "") or "").strip()
+        if not task_id:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"ok": False, "error": "missing_task"}).encode("utf-8"))
+            return
+        import_manager.cancel(task_id, message="Cancelado")
+        _update_import_status(task_id, state="cancelled", stage="cancelled", message="Cancelado", pct=100)
+        self._set_json()
+        self.wfile.write(json.dumps({"ok": True}).encode("utf-8"))
 
     def handle_evaluate_all(self):
         conn = ensure_db()

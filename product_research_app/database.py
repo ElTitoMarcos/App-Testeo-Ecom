@@ -984,6 +984,35 @@ def fail_import_job(conn: sqlite3.Connection, job_id: int, error: str) -> None:
     conn.commit()
 
 
+def cancel_import_job(
+    conn: sqlite3.Connection,
+    job_id: int,
+    *,
+    processed: Optional[int] = None,
+    total: Optional[int] = None,
+    rows_imported: Optional[int] = None,
+) -> None:
+    """Mark an import job as cancelled."""
+
+    now = datetime.utcnow().isoformat()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE import_jobs
+        SET status='cancelled',
+            phase='done',
+            updated_at=?,
+            processed=COALESCE(?, processed),
+            total=COALESCE(?, total),
+            rows_imported=COALESCE(?, rows_imported),
+            error=NULL
+        WHERE id=?
+        """,
+        (now, processed, total, rows_imported, job_id),
+    )
+    conn.commit()
+
+
 def start_import_job_ai(conn: sqlite3.Connection, job_id: int, total: int) -> None:
     now = datetime.utcnow().isoformat()
     cur = conn.cursor()
