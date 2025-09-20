@@ -95,7 +95,6 @@ DESIRE_TEXT_KEYS: Sequence[str] = (
     "desire_text",
     "ai_desire_label",
 )
-
 DESIRE_MAGNITUDE_KEYS: Sequence[str] = (
     "desire_magnitude",
     "desiremag",
@@ -140,7 +139,6 @@ _IMG_ROW_HEIGHT = 150
 _IMAGE_SESSION = requests.Session()
 _IMAGE_SESSION.headers.update({"User-Agent": "product-research-exporter/1.0"})
 _IMG_CACHE: Dict[str, Optional[bytes]] = {}
-
 
 def export_kalodata_minimal(handler: ResponseHandler, ensure_db: EnsureDbFn) -> None:
     start = time.perf_counter()
@@ -332,7 +330,6 @@ def _apply_sheet_format(ws) -> None:
     )
     ws.add_table(table)
 
-
 def _convert_row(row: Mapping[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     extras = _ensure_dict(row.get("extra"))
     sources = _prepare_sources(row, extras)
@@ -506,7 +503,6 @@ def _looks_numeric(value: Any) -> bool:
         return _parse_number(text) is not None
     return False
 
-
 def _prepare_sources(*dicts: Mapping[str, Any]) -> List[Dict[str, Any]]:
     sources: List[Dict[str, Any]] = []
     for data in dicts:
@@ -653,7 +649,6 @@ def _parse_money(value: Any) -> float:
     if num is None:
         return 0.0
     return float(num)
-
 
 def _parse_number(value: Any) -> Optional[float]:
     if value is None:
