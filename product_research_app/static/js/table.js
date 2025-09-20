@@ -31,10 +31,12 @@ function updateMasterState(){
   const noneSelected = selection.size===0;
   const btnDel = document.getElementById('btnDelete');
   const btnExp = document.getElementById('btnExport');
+  const btnExpMinimal = document.getElementById('btn-export-kalodata-minimal');
   const btnAdd = document.getElementById('btnAddToGroup');
   const btnGen = document.getElementById('btnGenWinner');
   if(btnDel) btnDel.disabled = noneSelected;
   if(btnExp) btnExp.disabled = noneSelected;
+  if(btnExpMinimal) btnExpMinimal.disabled = noneSelected;
   if(btnAdd) btnAdd.disabled = noneSelected;
   if(btnGen) btnGen.disabled = false;
   if(bottomBar){
