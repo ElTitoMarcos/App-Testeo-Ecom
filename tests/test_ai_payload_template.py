@@ -6,7 +6,6 @@ import httpx
 
 from product_research_app.services import ai_columns
 
-
 def test_build_payload_template_replaces_placeholders():
     batch = [
         {
