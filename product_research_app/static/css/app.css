@@ -20,6 +20,10 @@ body {
   --ws-thumb: var(--ws-accent);
   --ws-pill-bg: rgba(167,139,250,.15);
   --ws-pill-border: rgba(167,139,250,.45);
+  --topbar-h: 56px;
+  --toolbar-h: 0px;
+  --sticky-offset: calc(var(--topbar-h) + var(--toolbar-h));
+  --thead-bg: #12142a;
 }
 
 body.dark {
@@ -32,6 +36,52 @@ body.dark {
   --bar-btn-color: #E5EAF5;
   --bar-btn-focus: #3A6FD8;
 }
+
+/* HEADER ESTABLE */
+.topbar{ min-height:56px; display:flex; align-items:center; }
+.topbar .app-title{ display:flex; align-items:center; gap:12px; flex:1 1 auto; min-width:0; }
+
+/* PROGRESO INLINE (ocupa espacio libre) */
+.pi[hidden]{ display:none !important; }
+.pi{
+  display:flex; align-items:center; gap:10px;
+  flex:1 1 auto; min-width:240px; max-width:100%;
+}
+.pi .pi-text{
+  display:flex; gap:6px; font-size:12px; color:#e9e9f5; opacity:.9;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.pi .pi-track{
+  flex:1 1 auto; height:10px; border-radius:999px; overflow:hidden;
+  background:rgba(255,255,255,.16); position:relative; min-width:120px;
+}
+.pi .pi-fill{
+  position:absolute; inset:0 auto 0 0; width:0%;
+  background:linear-gradient(90deg,#A08CFF,#6EA5FF); border-radius:999px;
+}
+.pi .pi-pct{ font-size:12px; color:#e9e9f5; opacity:.85; }
+.pi .pi-cancel{
+  padding:6px 12px; border-radius:999px; min-width:92px;
+  border:1px solid rgba(255,255,255,.35);
+  background:rgba(0,0,0,.22); color:#fff; font-weight:600; line-height:1;
+  cursor:pointer;
+}
+
+/* Elimina hosts antiguos de progreso si existieran */
+.progress-host,.progress-text,.status-text,.progress-info-legacy{ display:none !important; }
+
+/* CABECERA STICKY SIN HUECOS NI SOLAPES */
+.toolbar{ margin-bottom:0; }
+.table-wrap{ position:relative; overflow:auto; max-height:calc(100vh - var(--topbar-h)); }
+.products-table{ width:100%; table-layout:fixed; border-collapse:separate; border-spacing:0; }
+.products-table thead th{
+  position:sticky; top:var(--sticky-offset);
+  z-index:1000; background:var(--thead-bg);
+  box-shadow:0 1px 0 rgba(255,255,255,.06),0 6px 12px rgba(0,0,0,.25);
+}
+.products-table tbody td{ position:relative; z-index:1; }
+.table-wrap, .products-table, .products-table thead{ transform:none !important; }
+.page-root, .main-content{ overflow:initial; }
 
 table {
   width: 100%;
