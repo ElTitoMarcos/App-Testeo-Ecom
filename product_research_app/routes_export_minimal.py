@@ -8,10 +8,15 @@ import logging
 import math
 import re
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence
 
-from openpyxl import Workbook
+import pandas as pd
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.worksheet.table import Table, TableStyleInfo
+from openpyxl.formatting.rule import DataBarRule
 
 from . import database
 from .utils.db import row_to_dict
@@ -170,14 +175,10 @@ def export_kalodata_minimal(handler: ResponseHandler, ensure_db: EnsureDbFn) -> 
 
 
 def _build_workbook(rows: Sequence[Mapping[str, Any]]) -> bytes:
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "products"
-    ws.append(list(COLUMNS))
-
+    records: List[List[Any]] = []
     for row in rows:
         record, missing = _convert_row(row)
-        ws.append(record)
+        records.append(record)
         if missing:
             logger.warning(
                 "Missing generated fields for product %s: %s",
@@ -185,10 +186,110 @@ def _build_workbook(rows: Sequence[Mapping[str, Any]]) -> bytes:
                 ", ".join(missing),
             )
 
+    df = pd.DataFrame(records, columns=COLUMNS)
+
     buffer = io.BytesIO()
-    wb.save(buffer)
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="products", index=False)
+        ws = writer.sheets["products"]
+        _apply_sheet_format(ws)
+
     return buffer.getvalue()
 
+
+def _apply_sheet_format(ws) -> None:
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+
+    header_fill = PatternFill("solid", fgColor="1F497D")
+    header_font = Font(color="FFFFFF", bold=True)
+    for cell in ws[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(vertical="center", wrap_text=True)
+
+    widths = {
+        1: 40,
+        2: 35,
+        3: 35,
+        4: 40,
+        5: 18,
+        6: 12,
+        7: 14,
+        8: 12,
+        9: 16,
+        10: 14,
+        11: 45,
+        12: 18,
+        13: 18,
+        14: 18,
+    }
+    for idx, width in widths.items():
+        ws.column_dimensions[get_column_letter(idx)].width = width
+
+    text_cols = [1, 4, 5, 11, 13, 14]
+    if ws.max_row >= 2:
+        for col in text_cols:
+            for row in ws.iter_rows(
+                min_row=2,
+                max_row=ws.max_row,
+                min_col=col,
+                max_col=col,
+            ):
+                cell = row[0]
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+
+        num_fmt_int = "#,##0"
+        num_fmt_money = "$#,##0.00"
+        num_fmt_rating = "0.0"
+        num_fmt_date = "yyyy-mm-dd"
+
+        for column in ws.iter_cols(8, 8, 2, ws.max_row):
+            for cell in column:
+                cell.number_format = num_fmt_int
+        for column in ws.iter_cols(6, 6, 2, ws.max_row):
+            for cell in column:
+                cell.number_format = num_fmt_money
+        for column in ws.iter_cols(7, 7, 2, ws.max_row):
+            for cell in column:
+                cell.number_format = num_fmt_rating
+        for column in ws.iter_cols(9, 9, 2, ws.max_row):
+            for cell in column:
+                cell.number_format = num_fmt_money
+        for column in ws.iter_cols(10, 10, 2, ws.max_row):
+            for cell in column:
+                cell.number_format = num_fmt_date
+
+        dv = DataValidation(
+            type="whole",
+            operator="between",
+            formula1="0",
+            formula2="100",
+            allow_blank=True,
+        )
+        ws.add_data_validation(dv)
+        dv_range = f"{get_column_letter(12)}2:{get_column_letter(12)}{ws.max_row}"
+        dv.add(dv_range)
+        bar_rule = DataBarRule(
+            start_type="num",
+            start_value=0,
+            end_type="num",
+            end_value=100,
+            color="1F497D",
+            showValue=None,
+        )
+        ws.conditional_formatting.add(dv_range, bar_rule)
+
+    table_ref = f"A1:{get_column_letter(ws.max_column)}{ws.max_row}"
+    table = Table(displayName="tbl_products", ref=table_ref)
+    table.tableStyleInfo = TableStyleInfo(
+        name="TableStyleMedium9",
+        showFirstColumn=False,
+        showLastColumn=False,
+        showRowStripes=True,
+        showColumnStripes=False,
+    )
+    ws.add_table(table)
 
 def _convert_row(row: Mapping[str, Any]) -> tuple[List[Any], List[str]]:
     extras = _ensure_dict(row.get("extra"))
@@ -211,7 +312,9 @@ def _convert_row(row: Mapping[str, Any]) -> tuple[List[Any], List[str]]:
 
     total_revenue = _compute_total_revenue(sources)
 
-    launch_date = _coerce_text(_value_from_sources(sources, TEXT_FIELD_KEYS["Launch Date"]))
+    launch_date = _normalize_launch_date(
+        _value_from_sources(sources, TEXT_FIELD_KEYS["Launch Date"])
+    )
 
     desire_text_raw = _value_from_sources(sources, DESIRE_TEXT_KEYS)
     desire_text = _coerce_text(desire_text_raw)
@@ -237,7 +340,7 @@ def _convert_row(row: Mapping[str, Any]) -> tuple[List[Any], List[str]]:
 
     desire_cell: Any
     if desire_score is None:
-        desire_cell = float("nan")
+        desire_cell = math.nan
     else:
         desire_cell = desire_score
 
@@ -366,11 +469,47 @@ def _compute_total_revenue(sources: Sequence[Mapping[str, Any]]) -> float:
         "Video Revenue($)",
         "Shopping Mall Revenue($)",
     ):
-        num = _parse_number(_value_from_sources(sources, NUMERIC_FIELD_KEYS[key]))
-        if num is not None:
-            total += num
+        raw = _value_from_sources(sources, NUMERIC_FIELD_KEYS[key])
+        total += _parse_money(raw)
     return round(total, 2)
 
+
+def _normalize_launch_date(raw: Any) -> Any:
+    if raw is None:
+        return ""
+    if isinstance(raw, datetime):
+        return raw.date()
+    if isinstance(raw, date):
+        return raw
+    if isinstance(raw, (int, float)):
+        if isinstance(raw, float) and math.isnan(raw):
+            return ""
+        try:
+            base = datetime(1899, 12, 30)
+            return (base + timedelta(days=float(raw))).date()
+        except Exception:
+            return str(raw)
+    text = str(raw).strip()
+    if not text:
+        return ""
+    try:
+        return datetime.fromisoformat(text).date()
+    except Exception:
+        pass
+    candidate = text.split()[0]
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d/%m/%Y", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(candidate, fmt).date()
+        except Exception:
+            continue
+    return text
+
+
+def _parse_money(value: Any) -> float:
+    num = _parse_number(value)
+    if num is None:
+        return 0.0
+    return float(num)
 
 def _parse_number(value: Any) -> Optional[float]:
     if value is None:

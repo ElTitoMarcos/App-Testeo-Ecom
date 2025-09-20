@@ -869,6 +869,8 @@ def test_export_kalodata_minimal_success(tmp_path, monkeypatch):
     header = list(next(ws.iter_rows(min_row=1, max_row=1, values_only=True)))
     assert header == list(EXPORT_COLUMNS)
 
+    assert ws.freeze_panes == "A2"
+    assert ws.auto_filter.ref == ws.dimensions
     rows = list(ws.iter_rows(min_row=2, values_only=True))
     assert len(rows) == 2
     row1, row2 = rows
@@ -879,6 +881,7 @@ def test_export_kalodata_minimal_success(tmp_path, monkeypatch):
     assert row1[6] == 4.8
     assert row1[7] == 1200
     assert row1[8] == 1550.0
+    assert row1[9].strftime("%Y-%m-%d") == "2024-01-01"
     assert row1[10] == "Fuerte deseo"
     assert row1[11] == 80
     assert row1[12] == "Solution-aware"
@@ -888,7 +891,36 @@ def test_export_kalodata_minimal_success(tmp_path, monkeypatch):
     assert row2[6] == 4.1
     assert row2[7] == 80
     assert row2[8] == 500.0
+    assert row2[9].strftime("%Y-%m-%d") == "2023-12-15"
     assert row2[10] == "Resuelve dolor"
     assert row2[11] == 65
     assert row2[12] == "Product-aware"
     assert row2[13] == "Medium"
+
+    assert ws.column_dimensions["A"].width == 40
+    assert ws.column_dimensions["L"].width == 18
+    assert "tbl_products" in ws.tables
+    assert ws.tables["tbl_products"].ref == "A1:N3"
+
+    dv_ranges = [dv.sqref for dv in ws.data_validations.dataValidation]
+    assert any(str(dv) == "L2:L3" for dv in dv_ranges)
+
+    cf_ranges = list(ws.conditional_formatting)
+
+    def _cfvo_values(cfvo):
+        values = []
+        for obj in cfvo:
+            try:
+                raw = getattr(obj, "value", getattr(obj, "val", None))
+                values.append(float(raw))
+            except (TypeError, ValueError):
+                values.append(None)
+        return values
+
+    assert any(
+        getattr(rule, "type", "") == "dataBar"
+        and rule.dataBar is not None
+        and _cfvo_values(rule.dataBar.cfvo) == [0.0, 100.0]
+        for cf in cf_ranges
+        for rule in cf.rules
+    )
