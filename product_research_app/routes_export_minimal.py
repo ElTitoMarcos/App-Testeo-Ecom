@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import io
 import json
 import logging
@@ -9,9 +10,12 @@ import math
 import re
 import time
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 import pandas as pd
+import requests
+from PIL import Image as PILImage
+from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
@@ -31,6 +35,7 @@ COLUMNS: Sequence[str] = (
     "TikTokUrl",
     "KalodataUrl",
     "Img_url",
+    "Image Preview",
     "Category",
     "Price($)",
     "Product Rating",
@@ -90,13 +95,16 @@ DESIRE_TEXT_KEYS: Sequence[str] = (
     "desire_text",
     "ai_desire_label",
 )
+DESIRE_MAGNITUDE_KEYS: Sequence[str] = (
+    "desire_magnitude",
+    "desiremag",
+    "desire_mag",
+)
 
 DESIRE_SCORE_KEYS: Sequence[str] = (
     "desire_score",
     "_desire_score",
     "ai_desire_score",
-    "desire_magnitude",
-    "desiremag",
 )
 
 AWARENESS_KEYS: Sequence[str] = (
@@ -123,6 +131,14 @@ _AWARENESS_LABELS = {
     4: "Most aware",
 }
 
+_IMG_MAX_WIDTH = 240
+_IMG_MAX_HEIGHT = 160
+_IMG_COLUMN_INDEX = 5
+_IMG_ROW_HEIGHT = 150
+
+_IMAGE_SESSION = requests.Session()
+_IMAGE_SESSION.headers.update({"User-Agent": "product-research-exporter/1.0"})
+_IMG_CACHE: Dict[str, Optional[bytes]] = {}
 
 def export_kalodata_minimal(handler: ResponseHandler, ensure_db: EnsureDbFn) -> None:
     start = time.perf_counter()
@@ -175,14 +191,31 @@ def export_kalodata_minimal(handler: ResponseHandler, ensure_db: EnsureDbFn) -> 
 
 
 def _build_workbook(rows: Sequence[Mapping[str, Any]]) -> bytes:
-    records: List[List[Any]] = []
+    records: List[Dict[str, Any]] = []
+    metadata: List[Dict[str, Any]] = []
+
     for row in rows:
-        record, missing = _convert_row(row)
+        record, meta = _convert_row(row)
         records.append(record)
+        metadata.append(meta)
+
+    _apply_desire_fallback(records, metadata)
+
+    generated_fields = ("Desire", "Desire Magnitude", "Awareness Level", "Competition Level")
+    for record, meta in zip(records, metadata):
+        missing: List[str] = []
+        for field in generated_fields:
+            value = record.get(field)
+            if field == "Desire Magnitude":
+                if value is None or (isinstance(value, float) and math.isnan(value)):
+                    missing.append(field)
+            else:
+                if not value:
+                    missing.append(field)
         if missing:
             logger.warning(
                 "Missing generated fields for product %s: %s",
-                row.get("id"),
+                meta.get("id"),
                 ", ".join(missing),
             )
 
@@ -193,6 +226,7 @@ def _build_workbook(rows: Sequence[Mapping[str, Any]]) -> bytes:
         df.to_excel(writer, sheet_name="products", index=False)
         ws = writer.sheets["products"]
         _apply_sheet_format(ws)
+        _embed_images(ws)
 
     return buffer.getvalue()
 
@@ -213,21 +247,22 @@ def _apply_sheet_format(ws) -> None:
         2: 35,
         3: 35,
         4: 40,
-        5: 18,
-        6: 12,
-        7: 14,
-        8: 12,
-        9: 16,
-        10: 14,
-        11: 45,
-        12: 18,
+        5: 38,
+        6: 18,
+        7: 12,
+        8: 14,
+        9: 12,
+        10: 16,
+        11: 14,
+        12: 45,
         13: 18,
         14: 18,
+        15: 18,
     }
     for idx, width in widths.items():
         ws.column_dimensions[get_column_letter(idx)].width = width
 
-    text_cols = [1, 4, 5, 11, 13, 14]
+    text_cols = [1, 4, 6, 12, 14, 15]
     if ws.max_row >= 2:
         for col in text_cols:
             for row in ws.iter_rows(
@@ -243,22 +278,26 @@ def _apply_sheet_format(ws) -> None:
         num_fmt_money = "$#,##0.00"
         num_fmt_rating = "0.0"
         num_fmt_date = "yyyy-mm-dd"
+        num_fmt_desire = "0"
 
-        for column in ws.iter_cols(8, 8, 2, ws.max_row):
-            for cell in column:
-                cell.number_format = num_fmt_int
-        for column in ws.iter_cols(6, 6, 2, ws.max_row):
-            for cell in column:
-                cell.number_format = num_fmt_money
-        for column in ws.iter_cols(7, 7, 2, ws.max_row):
-            for cell in column:
-                cell.number_format = num_fmt_rating
         for column in ws.iter_cols(9, 9, 2, ws.max_row):
             for cell in column:
+                cell.number_format = num_fmt_int
+        for column in ws.iter_cols(7, 7, 2, ws.max_row):
+            for cell in column:
                 cell.number_format = num_fmt_money
+        for column in ws.iter_cols(8, 8, 2, ws.max_row):
+            for cell in column:
+                cell.number_format = num_fmt_rating
         for column in ws.iter_cols(10, 10, 2, ws.max_row):
             for cell in column:
+                cell.number_format = num_fmt_money
+        for column in ws.iter_cols(11, 11, 2, ws.max_row):
+            for cell in column:
                 cell.number_format = num_fmt_date
+        for column in ws.iter_cols(13, 13, 2, ws.max_row):
+            for cell in column:
+                cell.number_format = num_fmt_desire
 
         dv = DataValidation(
             type="whole",
@@ -268,7 +307,7 @@ def _apply_sheet_format(ws) -> None:
             allow_blank=True,
         )
         ws.add_data_validation(dv)
-        dv_range = f"{get_column_letter(12)}2:{get_column_letter(12)}{ws.max_row}"
+        dv_range = f"{get_column_letter(13)}2:{get_column_letter(13)}{ws.max_row}"
         dv.add(dv_range)
         bar_rule = DataBarRule(
             start_type="num",
@@ -291,7 +330,7 @@ def _apply_sheet_format(ws) -> None:
     )
     ws.add_table(table)
 
-def _convert_row(row: Mapping[str, Any]) -> tuple[List[Any], List[str]]:
+def _convert_row(row: Mapping[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     extras = _ensure_dict(row.get("extra"))
     sources = _prepare_sources(row, extras)
 
@@ -319,8 +358,18 @@ def _convert_row(row: Mapping[str, Any]) -> tuple[List[Any], List[str]]:
     desire_text_raw = _value_from_sources(sources, DESIRE_TEXT_KEYS)
     desire_text = _coerce_text(desire_text_raw)
 
-    desire_score_raw = _value_from_sources(sources, DESIRE_SCORE_KEYS)
-    desire_score = _normalize_desire_score(desire_score_raw)
+    desire_mag_raw = _value_from_sources(sources, DESIRE_MAGNITUDE_KEYS)
+    desire_score: Optional[int]
+    if desire_mag_raw is not None:
+        desire_score = _normalize_desire_score(desire_mag_raw)
+    else:
+        desire_score_raw = _value_from_sources(sources, DESIRE_SCORE_KEYS)
+        if desire_score_raw is not None:
+            desire_score = _normalize_desire_score(desire_score_raw)
+        elif _looks_numeric(desire_text_raw):
+            desire_score = _normalize_desire_score(desire_text_raw)
+        else:
+            desire_score = None
 
     awareness_raw = _value_from_sources(sources, AWARENESS_KEYS)
     awareness = _normalize_awareness(awareness_raw)
@@ -328,41 +377,131 @@ def _convert_row(row: Mapping[str, Any]) -> tuple[List[Any], List[str]]:
     competition_raw = _value_from_sources(sources, COMPETITION_KEYS)
     competition = _normalize_competition(competition_raw)
 
-    missing: List[str] = []
-    if not desire_text:
-        missing.append("Desire")
-    if desire_score is None:
-        missing.append("Desire Magnitude")
-    if not awareness:
-        missing.append("Awareness Level")
-    if not competition:
-        missing.append("Competition Level")
+    record: Dict[str, Any] = {
+        "Product Name": product_name,
+        "TikTokUrl": tiktok_url,
+        "KalodataUrl": kalodata_url,
+        "Img_url": image_url,
+        "Image Preview": None,
+        "Category": category,
+        "Price($)": price,
+        "Product Rating": rating,
+        "Item Sold": units,
+        "Total Revenue($)": total_revenue,
+        "Launch Date": launch_date,
+        "Desire": desire_text,
+        "Desire Magnitude": desire_score,
+        "Awareness Level": awareness,
+        "Competition Level": competition,
+    }
 
-    desire_cell: Any
-    if desire_score is None:
-        desire_cell = math.nan
+    meta: Dict[str, Any] = {
+        "id": row.get("id"),
+        "item_sold": units,
+        "rating": rating,
+    }
+
+    return record, meta
+
+
+def _apply_desire_fallback(records: Sequence[Dict[str, Any]], metadata: Sequence[Dict[str, Any]]) -> None:
+    items = sorted(v for v in (meta.get("item_sold") for meta in metadata) if v is not None)
+    ratings = sorted(v for v in (meta.get("rating") for meta in metadata) if v is not None)
+
+    for record, meta in zip(records, metadata):
+        magnitude = record.get("Desire Magnitude")
+        if magnitude is None or (isinstance(magnitude, float) and math.isnan(magnitude)):
+            item_pct = _rank_percentile(meta.get("item_sold"), items)
+            rating_pct = _rank_percentile(meta.get("rating"), ratings)
+            fallback = int(round(((item_pct + rating_pct) / 2.0) * 100))
+            record["Desire Magnitude"] = max(0, min(100, fallback))
+        else:
+            record["Desire Magnitude"] = int(round(float(magnitude)))
+
+
+def _rank_percentile(value: Any, sorted_values: Sequence[float]) -> float:
+    if value is None or not sorted_values:
+        return 0.5
+    n = len(sorted_values)
+    if n == 1:
+        return 1.0
+    insert = bisect.bisect_left(sorted_values, value)
+    if insert >= n:
+        return 1.0
+    hi = bisect.bisect_right(sorted_values, value) - 1
+    if hi >= insert:
+        avg_rank = (insert + hi) / 2.0
     else:
-        desire_cell = desire_score
+        if insert == 0:
+            return 0.0
+        lower_index = insert - 1
+        upper_index = insert
+        lower_val = sorted_values[lower_index]
+        upper_val = sorted_values[upper_index]
+        if upper_val == lower_val:
+            avg_rank = float(lower_index)
+        else:
+            fraction = (float(value) - lower_val) / (upper_val - lower_val)
+            avg_rank = lower_index + fraction
+    percentile = avg_rank / (n - 1)
+    return max(0.0, min(1.0, float(percentile)))
 
-    record: List[Any] = [
-        product_name,
-        tiktok_url,
-        kalodata_url,
-        image_url,
-        category,
-        price,
-        rating,
-        units,
-        total_revenue,
-        launch_date,
-        desire_text,
-        desire_cell,
-        awareness,
-        competition,
-    ]
 
-    return record, missing
+def _embed_images(ws) -> None:
+    column_letter = get_column_letter(_IMG_COLUMN_INDEX)
+    ws.column_dimensions[column_letter].width = 38
+    for row_idx in range(2, ws.max_row + 1):
+        url = ws.cell(row=row_idx, column=4).value
+        bio = _fetch_and_resize(url)
+        target_cell = ws.cell(row=row_idx, column=_IMG_COLUMN_INDEX)
+        if bio is not None:
+            pic = XLImage(bio)
+            anchor = f"{column_letter}{row_idx}"
+            ws.add_image(pic, anchor)
+            ws.row_dimensions[row_idx].height = _IMG_ROW_HEIGHT
+            target_cell.value = None
+            target_cell.alignment = Alignment(horizontal="center", vertical="center")
+        else:
+            target_cell.value = "(no image)"
+            target_cell.font = Font(color="FF888888", italic=True)
+            target_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            ws.row_dimensions[row_idx].height = 45
 
+
+def _fetch_and_resize(url: Any) -> Optional[io.BytesIO]:
+    if not url:
+        return None
+    url_str = str(url)
+    if url_str in _IMG_CACHE:
+        cached = _IMG_CACHE[url_str]
+        return io.BytesIO(cached) if cached is not None else None
+    try:
+        with _IMAGE_SESSION.get(url_str, timeout=5, stream=True) as response:
+            response.raise_for_status()
+            raw_bytes = response.content
+        img = PILImage.open(io.BytesIO(raw_bytes)).convert("RGBA")
+        img.thumbnail((_IMG_MAX_WIDTH, _IMG_MAX_HEIGHT))
+        output = io.BytesIO()
+        img.save(output, format="PNG")
+        data = output.getvalue()
+        _IMG_CACHE[url_str] = data
+        return io.BytesIO(data)
+    except Exception:
+        _IMG_CACHE[url_str] = None
+        return None
+
+
+def _looks_numeric(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return False
+        return _parse_number(text) is not None
+    return False
 
 def _prepare_sources(*dicts: Mapping[str, Any]) -> List[Dict[str, Any]]:
     sources: List[Dict[str, Any]] = []
