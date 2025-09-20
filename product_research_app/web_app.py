@@ -27,6 +27,7 @@ from io import BytesIO
 import re
 import logging
 import requests
+from PIL import Image as PILImage
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
@@ -78,70 +79,57 @@ DEBUG = bool(os.environ.get("DEBUG"))
 DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y")
 
 
-IMG_BASE = 64
-IMG_SCALE = 2.5
-IMG_MAX = 320
-ROW_PAD = 18
-UA_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120 Safari/537.36"
-}
+UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120 Safari/537.36"}
+IMG_TARGET = 192
+ROW_PAD = 20
 
 
-def _download_image(url: str) -> BytesIO | None:
+def _download(url: str) -> BytesIO | None:
     try:
-        resp = requests.get(url, headers=UA_HEADERS, timeout=8)
+        resp = requests.get(url, headers=UA, timeout=10)
         resp.raise_for_status()
         return BytesIO(resp.content)
     except Exception:
-        try:
-            resp = requests.get(url, headers=UA_HEADERS, timeout=8, verify=False)
-            resp.raise_for_status()
-            return BytesIO(resp.content)
-        except Exception:
-            return None
-
-def _set_col_width_px(ws, col_letter: str, px: int) -> None:
-    width_chars = max(8, (px - 5) / 7.0)
-    ws.column_dimensions[col_letter].width = width_chars
+        return None
 
 
-def _add_img_cell(ws, col_letter: str, row_idx: int, url: str) -> bool:
-    try:
-        from openpyxl.drawing.image import Image as XLImage
-        from PIL import Image as PILImage
-    except Exception:
-        return False
-
-    bio = _download_image(url)
-    if not bio:
-        return False
-
+def _ensure_png_resized(bio: BytesIO) -> BytesIO | None:
     try:
         img = PILImage.open(bio).convert("RGBA")
-    except Exception:
-        return False
-
-    w, h = img.size
-    target_w = min(int(IMG_BASE * IMG_SCALE), IMG_MAX)
-    if w and w != target_w:
-        ratio = target_w / float(w)
-        img = img.resize((target_w, max(1, int(h * ratio))), PILImage.LANCZOS)
-
-    out = BytesIO()
-    try:
+        width = img.width or 1
+        if width != IMG_TARGET:
+            ratio = IMG_TARGET / float(width)
+            img = img.resize((IMG_TARGET, max(1, int(img.height * ratio))), PILImage.LANCZOS)
+        out = BytesIO()
         img.save(out, format="PNG")
+        out.seek(0)
+        return out
     except Exception:
-        return False
-    out.seek(0)
+        return None
 
+
+def _px_to_xlw(px: int) -> float:
+    return max(10.0, (px - 5) / 7.0)
+
+
+def _place_image(ws, col_letter: str, row: int, png: BytesIO) -> bool:
     try:
-        xlimg = XLImage(out)
+        from openpyxl.drawing.image import Image as XLImage
     except Exception:
         return False
-
-    _set_col_width_px(ws, col_letter, target_w + 16)
-    ws.row_dimensions[row_idx].height = target_w + ROW_PAD
-    ws.add_image(xlimg, f"{col_letter}{row_idx}")
+    try:
+        img = XLImage(png)
+    except Exception:
+        return False
+    img.width = IMG_TARGET
+    img.height = IMG_TARGET
+    try:
+        ws.add_image(img, f"{col_letter}{row}")
+    except TypeError:
+        img.anchor = f"{col_letter}{row}"
+        ws.add_image(img)
+    ws.column_dimensions[col_letter].width = _px_to_xlw(IMG_TARGET + 20)
+    ws.row_dimensions[row].height = IMG_TARGET + ROW_PAD
     return True
 
 
@@ -790,6 +778,12 @@ class RequestHandler(BaseHTTPRequestHandler):
     def setup(self):
         super().setup()
         self.wfile = _SilentWriter(self.wfile)
+
+    def log_message(self, format: str, *args):
+        message = format % args if args else format
+        if "Bad request version" in message and "h2" in message:
+            return
+        super().log_message(format, *args)
 
     def _set_json(self, status=200):
         self.send_response(status)
@@ -1490,6 +1484,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 wb = Workbook()
                 ws = wb.active
                 ws.append(headers)
+                ws.freeze_panes = "A2"
                 col_index = {key: idx for idx, (key, _) in enumerate(columns, start=1)}
                 col_letter_by_key = {key: get_column_letter(idx) for key, idx in col_index.items()}
                 img_key = next((k for k in ('image', 'image_url', 'img', 'thumbnail') if k in col_index), None)
@@ -1499,8 +1494,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                     if img_key:
                         url = str(item.get(img_key, '') or '').strip()
                         if url.startswith('http'):
-                            if _add_img_cell(ws, col_letter_by_key[img_key], r_idx, url):
-                                ws.cell(row=r_idx, column=col_index[img_key], value=None)
+                            raw = _download(url)
+                            if raw:
+                                png = _ensure_png_resized(raw)
+                                if png and _place_image(ws, col_letter_by_key[img_key], r_idx, png):
+                                    ws.cell(row=r_idx, column=col_index[img_key], value=None)
                 bio = BytesIO()
                 wb.save(bio)
                 data = bio.getvalue()

@@ -13,7 +13,7 @@
 // ===== ProgressRail: una barra por "host" (slot). host = elemento contenedor (header, modal, etc.)
 function createRailInHost(host) {
   if (!host) return null;
-  if (host.id === 'progress-slot-global') {
+  if (host.id === 'inline-progress') {
     return host;
   }
   let rail = host.querySelector(':scope > .progress-rail');
@@ -32,9 +32,9 @@ function createRailInHost(host) {
 }
 
 function ensureSlot(el) {
-  // Si el host es un modal o un hijo suyo, usa/crea .modal-progress-slot. Si no, usa #progress-slot-global.
+  // Si el host es un modal o un hijo suyo, usa/crea .modal-progress-slot. Si no, usa #inline-progress.
   let host = el && (el.closest('.modal')?.querySelector('.modal-progress-slot'));
-  if (!host) host = document.querySelector('#progress-slot-global');
+  if (!host) host = document.querySelector('#inline-progress');
 
   // Si no existe el slot de modal, créalo en caliente bajo el title del diálogo
   if (!host && el && el.closest('.modal')) {
@@ -55,15 +55,14 @@ function getRailState(host) {
   if (state) return state;
   const rail = createRailInHost(host);
   if (!rail) return null;
-  if (host.id === 'progress-slot-global') {
-    const globalLabel = document.querySelector('#global-progress .progress-label');
-    const globalFill = document.querySelector('#global-progress .progress-fill');
+  if (host.id === 'inline-progress') {
+    const globalFill = host.querySelector('.fill');
     state = {
       rail,
       fill: globalFill,
       pctEl: null,
-      titleEl: globalLabel,
-      stageEl: globalLabel,
+      titleEl: null,
+      stageEl: null,
       tasks: new Map(),
       hideTimer: null,
       isGlobal: true,

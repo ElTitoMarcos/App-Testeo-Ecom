@@ -9,9 +9,8 @@ body {
 
 :root {
   --topbar-h: 56px;
-  --toolbar-h: 48px;
-  --progress-h: 0px;
-  --sticky-offset: calc(var(--topbar-h) + var(--toolbar-h) + var(--progress-h));
+  --toolbar-h: 0px;
+  --sticky-offset: calc(var(--topbar-h) + var(--toolbar-h));
   --thead-bg: #12142a;
   --dup-bg: #ffe5e5;
   --dup-accent: #ff3b30;
@@ -40,6 +39,99 @@ body.dark {
 
 .page-root, .main-content { overflow: initial; }
 
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 56px;
+  position: relative;
+}
+
+.topbar .app-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: nowrap;
+}
+
+.topbar .app-title .brand {
+  font-size: 1.4rem;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.topbar .app-title .by {
+  font-size: 0.85rem;
+  opacity: 0.8;
+}
+
+.topbar .topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.toolbar { margin-bottom: 0; }
+
+.progress-inline[hidden] { display: none !important; }
+
+.progress-inline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 320px;
+}
+
+.progress-inline .track {
+  position: relative;
+  flex: 1;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .16);
+  overflow: hidden;
+}
+
+.progress-inline .fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #A08CFF, #6EA5FF);
+  width: 0%;
+}
+
+.progress-inline .btn-cancel {
+  padding: 6px 12px;
+  border-radius: 999px;
+  min-width: 92px;
+  border: 1px solid rgba(255, 255, 255, .35);
+  background: rgba(0, 0, 0, .22);
+  color: #fff;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.btn-cancel {
+  padding: 4px 10px;
+  min-width: 86px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, .35);
+  background: rgba(0, 0, 0, .2);
+  color: #fff;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.btn-cancel[hidden] { display: none !important; }
+
+.progress-text,
+.status-text,
+.progress-info {
+  display: none !important;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -50,7 +142,8 @@ table {
 .table-wrap {
   position: relative;
   overflow: auto;
-  max-height: calc(100vh - var(--topbar-h) - 12px);
+  max-height: calc(100vh - var(--topbar-h));
+  margin-top: 0;
 }
 
 .products-table {
@@ -343,70 +436,13 @@ body.dark .chip {
 }
 body.dark .chip button { color: #A9B4D0; }
 
-#top-progress-slot { width: 100%; }
-
-.progress-host[hidden] { display: none !important; }
-
-.progress-host {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 8px 0;
-}
-
-.progress-track {
-  flex: 1;
-  height: 6px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, .12);
-  position: relative;
-  overflow: hidden;
-}
-
-.progress-fill {
-  height: 100%;
-  width: 0%;
-  border-radius: 999px;
-  background: linear-gradient(90deg, #9b8cff, #6ea5ff);
-  transform: translateZ(0);
-}
-
-.progress-label {
-  position: absolute;
-  right: 8px;
-  top: -18px;
-  font-size: 11px;
-  color: #e9e9f5;
-  opacity: .85;
-}
-
-.btn-cancel {
-  padding: 4px 10px;
-  min-width: 86px;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, .35);
-  background: rgba(0, 0, 0, .2);
-  color: #fff;
-  font-weight: 600;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.btn-cancel[hidden] { display: none !important; }
-
-.progress-track.is-cancelled {
-  background: #6c7280 !important;
-}
-
-.btn-cancel[hidden] { display: none !important; }
-
-.progress-bar.is-cancelled { background: #6c7280 !important; }
 #searchRow {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  padding: 8px 15px 0 15px;
+  padding: 8px 15px;
+  margin: 0;
   background: #f8fbff;
 }
 body.dark #searchRow { background: #1a1b2e; }

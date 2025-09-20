@@ -14,7 +14,7 @@
 /* Basic layout */
 body { margin:0; padding:0; font-family: 'Segoe UI', Tahoma, sans-serif; color:#222; background: linear-gradient(to bottom, #f8fbff, #e9f0ff); }
 body.dark { background: #1a1b2e; color:#eaeaea; }
-#app-header .app-toolbar { padding:20px; text-align:center; background: linear-gradient(90deg, #0062ff, #00c8ff); color:#fff; box-shadow:0 2px 5px rgba(0,0,0,0.3); }
+#app-header .app-toolbar { padding:8px 15px; display:flex; align-items:center; justify-content:space-between; gap:16px; background: linear-gradient(90deg, #0062ff, #00c8ff); color:#fff; box-shadow:0 2px 5px rgba(0,0,0,0.3); }
 body.dark #app-header .app-toolbar { background: linear-gradient(90deg, #2e2e78, #6547a6); }
 .container { max-width: 1200px; margin: 0 auto; padding: 10px; }
 .card { background:#121426; border:1px solid #222642; border-radius:10px; padding:12px; margin-bottom:15px; }
@@ -99,31 +99,24 @@ body.dark .skeleton{background:#333;}
 <body class="dark">
 <header id="topBar" class="app-header">
   <div id="app-header">
-    <div class="app-toolbar topbar" style="padding:8px 15px; display:flex; flex-direction:column; gap:6px; position:relative;">
-      <div class="topbar-main" style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
-        <div style="display:flex; align-items:center; gap:8px;">
-          <h1 style="margin:0; font-size:1.4rem;">Ecom Testing App</h1>
-          <p style="margin:0;font-size:12px; opacity:0.8;">By El Tito 🤙</p>
-        </div>
-        <div style="flex:1; display:flex; justify-content:flex-end; gap:8px; align-items:center;">
-          <input type="file" id="fileInput" style="display:none;" />
-          <button id="uploadBtn" title="Subir archivo">📤</button>
-          <button id="refreshBtn" title="Actualizar lista">🔄</button>
-          <button id="btn-ver-tendencias" title="Ver tendencias" data-action="toggle-trends">📊</button>
-          <button id="darkToggle" title="Modo oscuro">🌙</button>
-          <button id="configBtn" title="Configuración avanzada">⚙️</button>
+    <div class="app-toolbar topbar">
+      <div class="app-title">
+        <span class="brand">Ecom Testing App</span>
+        <span class="by">By El Tito 👑</span>
+
+        <div id="inline-progress" class="progress-inline" hidden>
+          <div class="track"><div class="fill" style="width:0%"></div></div>
+          <button id="btn-cancel-import" class="btn-cancel">Cancelar</button>
         </div>
       </div>
-      <div id="top-progress-slot">
-        <div id="global-progress" class="progress-host" role="status" aria-live="polite" hidden>
-          <div id="progress-slot-global" class="progress-track">
-            <div class="progress-fill" style="width:0%"></div>
-            <span class="progress-label">Cargando…</span>
-          </div>
-          <button id="btn-cancel-import" class="btn-cancel" hidden>Cancelar</button>
-        </div>
+      <div class="topbar-actions">
+        <input type="file" id="fileInput" style="display:none;" />
+        <button id="uploadBtn" title="Subir archivo">📤</button>
+        <button id="refreshBtn" title="Actualizar lista">🔄</button>
+        <button id="btn-ver-tendencias" title="Ver tendencias" data-action="toggle-trends">📊</button>
+        <button id="darkToggle" title="Modo oscuro">🌙</button>
+        <button id="configBtn" title="Configuración avanzada">⚙️</button>
       </div>
-      <button id="btn-cancel-import" class="btn-cancel" hidden>Cancelar</button>
     </div>
   </div>
   <!-- Search bar row with controls -->
@@ -400,82 +393,7 @@ const IMPORT_START_URL = '/upload';
 let savedApiKeyHash = null;
 let savedApiKeyLength = 0;
 
-const progressHost = document.getElementById('global-progress');
-const progressTrack = progressHost?.querySelector('.progress-track');
-const progressFill = progressHost?.querySelector('.progress-fill');
-const progressLabel = progressHost?.querySelector('.progress-label');
-const cancelBtn = document.getElementById('btn-cancel-import');
-let currentProgressPct = 0;
-
-function progressShow(show){
-  if(progressHost){
-    progressHost.hidden = !show;
-    if(!show){
-      progressTrack?.classList.remove('is-cancelled');
-      currentProgressPct = 0;
-      if(progressFill) progressFill.style.width = '0%';
-    }
-  }
-}
-
-function progressSet(pct, text){
-  if(pct !== undefined && pct !== null){
-    const num = Number(pct);
-    const clamped = Math.max(0, Math.min(100, Number.isFinite(num) ? num : 0));
-    if(progressFill) progressFill.style.width = clamped + '%';
-    currentProgressPct = clamped;
-  }
-  if(text !== undefined){
-    if(progressLabel) progressLabel.textContent = text || '';
-  }
-}
-
-async function cancelImport(){
-  if(!progressHost || !window.currentTaskId) return;
-  cancelBtn?.setAttribute('disabled', 'true');
-  try{
-    await fetch('/_import_cancel', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ task_id: window.currentTaskId })
-    });
-  }catch(e){}
-  stopImportPolling?.();
-  progressTrack?.classList.add('is-cancelled');
-  progressSet(100, 'Cancelado');
-  cancelBtn?.removeAttribute('disabled');
-  const endImport = () => window.onImportEnd?.();
-  setTimeout(endImport, 600);
-  window.currentTaskId = null;
-}
-cancelBtn?.addEventListener('click', cancelImport);
-
-window.progressShow = progressShow;
-window.progressSet = progressSet;
-
-window.onImportStart = (taskId)=>{
-  window.currentTaskId = taskId;
-  progressTrack?.classList.remove('is-cancelled');
-  if(cancelBtn) cancelBtn.hidden = false;
-  progressSet(0, 'Importando…');
-  progressShow(true);
-};
-window.onImportTick = (pct, text)=>{
-  progressSet(pct, text || '');
-};
-window.onImportEnd = ()=>{
-  window.currentTaskId = null;
-  progressShow(false);
-  if(cancelBtn){
-    cancelBtn.hidden = true;
-    cancelBtn.removeAttribute('disabled');
-  }
-};
-
-progressShow(false);
-progressSet(0, '');
-if(cancelBtn) cancelBtn.hidden = true;
-
-const getGlobalProgressHost = () => document.querySelector('#progress-slot-global');
+const getGlobalProgressHost = () => document.querySelector('#inline-progress');
 const getActionHost = () => document.querySelector('#bottomBar') || getGlobalProgressHost();
 
 function formatPrice(n) {
@@ -630,7 +548,7 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
   } catch (err) {
     tracker.step(1, 'Error');
     toast.error(err?.message || 'Error al importar catálogo');
-    progressSet(currentProgressPct, 'Error');
+    progressSet(window.currentProgressPct ?? 0, 'Error');
     throw err;
   } finally {
     tracker.done();
@@ -1274,7 +1192,7 @@ window.onload = async () => {
     } catch (err) {
       tracker.step(1, 'Error');
       toast.error(err?.message || 'Error en importación');
-      progressSet(currentProgressPct, 'Error');
+      progressSet(window.currentProgressPct ?? 0, 'Error');
     } finally {
       localStorage.removeItem(IMPORT_TASK_LS_KEY);
       tracker.done();

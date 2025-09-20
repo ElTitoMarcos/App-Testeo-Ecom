@@ -327,7 +327,7 @@ function stratifiedSample(list, n){
 async function adjustWeightsAI(ev){
   const btn = ev?.currentTarget || document.getElementById('btnAiWeights');
   const modal = btn?.closest('.modal') || document.querySelector('.config-modal.modal');
-  const host = modal?.querySelector('.modal-progress-slot') || modal || document.querySelector('#progress-slot-global');
+  const host = modal?.querySelector('.modal-progress-slot') || modal || document.querySelector('#inline-progress');
   const tracker = LoadingHelpers.start('Ajustando pesos con IA', { host });
   const num = v => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
   const stratifiedSampleBy = (arr, key, n) => {
