@@ -63,16 +63,22 @@ function getRailState(host) {
 
 function refreshHost(host) {
   const s = getRailState(host); if (!s) return;
+  clearTimeout(s.hideTimer);
+  const progressBar = host?.closest('.progress-bar') || null;
+  const progressHost = progressBar?.closest('.progress-host') || null;
+  const label = progressHost?.querySelector('.progress-label') || progressBar?.querySelector('.progress-label') || null;
   const tasks = s.tasks;
   if (tasks.size === 0) {
     // completar al 100% brevemente y colapsar el slot
     s.fill.style.width = '100%';
     s.pctEl.textContent = '100%';
-    clearTimeout(s.hideTimer);
     s.hideTimer = setTimeout(() => {
       s.fill.style.width = '0%';
       s.pctEl.textContent = '0%';
       host.classList.remove('active'); // colapsa el slot (height:0)
+      progressBar?.classList.remove('is-cancelled');
+      if (progressHost) progressHost.hidden = true;
+      if (label) label.textContent = 'Listo';
     }, 300);
     return;
   }
@@ -83,10 +89,19 @@ function refreshHost(host) {
   const pct = Math.round(avg * 100);
   s.fill.style.width = pct + '%';
   s.pctEl.textContent = pct + '%';
+  if (progressHost) progressHost.hidden = false;
   host.classList.add('active');
+  progressBar?.classList.remove('is-cancelled');
   if (last) {
     if (last.title) s.titleEl.textContent = last.title;
-    if (last.stage) s.stageEl.textContent = last.stage;
+    if (last.stage) {
+      s.stageEl.textContent = last.stage;
+      if (label) label.textContent = last.stage;
+    } else if (label) {
+      label.textContent = last.title;
+    }
+  } else if (label) {
+    label.textContent = 'Procesando…';
   }
 }
 
