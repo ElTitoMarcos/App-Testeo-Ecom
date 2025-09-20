@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import io
+from io import BytesIO
 import re
 import logging
 import requests
@@ -75,6 +76,74 @@ logger = logging.getLogger(__name__)
 DEBUG = bool(os.environ.get("DEBUG"))
 
 DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y")
+
+
+IMG_BASE = 64
+IMG_SCALE = 2.5
+IMG_MAX = 320
+ROW_PAD = 18
+UA_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120 Safari/537.36"
+}
+
+
+def _download_image(url: str) -> BytesIO | None:
+    try:
+        resp = requests.get(url, headers=UA_HEADERS, timeout=8)
+        resp.raise_for_status()
+        return BytesIO(resp.content)
+    except Exception:
+        try:
+            resp = requests.get(url, headers=UA_HEADERS, timeout=8, verify=False)
+            resp.raise_for_status()
+            return BytesIO(resp.content)
+        except Exception:
+            return None
+
+
+def _set_col_width_px(ws, col_letter: str, px: int) -> None:
+    width_chars = max(8, (px - 5) / 7.0)
+    ws.column_dimensions[col_letter].width = width_chars
+
+
+def _add_img_cell(ws, col_letter: str, row_idx: int, url: str) -> bool:
+    try:
+        from openpyxl.drawing.image import Image as XLImage
+        from PIL import Image as PILImage
+    except Exception:
+        return False
+
+    bio = _download_image(url)
+    if not bio:
+        return False
+
+    try:
+        img = PILImage.open(bio).convert("RGBA")
+    except Exception:
+        return False
+
+    w, h = img.size
+    target_w = min(int(IMG_BASE * IMG_SCALE), IMG_MAX)
+    if w and w != target_w:
+        ratio = target_w / float(w)
+        img = img.resize((target_w, max(1, int(h * ratio))), PILImage.LANCZOS)
+
+    out = BytesIO()
+    try:
+        img.save(out, format="PNG")
+    except Exception:
+        return False
+    out.seek(0)
+
+    try:
+        xlimg = XLImage(out)
+    except Exception:
+        return False
+
+    _set_col_width_px(ws, col_letter, target_w + 16)
+    ws.row_dimensions[row_idx].height = target_w + ROW_PAD
+    ws.add_image(xlimg, f"{col_letter}{row_idx}")
+    return True
 
 
 _DB_INIT = False
@@ -1379,30 +1448,42 @@ class RequestHandler(BaseHTTPRequestHandler):
                         items.append(p)
             else:
                 items = database.list_products(conn)
-            rows = []
+            row_dicts: list[dict[str, Any]] = []
             for p in items:
+                pdata = row_to_dict(p)
                 scores = database.get_scores_for_product(conn, p['id'])
                 score_val = None
                 if scores:
                     sc = scores[0]
                     if 'winner_score' in sc.keys():
                         score_val = sc['winner_score']
-                rows.append(
-                    [
-                        p['id'],
-                        p['name'],
-                        score_val,
-                        p['desire'],
-                        p['desire_magnitude'],
-                        p['awareness_level'],
-                        p['competition_level'],
-                        p['date_range'],
-                    ]
-                )
-            headers = ["id", "name", "Winner Score", "Desire", "Desire Magnitude", "Awareness Level", "Competition Level", "Date Range"]
+                row_dicts.append({
+                    'id': pdata.get('id'),
+                    'image_url': pdata.get('image_url'),
+                    'name': pdata.get('name'),
+                    'winner_score': score_val,
+                    'desire': pdata.get('desire'),
+                    'desire_magnitude': pdata.get('desire_magnitude'),
+                    'awareness_level': pdata.get('awareness_level'),
+                    'competition_level': pdata.get('competition_level'),
+                    'date_range': pdata.get('date_range'),
+                })
+            columns = [
+                ('id', 'ID'),
+                ('image_url', 'Imagen'),
+                ('name', 'Nombre'),
+                ('winner_score', 'Winner Score'),
+                ('desire', 'Desire'),
+                ('desire_magnitude', 'Desire Magnitude'),
+                ('awareness_level', 'Awareness Level'),
+                ('competition_level', 'Competition Level'),
+                ('date_range', 'Date Range'),
+            ]
+            headers = [label for _, label in columns]
             if fmt == 'xlsx':
                 try:
                     from openpyxl import Workbook
+                    from openpyxl.utils import get_column_letter
                 except Exception:
                     self._set_json(500)
                     self.wfile.write(json.dumps({"error": "openpyxl not installed"}).encode('utf-8'))
@@ -1410,9 +1491,17 @@ class RequestHandler(BaseHTTPRequestHandler):
                 wb = Workbook()
                 ws = wb.active
                 ws.append(headers)
-                for r in rows:
-                    ws.append(r)
-                from io import BytesIO
+                col_index = {key: idx for idx, (key, _) in enumerate(columns, start=1)}
+                col_letter_by_key = {key: get_column_letter(idx) for key, idx in col_index.items()}
+                img_key = next((k for k in ('image', 'image_url', 'img', 'thumbnail') if k in col_index), None)
+                for r_idx, item in enumerate(row_dicts, start=2):
+                    for key, _ in columns:
+                        ws.cell(row=r_idx, column=col_index[key], value=item.get(key))
+                    if img_key:
+                        url = str(item.get(img_key, '') or '').strip()
+                        if url.startswith('http'):
+                            if _add_img_cell(ws, col_letter_by_key[img_key], r_idx, url):
+                                ws.cell(row=r_idx, column=col_index[img_key], value=None)
                 bio = BytesIO()
                 wb.save(bio)
                 data = bio.getvalue()
@@ -1428,7 +1517,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 output = StringIO()
                 writer = csv.writer(output)
                 writer.writerow(headers)
-                writer.writerows(rows)
+                csv_rows = [[row.get(key) for key, _ in columns] for row in row_dicts]
+                writer.writerows(csv_rows)
                 csv_data = output.getvalue().encode('utf-8')
                 self.send_response(200)
                 self.send_header("Content-Type", "text/csv; charset=utf-8")
