@@ -2,7 +2,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from ..config import load_config, save_config, DEFAULT_WINNER_ORDER
+from ..config import load_config as _load_config_from_store, save_config, DEFAULT_WINNER_ORDER
 
 ALLOWED_FIELDS = (
     "price",
@@ -15,6 +15,7 @@ ALLOWED_FIELDS = (
     "awareness",
 )
 DEFAULT_WEIGHTS_RAW: Dict[str, int] = {k: 50 for k in ALLOWED_FIELDS}
+# Orden por defecto del winner score
 DEFAULT_ORDER: List[str] = list(DEFAULT_WINNER_ORDER)
 DEFAULT_ENABLED: Dict[str, bool] = {k: True for k in ALLOWED_FIELDS}
 
@@ -38,6 +39,19 @@ def _normalize_order(order, weights: Dict[str, int]) -> List[str]:
     out: List[str] = [k for k in (order or []) if k in weights and not (k in seen or seen.add(k))]
     out += [k for k in weights.keys() if k not in out]
     return out
+
+
+def load_config():
+    cfg = _load_config_from_store()
+    try:
+        order = cfg.get("winner_order")
+        if not isinstance(order, list) or not order:
+            cfg["winner_order"] = DEFAULT_ORDER.copy()
+            save_config(cfg)
+    except Exception:
+        # No romper la carga si la persistencia falla; otros puntos lo reintentarán
+        pass
+    return cfg
 
 
 def init_app_config() -> None:

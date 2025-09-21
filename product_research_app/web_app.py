@@ -2632,6 +2632,14 @@ class RequestHandler(BaseHTTPRequestHandler):
         winner_calc.invalidate_weights_cache()
         order = list(saved_order)
         final_weights = saved_weights
+        try:
+            snapshot = config.load_config()
+            snapshot["winner_weights"] = dict(final_weights)
+            snapshot["winner_order"] = order.copy()
+            snapshot["weights_order"] = order.copy()
+            config.save_config(snapshot)
+        except Exception:
+            logger.warning("failed to persist AI-adjusted winner weights", exc_info=True)
 
         # Logs (útiles para ti): ahora ai_raw/ints son lo mismo (0..100 independientes)
         logger.info(

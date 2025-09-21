@@ -10,6 +10,7 @@ from product_research_app.services.winner_score import (
 from product_research_app.services.config import (
     ALLOWED_FIELDS,
     compute_effective_int,
+    DEFAULT_ORDER,
 )
 
 
@@ -45,7 +46,40 @@ accepts any of the shapes described above.
 def api_get_winner_weights():
     settings = load_settings()
     weights = _coerce_weights(settings.get("winner_weights"))
-    order = settings.get("winner_order") or list(weights.keys())
+    raw_order = settings.get("winner_order")
+    order: list[str] = []
+    seen: set[str] = set()
+    if isinstance(raw_order, list):
+        for item in raw_order:
+            if not isinstance(item, str) or item in seen:
+                continue
+            if not weights or item in weights:
+                order.append(item)
+                seen.add(item)
+    if not order:
+        for item in DEFAULT_ORDER:
+            if item in seen:
+                continue
+            if not weights or item in weights:
+                order.append(item)
+                seen.add(item)
+    for key in weights.keys():
+        if key not in seen:
+            order.append(key)
+            seen.add(key)
+    persist_needed = not isinstance(raw_order, list) or raw_order != order
+    raw_weights_order = settings.get("weights_order")
+    if not isinstance(raw_weights_order, list) or raw_weights_order != order:
+        persist_needed = True
+    if persist_needed:
+        settings["winner_order"] = order.copy()
+        settings["weights_order"] = order.copy()
+        try:
+            save_settings(settings)
+        except Exception:
+            current_app.logger.warning(
+                "failed to persist default winner_order", exc_info=True
+            )
     enabled_raw = settings.get("weights_enabled") if isinstance(settings.get("weights_enabled"), dict) else {}
     enabled = {k: bool(enabled_raw.get(k, True)) for k in weights.keys()}
     weights_eff = {k: (weights.get(k, 0) if enabled.get(k, True) else 0) for k in weights.keys()}
@@ -54,6 +88,7 @@ def api_get_winner_weights():
         **weights,
         "weights": weights,
         "order": order,
+        "version": "v2",
         "effective": {"int": eff},
         "weights_enabled": enabled,
         "weights_order": settings.get("weights_order") or order,
@@ -104,6 +139,15 @@ def api_patch_winner_weights():
     except Exception as e:
         current_app.logger.warning("recompute on save failed: %s", e)
 
-    resp = jsonify({"ok": True, "winner_weights": settings["winner_weights"], "winner_order": order, "updated": updated})
+    payload = {
+        "ok": True,
+        "winner_weights": settings["winner_weights"],
+        "weights": settings["winner_weights"],
+        "winner_order": order,
+        "order": order,
+        "updated": updated,
+        "version": "v2",
+    }
+    resp = jsonify(payload)
     resp.headers["Cache-Control"] = "no-store"
     return resp, 200
