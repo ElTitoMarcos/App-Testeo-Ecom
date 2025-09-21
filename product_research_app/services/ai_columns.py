@@ -376,7 +376,7 @@ def run_ai_fill_job(
         requested_ids.append(num)
 
     rows = database.get_products_by_ids(conn, requested_ids)
-    row_map = {int(row["id"]): row for row in rows}
+    row_map = {int(row["id"]): dict(row) for row in rows}
 
     candidates: List[Candidate] = []
     sig_updates: List[tuple[str, int]] = []
