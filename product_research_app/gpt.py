@@ -827,92 +827,144 @@ def generate_ba_insights(api_key: str, model: str, product: Dict[str, Any]) -> T
     return norm, usage, duration
 
 
-def generate_batch_columns(api_key: str, model: str, items: List[Dict[str, Any]]) -> Tuple[Dict[str, Any], Dict[str, str], Dict[str, Any], float]:
+def generate_batch_columns(
+    api_key: str,
+    model: str,
+    items: List[Dict[str, Any]],
+    *,
+    temperature: float = 0.0,
+    top_p: float = 0.1,
+    max_tokens: Optional[int] = None,
+) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]], Dict[str, Any], float]:
+    if not items:
+        return {}, {}, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}, 0.0
+
     sys_msg = (
-        "Eres un analista de marketing. Aplica marcos de Breakthrough Advertising sin citar texto. "
-        "Devuelve exclusivamente un JSON cuyas claves son los IDs de producto, y cuyos valores incluyen: "
-        "desire (string), desire_magnitude (Low|Medium|High), awareness_level (Unaware|Problem-Aware|Solution-Aware|Product-Aware|Most Aware), "
-        "competition_level (Low|Medium|High). No devuelvas comentarios, ni Markdown, ni bloques de código."
+        "Eres un analista de marketing experto en Breakthrough Advertising. "
+        "Evalúa cada producto y responde únicamente con JSON."
+    )
+    user_intro = (
+        "Devuelve EXCLUSIVAMENTE un JSON.\n"
+        "Raíz: objeto cuyas claves son los IDs de producto.\n"
+        "Cada valor debe contener: desire (texto), desire_magnitude (Low|Medium|High), "
+        "awareness_level (Unaware|Problem-Aware|Solution-Aware|Product-Aware|Most Aware), "
+        "competition_level (Low|Medium|High)."
     )
 
-    intro_text = (
-        "Responde SOLO con un JSON.\n"
-        "Raíz: objeto cuyas claves son IDs de producto (string o número).\n"
-        "Por cada ID: { \"desire\": string,\n"
-        "               \"desire_magnitude\": \"Low|Medium|High\",\n"
-        "               \"awareness_level\": \"Unaware|Problem-Aware|Solution-Aware|Product-Aware|Most Aware\",\n"
-        "               \"competition_level\": \"Low|Medium|High\" }.\n"
-    )
+    def _fmt(value: Any) -> str:
+        if value in (None, ""):
+            return ""
+        if isinstance(value, (int, float)):
+            if isinstance(value, int) or float(value).is_integer():
+                return str(int(value))
+            return f"{float(value):.4g}"
+        text = str(value)
+        return text.strip()
 
-    content: List[Dict[str, Any]] = [{"type": "text", "text": intro_text}]
-    for it in items:
+    blocks: List[str] = []
+    id_map: Dict[str, Dict[str, Any]] = {}
+    for item in items:
+        pid = str(item.get("id"))
+        if not pid:
+            continue
+        id_map[pid] = dict(item)
         lines = [
-            "BEGIN_PRODUCT",
-            f"id: {it.get('id')}",
-            f"name: {it.get('name')}",
-            f"category: {it.get('category')}",
-            f"price: {it.get('price')}",
-            f"rating: {it.get('rating')}",
-            f"units_sold: {it.get('units_sold')}",
-            f"revenue: {it.get('revenue')}",
-            f"conversion_rate: {it.get('conversion_rate')}",
-            f"launch_date: {it.get('launch_date')}",
-            f"date_range: {it.get('date_range')}",
+            f"id: {pid}",
+            f"name: {_fmt(item.get('name'))}",
+            f"brand: {_fmt(item.get('brand'))}",
+            f"category: {_fmt(item.get('category'))}",
+            f"price: {_fmt(item.get('price'))}",
+            f"rating: {_fmt(item.get('rating'))}",
+            f"units_sold: {_fmt(item.get('units_sold'))}",
+            f"revenue: {_fmt(item.get('revenue'))}",
         ]
-        url = (it.get("image_url") or "").strip()
-        if not re.match(r"^https?://", url):
-            if url:
-                lines.append(f"image_url: {url}")
-        lines.append("END_PRODUCT")
-        content.append({"type": "text", "text": "\n".join(lines)})
-        if url and re.match(r"^https?://", url):
-            content.append({"type": "image_url", "image_url": {"url": url}})
+        desc = item.get("description")
+        if desc:
+            description = " ".join(str(desc).split())
+            if description:
+                lines.append(f"description: {description}")
+        blocks.append("\n".join(lines))
 
+    if not id_map:
+        return {}, {}, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}, 0.0
+
+    user_content = user_intro + "\n\n" + "\n\n".join(blocks)
     messages = [
         {"role": "system", "content": sys_msg},
-        {"role": "user", "content": content},
+        {"role": "user", "content": user_content},
     ]
 
+    if max_tokens is None:
+        per_item = max(1, len(items))
+        max_tokens = max(64, per_item * 8)
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "top_p": top_p,
+        "max_tokens": max_tokens,
+        "response_format": {"type": "json_object"},
+    }
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
     start = time.time()
-    resp = call_openai_chat(
-        api_key,
-        model,
-        messages,
-        temperature=0.2,
-        response_format={"type": "json_object"},
-    )
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers=headers,
+            data=json.dumps(payload),
+            timeout=120,
+        )
+    except requests.RequestException as exc:
+        raise OpenAIError(f"Failed to connect to OpenAI API: {exc}") from exc
+
     duration = time.time() - start
-    usage = resp.get("usage", {})
+    if response.status_code != 200:
+        try:
+            err = response.json()
+            message = err.get("error", {}).get("message", response.text)
+        except Exception:
+            message = response.text
+        raise OpenAIError(f"OpenAI API returned status {response.status_code}: {message}")
 
     try:
-        raw = resp["choices"][0]["message"]["content"].strip()
-        if raw.startswith("```") and raw.endswith("```"):
-            raw = re.sub(r"^```[a-zA-Z]*\n?", "", raw)
-            raw = re.sub(r"\n?```$", "", raw)
-        data = json.loads(raw)
+        resp_json = response.json()
     except Exception as exc:
-        logger.error("Respuesta IA no es JSON: %s", resp)
-        raise InvalidJSONError("Respuesta IA no es JSON") from exc
+        raise OpenAIError(f"Invalid JSON response from OpenAI: {exc}") from exc
+
+    choices = resp_json.get("choices") or []
+    if not choices:
+        raise OpenAIError("Respuesta de OpenAI sin choices")
+
+    message = choices[0].get("message", {}) or {}
+    data: Any
+    parsed = message.get("parsed")
+    if parsed is not None:
+        data = parsed
+    else:
+        parsed_json, text = _parse_message_content({"choices": [{"message": message}]})
+        if parsed_json is not None:
+            data = parsed_json
+        else:
+            raw = text.strip()
+            if raw.startswith("```") and raw.endswith("```"):
+                raw = re.sub(r"^```[a-zA-Z]*\n?", "", raw)
+                raw = re.sub(r"\n?```$", "", raw)
+            try:
+                data = json.loads(raw)
+            except Exception as exc:
+                raise InvalidJSONError(raw) from exc
 
     if not isinstance(data, dict):
         raise InvalidJSONError("Respuesta IA no es JSON")
 
-    ok: Dict[str, Dict[str, Any]] = {}
-    ko: Dict[str, str] = {}
-    for it in items:
-        pid = str(it.get("id"))
-        entry = data.get(pid)
-        if not isinstance(entry, dict):
-            ko[pid] = "missing"
-            continue
-        ok[pid] = {
-            "desire": entry.get("desire"),
-            "desire_magnitude": _norm_tri(entry.get("desire_magnitude")),
-            "awareness_level": _norm_awareness(entry.get("awareness_level")),
-            "competition_level": _norm_tri(entry.get("competition_level")),
-        }
-
-    return ok, ko, usage, duration
+    usage = resp_json.get("usage", {}) or {}
+    return data, id_map, usage, duration
 
 
 # ---------------- Winner Score evaluation -----------------

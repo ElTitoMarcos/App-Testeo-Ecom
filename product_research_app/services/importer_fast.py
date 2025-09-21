@@ -5,21 +5,25 @@ import io
 import logging
 import re
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Iterable, Iterator, Mapping, Optional, Sequence
 
+from product_research_app import config
 from product_research_app.db import get_db, get_last_performance_config, init_db_performance
 from product_research_app.database import (
     append_import_job_metrics,
     clear_staging_for_job,
     create_import_job,
+    get_job_product_ids,
     json_dump,
     merge_staging_into_products,
     transition_job_items,
     update_import_job_progress,
 )
+from product_research_app.services import ai_columns
 from product_research_app.utils.signature import compute_sig_hash
 
 logger = logging.getLogger(__name__)
@@ -532,6 +536,15 @@ def fast_import(
                 "batch_size": batch_size,
             },
         )
+        inserted_ids = get_job_product_ids(base_conn, job_id)
+        if inserted_ids and config.is_auto_fill_ia_on_import_enabled():
+            def _run_ai_fill() -> None:
+                try:
+                    ai_columns.run_ai_fill_job(inserted_ids, job_id=job_id)
+                except Exception:
+                    logger.exception("Auto AI fill failed job=%s", job_id)
+
+            threading.Thread(target=_run_ai_fill, name=f"ai-fill-{job_id}", daemon=True).start()
         return summary.unique_rows
     except Exception as exc:
         logger.exception("Fast import failed job=%s", job_id)
@@ -601,6 +614,15 @@ def fast_import_records(
                 "batch_size": batch_size,
             },
         )
+        inserted_ids = get_job_product_ids(base_conn, job_id)
+        if inserted_ids and config.is_auto_fill_ia_on_import_enabled():
+            def _run_ai_fill() -> None:
+                try:
+                    ai_columns.run_ai_fill_job(inserted_ids, job_id=job_id)
+                except Exception:
+                    logger.exception("Auto AI fill failed job=%s", job_id)
+
+            threading.Thread(target=_run_ai_fill, name=f"ai-fill-{job_id}", daemon=True).start()
         return summary.unique_rows
     except Exception as exc:
         logger.exception("Fast record import failed job=%s", job_id)

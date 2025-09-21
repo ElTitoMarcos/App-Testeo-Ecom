@@ -36,7 +36,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "aiCost": {
         "model": "gpt-4.1-mini",
         "useBatchWhenCountGte": 300,
-        "costCapUSD": 0.25,
+        "costCapUSD": 5.0,
         "estTokensPerItemIn": 300,
         "estTokensPerItemOut": 80,
     },
@@ -49,11 +49,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "min_high_pct": 0.05,
     },
     "ai": {
-        "parallelism": 8,
-        "microbatch": 32,
-        "cache_enabled": True,
-        "version": 1,
-        "tpm_limit": None,
+        "model": "gpt-4o-mini",
+        "parallelism": 32,
+        "microbatch": 512,
+        "temperature": 0.0,
+        "topP": 0.1,
+        "maxOutputTokensPerItem": 8,
+        "truncate": {"title": 120, "description": 240},
+        "enableCache": True,
     },
     "includeImageInAI": True,
     "aiImageCostMaxUSD": 0.02,
@@ -146,8 +149,11 @@ def _merge_defaults(dst: Dict[str, Any], src: Dict[str, Any]) -> bool:
 
 
 def get_api_key() -> Optional[str]:
-    """Return the stored OpenAI API key if present."""
+    """Return the configured OpenAI API key giving precedence to the environment."""
 
+    env_key = os.environ.get("OPENAI_API_KEY")
+    if env_key:
+        return env_key
     config = load_config()
     return config.get("api_key")
 
@@ -158,7 +164,11 @@ def get_model() -> str:
     config = load_config()
     model = config.get("model")
     if not model:
-        return "gpt-4o"
+        ai_cfg = config.get("ai") or {}
+        if isinstance(ai_cfg, dict):
+            model = ai_cfg.get("model")
+    if not model:
+        return "gpt-4o-mini"
     return model
 
 
@@ -206,7 +216,7 @@ def get_ai_runtime_config() -> Dict[str, Any]:
             base[k] = v
 
     cpu_parallel = max(1, (os.cpu_count() or 1) * 2)
-    default_parallel = min(8, cpu_parallel)
+    default_parallel = min(32, cpu_parallel)
     try:
         parallel = int(base.get("parallelism") or 0)
     except Exception:
@@ -223,22 +233,45 @@ def get_ai_runtime_config() -> Dict[str, Any]:
         micro = DEFAULT_CONFIG["ai"]["microbatch"]
     base["microbatch"] = max(1, micro)
 
-    base["cache_enabled"] = bool(base.get("cache_enabled", True))
     try:
-        base["version"] = int(base.get("version", DEFAULT_CONFIG["ai"]["version"]))
+        temp_val = float(base.get("temperature", DEFAULT_CONFIG["ai"]["temperature"]))
     except Exception:
-        base["version"] = DEFAULT_CONFIG["ai"]["version"]
+        temp_val = DEFAULT_CONFIG["ai"]["temperature"]
+    base["temperature"] = max(0.0, temp_val)
 
-    tpm_limit = base.get("tpm_limit")
-    if tpm_limit is None:
-        base["tpm_limit"] = None
-    else:
-        try:
-            limit_val = int(tpm_limit)
-        except Exception:
-            base["tpm_limit"] = None
-        else:
-            base["tpm_limit"] = max(0, limit_val) or None
+    try:
+        top_p = float(base.get("topP", DEFAULT_CONFIG["ai"]["topP"]))
+    except Exception:
+        top_p = DEFAULT_CONFIG["ai"]["topP"]
+    base["topP"] = max(0.0, min(1.0, top_p))
+
+    try:
+        per_item = int(base.get("maxOutputTokensPerItem", DEFAULT_CONFIG["ai"]["maxOutputTokensPerItem"]))
+    except Exception:
+        per_item = DEFAULT_CONFIG["ai"]["maxOutputTokensPerItem"]
+    if per_item <= 0:
+        per_item = DEFAULT_CONFIG["ai"]["maxOutputTokensPerItem"]
+    base["maxOutputTokensPerItem"] = max(1, per_item)
+
+    truncate_cfg = base.get("truncate") or {}
+    if not isinstance(truncate_cfg, dict):
+        truncate_cfg = {}
+    trunc_title = truncate_cfg.get("title", DEFAULT_CONFIG["ai"]["truncate"]["title"])
+    trunc_desc = truncate_cfg.get("description", DEFAULT_CONFIG["ai"]["truncate"]["description"])
+    try:
+        trunc_title = int(trunc_title)
+    except Exception:
+        trunc_title = DEFAULT_CONFIG["ai"]["truncate"]["title"]
+    try:
+        trunc_desc = int(trunc_desc)
+    except Exception:
+        trunc_desc = DEFAULT_CONFIG["ai"]["truncate"]["description"]
+    base["truncate"] = {
+        "title": max(10, trunc_title),
+        "description": max(20, trunc_desc),
+    }
+
+    base["enableCache"] = bool(base.get("enableCache", True))
 
     return base
 

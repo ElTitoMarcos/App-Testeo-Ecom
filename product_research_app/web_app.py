@@ -24,6 +24,7 @@ import json
 import os
 import io
 import re
+import uuid
 import logging
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -439,18 +440,20 @@ def _schedule_post_import_tasks(
         conn = database.get_connection(DB_PATH)
         try:
             final_counts: Dict[str, Any] = {
-                "queued": len(product_ids),
-                "sent": 0,
+                "total": len(product_ids),
                 "ok": 0,
                 "ko": 0,
-                "cached": 0,
-                "retried": 0,
-                "cost_spent_usd": 0.0,
+                "cached_hits": 0,
+                "cached_misses": 0,
+                "pending": len(product_ids),
+                "batches": 0,
+                "cost_estimated_usd": 0.0,
+                "cost_actual_usd": 0.0,
             }
             pending_ids: List[int] = list(product_ids)
             try:
                 if auto_ai and product_ids:
-                    result = ai_columns.run_ai_fill_job(job_id, product_ids, status_cb=status_cb)
+                    result = ai_columns.run_ai_fill_job(product_ids, job_id=job_id, status_cb=status_cb)
                     final_counts = result.get("counts", final_counts)
                     pending_ids = result.get("pending_ids", pending_ids)
                     error = result.get("error")
@@ -458,13 +461,15 @@ def _schedule_post_import_tasks(
                         database.set_import_job_ai_error(conn, job_id, str(error))
                 else:
                     final_counts = {
-                        "queued": 0,
-                        "sent": 0,
+                        "total": 0,
                         "ok": 0,
                         "ko": 0,
-                        "cached": 0,
-                        "retried": 0,
-                        "cost_spent_usd": 0.0,
+                        "cached_hits": 0,
+                        "cached_misses": 0,
+                        "pending": 0,
+                        "batches": 0,
+                        "cost_estimated_usd": 0.0,
+                        "cost_actual_usd": 0.0,
                     }
                     pending_ids = []
                     database.set_import_job_ai_counts(conn, job_id, final_counts, pending_ids)
@@ -472,20 +477,22 @@ def _schedule_post_import_tasks(
             except Exception as exc:
                 logger.exception("AI enrichment failed job=%s", job_id)
                 final_counts = {
-                    "queued": len(product_ids),
-                    "sent": 0,
+                    "total": len(product_ids),
                     "ok": 0,
                     "ko": len(product_ids),
-                    "cached": 0,
-                    "retried": 0,
-                    "cost_spent_usd": 0.0,
+                    "cached_hits": 0,
+                    "cached_misses": len(product_ids),
+                    "pending": len(product_ids),
+                    "batches": 0,
+                    "cost_estimated_usd": 0.0,
+                    "cost_actual_usd": 0.0,
                 }
                 pending_ids = list(product_ids)
                 database.set_import_job_ai_error(conn, job_id, str(exc))
                 database.set_import_job_ai_counts(conn, job_id, final_counts, pending_ids)
                 database.update_import_job_ai_progress(conn, job_id, 0)
-            total_ai = int(final_counts.get("queued", 0) or 0)
-            done_ai = int(final_counts.get("ok", 0) + final_counts.get("cached", 0))
+            total_ai = int(final_counts.get("total", 0) or 0)
+            done_ai = int(final_counts.get("ok", 0) or 0)
             _update_import_status(
                 task_key,
                 phase="winner",
@@ -2703,31 +2710,103 @@ class RequestHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(length).decode('utf-8')
         try:
-            payload = json.loads(body)
-            items = payload.get("items")
-            model = payload.get("model") or "gpt-4o-mini-2024-07-18"
-            if not isinstance(items, list):
-                raise ValueError
+            payload = json.loads(body) if body else {}
         except Exception:
             self._set_json(400)
             self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
             return
+
+        product_ids_raw = payload.get("product_ids")
+        if not isinstance(product_ids_raw, list):
+            items = payload.get("items")
+            if isinstance(items, list):
+                product_ids_raw = [item.get("id") for item in items if isinstance(item, dict)]
+            else:
+                product_ids_raw = []
+
+        product_ids: List[int] = []
+        for pid in product_ids_raw:
+            try:
+                num = int(pid)
+            except Exception:
+                continue
+            product_ids.append(num)
+
+        if not product_ids:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "invalid_request"}).encode('utf-8'))
+            return
+
         api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
         if not api_key:
-            self._set_json(503)
-            self.wfile.write(json.dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "missing_api_key"}).encode('utf-8'))
             return
-        try:
-            ok, ko, usage, duration = gpt.generate_batch_columns(api_key, model, items)
-            logger.info("/api/ia/batch-columns tokens=%s duration=%.2fs", usage.get('total_tokens'), duration)
-            self._set_json()
-            self.wfile.write(json.dumps({"ok": ok, "ko": ko}).encode('utf-8'))
-        except gpt.InvalidJSONError:
-            self._set_json(502)
-            self.wfile.write(json.dumps({"error": "Respuesta IA no es JSON"}).encode('utf-8'))
-        except Exception:
-            self._set_json(503)
-            self.wfile.write(json.dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
+
+        task_id = f"ai-{uuid.uuid4().hex[:12]}"
+        initial_counts = {
+            "total": len(product_ids),
+            "ok": 0,
+            "ko": 0,
+            "cached_hits": 0,
+            "cached_misses": len(product_ids),
+            "pending": len(product_ids),
+            "batches": 0,
+            "cost_estimated_usd": 0.0,
+            "cost_actual_usd": 0.0,
+        }
+        _update_import_status(
+            task_id,
+            task_id=task_id,
+            state="pending",
+            stage="queued",
+            ai_counts=initial_counts,
+            ai_total=len(product_ids),
+            ai_done=0,
+            ai_pending=product_ids,
+            message="IA columnas en cola",
+        )
+
+        def status_cb(**payload: Any) -> None:
+            payload.setdefault("task_id", task_id)
+            _update_import_status(task_id, **payload)
+
+        def worker() -> None:
+            try:
+                result = ai_columns.run_ai_fill_job(product_ids, status_cb=status_cb)
+            except Exception as exc:  # pragma: no cover - background thread errors
+                logger.exception("/api/ia/batch-columns background error")
+                final_counts = {**initial_counts, "ko": len(product_ids), "pending": len(product_ids)}
+                _update_import_status(
+                    task_id,
+                    phase="enrich",
+                    state="error",
+                    ai_counts=final_counts,
+                    ai_total=final_counts.get("total", len(product_ids)),
+                    ai_done=final_counts.get("ok", 0),
+                    ai_pending=product_ids,
+                    error=str(exc),
+                )
+                return
+
+            counts = result.get("counts", initial_counts)
+            pending = result.get("pending_ids", [])
+            error = result.get("error")
+            state = "done" if not error else "error"
+            payload = {
+                "phase": "enrich",
+                "state": state,
+                "ai_counts": counts,
+                "ai_total": counts.get("total", len(product_ids)),
+                "ai_done": counts.get("ok", 0),
+                "ai_pending": pending,
+            }
+            if error:
+                payload["error"] = error
+            _update_import_status(task_id, **payload)
+
+        threading.Thread(target=worker, daemon=True, name=f"ai-batch-{task_id}").start()
+        self.safe_write(lambda: self.send_json({"task_id": task_id}, status=202))
 
     def handle_auto_weights(self):
         """
