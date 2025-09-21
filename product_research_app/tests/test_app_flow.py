@@ -14,6 +14,7 @@ from product_research_app.routes_export_minimal import COLUMNS as EXPORT_COLUMNS
 from product_research_app.services import winner_score
 from product_research_app.services import config as cfg_service
 from product_research_app.utils.db import row_to_dict
+from openpyxl.utils import get_column_letter
 
 def setup_env(tmp_path, monkeypatch):
     monkeypatch.setattr(web_app, "DB_PATH", tmp_path / "data.sqlite3")
@@ -786,6 +787,8 @@ def test_export_kalodata_minimal_not_found(tmp_path, monkeypatch):
 def test_export_kalodata_minimal_success(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)
     monkeypatch.setattr(web_app, "ensure_db", lambda: conn)
+    monkeypatch.setattr(routes_export_minimal, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(routes_export_minimal, "EXPORT_DIR", tmp_path / "exports")
 
     extra1 = {
         "TikTokUrl": "https://tiktok.example/alpha",
@@ -902,7 +905,8 @@ def test_export_kalodata_minimal_success(tmp_path, monkeypatch):
     web_app.RequestHandler.handle_export_kalodata_minimal(handler)
 
     assert handler.status == 200
-    assert "kalodata_for_analysis_" in handler.sent_headers.get("Content-Disposition", "")
+    disposition = handler.sent_headers.get("Content-Disposition", "")
+    assert disposition == "attachment; filename=Analisis_Export_0001.xlsx"
 
     payload = handler.wfile.getvalue()
     assert payload
@@ -922,72 +926,82 @@ def test_export_kalodata_minimal_success(tmp_path, monkeypatch):
     assert len(rows) == 3
     row1, row2, row3 = rows
 
-    assert row1[0] == "Alpha"
-    assert row2[0] == "Beta"
-    assert row3[0] == "Gamma"
-    assert row1[4] is None
-    assert row3[4] == "(no image)"
-    assert row1[5] == "Beauty"
-    assert row1[6] == 19.99
-    assert row1[7] == 4.8
-    assert row1[8] == 1200
-    assert row1[9] == 1550.0
-    assert row1[10].strftime("%Y-%m-%d") == "2024-01-01"
-    assert row1[11] == "Fuerte deseo"
-    assert row1[12] == 80
-    assert row1[13] == "Solution-aware"
-    assert row1[14] == "Low"
+    assert row1[0] is None
+    assert row2[0] is None
+    assert row3[0] == "(no image)"
+    assert row1[1] == "Alpha"
+    assert row2[1] == "Beta"
+    assert row3[1] == "Gamma"
+    assert row1[2] == "Beauty"
+    assert row2[2] == "Home"
+    assert row3[2] == "Kitchen"
+    assert row1[3] and row1[3].strftime("%Y-%m-%d") == "2024-01-01"
+    assert row2[3] and row2[3].strftime("%Y-%m-%d") == "2023-12-15"
+    assert row3[3] and row3[3].strftime("%Y-%m-%d") == "2023-11-30"
+    assert row1[4] == 19.99
+    assert row2[4] == 29.0
+    assert row3[4] == 15.5
+    assert row1[5] == 4.8
+    assert row2[5] == 4.1
+    assert row3[5] == 4.5
+    assert row1[6] == 1550.0
+    assert row2[6] == 500.0
+    assert row3[6] == 300.0
+    assert row1[7] == 1200
+    assert row2[7] == 80
+    assert row3[7] == 500
+    assert row1[8] == "Fuerte deseo"
+    assert row2[8] == "Resuelve dolor"
+    assert row3[8] == "Resolver frustración"
+    assert row1[9] == 80
+    assert row2[9] == 65
+    assert row3[9] == 50
+    assert row1[10] == "Solution-aware"
+    assert row2[10] == "Product-aware"
+    assert row3[10] == "Most aware"
+    assert row1[11] == "Low"
+    assert row2[11] == "Medium"
+    assert row3[11] == "High"
+    assert row1[12] == "https://tiktok.example/alpha"
+    assert row2[12] == "https://tiktok.example/beta"
+    assert row3[12] == "https://tiktok.example/gamma"
+    assert row1[13] == "https://kalodata.example/alpha"
+    assert row2[13] == "https://kalodata.example/beta"
+    assert row3[13] == "https://kalodata.example/gamma"
+    assert row1[14] == "https://img.example/alpha.jpg"
+    assert row2[14] == "https://img.example/beta.png"
+    assert row3[14] == "https://img.example/gamma-missing.png"
 
-    assert row2[5] == "Home"
-    assert row2[6] == 29.0
-    assert row2[7] == 4.1
-    assert row2[8] == 80
-    assert row2[9] == 500.0
-    assert row2[10].strftime("%Y-%m-%d") == "2023-12-15"
-    assert row2[11] == "Resuelve dolor"
-    assert row2[12] == 65
-    assert row2[13] == "Product-aware"
-    assert row2[14] == "Medium"
-
-    assert row3[5] == "Kitchen"
-    assert row3[6] == 15.5
-    assert row3[7] == 4.5
-    assert row3[8] == 500
-    assert row3[9] == 300.0
-    assert row3[10].strftime("%Y-%m-%d") == "2023-11-30"
-    assert row3[11] == "Resolver frustración"
-    assert row3[12] == 50
-    assert row3[13] == "Most aware"
-    assert row3[14] == "High"
-
-    assert ws.column_dimensions["A"].width == 40
-    assert ws.column_dimensions["E"].width == 38
-    assert ws.column_dimensions["L"].width == 45
+    assert ws.column_dimensions["A"].width == 38
+    assert ws.column_dimensions["I"].width == 45
+    assert ws.column_dimensions["O"].width == 40
     assert "tbl_products" in ws.tables
     assert ws.tables["tbl_products"].ref == "A1:O4"
 
     dv_ranges = [dv.sqref for dv in ws.data_validations.dataValidation]
-    assert any(str(dv) == "M2:M4" for dv in dv_ranges)
+    assert any(str(dv) == "J2:J4" for dv in dv_ranges)
 
-    cf_ranges = list(ws.conditional_formatting)
-
-    def _cfvo_values(cfvo):
-        values = []
-        for obj in cfvo:
-            try:
-                raw = getattr(obj, "value", getattr(obj, "val", None))
-                values.append(float(raw))
-            except (TypeError, ValueError):
-                values.append(None)
-        return values
-
-    assert any(
-        getattr(rule, "type", "") == "dataBar"
-        and rule.dataBar is not None
-        and _cfvo_values(rule.dataBar.cfvo) == [0.0, 100.0]
-        for cf in cf_ranges
+    cf_rules = [
+        rule
+        for cf in ws.conditional_formatting
         for rule in cf.rules
-    )
+    ]
+    assert not any(getattr(rule, "type", "") == "dataBar" for rule in cf_rules)
+
+    dm_index = header.index("desire magnitude")
+    dm_letter = get_column_letter(dm_index + 1)
+    for row_idx in range(2, ws.max_row + 1):
+        cell = ws[f"{dm_letter}{row_idx}"]
+        assert cell.fill.fill_type is None
+
+    saved_files = sorted((routes_export_minimal.EXPORT_DIR).glob("Analisis_Export_*.xlsx"))
+    assert saved_files
+    assert saved_files[0].name == "Analisis_Export_0001.xlsx"
+    seq_path = routes_export_minimal.STATE_DIR / "export_seq.json"
+    assert seq_path.exists()
+    with seq_path.open("r", encoding="utf-8") as fh:
+        seq_payload = json.load(fh)
+    assert seq_payload == {"export_seq": 1}
 
     assert len(getattr(ws, "_images", [])) == 2
     assert ws.row_dimensions[2].height == routes_export_minimal._IMG_ROW_HEIGHT
