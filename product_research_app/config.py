@@ -12,6 +12,28 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 
+DEFAULT_WINNER_ORDER = [
+    "awareness",
+    "desire",
+    "revenue",
+    "competition",
+    "units_sold",
+    "price",
+    "oldness",
+    "rating",
+]
+
+DEFAULT_WINNER_WEIGHTS_INT = {
+    "awareness": 14,
+    "desire": 14,
+    "revenue": 14,
+    "competition": 14,
+    "units_sold": 14,
+    "price": 14,
+    "oldness": 14,
+    "rating": 14,
+}
+
 DEFAULT_CONFIG: Dict[str, Any] = {
     "autoFillIAOnImport": True,
     "aiBatch": {
@@ -38,7 +60,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "includeImageInAI": True,
     "aiImageCostMaxUSD": 0.02,
     "weightsVersion": 0,
+    "winner_weights_schema_version": 2,
     "weightsUpdatedAt": 0,
+    "winner_weights": DEFAULT_WINNER_WEIGHTS_INT.copy(),
+    "winner_order": DEFAULT_WINNER_ORDER.copy(),
+    "weights_order": DEFAULT_WINNER_ORDER.copy(),
     "oldness_preference": "newer",
 }
 
@@ -79,6 +105,40 @@ def load_config() -> Dict[str, Any]:
 
     # ensure weights_enabled defaulting to True for all weight keys
     weights_map = data.get("winner_weights")
+    weights_changed = False
+    schema_version = int(data.get("winner_weights_schema_version", 0) or 0)
+    sanitized_weights: Dict[str, int] = {}
+    if isinstance(weights_map, dict):
+        for key, value in weights_map.items():
+            if key not in DEFAULT_WINNER_WEIGHTS_INT:
+                continue
+            try:
+                iv = int(round(float(value)))
+            except Exception:
+                continue
+            if schema_version < 2 and iv >= 0:
+                iv = int(round(iv * 0.5))
+            if iv < 0:
+                iv = 0
+            if iv > 50:
+                iv = 50
+            sanitized_weights[key] = iv
+        for key, default_val in DEFAULT_WINNER_WEIGHTS_INT.items():
+            if key not in sanitized_weights:
+                sanitized_weights[key] = default_val
+                weights_changed = True
+        if sanitized_weights != weights_map:
+            data["winner_weights"] = sanitized_weights
+            weights_changed = True
+    else:
+        data["winner_weights"] = DEFAULT_WINNER_WEIGHTS_INT.copy()
+        weights_changed = True
+
+    if weights_changed or schema_version < 2:
+        data["winner_weights_schema_version"] = 2
+        changed = True
+
+    weights_map = data.get("winner_weights")
     if isinstance(weights_map, dict):
         enabled = data.get("weights_enabled")
         if not isinstance(enabled, dict):
@@ -89,8 +149,16 @@ def load_config() -> Dict[str, Any]:
                 if k not in enabled:
                     enabled[k] = True
                     changed = True
-    if "winner_order" in data and "weights_order" not in data:
-        data["weights_order"] = list(data["winner_order"])
+
+    order = data.get("winner_order")
+    order_valid = isinstance(order, list) and set(order) == set(DEFAULT_WINNER_ORDER)
+    if not order_valid:
+        data["winner_order"] = DEFAULT_WINNER_ORDER.copy()
+        changed = True
+        order = data["winner_order"]
+
+    if order and not data.get("weights_order"):
+        data["weights_order"] = list(order)
         changed = True
 
     if changed:

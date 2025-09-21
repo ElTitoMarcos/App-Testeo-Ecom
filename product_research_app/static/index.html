@@ -157,9 +157,13 @@ body.dark .skeleton{background:#333;}
 </div>
 <div id="weightsCard" class="card" style="display:none;">
   <strong>Ponderaciones Winner Score</strong>
-  <div class="legend">ℹ️ Arrastra para reordenar. Más arriba = mayor prioridad. El número (0–100) es el peso.</div>
+  <div class="legend">ℹ️ Arrastra para reordenar. Más arriba = mayor prioridad. El número (0–50) es el peso.</div>
   <ul id="weightsList" class="weights-list"></ul>
 </div>
+<details id="weightsDiffPanel" class="weights-diff" hidden>
+  <summary>Cambios recientes</summary>
+  <div class="diff-body"></div>
+</details>
 <div id="weightsFooter" class="config-footer" style="display:none;">
   <button id="btnReset" class="btn">Reset</button>
   <button id="btnAiWeights" class="btn primary">Ajustar pesos con IA</button>

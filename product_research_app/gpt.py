@@ -1242,9 +1242,18 @@ def recommend_winner_weights(
         # Reescala 0..100; si todo cero, da un perfil razonable
         mx = max(raw.values() or [0.0])
         if mx <= 0:
-            profile = {"revenue":80,"units_sold":70,"rating":60,"price":55,"desire":45,"competition":35,"oldness":25,"awareness":15}
-            return {k:int(profile.get(k,50)) for k in allowed}
-        return {k: int(round((v/mx)*100.0)) for k,v in raw.items()}
+            profile = {
+                "revenue": 40,
+                "units_sold": 35,
+                "rating": 30,
+                "price": 28,
+                "desire": 22,
+                "competition": 18,
+                "oldness": 12,
+                "awareness": 8,
+            }
+            return {k: int(profile.get(k, 25)) for k in allowed}
+        return {k: int(round((v / mx) * 50.0)) for k, v in raw.items()}
 
     def _extract_json_block(text: str) -> dict:
         import json, re
@@ -1279,22 +1288,22 @@ def recommend_winner_weights(
         "Eres un optimizador de modelos de e-commerce.\n"
         f"Variables del Winner Score: {allowed}\n"
         f"Señal de éxito a maximizar: '{success_key}'.\n"
-        "Devuelve JSON ESTRICTO con pesos 0..100 por variable (independientes, NO normalizados):\n"
+        "Devuelve JSON ESTRICTO con pesos enteros 0..50 por variable (independientes, NO normalizados):\n"
         "{\n"
-        '  "pesos_0_100": {\n'
-        '    "price": 0..100,\n'
-        '    "rating": 0..100,\n'
-        '    "units_sold": 0..100,\n'
-        '    "revenue": 0..100,\n'
-        '    "desire": 0..100,\n'
-        '    "competition": 0..100,\n'
-        '    "oldness": 0..100,\n'
-        '    "awareness": 0..100\n'
+        '  "pesos_0_50": {\n'
+        '    "price": 0..50,\n'
+        '    "rating": 0..50,\n'
+        '    "units_sold": 0..50,\n'
+        '    "revenue": 0..50,\n'
+        '    "desire": 0..50,\n'
+        '    "competition": 0..50,\n'
+        '    "oldness": 0..50,\n'
+        '    "awareness": 0..50\n'
         "  },\n"
         '  "orden": ["revenue","price",...],\n'
         '  "justificacion": "1-2 frases"\n'
         "}\n"
-        "- No normalices para que sumen 100; cada peso es una intensidad 0..100.\n\n"
+        "- No normalices para que sumen 50; cada peso es una intensidad 0..50.\n\n"
         "Muestra parcial:\n" + sample_json
     )
     messages = [
@@ -1313,7 +1322,13 @@ def recommend_winner_weights(
     # Leer posibles claves de pesos
     raw = {}
     if isinstance(parsed, dict):
-        raw = parsed.get("pesos_0_100") or parsed.get("pesos") or parsed.get("weights") or {}
+        raw = (
+            parsed.get("pesos_0_50")
+            or parsed.get("pesos_0_100")
+            or parsed.get("pesos")
+            or parsed.get("weights")
+            or {}
+        )
     justification = (parsed.get("justificacion") or parsed.get("justification") or "") if isinstance(parsed, dict) else ""
 
     # Reescalar si vino en 0..1 o suma≈1
@@ -1325,7 +1340,7 @@ def recommend_winner_weights(
         all_01 = all(0.0 <= float(v) <= 1.0 for v in vals)
         sum_is_1 = abs(sum(vals) - 1.0) < 1e-6
         if all_01 and (sum_is_1 or max(vals) <= 1.0):
-            raw = {k: float(v) * 100.0 for k, v in raw.items()}
+            raw = {k: float(v) * 50.0 for k, v in raw.items()}
 
     # Completar 0..100, clamp y enteros
     out: Dict[str, int] = {}
@@ -1336,18 +1351,31 @@ def recommend_winner_weights(
         try: v = float(v)
         except Exception: v = None
         if v is None: continue
-        v = max(0.0, min(100.0, v))
+        if v > 50.0:
+            v = v * 0.5
+        v = max(0.0, min(50.0, v))
         out[k] = int(round(v))
 
     # Si no hay nada útil o todos iguales → fallback estadístico por correlación
     if not out or len(set(out.values())) == 1:
         out = _stat_fallback(samples, success_key)
 
-    # Garantiza todas las claves (si falta alguna tras fallback, rellena 0)
     for k in allowed:
         out.setdefault(k, 0)
 
-    return {"weights": out, "justification": justification}
+    order_candidate = []
+    if isinstance(parsed, dict):
+        order_candidate = parsed.get("orden") or parsed.get("order") or []
+    if isinstance(order_candidate, list):
+        cleaned = [k for k in order_candidate if k in allowed]
+        if len(cleaned) == len(allowed):
+            order = cleaned
+        else:
+            order = sorted(allowed, key=lambda k: (-out.get(k, 0), allowed.index(k)))
+    else:
+        order = sorted(allowed, key=lambda k: (-out.get(k, 0), allowed.index(k)))
+
+    return {"weights": out, "order": order, "justification": justification, "method": "gpt"}
 
 
 def summarize_top_products(api_key: str, model: str, products: List[Dict[str, Any]]) -> str:

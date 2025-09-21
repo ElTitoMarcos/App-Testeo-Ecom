@@ -2,20 +2,16 @@ import time
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from ..config import load_config, save_config
-
-ALLOWED_FIELDS = (
-    "price",
-    "rating",
-    "units_sold",
-    "revenue",
-    "desire",
-    "competition",
-    "oldness",
-    "awareness",
+from ..config import (
+    load_config,
+    save_config,
+    DEFAULT_WINNER_ORDER,
+    DEFAULT_WINNER_WEIGHTS_INT,
 )
-DEFAULT_WEIGHTS_RAW: Dict[str, int] = {k: 50 for k in ALLOWED_FIELDS}
-DEFAULT_ORDER: List[str] = list(ALLOWED_FIELDS)
+
+ALLOWED_FIELDS = tuple(DEFAULT_WINNER_ORDER)
+DEFAULT_WEIGHTS_RAW: Dict[str, int] = DEFAULT_WINNER_WEIGHTS_INT.copy()
+DEFAULT_ORDER: List[str] = list(DEFAULT_WINNER_ORDER)
 DEFAULT_ENABLED: Dict[str, bool] = {k: True for k in ALLOWED_FIELDS}
 
 # Compatibility placeholder; not used but kept for tests that monkeypatch it
@@ -29,8 +25,29 @@ def _coerce_weights(raw: Dict[str, object] | None) -> Dict[str, int]:
             iv = int(round(float(v)))
         except Exception:
             iv = 0
-        out[k] = max(0, min(100, iv))
+        if iv < 0:
+            iv = 0
+        if iv > 50:
+            iv = int(round(iv * 0.5))
+        out[k] = max(0, min(50, iv))
     return out
+
+
+def validate_order(order: List[str] | None) -> List[str]:
+    if order is None:
+        raise ValueError("order is required")
+    if not isinstance(order, list):
+        raise ValueError("order must be a list")
+    cleaned: List[str] = []
+    seen: set[str] = set()
+    for item in order:
+        if item in ALLOWED_FIELDS and item not in seen:
+            cleaned.append(item)
+            seen.add(item)
+    missing = [k for k in ALLOWED_FIELDS if k not in seen]
+    if missing or len(cleaned) != len(ALLOWED_FIELDS):
+        raise ValueError("order must include each metric exactly once")
+    return cleaned
 
 
 def _normalize_order(order, weights: Dict[str, int]) -> List[str]:
@@ -43,27 +60,26 @@ def _normalize_order(order, weights: Dict[str, int]) -> List[str]:
 def init_app_config() -> None:
     cfg = load_config()
     changed = False
-    weights = cfg.get("winner_weights")
-    if not isinstance(weights, dict):
-        cfg["winner_weights"] = DEFAULT_WEIGHTS_RAW.copy()
-        changed = True
-        weights = cfg["winner_weights"]
-    else:
-        for k, v in DEFAULT_WEIGHTS_RAW.items():
-            if k not in weights:
-                weights[k] = v
-                changed = True
-
-    order = cfg.get("winner_order")
-    if not isinstance(order, list):
-        cfg["winner_order"] = DEFAULT_ORDER.copy()
-        cfg["weights_order"] = DEFAULT_ORDER.copy()
+    weights_in = cfg.get("winner_weights")
+    if not isinstance(weights_in, dict):
+        weights = DEFAULT_WEIGHTS_RAW.copy()
+        cfg["winner_weights"] = weights
         changed = True
     else:
-        if "awareness" not in order:
-            order.append("awareness")
+        weights = DEFAULT_WEIGHTS_RAW.copy()
+        weights.update(_coerce_weights(weights_in))
+        if weights != weights_in:
+            cfg["winner_weights"] = weights
             changed = True
-        cfg.setdefault("weights_order", order.copy())
+
+    order_in = cfg.get("winner_order")
+    try:
+        order = validate_order(order_in if isinstance(order_in, list) else None)
+    except Exception:
+        order = DEFAULT_ORDER.copy()
+        changed = True
+    cfg["winner_order"] = order
+    cfg.setdefault("weights_order", order.copy())
 
     enabled = cfg.get("weights_enabled")
     if not isinstance(enabled, dict):
@@ -159,8 +175,9 @@ def set_winner_weights_raw(weights: Dict[str, object]) -> Dict[str, int]:
 
 
 def set_winner_order_raw(order: List[str]) -> List[str]:
-    _, order, _ = update_winner_settings(weights_in=None, order_in=order)
-    return order
+    valid = validate_order(order)
+    _, stored_order, _ = update_winner_settings(weights_in=None, order_in=valid)
+    return stored_order
 
 
 def set_weights_enabled_raw(enabled: Dict[str, object]) -> Dict[str, bool]:

@@ -72,17 +72,17 @@ def test_oldness_weight_direction():
     prod_new = {"first_seen": (today - timedelta(days=10)).isoformat()}
     ws.prepare_oldness_bounds([prod_old, prod_new])
 
-    res_old = ws.compute_winner_score_v2(prod_old, {"oldness": 100})
-    res_new = ws.compute_winner_score_v2(prod_new, {"oldness": 100})
+    res_old = ws.compute_winner_score_v2(prod_old, {"oldness": 50})
+    res_new = ws.compute_winner_score_v2(prod_new, {"oldness": 50})
     assert res_old["score"] > res_new["score"]
 
     res_old_rev = ws.compute_winner_score_v2(prod_old, {"oldness": 0})
     res_new_rev = ws.compute_winner_score_v2(prod_new, {"oldness": 0})
     assert res_new_rev["score"] > res_old_rev["score"]
 
-    res_old_neu = ws.compute_winner_score_v2(prod_old, {"oldness": 50})
-    res_new_neu = ws.compute_winner_score_v2(prod_new, {"oldness": 50})
-    assert res_old_neu["score"] == res_new_neu["score"] == 0
+    res_old_neu = ws.compute_winner_score_v2(prod_old, {"oldness": 25})
+    res_new_neu = ws.compute_winner_score_v2(prod_new, {"oldness": 25})
+    assert res_old_neu["score"] == res_new_neu["score"]
 
 
 def test_order_affects_score():
@@ -94,12 +94,24 @@ def test_order_affects_score():
     assert res_price_first["score"] != res_rating_first["score"]
 
 
+def test_tie_break_uses_priority():
+    ws.prepare_oldness_bounds([])
+    prod = {"price": 12.0, "rating": 4.0}
+    weights_zero = {k: 0 for k in ws.ALLOWED_FIELDS}
+    default_order = list(ws.ALLOWED_FIELDS)
+    flipped_order = default_order[:]
+    flipped_order[0], flipped_order[1] = flipped_order[1], flipped_order[0]
+    res_default = ws.compute_winner_score_v2(prod, weights_zero, order=default_order)
+    res_flipped = ws.compute_winner_score_v2(prod, weights_zero, order=flipped_order)
+    assert res_default["score_float"] > res_flipped["score_float"]
+
+
 def test_awareness_weight_impacts_score():
     ws.prepare_oldness_bounds([])
     prod_low = {"awareness_level": "unaware"}
     prod_high = {"awareness_level": "most aware"}
-    hi = ws.compute_winner_score_v2(prod_high, {"awareness": 100})
-    lo = ws.compute_winner_score_v2(prod_low, {"awareness": 100})
+    hi = ws.compute_winner_score_v2(prod_high, {"awareness": 50})
+    lo = ws.compute_winner_score_v2(prod_low, {"awareness": 50})
     assert hi["score"] > lo["score"]
     hi0 = ws.compute_winner_score_v2(prod_high, {"awareness": 0})
     lo0 = ws.compute_winner_score_v2(prod_low, {"awareness": 0})
@@ -123,7 +135,7 @@ def test_recommend_winner_weights_includes_awareness(monkeypatch):
 
 def test_awareness_priority_and_closeness():
     order = ws.awareness_priority_order_from_weight(44)
-    assert order == [2, 1, 3, 0, 4]
+    assert order == [4, 3, 2, 1, 0]
     prod = {"awareness_level": "solution aware"}
     val = ws.awareness_feature_value(prod, 44)
     idx = ws.awareness_stage_index_from_product(prod)

@@ -16,6 +16,8 @@ from .config import (
     set_winner_weights_raw,
     get_winner_order_raw,
     DB_PATH as CONFIG_DB_PATH,
+    DEFAULT_WEIGHTS_RAW,
+    DEFAULT_ORDER as CONFIG_DEFAULT_ORDER,
 )
 from ..config import load_config, save_config
 
@@ -30,16 +32,7 @@ def save_settings(settings: Dict[str, Any]) -> None:
     save_config(settings)
 
 # Winner Score allowed fields and compatibility aliases
-ALLOWED_FIELDS = (
-    "price",
-    "rating",
-    "units_sold",
-    "revenue",
-    "desire",
-    "competition",
-    "oldness",
-    "awareness",
-)
+ALLOWED_FIELDS = tuple(CONFIG_DEFAULT_ORDER)
 DEFAULT_WEIGHTS = {k: 1.0 for k in ALLOWED_FIELDS}
 
 WEIGHT_KEYS = list(ALLOWED_FIELDS)
@@ -64,6 +57,18 @@ def _norm_awareness(s: str) -> str:
     return (s or "").strip().lower()
 
 
+def _awareness_slider_value(weight: int | float) -> float:
+    try:
+        val = float(weight)
+    except Exception:
+        val = 0.0
+    if val < 0:
+        val = 0.0
+    if val > 50.0:
+        return max(0.0, min(100.0, val))
+    return max(0.0, min(100.0, val * 2.0))
+
+
 def awareness_stage_index_from_product(prod) -> int:
     cand = None
     extras = _get_extras(prod)
@@ -82,14 +87,14 @@ def awareness_stage_index_from_product(prod) -> int:
 
 
 def awareness_pref_segment_from_weight(w: int) -> int:
-    w = max(0, min(100, int(round(float(w)))))
-    return min(4, w // 20)  # 0..4
+    slider = _awareness_slider_value(w)
+    return min(4, int(slider // 20))  # 0..4
 
 
 def awareness_priority_order_from_weight(w: int) -> list[int]:
     """Ordena 0..4 por cercanía del valor w a los centros [10,30,50,70,90]. Ties: prioriza el menor índice."""
-    w = max(0, min(100, int(round(float(w)))))
-    return sorted(range(5), key=lambda i: (abs(w - AWARE_CENTERS[i]), i))
+    slider = _awareness_slider_value(w)
+    return sorted(range(5), key=lambda i: (abs(slider - AWARE_CENTERS[i]), i))
 
 
 def awareness_closeness(w_slider_0_100: int, stage_idx: int) -> float:
@@ -100,19 +105,21 @@ def awareness_closeness(w_slider_0_100: int, stage_idx: int) -> float:
 
 def awareness_closeness_from_weight(w: int, stage_idx: int) -> float:
     """Backward-compatible alias."""
-    return awareness_closeness(w, stage_idx)
+    slider = _awareness_slider_value(w)
+    return awareness_closeness(slider, stage_idx)
 
 
 def awareness_feature_value(prod, w_slider_0_100: int) -> float:
     stage_idx = awareness_stage_index_from_product(prod)
-    return awareness_closeness(w_slider_0_100, stage_idx)
+    slider = _awareness_slider_value(w_slider_0_100)
+    return awareness_closeness(slider, stage_idx)
 
 
 def build_features(prod, settings):
     feats: Dict[str, float] = {}
-    w_aw = (settings.get("winner_weights") or {}).get("awareness", 50)
-    stage_idx = awareness_stage_index_from_product(prod)
-    feats["awareness"] = awareness_closeness(w_aw, stage_idx)
+    weights_map = (settings.get("winner_weights") or {})
+    w_aw = float(weights_map.get("awareness", DEFAULT_WEIGHTS_RAW.get("awareness", 25)))
+    feats["awareness"] = awareness_feature_value(prod, w_aw)
     return feats
 
 
@@ -177,6 +184,7 @@ WEIGHTS_CACHE: Dict[str, float] | None = None
 ORDER_CACHE: list[str] | None = None
 ENABLED_CACHE: Dict[str, bool] | None = None
 WEIGHTS_VERSION: int = 0
+EPSILON_TIE_BREAK = 1e-6
 
 
 def compute_effective_weights(weights: dict[str, int | float], order: list[str]) -> dict[str, float]:
@@ -587,13 +595,25 @@ def _norm_identity(v: float) -> float:
     return clamp(v)
 
 
+OLDNESS_CENTER = 25.0
+
+
 def _oldness_pref_and_weight(cfg_weights: dict[str, float]) -> tuple[float, float]:
-    # Entrada UI 0..100 (la misma barra que ves en el modal)
-    v = float(cfg_weights.get("oldness", 50))
-    # Intensidad 0..1 (50 => 0, 0/100 => 1)
-    intensity = abs(v - 50.0) / 50.0
-    # Dirección: -1 recientes, +1 antiguos (50 => 0)
-    direction = (v - 50.0) / 50.0
+    raw = cfg_weights.get("oldness", OLDNESS_CENTER)
+    try:
+        v = float(raw)
+    except Exception:
+        v = OLDNESS_CENTER
+    if v < 0:
+        v = 0.0
+    # Compatibilidad: valores > 50 implican escala antigua 0..100
+    if v > 50.0:
+        v = min(100.0, v)
+        intensity = abs(v - 50.0) / 50.0
+        direction = (v - 50.0) / 50.0
+        return direction, intensity
+    intensity = min(1.0, abs(v - OLDNESS_CENTER) / OLDNESS_CENTER)
+    direction = (v - OLDNESS_CENTER) / OLDNESS_CENTER
     return direction, intensity
 
 
@@ -625,7 +645,7 @@ def compute_winner_score_v2(
             continue
         raw_vals[name] = val
 
-    w_aw = user_weights.get("awareness", 50)
+    w_aw = float(user_weights.get("awareness", DEFAULT_WEIGHTS_RAW.get("awareness", 25)))
     raw_vals["awareness"] = awareness_feature_value(product_row, w_aw)
 
     present = list(raw_vals.keys())
@@ -643,7 +663,7 @@ def compute_winner_score_v2(
 
     weights_for_priority: Dict[str, int] = {}
     for k in ALLOWED_FIELDS:
-        base = int(round(user_weights.get(k, 0)))
+        base = int(round(user_weights.get(k, DEFAULT_WEIGHTS_RAW.get(k, 0))))
         on = enabled.get(k, True) if enabled else True
         weights_for_priority[k] = base if on else 0
     weights_for_priority["oldness"] = (
@@ -658,6 +678,21 @@ def compute_winner_score_v2(
 
     sum_filtered = sum(eff_weights.values())
     score_float = sum(eff_weights.get(k, 0.0) * norms[k] for k in norms)
+    order_for_tiebreak: list[str] = []
+    seen_order: set[str] = set()
+    if order:
+        for key in order:
+            if key in ALLOWED_FIELDS and key not in seen_order:
+                order_for_tiebreak.append(key)
+                seen_order.add(key)
+    for key in CONFIG_DEFAULT_ORDER:
+        if key not in seen_order:
+            order_for_tiebreak.append(key)
+            seen_order.add(key)
+    total_slots = len(order_for_tiebreak) or 1
+    for idx, key in enumerate(order_for_tiebreak):
+        boost_val = norms.get(key, 0.0)
+        score_float += (total_slots - idx) * EPSILON_TIE_BREAK * boost_val
     score_int = int(round(score_float * 100))
 
     eff_all_full = {k: eff_all.get(k, 0.0) for k in ALLOWED_FIELDS}
@@ -703,13 +738,19 @@ def generate_winner_scores(
         enabled = get_weights_enabled_raw()
 
     dir_old, w_old_intensity = _oldness_pref_and_weight(weights)
-    oldness_ui = float(weights.get("oldness", 50))
+    oldness_ui = float(weights.get("oldness", DEFAULT_WEIGHTS_RAW.get("oldness", OLDNESS_CENTER)))
     dir_old_label = "+1" if dir_old >= 0 else "-1"
 
     weights_hash_all = hashlib.sha1(
         json.dumps(weights, sort_keys=True).encode("utf-8")
     ).hexdigest()[:8]
     weights_hash_eff = ""
+    logger.info(
+        "winner_score.recompute weights_hash=%s order=%s oldness_dir=%s",
+        weights_hash_all,
+        order,
+        dir_old_label,
+    )
 
     ids: Optional[set[int]] = None
     if product_ids:

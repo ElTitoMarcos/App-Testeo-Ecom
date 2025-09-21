@@ -1,477 +1,774 @@
-import * as api from './net.js';
 import { LoadingHelpers } from './loading.js';
+
+const DEFAULT_WEIGHT = 14;
+const DEFAULT_ORDER = [
+  'awareness',
+  'desire',
+  'revenue',
+  'competition',
+  'units_sold',
+  'price',
+  'oldness',
+  'rating',
+];
+const METRIC_DEFS = [
+  { key: 'awareness', label: 'Awareness', extremes: { left: 'Unaware', right: 'Most aware' } },
+  { key: 'desire', label: 'Desire', extremes: { left: 'Menor deseo', right: 'Mayor deseo' } },
+  { key: 'revenue', label: 'Revenue', extremes: { left: 'Menores ingresos', right: 'Mayores ingresos' } },
+  { key: 'competition', label: 'Competition', extremes: { left: 'Menos competencia', right: 'Más competencia' } },
+  { key: 'units_sold', label: 'Units Sold', extremes: { left: 'Menos ventas', right: 'Más ventas' } },
+  { key: 'price', label: 'Price', extremes: { left: 'Más barato', right: 'Más caro' } },
+  { key: 'oldness', label: 'Oldness (antigüedad)', extremes: { left: 'Más reciente', right: 'Más antiguo' } },
+  { key: 'rating', label: 'Rating', extremes: { left: 'Peor rating', right: 'Mejor rating' } },
+];
+const METRIC_INDEX = new Map(METRIC_DEFS.map(def => [def.key, def]));
+const METRIC_KEYS = METRIC_DEFS.map(def => def.key);
+const ALIASES = {
+  unitsSold: 'units_sold',
+  unitssold: 'units_sold',
+  orders: 'units_sold',
+};
+
+function normalizeKey(k) {
+  if (k === undefined || k === null) return '';
+  const str = String(k).trim();
+  if (!str) return '';
+  if (ALIASES[str]) return ALIASES[str];
+  const lower = str.toLowerCase();
+  if (ALIASES[lower]) return ALIASES[lower];
+  const canonical = lower.replace(/[\s-]+/g, '_');
+  if (ALIASES[canonical]) return ALIASES[canonical];
+  if (METRIC_INDEX.has(str)) return str;
+  if (METRIC_INDEX.has(lower)) return lower;
+  if (METRIC_INDEX.has(canonical)) return canonical;
+  return canonical;
+}
+
+function clampInt(value, min, max, fallback = min) {
+  let num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  num = Math.round(num);
+  if (Number.isNaN(num)) return fallback;
+  if (num < min) return min;
+  if (num > max) return max;
+  return num;
+}
+
+function cloneState(state) {
+  if (!state) return getDefaultState();
+  return {
+    order: Array.isArray(state.order) ? state.order.slice() : [],
+    weights: { ...(state.weights || {}) },
+    enabled: { ...(state.enabled || {}) },
+  };
+}
+
+function getDefaultState() {
+  const weights = {};
+  const enabled = {};
+  DEFAULT_ORDER.forEach(key => {
+    weights[key] = DEFAULT_WEIGHT;
+    enabled[key] = true;
+  });
+  return { order: DEFAULT_ORDER.slice(), weights, enabled };
+}
+
+function normalizeState(raw = {}) {
+  const base = getDefaultState();
+  const normalizedWeights = {};
+  const srcWeights = raw.weights || raw.winner_weights || raw.factors || {};
+  Object.entries(srcWeights).forEach(([rawKey, value]) => {
+    const key = normalizeKey(rawKey);
+    if (METRIC_INDEX.has(key)) {
+      normalizedWeights[key] = clampInt(value, 0, 50, DEFAULT_WEIGHT);
+    }
+  });
+  const normalizedEnabled = {};
+  const srcEnabled = raw.weights_enabled || raw.enabled || raw.winner_weights_enabled || {};
+  Object.entries(srcEnabled).forEach(([rawKey, value]) => {
+    const key = normalizeKey(rawKey);
+    if (METRIC_INDEX.has(key)) {
+      normalizedEnabled[key] = value !== false;
+    }
+  });
+
+  let orderCandidate = raw.order || raw.weights_order || raw.winner_order || [];
+  const seen = new Set();
+  const order = [];
+  if (Array.isArray(orderCandidate) && orderCandidate.length) {
+    orderCandidate.forEach(rawKey => {
+      const key = normalizeKey(rawKey);
+      if (METRIC_INDEX.has(key) && !seen.has(key)) {
+        seen.add(key);
+        order.push(key);
+      }
+    });
+  }
+  DEFAULT_ORDER.forEach(key => {
+    if (!seen.has(key)) {
+      seen.add(key);
+      order.push(key);
+    }
+  });
+
+  const weights = {};
+  const enabled = {};
+  order.forEach(key => {
+    weights[key] = Object.prototype.hasOwnProperty.call(normalizedWeights, key)
+      ? normalizedWeights[key]
+      : clampInt(base.weights[key], 0, 50, DEFAULT_WEIGHT);
+    enabled[key] = Object.prototype.hasOwnProperty.call(normalizedEnabled, key)
+      ? normalizedEnabled[key]
+      : base.enabled[key];
+  });
+
+  return { order, weights, enabled };
+}
 
 const SettingsCache = (() => {
   let cache = null;
   let inflight = null;
 
-  const norm = (cfg) => {
-    const weights = cfg?.weights || {};
-    const order = (Array.isArray(cfg?.weights_order) && cfg.weights_order.length)
-      ? cfg.weights_order.slice()
-      : Object.keys(weights);
-    const enabled = {};
-    for (const k of order) enabled[k] = cfg?.weights_enabled?.[k] ?? true;
-    return { order, weights, enabled };
-  };
+  const norm = (raw = {}) => normalizeState(raw);
 
   const get = async () => {
-    if (cache) return cache;
+    if (cache) return cloneState(cache);
     if (inflight) return inflight;
-    inflight = fetch('/config', { cache: 'no-store' })
-      .then(r => r.json())
-      .then(cfg => (cache = norm(cfg)))
-      .finally(() => { inflight = null; });
+    inflight = fetch('/api/config/winner-weights', { cache: 'no-store' })
+      .then(res => res.json())
+      .then(data => {
+        cache = norm(data);
+        return cloneState(cache);
+      })
+      .catch(err => {
+        cache = norm({});
+        throw err;
+      })
+      .finally(() => {
+        inflight = null;
+      });
     return inflight;
   };
 
-  const set = (next) => { cache = norm(next); };
+  const set = (next) => {
+    cache = norm(next || {});
+  };
 
-  return { get, set };
+  const snapshot = () => cloneState(cache || norm({}));
+
+  return { get, set, snapshot };
 })();
 
-const WEIGHT_FIELDS = [
-  { key: 'price',        label: 'Price' },
-  { key: 'rating',       label: 'Rating' },
-  { key: 'units_sold',   label: 'Units Sold' },
-  { key: 'revenue',      label: 'Revenue' },
-  { key: 'desire',       label: 'Desire' },
-  { key: 'competition',  label: 'Competition' },
-  { key: 'oldness',      label: 'Oldness (antigüedad)' },
-  { key: 'awareness',    label: 'Awareness' }
-];
-const WEIGHT_KEYS = WEIGHT_FIELDS.map(f => f.key);
-const EXTREMES = {
-  price:       { left: 'Más barato',       right: 'Más caro' },
-  rating:      { left: 'Peor rating',      right: 'Mejor rating' },
-  units_sold:  { left: 'Menos ventas',     right: 'Más ventas' },
-  revenue:     { left: 'Menores ingresos', right: 'Mayores ingresos' },
-  desire:      { left: 'Menor deseo',      right: 'Mayor deseo' },
-  competition: { left: 'Menos competencia', right: 'Más competencia' },
-  oldness:     { left: 'Más reciente',     right: 'Más antiguo' },
-  awareness:   { left: 'Unaware',          right: 'Most aware' }
-};
-const ALIASES = { unitsSold: 'units_sold', orders: 'units_sold' };
-function normalizeKey(k){ return ALIASES[k] || k; }
-const metricDefs = WEIGHT_FIELDS;
-const metricKeys = WEIGHT_KEYS;
-let factors = [];
-let userConfig = {};
-let cacheState = { order: [], weights: {}, enabled: {} };
+let cacheState = getDefaultState();
+let saveTimer = null;
+let saveInFlight = null;
+let pendingPreviousState = null;
 
 document.addEventListener('DOMContentLoaded', () => {
   SettingsCache.get().catch(() => {});
 });
 
-function defaultFactors(){
-  return WEIGHT_FIELDS.map(f => ({ ...f, weight:50, enabled:true }));
-}
-let saveTimer=null;
-let isInitialRender = true;
-function markDirty(){
-  clearTimeout(saveTimer);
-  saveTimer=setTimeout(saveSettings,700);
+function beginStateChange() {
+  if (!pendingPreviousState) {
+    pendingPreviousState = cloneState(cacheState);
+  }
+  return cloneState(pendingPreviousState);
 }
 
-function bindToggle(itemEl, field, state) {
-  const toggle = itemEl.querySelector('.wt-enabled');
-  if (!toggle) return;
-  const setDisabled = (off) => {
-    itemEl.classList.toggle('disabled', off);
-    itemEl.querySelectorAll('input[type="range"], input[type="number"]').forEach(el => el.disabled = off);
-  };
-  toggle.checked = !!state.enabled[field];
-  setDisabled(!toggle.checked);
-  toggle.addEventListener('change', (e) => {
-    const on = !!e.target.checked;
-    state.enabled[field] = on;
-    const factor = factors.find(f => f.key === field);
-    if (factor) factor.enabled = on;
-    setDisabled(!on);
-    if(!isInitialRender) markDirty();
+function getPendingPreviousState() {
+  return pendingPreviousState ? cloneState(pendingPreviousState) : null;
+}
+
+function clearPendingPreviousState() {
+  pendingPreviousState = null;
+}
+
+function computeDiff(prev, next) {
+  if (!prev || !next) {
+    return { weightChanges: [], toggleChanges: [], orderMoves: [] };
+  }
+  const weightChanges = [];
+  const toggleChanges = [];
+  const orderMoves = [];
+  const prevPositions = new Map();
+  (prev.order || []).forEach((key, idx) => prevPositions.set(key, idx));
+
+  next.order.forEach((key, idx) => {
+    if (prev.weights) {
+      const prevWeight = prev.weights[key];
+      const nextWeight = next.weights[key];
+      if (prevWeight !== undefined && nextWeight !== undefined && prevWeight !== nextWeight) {
+        weightChanges.push({ key, from: prevWeight, to: nextWeight });
+      }
+    }
+    const prevEnabled = prev.enabled ? prev.enabled[key] !== false : true;
+    const nextEnabled = next.enabled ? next.enabled[key] !== false : true;
+    if (prevEnabled !== nextEnabled) {
+      toggleChanges.push({ key, from: prevEnabled, to: nextEnabled });
+    }
+    if (prevPositions.has(key)) {
+      const fromIdx = prevPositions.get(key);
+      if (fromIdx !== idx) {
+        orderMoves.push({ key, from: fromIdx, to: idx });
+      }
+    }
+  });
+
+  return { weightChanges, toggleChanges, orderMoves };
+}
+
+function formatMetricLabel(key) {
+  const def = METRIC_INDEX.get(key);
+  return def ? def.label : key;
+}
+
+function formatOrder(order) {
+  return (order || []).map(formatMetricLabel).join(' → ');
+}
+
+function applyHighlights(diff, options = {}) {
+  if (!diff) return;
+  const list = document.getElementById('weightsList');
+  if (!list) return;
+
+  diff.weightChanges.forEach(({ key }) => {
+    const item = list.querySelector(`.weight-item[data-key="${key}"]`);
+    if (!item) return;
+    item.classList.add('highlight');
+    setTimeout(() => item.classList.remove('highlight'), 900);
+    const input = item.querySelector('.weight-input');
+    if (input) {
+      input.classList.add('changed');
+      setTimeout(() => input.classList.remove('changed'), 900);
+    }
+  });
+
+  diff.toggleChanges.forEach(({ key }) => {
+    const item = list.querySelector(`.weight-item[data-key="${key}"]`);
+    if (!item) return;
+    item.classList.add('highlight');
+    setTimeout(() => item.classList.remove('highlight'), 900);
+  });
+
+  diff.orderMoves.forEach(({ key, from, to }) => {
+    const item = list.querySelector(`.weight-item[data-key="${key}"]`);
+    if (!item) return;
+    const cls = to < from ? 'moved-up' : 'moved-down';
+    item.classList.add(cls);
+    setTimeout(() => item.classList.remove(cls), 1200);
+  });
+
+  if (options.focusKey) {
+    const focusEl = list.querySelector(`.weight-item[data-key="${options.focusKey}"]`);
+    if (focusEl) focusEl.focus();
+  }
+}
+
+function updateDiffPanel(diff) {
+  const panel = document.getElementById('weightsDiffPanel');
+  if (!panel) return;
+  const body = panel.querySelector('.diff-body');
+  if (!body) return;
+
+  if (!diff || (!diff.weightChanges.length && !diff.orderMoves.length && !diff.toggleChanges.length)) {
+    body.innerHTML = '';
+    panel.hidden = true;
+    panel.removeAttribute('open');
+    return;
+  }
+
+  body.innerHTML = '';
+  if (diff.weightChanges.length) {
+    diff.weightChanges.forEach(({ key, from, to }) => {
+      const row = document.createElement('div');
+      row.className = 'diff-row';
+      row.innerHTML = `<span>${formatMetricLabel(key)}</span><span>${from} → ${to}</span>`;
+      body.appendChild(row);
+    });
+  }
+  if (diff.orderMoves.length) {
+    diff.orderMoves.forEach(({ key, from, to }) => {
+      const row = document.createElement('div');
+      row.className = 'diff-row';
+      const direction = to < from ? '↑' : '↓';
+      row.innerHTML = `<span class="diff-move">${formatMetricLabel(key)}</span><span>${direction} #${from + 1} → #${to + 1}</span>`;
+      body.appendChild(row);
+    });
+  }
+  if (diff.toggleChanges.length) {
+    diff.toggleChanges.forEach(({ key, to }) => {
+      const row = document.createElement('div');
+      row.className = 'diff-row';
+      row.innerHTML = `<span>${formatMetricLabel(key)}</span><span>${to ? 'Activado' : 'Desactivado'}</span>`;
+      body.appendChild(row);
+    });
+  }
+  panel.hidden = false;
+  panel.open = true;
+}
+
+function syncListWithState(state) {
+  const list = document.getElementById('weightsList');
+  if (!list) return;
+  const items = new Map(Array.from(list.children).map(el => [el.dataset.key, el]));
+  const total = state.order.length;
+
+  state.order.forEach((key, idx) => {
+    const el = items.get(key);
+    if (!el) return;
+    list.appendChild(el);
+    el.setAttribute('aria-posinset', idx + 1);
+    el.setAttribute('aria-setsize', total);
+    const rankEl = el.querySelector('.wi-rank');
+    if (rankEl) rankEl.textContent = `#${idx + 1}`;
+    const input = el.querySelector('.weight-input');
+    if (input) {
+      const val = clampInt(state.weights[key], 0, 50, DEFAULT_WEIGHT);
+      if (Number(input.value) !== val) input.value = val;
+      input.disabled = state.enabled[key] === false;
+    }
+    const toggle = el.querySelector('.wt-enabled');
+    if (toggle) toggle.checked = state.enabled[key] !== false;
+    el.classList.toggle('disabled', state.enabled[key] === false);
   });
 }
 
-function enhanceRangeWithFloat(rangeEl, itemEl){
-  const THUMB = 16; // debe coincidir con el CSS del thumb
-  const floatEl = itemEl.querySelector('.wi-float');
-  if (!floatEl) return;
+function buildPayload(state) {
+  const payloadWeights = {};
+  const enabledMap = {};
+  state.order.forEach(key => {
+    payloadWeights[key] = clampInt(state.weights[key], 0, 50, DEFAULT_WEIGHT);
+    enabledMap[key] = state.enabled[key] !== false;
+  });
+  return {
+    weights: payloadWeights,
+    order: state.order.slice(),
+    weights_enabled: enabledMap,
+  };
+}
 
-  const setPercent = () => {
-    const min = +rangeEl.min || 0;
-    const max = +rangeEl.max || 100;
-    const val = +rangeEl.value || 0;
-    const p = ((val - min) * 100) / (max - min);
-    rangeEl.style.setProperty('--p', `${p}%`); // colorea el track
-    return p;
+async function saveSettings(options = {}) {
+  const stateToPersist = options.state ? cloneState(options.state) : cloneState(cacheState);
+  const prevState = options.previousState ? cloneState(options.previousState) : getPendingPreviousState() || cloneState(cacheState);
+  const reason = options.reason || 'weights';
+  const toastMessage = options.toastMessage;
+  const payload = buildPayload(stateToPersist);
+  const host = options.host || document.querySelector('#progress-slot-global');
+  const needsTracker = reason === 'ai' || reason === 'order' || reason === 'reset';
+  const tracker = needsTracker ? LoadingHelpers.start('Guardando configuración', { host }) : null;
+
+  const run = async () => {
+    try {
+      const res = await fetch('/api/config/winner-weights', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        __hostEl: host,
+      });
+      if (!res.ok) throw new Error('save_failed');
+      const data = await res.json().catch(() => ({}));
+      SettingsCache.set(data);
+      cacheState = SettingsCache.snapshot();
+      syncListWithState(cacheState);
+      if (toastMessage && typeof toast !== 'undefined' && toast.success) {
+        toast.success(toastMessage);
+      }
+      if (typeof reloadProductsLight === 'function') reloadProductsLight();
+      else if (typeof reloadProducts === 'function') reloadProducts();
+    } catch (err) {
+      if (typeof toast !== 'undefined' && toast.error) {
+        toast.error('No se pudo guardar la configuración');
+      }
+      cacheState = prevState;
+      renderWeightsUI(cacheState, { updateDiffPanel: true, applyHighlights: false });
+      throw err;
+    } finally {
+      if (tracker) tracker.done();
+      clearPendingPreviousState();
+    }
   };
 
-  const placeFloat = () => {
-    const rect = rangeEl.getBoundingClientRect();
-    const p = parseFloat(getComputedStyle(rangeEl).getPropertyValue('--p'));
-    const usable = rect.width - THUMB;
-    const x = (p / 100) * usable + THUMB / 2;
-    floatEl.style.left = `${x}px`;
-    floatEl.textContent = `peso: ${Math.round(rangeEl.value)}/100`;
-  };
-
-  const showFloat = () => { floatEl.classList.add('show'); };
-  const hideFloatSoon = () => {
-    clearTimeout(hideFloatSoon._t);
-    hideFloatSoon._t = setTimeout(() => floatEl.classList.remove('show'), 700);
-  };
-
-  const updateAll = () => { setPercent(); placeFloat(); };
-
-  rangeEl.addEventListener('input', () => { updateAll(); showFloat(); });
-  rangeEl.addEventListener('pointerdown', () => { updateAll(); showFloat(); });
-  ['pointerup','blur','mouseleave'].forEach(ev =>
-    rangeEl.addEventListener(ev, hideFloatSoon)
-  );
-
-  updateAll();
-
-  const toggle = itemEl.querySelector('.wt-enabled');
-  if (toggle){
-    toggle.addEventListener('change', () => {
-      if (!toggle.checked) floatEl.classList.remove('show');
-      else { updateAll(); showFloat(); hideFloatSoon(); }
-    });
+  if (saveInFlight) {
+    try {
+      await saveInFlight;
+    } catch (err) {
+      // precedente fallido; continuar
+    }
+  }
+  saveInFlight = run();
+  try {
+    await saveInFlight;
+  } finally {
+    saveInFlight = null;
   }
 }
 
-function renderWeightsUI(state){
-  const list = document.getElementById('weightsList');
-  if(!list) return;
-  if(state){
-    cacheState = state;
-    const fieldList = (typeof WEIGHT_FIELDS !== 'undefined' && Array.isArray(WEIGHT_FIELDS)) ? WEIGHT_FIELDS : [];
-    const byKey = Object.fromEntries(fieldList.map(f => [f.key, f]));
-    factors = cacheState.order
-      .filter(k => byKey[k])
-      .map(k => ({
-        ...byKey[k],
-        weight: (cacheState.weights[k] !== undefined && !isNaN(cacheState.weights[k])) ? Math.round(Number(cacheState.weights[k])) : 50,
-        enabled: cacheState.enabled[k] !== undefined ? !!cacheState.enabled[k] : true
-      }));
-  } else {
-    cacheState = {
-      order: factors.map(f => f.key),
-      weights: Object.fromEntries(factors.map(f => [f.key, f.weight])),
-      enabled: Object.fromEntries(factors.map(f => [f.key, f.enabled !== false]))
-    };
+function markDirty(options = {}) {
+  const immediate = options.immediate === true;
+  const delay = typeof options.delay === 'number' ? options.delay : 700;
+  clearTimeout(saveTimer);
+  if (immediate) {
+    return saveSettings(options);
   }
+  saveTimer = setTimeout(() => {
+    saveSettings(options);
+  }, delay);
+  return Promise.resolve();
+}
+
+function attachItemEvents(li, key) {
+  const input = li.querySelector('.weight-input');
+  if (input) {
+    input.addEventListener('input', (ev) => {
+      beginStateChange();
+      let val = clampInt(ev.target.value, 0, 50, cacheState.weights[key] ?? DEFAULT_WEIGHT);
+      if (!Number.isFinite(val)) val = cacheState.weights[key] ?? DEFAULT_WEIGHT;
+      cacheState.weights[key] = val;
+      ev.target.value = val;
+      const base = getPendingPreviousState();
+      if (base) {
+        const diff = computeDiff(base, cacheState);
+        updateDiffPanel(diff);
+      }
+      markDirty({ reason: 'weights' });
+    });
+    input.addEventListener('change', (ev) => {
+      let val = clampInt(ev.target.value, 0, 50, cacheState.weights[key] ?? DEFAULT_WEIGHT);
+      cacheState.weights[key] = val;
+      ev.target.value = val;
+      const base = getPendingPreviousState();
+      if (base) {
+        const diff = computeDiff(base, cacheState);
+        updateDiffPanel(diff);
+      }
+      markDirty({ reason: 'weights' });
+    });
+  }
+
+  const toggle = li.querySelector('.wt-enabled');
+  if (toggle) {
+    toggle.addEventListener('change', (ev) => {
+      beginStateChange();
+      const on = !!ev.target.checked;
+      cacheState.enabled[key] = on;
+      li.classList.toggle('disabled', !on);
+      const base = getPendingPreviousState();
+      if (base) {
+        const diff = computeDiff(base, cacheState);
+        updateDiffPanel(diff);
+      }
+      markDirty({ reason: 'weights' });
+    });
+  }
+
+  li.addEventListener('keydown', (ev) => {
+    if (ev.key === 'ArrowUp') {
+      ev.preventDefault();
+      moveMetric(key, -1);
+    } else if (ev.key === 'ArrowDown') {
+      ev.preventDefault();
+      moveMetric(key, 1);
+    }
+  });
+}
+
+function renderWeightsUI(state, options = {}) {
+  const list = document.getElementById('weightsList');
+  if (!list) return { weightChanges: [], toggleChanges: [], orderMoves: [] };
+
+  const prevState = options.prevState ? cloneState(options.prevState) : null;
+
+  if (list.sortableInstance) {
+    list.sortableInstance.destroy();
+    list.sortableInstance = null;
+  }
+
+  if (state) {
+    cacheState = normalizeState(state);
+  } else {
+    cacheState = normalizeState(cacheState);
+  }
+  SettingsCache.set(cacheState);
+
   list.innerHTML = '';
-  factors.forEach((f,idx) => {
-    const priority = idx + 1;
+  const total = cacheState.order.length;
+  cacheState.order.forEach((key, idx) => {
+    const def = METRIC_INDEX.get(key) || { label: key, extremes: { left: '', right: '' } };
     const li = document.createElement('li');
     li.className = 'weight-item';
-    li.dataset.key = f.key;
+    if (cacheState.enabled[key] === false) li.classList.add('disabled');
+    li.dataset.key = key;
+    li.setAttribute('role', 'option');
+    li.setAttribute('aria-posinset', idx + 1);
+    li.setAttribute('aria-setsize', total);
+    li.tabIndex = 0;
 
-    if (f.key === 'awareness') {
-      li.innerHTML = `
-        <div class="wi-head"><span class="wi-rank">#${priority}</span><span class="wi-title">Awareness</span><span class="wi-handle" aria-hidden="true">≡</span></div>
-        <div class="wi-slider">
-          <div class="segmented-range">
-            <input id="awarenessSlider" class="weight-slider seg-awareness" type="range" min="0" max="100" step="1" />
-            <div class="ticks" aria-hidden="true">
-              <i style="left:20%"></i><i style="left:40%"></i><i style="left:60%"></i><i style="left:80%"></i>
-            </div>
-          </div>
-          <div class="wi-float" aria-hidden="true"></div>
-          <div class="awareness-labels">
-            <span>Unaware</span>
-            <span>Problem aware</span>
-            <span>Solution aware</span>
-            <span>Product aware</span>
-            <span>Most aware</span>
-          </div>
-        </div>
-        <div class="wi-meta">
-          <span class="wi-min">${EXTREMES[f.key].left}</span>
-          <div class="wi-center">
-            <span class="wi-pill">peso: ${f.weight}/100</span>
-            <label class="wi-toggle"><input type="checkbox" class="wt-enabled" aria-label="Activar métrica" /></label>
-          </div>
-          <span class="wi-max">${EXTREMES[f.key].right}</span>
-        </div>`;
-      const slider = li.querySelector('#awarenessSlider');
-      const pill = li.querySelector('.wi-pill');
-      const segs = Array.from(li.querySelectorAll('.awareness-labels span'));
-      function updateAw(val){
-        const v = Math.max(0, Math.min(100, parseInt(val,10) || 0));
-        f.weight = v;
-        cacheState.weights[f.key] = v;
-        slider.value = v;
-        pill.textContent = `peso: ${v}/100`;
-        const idx = Math.min(4, Math.floor(v/20));
-        segs.forEach((el,i)=>el.classList.toggle('active', i===idx));
-      }
-      updateAw(f.weight);
-      slider.addEventListener('input', e => {
-        updateAw(e.target.value);
-        if(!isInitialRender) markDirty();
-      });
-      bindToggle(li, f.key, cacheState);
-    } else {
-      li.innerHTML = `
-        <div class="wi-head"><span class="wi-rank">#${priority}</span><span class="wi-title">${f.label}</span><span class="wi-handle" aria-hidden="true">≡</span></div>
-        <div class="wi-slider"><input id="weight-${f.key}" class="weight-range" type="range" min="0" max="100" step="1" value="${f.weight}"><div class="wi-float" aria-hidden="true"></div></div>
-        <div class="wi-meta">
-          <span class="wi-min">${EXTREMES[f.key].left}</span>
-          <div class="wi-center">
-            <span class="wi-pill">peso: ${f.weight}/100</span>
-            <label class="wi-toggle"><input type="checkbox" class="wt-enabled" aria-label="Activar métrica" /></label>
-          </div>
-          <span class="wi-max">${EXTREMES[f.key].right}</span>
-        </div>`;
-      const range = li.querySelector('.weight-range');
-      const pill = li.querySelector('.wi-pill');
-      range.addEventListener('input', e => {
-        const v = Math.max(0, Math.min(100, parseInt(e.target.value,10) || 0));
-        f.weight = v;
-        cacheState.weights[f.key] = v;
-        range.value = v;
-        pill.textContent = `peso: ${f.weight}/100`;
-        if(!isInitialRender) markDirty();
-      });
-      bindToggle(li, f.key, cacheState);
-    }
+    const leftLabel = def.extremes?.left || '';
+    const rightLabel = def.extremes?.right || '';
+
+    li.innerHTML = `
+      <div class="wi-head">
+        <span class="wi-rank">#${idx + 1}</span>
+        <span class="wi-title">${def.label}</span>
+        <button type="button" class="wi-handle" aria-label="Mover ${def.label}">≡</button>
+      </div>
+      <div class="wi-controls">
+        <input id="weight-${key}" class="weight-input" type="number" min="0" max="50" value="${clampInt(cacheState.weights[key], 0, 50, DEFAULT_WEIGHT)}" aria-label="Peso ${def.label}" />
+        <label class="wi-toggle"><input type="checkbox" class="wt-enabled" ${cacheState.enabled[key] === false ? '' : 'checked'} aria-label="Activar ${def.label}" /></label>
+      </div>
+      <div class="wi-meta">
+        <small>${leftLabel}</small>
+        <small>${rightLabel}</small>
+      </div>
+    `;
+    attachItemEvents(li, key);
     list.appendChild(li);
-    enhanceRangeWithFloat(li.querySelector('input[type="range"]'), li);
   });
-  Sortable.create(list,{ handle:'.wi-handle', animation:150, onEnd:()=>{
-    const orderKeys = Array.from(list.children).map(li=>li.dataset.key);
-    factors.sort((a,b)=>orderKeys.indexOf(a.key)-orderKeys.indexOf(b.key));
-    cacheState.order = orderKeys;
-    renderWeightsUI();
-    if(!isInitialRender) markDirty();
-  }});
-  const root = document.getElementById('weightsCard');
-  if (root && !root.classList.contains('weights-section')) root.classList.add('weights-section');
-  document.querySelector('.weights-section')?.classList.add('compact');
-  isInitialRender = false;
-  window.factors = factors;
-}
 
-function resetWeights(){
-  const state = {
-    order: WEIGHT_FIELDS.map(f => f.key),
-    weights: Object.fromEntries(WEIGHT_FIELDS.map(f => [f.key, 50])),
-    enabled: Object.fromEntries(WEIGHT_FIELDS.map(f => [f.key, true]))
-  };
-  renderWeightsUI(state);
-  markDirty();
-}
-
-async function saveSettings(){
-  const payload = {
-    weights: Object.fromEntries(
-      factors.map(f => [f.key, Math.max(0, Math.min(100, Math.round(Number(f.weight))))])
-    ),
-    order: factors.map(f => f.key),
-    weights_enabled: Object.fromEntries(
-      factors.map(f => [f.key, f.enabled !== false])
-    ),
-    weights_order: factors.map(f => f.key)
-  };
-  try{
-    const res = await fetch('/api/config/winner-weights', {
-      method:'PATCH',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(payload)
+  if (typeof Sortable !== 'undefined') {
+    list.sortableInstance = Sortable.create(list, {
+      handle: '.wi-handle',
+      animation: 150,
+      onEnd: handleSortableEnd,
     });
-    const data = await res.json().catch(()=>null);
-    if (data) SettingsCache.set(data);
-    else SettingsCache.set({ weights: payload.weights, weights_order: payload.order, weights_enabled: payload.weights_enabled });
-    if (typeof reloadProductsLight === 'function') reloadProductsLight();
-    else if (typeof reloadProducts === 'function') reloadProducts();
-  }catch(err){
-    if (typeof toast !== 'undefined' && toast.error) toast.error('No se pudo guardar la configuración');
   }
+
+  const diff = prevState ? computeDiff(prevState, cacheState) : { weightChanges: [], toggleChanges: [], orderMoves: [] };
+  if (prevState && options.applyHighlights !== false) {
+    applyHighlights(diff, { focusKey: options.focusKey });
+  }
+  if (options.updateDiffPanel) {
+    updateDiffPanel(diff);
+  }
+
+  const card = document.getElementById('weightsCard');
+  if (card) {
+    card.style.display = '';
+    card.classList.add('weights-section');
+    card.classList.add('compact');
+  }
+  const footer = document.getElementById('weightsFooter');
+  if (footer) footer.style.display = '';
+  document.querySelector('.weights-section')?.classList.add('compact');
+
+  return diff;
+}
+
+function handleSortableEnd(evt) {
+  if (!evt || evt.oldIndex === evt.newIndex) return;
+  const list = evt.to || document.getElementById('weightsList');
+  if (!list) return;
+  const prevState = beginStateChange();
+  const items = Array.from(list.children);
+  const newOrder = items.map(el => el.dataset.key).filter(Boolean);
+  if (!newOrder.length) return;
+  cacheState.order = newOrder;
+  syncListWithState(cacheState);
+  const diff = computeDiff(prevState, cacheState);
+  updateDiffPanel(diff);
+  applyHighlights(diff, { focusKey: cacheState.order[Math.min(evt.newIndex, cacheState.order.length - 1)] });
+  const toastMessage = `Prioridad actualizada: ${formatOrder(cacheState.order)}`;
+  markDirty({
+    immediate: true,
+    reason: 'order',
+    toastMessage,
+    previousState: prevState,
+    state: cloneState(cacheState),
+  });
+}
+
+function moveMetric(key, delta) {
+  const idx = cacheState.order.indexOf(key);
+  if (idx === -1) return;
+  const target = idx + delta;
+  if (target < 0 || target >= cacheState.order.length) return;
+  const prevState = beginStateChange();
+  const newOrder = cacheState.order.slice();
+  const [moved] = newOrder.splice(idx, 1);
+  newOrder.splice(target, 0, moved);
+  cacheState.order = newOrder;
+  syncListWithState(cacheState);
+  const diff = computeDiff(prevState, cacheState);
+  updateDiffPanel(diff);
+  applyHighlights(diff, { focusKey: key });
+  const toastMessage = `Prioridad actualizada: ${formatOrder(cacheState.order)}`;
+  markDirty({
+    immediate: true,
+    reason: 'order',
+    toastMessage,
+    previousState: prevState,
+    state: cloneState(cacheState),
+  });
+}
+
+function resetWeights() {
+  const prevState = beginStateChange();
+  cacheState = getDefaultState();
+  renderWeightsUI(cacheState, { prevState, updateDiffPanel: true });
+  markDirty({
+    immediate: true,
+    reason: 'reset',
+    toastMessage: 'Pesos restablecidos',
+    previousState: prevState,
+    state: cloneState(cacheState),
+  });
 }
 
 const AWARE_MAP = {
-  'unaware': 0,
+  unaware: 0,
   'problem aware': 0.25,
   'solution aware': 0.5,
   'product aware': 0.75,
-  'most aware': 1
+  'most aware': 1,
 };
-function awarenessValue(p){
+function awarenessValue(p) {
   const s = (p.awareness_level || '').toString().trim().toLowerCase();
   return AWARE_MAP[s] ?? 0.5;
 }
 
-function stratifiedSample(list, n){
-  const byCat = {};
-  list.forEach(p=>{ const c = p.category || 'N/A'; (byCat[c] = byCat[c] || []).push(p); });
-  const total = list.length;
-  const sample = [];
-  for(const c in byCat){
-    const arr = byCat[c].slice().sort((a,b)=>{
-      const ra = Number(a.revenue || (a.extras && a.extras['Revenue($)']) || 0);
-      const rb = Number(b.revenue || (b.extras && b.extras['Revenue($)']) || 0);
-      const ua = Number(a.units_sold || (a.extras && a.extras['Item Sold']) || 0);
-      const ub = Number(b.units_sold || (b.extras && b.extras['Item Sold']) || 0);
-      const sa = ra || ua;
-      const sb = rb || ub;
-      return sb - sa;
-    });
-    const k = Math.max(1, Math.round(n * arr.length / total));
-    sample.push(...arr.slice(0,k));
+function stratifiedSampleBy(arr, key, n) {
+  if (!Array.isArray(arr) || arr.length <= n) return (arr || []).slice();
+  const sorted = [...arr].sort((a, b) => Number(b[key] || 0) - Number(a[key] || 0));
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const idx = Math.floor(i * (sorted.length - 1) / Math.max(1, (n - 1)));
+    out.push(sorted[idx]);
   }
-  return sample.slice(0,n);
+  return out;
 }
 
-async function adjustWeightsAI(ev){
+async function adjustWeightsAI(ev) {
   const btn = ev?.currentTarget || document.getElementById('btnAiWeights');
   const modal = btn?.closest('.modal') || document.querySelector('.config-modal.modal');
   const host = modal?.querySelector('.modal-progress-slot') || modal || document.querySelector('#progress-slot-global');
   const tracker = LoadingHelpers.start('Ajustando pesos con IA', { host });
-  const num = v => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
-  const stratifiedSampleBy = (arr, key, n) => {
-    if (!Array.isArray(arr) || arr.length <= n) return (arr || []).slice();
-    const sorted = [...arr].sort((a,b) => num(b[key]) - num(a[key]));
-    const out = [];
-    for (let i=0; i<n; i++){
-      const idx = Math.floor(i * (sorted.length - 1) / Math.max(1,(n - 1)));
-      out.push(sorted[idx]);
-    }
-    return out;
+  if (btn) {
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+  }
+  const num = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
   };
 
-  try{
+  let rollbackState = null;
+  try {
     const products = Array.isArray(window.allProducts) ? window.allProducts : [];
-    if (!products.length){
-      tracker.step(1);
-      if (typeof toast !== 'undefined') toast.info('No hay productos cargados');
+    if (!products.length) {
+      tracker.step(1, 'Sin productos');
+      if (typeof toast !== 'undefined' && toast.info) toast.info('No hay productos cargados');
       return;
     }
-    tracker.step(0.1);
+    tracker.step(0.1, 'Preparando datos');
 
-    // Construir dataset con las 8 features del Winner Score
     const rows = products.map(p => {
       const ratingRaw = p.rating ?? (p.extras && p.extras.rating);
-      const unitsRaw  = p.units_sold ?? (p.extras && (p.extras['Item Sold'] || p.extras['Orders']));
-      const revRaw    = p.revenue ?? (p.extras && (p.extras['Revenue($)'] || p.extras['Revenue']));
+      const unitsRaw = p.units_sold ?? (p.extras && (p.extras['Item Sold'] || p.extras['Orders']));
+      const revRaw = p.revenue ?? (p.extras && (p.extras['Revenue($)'] || p.extras['Revenue']));
       return {
-        price:       num(p.price),
-        rating:      num(ratingRaw),
-        units_sold:  num(unitsRaw),
-        revenue:     num(revRaw),
-        desire:      num(p.desire_magnitude),
+        price: num(p.price),
+        rating: num(ratingRaw),
+        units_sold: num(unitsRaw),
+        revenue: num(revRaw),
+        desire: num(p.desire_magnitude),
         competition: num(p.competition_level),
-        oldness:     num(typeof computeOldnessDays === 'function' ? computeOldnessDays(p) : 0),
-        awareness:   num(typeof awarenessValue === 'function' ? awarenessValue(p) : 0),
+        oldness: num(typeof computeOldnessDays === 'function' ? computeOldnessDays(p) : 0),
+        awareness: num(typeof awarenessValue === 'function' ? awarenessValue(p) : 0),
       };
     });
 
-    // Target: revenue si >=50% lo tiene; si no, units_sold
     const revCount = rows.filter(r => r.revenue > 0).length;
     const targetName = (revCount >= Math.ceil(rows.length * 0.5)) ? 'revenue' : 'units_sold';
-    tracker.step(0.22);
+    tracker.step(0.25, 'Seleccionando muestra');
 
-    // Enviar el mayor número posible en una sola llamada (controlado por presupuesto)
     const cfg = (window.userConfig && window.userConfig.aiCost) ? window.userConfig.aiCost : { costCapUSD: 0.25, estTokensPerItemIn: 300, estTokensPerItemOut: 80 };
     const estTokPerItem = (num(cfg.estTokensPerItemIn) + num(cfg.estTokensPerItemOut)) || 380;
-    const pricePerK = 0.002; // estimación conservadora
-    const maxByBudget = Math.max(30, Math.floor((cfg.costCapUSD || 0.25) / pricePerK * 1000 / estTokPerItem));
+    const pricePerK = 0.002;
+    const maxByBudget = Math.max(30, Math.floor((cfg.costCapUSD || 0.25) / pricePerK * 1000 / Math.max(1, estTokPerItem)));
     const HARD_CAP = 500;
     const MAX = Math.min(HARD_CAP, Math.max(60, maxByBudget));
 
-    let data_sample = rows.map(r => ({ ...r, target: r[targetName] }));
-    if (data_sample.length > MAX) data_sample = stratifiedSampleBy(data_sample, targetName, MAX);
+    let dataSample = rows.map(r => ({ ...r, target: r[targetName] }));
+    if (dataSample.length > MAX) dataSample = stratifiedSampleBy(dataSample, targetName, MAX);
 
-    const features = (typeof metricKeys !== 'undefined' && metricKeys.length) ? metricKeys : [
-      'price','rating','units_sold','revenue','desire','competition','oldness','awareness'
-    ];
-    const payload = { features, target: targetName, data_sample };
-    tracker.step(0.35);
+    tracker.step(0.45, 'Consultando IA');
 
-    // 1 intento: GPT; fallback estadístico si falla
-    let res = await fetch('/scoring/v2/auto-weights-gpt', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(payload),
+    const res = await fetch('/api/config/winner-weights/ai?can_reorder=true', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ features: METRIC_KEYS, target: targetName, data_sample: dataSample }),
       __hostEl: host,
-      __skipLoadingHook: true
     });
-    if (!res.ok){
-      res = await fetch('/scoring/v2/auto-weights-stat', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify(payload),
-        __hostEl: host,
-        __skipLoadingHook: true
-      });
-    }
-    if (!res.ok) throw new Error('Auto-weights request failed');
+    if (!res.ok) throw new Error('auto_weights_failed');
+    const out = await res.json();
 
-    const out = await res.json(); // { weights:{}, weights_order:[...], method?... }
-    const intWeights = (out && out.weights) ? out.weights : {};
-    const newOrder = (out && Array.isArray(out.weights_order) && out.weights_order.length)
-      ? out.weights_order.slice()
-      : Object.keys(intWeights).sort((a,b) => (intWeights[b]||0) - (intWeights[a]||0));
-    tracker.step(0.55);
-
-    // Persistir en backend y refrescar UI con lo guardado
-    const state = await SettingsCache.get();
-    const resSave = await fetch('/api/config/winner-weights', {
-      method:'PATCH',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ weights: intWeights, weights_order: newOrder, weights_enabled: state.enabled }),
-      __hostEl: host,
-      __skipLoadingHook: true
+    const prevState = beginStateChange();
+    rollbackState = cloneState(prevState);
+    const mergedWeights = { ...cacheState.weights, ...(out.weights || out.winner_weights || {}) };
+    const nextState = normalizeState({
+      weights: mergedWeights,
+      order: out.order || out.winner_order || cacheState.order,
+      weights_enabled: cacheState.enabled,
     });
-    if (!resSave.ok) throw new Error('Persist weights failed');
-    const saved = await resSave.json();
-    SettingsCache.set(saved);
-    // renderWeightsUI reinstates slider helpers like enhanceRangeWithFloat
-    const fresh = await SettingsCache.get();
-    if (typeof renderWeightsUI === 'function') renderWeightsUI(fresh);
-    tracker.step(0.85);
 
-    if (typeof toast !== 'undefined' && toast.success){
-      const method = (out && out.method) ? out.method : 'gpt';
-      toast.success(`Pesos ajustados por IA (${method}) con ${data_sample.length} muestras`);
+    cacheState = nextState;
+    const diff = renderWeightsUI(cacheState, { prevState, updateDiffPanel: true });
+    applyHighlights(diff);
+
+    tracker.step(0.75, 'Guardando cambios');
+
+    await markDirty({
+      immediate: true,
+      reason: 'ai',
+      toastMessage: 'IA actualizó pesos (+orden) · guardado',
+      previousState: prevState,
+      state: cloneState(cacheState),
+    });
+
+    rollbackState = null;
+    tracker.step(1, 'Completado');
+  } catch (err) {
+    if (rollbackState) {
+      cacheState = rollbackState;
+      renderWeightsUI(cacheState, { updateDiffPanel: true, applyHighlights: false });
     }
-    tracker.step(1);
-  }catch(err){
-    tracker.step(1);
-    if (typeof toast !== 'undefined' && toast.error){
-      toast.error('No se pudo ajustar por IA. Revisa tu API Key o inténtalo más tarde.');
+    if (!err || (err && err.message !== 'save_failed')) {
+      if (typeof toast !== 'undefined' && toast.error) {
+        toast.error('No se pudo ajustar por IA. Revisa tu API Key o inténtalo más tarde.');
+      }
     }
   } finally {
     tracker.done();
+    if (btn) {
+      btn.disabled = false;
+      btn.removeAttribute('aria-busy');
+    }
+    clearPendingPreviousState();
   }
 }
 
-
-function showSettingsModalShell(){
+function showSettingsModalShell() {
   const list = document.getElementById('weightsList');
   if (list) list.innerHTML = '';
 }
 
-function revealSettingsModalContent(){ /* no-op */ }
-
-async function hydrateSettingsModal(){
-  try{
-    isInitialRender = true;
+async function hydrateSettingsModal() {
+  try {
     const state = await SettingsCache.get();
-    renderWeightsUI(state);
+    cacheState = cloneState(state);
+    renderWeightsUI(cacheState, { applyHighlights: false, updateDiffPanel: false });
+    updateDiffPanel({ weightChanges: [], toggleChanges: [], orderMoves: [] });
     console.debug('hydrateSettingsModal -> weights/order aplicados:', state);
-  }catch(err){
-    /* silencioso */
+  } catch (err) {
+    // silencioso
   }
 }
 
-async function openConfigModal(){
+async function openConfigModal() {
   showSettingsModalShell();
   await hydrateSettingsModal();
   document.querySelector('#configModal')?.classList.add('ready');
   document.querySelector('#settings-modal')?.classList.add('ready');
-  revealSettingsModalContent();
   const resetBtn = document.getElementById('btnReset');
   if (resetBtn) resetBtn.onclick = resetWeights;
   const aiBtn = document.getElementById('btnAiWeights');
@@ -483,4 +780,4 @@ window.loadWeights = hydrateSettingsModal;
 window.resetWeights = resetWeights;
 window.adjustWeightsAI = adjustWeightsAI;
 window.markDirty = markDirty;
-window.metricKeys = metricKeys;
+window.metricKeys = METRIC_KEYS;

@@ -893,10 +893,13 @@ class RequestHandler(BaseHTTPRequestHandler):
             resp = {
                 **raw,
                 "weights": raw,
+                "winner_weights": raw,
                 "order": order,
+                "winner_order": order,
                 "effective": {"int": eff_int},
                 "weights_enabled": enabled,
                 "weights_order": order,
+                "version": "v2",
             }
             self._set_json()
             self.wfile.write(json.dumps(resp).encode("utf-8"))
@@ -1745,10 +1748,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                 set_winner_weights_raw,
                 set_winner_order_raw,
                 get_winner_order_raw,
+                get_winner_weights_raw,
                 set_weights_enabled_raw,
                 get_weights_enabled_raw,
                 compute_effective_int,
                 ALLOWED_FIELDS,
+                validate_order,
             )
             from .services import winner_score
 
@@ -1757,28 +1762,62 @@ class RequestHandler(BaseHTTPRequestHandler):
                 or data.get("weights")
                 or {k: v for k, v in data.items() if k in ALLOWED_FIELDS}
             )
-            saved = set_winner_weights_raw(payload_map)
-            order_in = data.get("order") if isinstance(data, dict) else None
-            if isinstance(order_in, list):
-                order = [k for k in order_in if k in saved]
+            order_in = data.get("order") or data.get("weights_order")
+            if order_in is not None and not isinstance(order_in, list):
+                order_in = None
+            if order_in is not None:
+                try:
+                    validated_order = validate_order(order_in)
+                except ValueError:
+                    self._set_json(400)
+                    self.wfile.write(json.dumps({"error": "invalid_order"}).encode("utf-8"))
+                    return
             else:
-                order = get_winner_order_raw()
-            if "awareness" not in order:
-                order.append("awareness")
-            saved_order = set_winner_order_raw(order)
+                validated_order = None
+
+            prev_weights = get_winner_weights_raw()
+            prev_order = get_winner_order_raw()
+            prev_enabled = get_weights_enabled_raw()
+
+            saved = set_winner_weights_raw(payload_map)
+            if validated_order is not None:
+                saved_order = set_winner_order_raw(validated_order)
+            else:
+                saved_order = get_winner_order_raw()
             en_in = data.get("weights_enabled") if isinstance(data, dict) else None
             if isinstance(en_in, dict):
-                set_weights_enabled_raw(en_in)
-            enabled = get_weights_enabled_raw()
+                saved_enabled = set_weights_enabled_raw(en_in)
+            else:
+                saved_enabled = get_weights_enabled_raw()
+            weight_changes = {
+                k: (prev_weights.get(k, 0), saved.get(k, 0))
+                for k in saved
+                if prev_weights.get(k, 0) != saved.get(k, 0)
+            }
+            prev_positions = {k: idx for idx, k in enumerate(prev_order)}
+            order_moves = []
+            for idx, key in enumerate(saved_order):
+                prev_idx = prev_positions.get(key)
+                if prev_idx is not None and prev_idx != idx:
+                    order_moves.append({"metric": key, "from": prev_idx, "to": idx})
+            if weight_changes or order_moves:
+                logger.info(
+                    "winner_weights.diff source=manual weights=%s order=%s",
+                    weight_changes,
+                    order_moves,
+                )
             winner_score.invalidate_weights_cache()
-            eff_map = {k: (saved.get(k, 0) if enabled.get(k, True) else 0) for k in saved}
+            eff_map = {k: (saved.get(k, 0) if saved_enabled.get(k, True) else 0) for k in saved}
             resp = {
                 **saved,
                 "weights": saved,
+                "winner_weights": saved,
                 "order": saved_order,
+                "winner_order": saved_order,
                 "effective": {"int": compute_effective_int(eff_map, saved_order)},
-                "weights_enabled": enabled,
+                "weights_enabled": saved_enabled,
                 "weights_order": saved_order,
+                "version": "v2",
             }
             publish_progress({
                 "event": "weights",
@@ -2593,41 +2632,111 @@ class RequestHandler(BaseHTTPRequestHandler):
         result = gpt.recommend_winner_weights(api_key, model, samples, target)
         weights_raw = result.get("weights", {}) or {}
         notes = result.get("justification", "")
+        parsed_path = urlparse(self.path)
+        qs = parse_qs(parsed_path.query or "")
+        can_reorder = False
+        if qs.get("can_reorder"):
+            flag = qs.get("can_reorder")[0]
+            can_reorder = str(flag).lower() in {"1", "true", "yes", "on"}
 
-        # Filtra a campos permitidos + clamp 0..100 enteros
         allowed = list(winner_calc.ALLOWED_FIELDS)
-        final_weights = {}
+        final_weights: Dict[str, int] = {}
         for k in allowed:
             v = weights_raw.get(k, 0)
             try:
                 v = float(v)
             except Exception:
                 v = 0.0
-            v = max(0.0, min(100.0, v))
+            if v > 100.0:
+                v = 100.0
+            if v > 50.0:
+                v = v * 0.5
+            v = max(0.0, min(50.0, v))
             final_weights[k] = int(round(v))
 
-        # ORDER: por peso desc; a igualdad conserva el orden previo
-        prev_settings = winner_calc.load_settings()
-        prev_order = prev_settings.get("weights_order") or list(allowed)
-        order = sorted(final_weights.keys(), key=lambda k: (-final_weights[k], prev_order.index(k) if k in prev_order else 999))
-
-        # Logs (útiles para ti): ahora ai_raw/ints son lo mismo (0..100 independientes)
-        logger.info(
-            "ai_raw=%s enabled_only=%s ints=%s order=%s sum=%s",
-            final_weights,
-            final_weights,
-            final_weights,
-            order,
-            sum(final_weights.values()),
+        from .services.config import (
+            get_winner_weights_raw,
+            get_winner_order_raw,
+            get_weights_enabled_raw,
+            set_winner_weights_raw,
+            set_winner_order_raw,
+            compute_effective_int,
+            validate_order,
         )
 
-        # Respuesta para el frontend (este ya hace el PATCH /api/config/winner-weights)
+        prev_weights = get_winner_weights_raw()
+        prev_order = get_winner_order_raw()
+        prev_enabled = get_weights_enabled_raw()
+
+        order_candidate = result.get("order") if isinstance(result, dict) else None
+        proposed_order: list[str] | None = None
+        if isinstance(order_candidate, list):
+            try:
+                proposed_order = validate_order(order_candidate)
+            except ValueError:
+                proposed_order = None
+        if proposed_order is None:
+            prev_positions = {k: idx for idx, k in enumerate(prev_order)}
+            proposed_order = sorted(
+                allowed,
+                key=lambda key: (
+                    -final_weights.get(key, 0),
+                    prev_positions.get(key, len(prev_positions)),
+                ),
+            )
+
+        saved_weights = final_weights
+        saved_order = proposed_order
+        saved_enabled = prev_enabled
+        updated = 0
+        persisted = False
+        if can_reorder:
+            saved_weights = set_winner_weights_raw(final_weights)
+            saved_order = set_winner_order_raw(proposed_order)
+            winner_calc.invalidate_weights_cache()
+            weight_changes = {
+                k: (prev_weights.get(k, 0), saved_weights.get(k, 0))
+                for k in saved_weights
+                if prev_weights.get(k, 0) != saved_weights.get(k, 0)
+            }
+            prev_positions = {k: idx for idx, k in enumerate(prev_order)}
+            order_moves = []
+            for idx, key in enumerate(saved_order):
+                prev_idx = prev_positions.get(key)
+                if prev_idx is not None and prev_idx != idx:
+                    order_moves.append({"metric": key, "from": prev_idx, "to": idx})
+            if weight_changes or order_moves:
+                logger.info(
+                    "winner_weights.diff source=ai weights=%s order=%s",
+                    weight_changes,
+                    order_moves,
+                )
+            try:
+                updated = winner_calc.recompute_scores_for_all_products(scope="all")
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("recompute on ai save failed: %s", exc)
+            saved_enabled = get_weights_enabled_raw()
+            persisted = True
+
+        eff_map = {
+            k: (saved_weights.get(k, 0) if saved_enabled.get(k, True) else 0)
+            for k in saved_weights
+        }
+        effective = compute_effective_int(eff_map, saved_order)
+
         resp = {
-            "weights": final_weights,      # 0..100 independientes
-            "weights_order": order,        # prioridad explícita
-            "order": order,
-            "method": "gpt",
+            "weights": saved_weights,
+            "winner_weights": saved_weights,
+            "order": proposed_order,
+            "winner_order": saved_order,
+            "weights_order": saved_order,
+            "weights_enabled": saved_enabled,
+            "effective": {"int": effective},
+            "version": "v2",
+            "method": result.get("method", "gpt") if isinstance(result, dict) else "gpt",
             "diagnostics": {"notes": notes},
+            "persisted": persisted,
+            "updated": updated,
         }
         self._set_json()
         self.wfile.write(json.dumps(resp).encode('utf-8'))

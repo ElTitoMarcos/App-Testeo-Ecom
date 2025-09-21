@@ -354,7 +354,17 @@ def test_patch_product_desire(tmp_path, monkeypatch):
 def test_patch_winner_weights_persists(tmp_path, monkeypatch):
     setup_env(tmp_path, monkeypatch)
 
-    body = json.dumps({"weights": {"rating": 25}, "order": ["rating", "price"]})
+    full_order = [
+        "rating",
+        "price",
+        "units_sold",
+        "revenue",
+        "desire",
+        "competition",
+        "oldness",
+        "awareness",
+    ]
+    body = json.dumps({"weights": {"rating": 25}, "order": full_order})
 
     class Dummy:
         def __init__(self, body):
@@ -370,12 +380,13 @@ def test_patch_winner_weights_persists(tmp_path, monkeypatch):
     web_app.RequestHandler.do_PATCH(handler)
     resp = json.loads(handler.wfile.getvalue().decode("utf-8"))
     assert resp["weights"]["rating"] == 25
-    assert resp["order"][0] == "rating"
+    assert resp["order"] == full_order
+    assert resp["version"] == "v2"
     from product_research_app.services.config import get_winner_weights_raw, get_winner_order_raw
     data = get_winner_weights_raw()
     order = get_winner_order_raw()
     assert data.get("rating") == 25
-    assert order[0] == "rating"
+    assert order == full_order
 
 def test_config_oldness_preference_roundtrip(tmp_path, monkeypatch):
     setup_env(tmp_path, monkeypatch)
@@ -732,7 +743,8 @@ def test_weights_eff_stable_when_touching_missing_metric(tmp_path, monkeypatch):
     resp2 = json.loads(h2.wfile.getvalue().decode("utf-8"))
     assert resp2["weights_all"] != hash_all1
     assert resp2["weights_eff"] != hash_eff1
-    assert resp2["diag"]["sum_filtered"] > sum1
+    assert resp2["diag"]["sum_filtered"] > 0
+    assert resp2["diag"]["sum_filtered"] != sum1
 
 
 def _make_export_dummy(body: str):
