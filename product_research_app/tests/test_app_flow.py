@@ -971,6 +971,7 @@ def test_export_kalodata_minimal_success(tmp_path, monkeypatch):
     assert ws.column_dimensions["A"].width == 38
     assert ws.column_dimensions["I"].width == 45
     assert ws.column_dimensions["O"].width == 40
+
     assert "tbl_products" in ws.tables
     assert ws.tables["tbl_products"].ref == "A1:O4"
 

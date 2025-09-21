@@ -156,7 +156,6 @@ def reorder_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     resolved: List[str] = []
     rename_map: Dict[str, str] = {}
-
     for canonical in desired_labels:
         found = None
         for variant in synonyms.get(canonical, [canonical]):
