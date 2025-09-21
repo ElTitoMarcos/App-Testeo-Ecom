@@ -12,6 +12,7 @@ from product_research_app.services.winner_score import (
 from product_research_app.services.config import (
     ALLOWED_FIELDS,
     compute_effective_int,
+    get_default_winner_weights,
 )
 from product_research_app.config import DEFAULT_WINNER_ORDER
 
@@ -58,6 +59,42 @@ def _sanitize_enabled(raw_enabled, keys: list[str]) -> dict[str, bool]:
         return {k: True for k in keys}
     return {k: bool(raw_enabled.get(k, True)) for k in keys}
 
+def _apply_reset(settings: dict | None = None) -> dict:
+    cfg = dict(settings or load_settings() or {})
+    default_weights = get_default_winner_weights()
+    cfg["winner_weights"] = dict(default_weights)
+    order = list(DEFAULT_WINNER_ORDER)
+    cfg["winner_order"] = order[:]
+    cfg["weights_order"] = order[:]
+    raw_enabled = cfg.get("weights_enabled")
+    if isinstance(raw_enabled, dict):
+        enabled = {k: bool(raw_enabled.get(k, True)) for k in default_weights.keys()}
+    else:
+        enabled = {k: True for k in default_weights.keys()}
+    cfg["weights_enabled"] = enabled
+    cfg["weightsUpdatedAt"] = int(time.time())
+    save_settings(cfg)
+    try:
+        invalidate_weights_cache()
+    except Exception as exc:  # pragma: no cover - defensive logging
+        current_app.logger.warning("reset invalidate failed: %s", exc)
+    return cfg
+
+
+def _build_reset_payload(cfg: dict) -> dict:
+    payload = {
+        "ok": True,
+        "weights": dict(cfg.get("winner_weights", {})),
+        "winner_weights": dict(cfg.get("winner_weights", {})),
+        "order": list(cfg.get("winner_order", [])),
+        "winner_order": list(cfg.get("winner_order", [])),
+        "weights_order": list(cfg.get("weights_order", [])),
+        "weights_enabled": dict(cfg.get("weights_enabled", {})),
+    }
+    for key in ("weightsUpdatedAt", "weightsVersion"):
+        if key in cfg:
+            payload[key] = cfg[key]
+    return payload
 
 """Endpoints for winner weight configuration.
 
@@ -116,6 +153,9 @@ def api_get_winner_weights():
         for k in weights.keys()
     }
     eff = compute_effective_int(weights_eff, order)
+    current_app.logger.info(
+        "CONFIG served weights_order=%s", settings.get("weights_order")
+    )
     resp = jsonify({
         **weights,
         "weights": weights,
@@ -132,6 +172,15 @@ def api_get_winner_weights():
 @app.route("/api/config/winner-weights", methods=["PATCH"])
 def api_patch_winner_weights():
     body = request.get_json(force=True) or {}
+    if body.get("reset"):
+        cfg = _apply_reset()
+        current_app.logger.info(
+            "RESET applied weights_order=%s", cfg.get("weights_order")
+        )
+        payload = _build_reset_payload(cfg)
+        resp = jsonify(payload)
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        return resp, 200
     payload_map = (
         body.get("winner_weights")
         or body.get("weights")
@@ -182,5 +231,18 @@ def api_patch_winner_weights():
         }
     )
     resp = jsonify(resp_payload)
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    return resp, 200
+
+
+# POST /api/config/winner-weights/reset
+@app.route("/api/config/winner-weights/reset", methods=["POST"])
+def api_reset_winner_weights():
+    cfg = _apply_reset()
+    current_app.logger.info(
+        "RESET applied weights_order=%s", cfg.get("weights_order")
+    )
+    payload = _build_reset_payload(cfg)
+    resp = jsonify(payload)
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     return resp, 200

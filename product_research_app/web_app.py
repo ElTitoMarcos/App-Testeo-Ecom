@@ -45,6 +45,7 @@ from . import config
 from .services import ai_columns
 from .services import winner_score as winner_calc
 from .services import trends_service
+from .services.config import get_default_winner_weights
 from .services.importer_fast import DEFAULT_BATCH_SIZE, fast_import, fast_import_records
 from . import gpt
 from .prompts.registry import normalize_task
@@ -117,6 +118,43 @@ def _normalize_order_list(order, available: Dict[str, Any]) -> List[str]:
             seen.add(key)
     return out
 
+def _apply_weights_reset(existing: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    cfg = dict(existing or config.load_config())
+    default_weights = get_default_winner_weights()
+    cfg["winner_weights"] = dict(default_weights)
+    order = list(config.DEFAULT_WINNER_ORDER)
+    cfg["winner_order"] = order[:]
+    cfg["weights_order"] = order[:]
+    raw_enabled = cfg.get("weights_enabled")
+    if isinstance(raw_enabled, dict):
+        enabled = {k: bool(raw_enabled.get(k, True)) for k in default_weights.keys()}
+    else:
+        enabled = {k: True for k in default_weights.keys()}
+    cfg["weights_enabled"] = enabled
+    cfg["weightsUpdatedAt"] = int(time.time())
+    config.save_config(cfg)
+    try:
+        winner_calc.invalidate_weights_cache()
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.warning("reset invalidate failed: %s", exc)
+    return cfg
+
+
+def _build_weights_payload(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    payload = {
+        "ok": True,
+        "weights": dict(cfg.get("winner_weights", {})),
+        "winner_weights": dict(cfg.get("winner_weights", {})),
+        "order": list(cfg.get("winner_order", [])),
+        "winner_order": list(cfg.get("winner_order", [])),
+        "weights_order": list(cfg.get("weights_order", [])),
+        "weights_enabled": dict(cfg.get("weights_enabled", {})),
+    }
+    if "weightsUpdatedAt" in cfg:
+        payload["weightsUpdatedAt"] = cfg["weightsUpdatedAt"]
+    if "weightsVersion" in cfg:
+        payload["weightsVersion"] = cfg["weightsVersion"]
+    return payload
 
 def _sanitize_enabled_map(raw_enabled, keys: List[str]) -> Dict[str, bool]:
     if not isinstance(raw_enabled, dict):
@@ -958,6 +996,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             if changed:
                 config.save_config(cfg)
 
+            logger.info("CONFIG served weights_order=%s", cfg.get("weights_order"))
+            
             raw_eff = {
                 k: (weights_map.get(k, 0) if weights_enabled.get(k, True) else 0)
                 for k in weights_map
@@ -1113,14 +1153,17 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/config":
             # return stored configuration (without exposing the API key)
             cfg = config.load_config()
+            changed = False
             order = cfg.get("winner_order")
             if not isinstance(order, list) or len(order) != 8:
                 order = list(config.DEFAULT_WINNER_ORDER)
                 cfg["winner_order"] = order[:]
                 cfg["weights_order"] = order[:]
-                config.save_config(cfg)
+                changed = True
             if not isinstance(cfg.get("weights_order"), list) or len(cfg["weights_order"]) != 8:
                 cfg["weights_order"] = cfg["winner_order"][:]
+                changed = True
+            if changed:
                 config.save_config(cfg)
 
             weights_map = _sanitize_weights_map(cfg.get("winner_weights"))
@@ -1146,6 +1189,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 data["api_key_last4"] = key[-4:]
                 data["api_key_length"] = len(key)
                 data["api_key_hash"] = hashlib.sha256(key.encode("utf-8")).hexdigest()
+            logger.info("CONFIG served weights_order=%s", data["weights_order"])
             self._set_json()
             self.wfile.write(json.dumps(data).encode("utf-8"))
             return
@@ -1612,6 +1656,13 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/api/config/winner-weights/ai":
             self.handle_scoring_v2_auto_weights_gpt()
             return
+        if path == "/api/config/winner-weights/reset":
+            cfg = _apply_weights_reset()
+            payload = _build_weights_payload(cfg)
+            logger.info("RESET applied weights_order=%s", cfg.get("weights_order"))
+            self._set_json()
+            self.wfile.write(json.dumps(payload).encode('utf-8'))
+            return
         if path == "/scoring/v2/auto-weights-gpt":
             self.handle_scoring_v2_auto_weights_gpt()
             return
@@ -1837,6 +1888,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._set_json(400)
                 self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
                 return
+            if data.get("reset"):
+                cfg = _apply_weights_reset()
+                payload = _build_weights_payload(cfg)
+                logger.info("RESET applied weights_order=%s", cfg.get("weights_order"))
+                self._set_json()
+                self.wfile.write(json.dumps(payload).encode('utf-8'))
+                return
+              
             weights_in = (
                 data.get("weights")
                 or data.get("winner_weights")

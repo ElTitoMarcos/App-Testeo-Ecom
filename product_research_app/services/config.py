@@ -18,6 +18,13 @@ DEFAULT_WEIGHTS_RAW: Dict[str, int] = {k: 50 for k in ALLOWED_FIELDS}
 DEFAULT_ORDER: List[str] = list(DEFAULT_WINNER_ORDER)
 DEFAULT_ENABLED: Dict[str, bool] = {k: True for k in ALLOWED_FIELDS}
 
+
+def get_default_winner_weights() -> Dict[str, int]:
+    """Return a copy of the default weight map (0-100 scale)."""
+
+    return DEFAULT_WEIGHTS_RAW.copy()
+
+
 # Compatibility placeholder; not used but kept for tests that monkeypatch it
 DB_PATH = Path(__file__).resolve().parents[1] / "data.sqlite3"
 

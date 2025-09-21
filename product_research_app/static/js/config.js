@@ -263,14 +263,56 @@ function renderWeightsUI(state){
   window.factors = factors;
 }
 
-function resetWeights(){
-  const state = {
-    order: WEIGHT_FIELDS.map(f => f.key),
-    weights: Object.fromEntries(WEIGHT_FIELDS.map(f => [f.key, 50])),
-    enabled: Object.fromEntries(WEIGHT_FIELDS.map(f => [f.key, true]))
-  };
-  renderWeightsUI(state);
-  markDirty();
+async function resetWeights(ev){
+  try { ev?.preventDefault?.(); } catch (_) {}
+  const btn = ev?.currentTarget;
+  if (btn) btn.disabled = true;
+  const fallbackOrder = [
+    'awareness','desire','revenue','competition',
+    'units_sold','price','oldness','rating'
+  ];
+  try{
+    const res = await fetch('/api/config/winner-weights/reset', {
+      method: 'POST',
+      headers: { 'Cache-Control': 'no-store' }
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const serverOrder = Array.isArray(data?.weights_order) && data.weights_order.length
+      ? data.weights_order.slice()
+      : Array.isArray(data?.order) && data.order.length
+        ? data.order.slice()
+        : [];
+    const mergedOrder = serverOrder.filter(k => typeof k === 'string' && k);
+    const finalOrder = (() => {
+      const next = mergedOrder.slice();
+      fallbackOrder.forEach(key => { if (!next.includes(key)) next.push(key); });
+      return next;
+    })();
+    const rawWeights = (data && typeof data === 'object' && (data.weights || data.winner_weights)) || {};
+    const payloadForCache = {
+      ...data,
+      weights: rawWeights,
+      winner_weights: rawWeights,
+      winner_order: finalOrder.slice(),
+      weights_order: finalOrder.slice(),
+      weights_enabled: (data && typeof data === 'object' && data.weights_enabled) || {},
+    };
+    SettingsCache.set(payloadForCache);
+    const normalized = await SettingsCache.get();
+    const state = {
+      order: normalized.order.slice(),
+      weights: { ...normalized.weights },
+      enabled: { ...normalized.enabled }
+    };
+    try { localStorage.setItem('winner_order', JSON.stringify(state.order)); } catch (_) {}
+    renderWeightsUI(state);
+  }catch(err){
+    console.error('resetWeights error', err);
+    if (typeof toast !== 'undefined' && toast.error) toast.error('No se pudo restablecer los pesos');
+  }finally{
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function saveSettings(){
