@@ -49,9 +49,10 @@ BASE_COLUMNS: Sequence[str] = (
 )
 
 COLUMNS: Sequence[str] = (
-    "image",
+    "image preview",
     "name",
     "category",
+    "launch date",
     "price",
     "rating",
     "revenue",
@@ -62,16 +63,16 @@ COLUMNS: Sequence[str] = (
     "competition level",
     "TikTokUrl",
     "KalodataUrl",
-    "Image Preview",
-    "Launch Date",
+    "Img_url",
 )
 
 
 def reorder_columns(df: pd.DataFrame) -> pd.DataFrame:
     desired_labels = [
-        "image",
+        "image preview",
         "name",
         "category",
+        "launch date",
         "price",
         "rating",
         "revenue",
@@ -81,38 +82,76 @@ def reorder_columns(df: pd.DataFrame) -> pd.DataFrame:
         "awareness level",
         "competition level",
     ]
+
     lower_map = {c.lower(): c for c in df.columns}
 
     synonyms = {
-        "items sold": ["items sold", "units_sold", "units sold", "item sold"],
-        "awareness level": ["awareness level", "awareness"],
-        "competition level": ["competition level", "competition"],
+        "image preview": [
+            "image preview",
+            "image_preview",
+            "preview image",
+            "thumbnail",
+            "miniatura",
+            "img",
+            "product image",
+            "image url",
+            "image_url",
+            "img_url",
+            "imagen",
+            "image",
+        ],
+        "name": ["name", "title", "product name", "nombre", "producto"],
+        "category": ["category", "categories", "categoria", "categoría"],
+        "launch date": [
+            "launch date",
+            "launch_date",
+            "launched at",
+            "launched_at",
+            "release date",
+            "release_date",
+            "first seen",
+            "first_seen",
+            "fecha de lanzamiento",
+            "fecha lanzamiento",
+            "date launched",
+            "launchdate",
+        ],
+        "price": ["price", "precio", "price($)", "price usd", "price$"],
+        "rating": ["rating", "rate", "stars", "product rating", "valoración", "valoracion"],
+        "revenue": [
+            "revenue",
+            "total revenue",
+            "total revenue($)",
+            "income",
+            "ingresos",
+        ],
+        "items sold": [
+            "items sold",
+            "units_sold",
+            "units sold",
+            "item sold",
+            "sold",
+            "unidades vendidas",
+        ],
+        "desire": ["desire", "desires"],
         "desire magnitude": [
             "desire magnitude",
             "desire_magnitude",
             "desire mag",
             "desire_mag",
+            "magnitud del deseo",
         ],
-        "image": [
-            "image",
-            "thumbnail",
-            "miniatura",
-            "img",
-            "product image",
-            "img_url",
-            "image url",
+        "awareness level": [
+            "awareness level",
+            "awareness",
+            "nivel de awareness",
+            "nivel awareness",
         ],
-        "name": ["name", "title", "product name"],
-        "category": ["category", "categories", "categoria", "categoría"],
-        "price": ["price", "precio", "price($)", "price usd", "price$"],
-        "rating": ["rating", "rate", "stars", "product rating"],
-        "revenue": [
-            "revenue",
-            "total revenue",
-            "income",
-            "total revenue($)",
+        "competition level": [
+            "competition level",
+            "competition",
+            "nivel de competencia",
         ],
-        "desire": ["desire", "desires"],
     }
 
     resolved: List[str] = []
@@ -136,6 +175,10 @@ def reorder_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     if rename_map:
         df_out = df_out.rename(columns=rename_map)
+
+    cols_lower = {c.lower(): c for c in df_out.columns}
+    if "image preview" in cols_lower and "image" in cols_lower:
+        df_out = df_out.drop(columns=[cols_lower["image"]])
 
     return df_out
 
