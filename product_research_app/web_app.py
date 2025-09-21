@@ -78,6 +78,52 @@ DEBUG = bool(os.environ.get("DEBUG"))
 DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y")
 
 
+DEFAULT_ORDER_LIST = list(config.DEFAULT_WINNER_ORDER)
+
+
+def _clamp_weight_value(value: Any) -> int:
+    try:
+        return int(max(0, min(100, float(value))))
+    except Exception:
+        return 0
+
+
+def _sanitize_weights_map(raw: Dict[str, Any] | None) -> Dict[str, int]:
+    sanitized: Dict[str, int] = {}
+    base = raw or {}
+    for key in DEFAULT_ORDER_LIST:
+        sanitized[key] = _clamp_weight_value(base.get(key, 50))
+    for key, value in base.items():
+        if key not in sanitized:
+            sanitized[key] = _clamp_weight_value(value)
+    return sanitized
+
+
+def _normalize_order_list(order, available: Dict[str, Any]) -> List[str]:
+    seen: set[str] = set()
+    out: List[str] = []
+    keys = list(available.keys())
+    for key in order or []:
+        if key in available and key not in seen:
+            out.append(key)
+            seen.add(key)
+    for key in DEFAULT_ORDER_LIST:
+        if key in available and key not in seen:
+            out.append(key)
+            seen.add(key)
+    for key in keys:
+        if key not in seen:
+            out.append(key)
+            seen.add(key)
+    return out
+
+
+def _sanitize_enabled_map(raw_enabled, keys: List[str]) -> Dict[str, bool]:
+    if not isinstance(raw_enabled, dict):
+        return {k: True for k in keys}
+    return {k: bool(raw_enabled.get(k, True)) for k in keys}
+
+
 _DB_INIT = False
 _DB_INIT_PATH: str | None = None
 _DB_INIT_LOCK = threading.Lock()
@@ -730,6 +776,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
+        self.send_header(
+            "Cache-Control", "no-store, no-cache, must-revalidate, max-age=0"
+        )
         self.end_headers()
 
     def _set_html(self, status=200):
@@ -877,25 +926,50 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(resp).encode("utf-8"))
             return
         if path == "/api/config/winner-weights":
-            from .services.config import (
-                get_winner_weights_raw,
-                get_winner_order_raw,
-                get_weights_enabled_raw,
-                compute_effective_int,
-            )
+            cfg = config.load_config()
+            changed = False
+            order = cfg.get("winner_order")
+            if not isinstance(order, list) or len(order) != 8:
+                order = list(config.DEFAULT_WINNER_ORDER)
+                cfg["winner_order"] = order[:]
+                cfg["weights_order"] = order[:]
+                changed = True
+            weights_order = cfg.get("weights_order")
+            if not isinstance(weights_order, list) or len(weights_order) != 8:
+                cfg["weights_order"] = cfg["winner_order"][:]
+                weights_order = cfg["weights_order"]
+                changed = True
 
-            raw = get_winner_weights_raw()
-            order = get_winner_order_raw()
-            enabled = get_weights_enabled_raw()
-            raw_eff = {k: (raw.get(k, 0) if enabled.get(k, True) else 0) for k in raw}
-            eff_int = compute_effective_int(raw_eff, order)
+            weights_map = _sanitize_weights_map(cfg.get("winner_weights"))
+            weights_enabled = _sanitize_enabled_map(
+                cfg.get("weights_enabled"),
+                list(weights_map.keys()),
+            )
+            if weights_enabled != cfg.get("weights_enabled"):
+                cfg["weights_enabled"] = weights_enabled
+                changed = True
+
+            order = _normalize_order_list(cfg.get("weights_order"), weights_map)
+            if order != cfg.get("winner_order"):
+                cfg["winner_order"] = order[:]
+                cfg["weights_order"] = order[:]
+                changed = True
+
+            if changed:
+                config.save_config(cfg)
+
+            raw_eff = {
+                k: (weights_map.get(k, 0) if weights_enabled.get(k, True) else 0)
+                for k in weights_map
+            }
+            eff_int = winner_calc.compute_effective_int(raw_eff, order)
             logger.info("weights_effective_int=%s order=%s", eff_int, order)
             resp = {
-                **raw,
-                "weights": raw,
+                **weights_map,
+                "weights": weights_map,
                 "order": order,
                 "effective": {"int": eff_int},
-                "weights_enabled": enabled,
+                "weights_enabled": weights_enabled,
                 "weights_order": order,
             }
             self._set_json()
@@ -1039,12 +1113,34 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/config":
             # return stored configuration (without exposing the API key)
             cfg = config.load_config()
+            order = cfg.get("winner_order")
+            if not isinstance(order, list) or len(order) != 8:
+                order = list(config.DEFAULT_WINNER_ORDER)
+                cfg["winner_order"] = order[:]
+                cfg["weights_order"] = order[:]
+                config.save_config(cfg)
+            if not isinstance(cfg.get("weights_order"), list) or len(cfg["weights_order"]) != 8:
+                cfg["weights_order"] = cfg["winner_order"][:]
+                config.save_config(cfg)
+
+            weights_map = _sanitize_weights_map(cfg.get("winner_weights"))
+            weights_enabled = _sanitize_enabled_map(
+                cfg.get("weights_enabled"),
+                list(weights_map.keys()),
+            )
             key = cfg.get("api_key") or ""
             data = {
                 "model": cfg.get("model", "gpt-4o"),
-                "weights": config.get_weights(),
+                "weights": weights_map,
+                "winner_weights": weights_map,
+                "winner_order": list(cfg.get("winner_order", list(DEFAULT_ORDER_LIST))),
+                "weights_order": list(cfg.get("weights_order", list(DEFAULT_ORDER_LIST))),
+                "weights_enabled": weights_enabled,
+                "order": list(cfg.get("winner_order", list(DEFAULT_ORDER_LIST))),
                 "has_api_key": bool(key),
                 "oldness_preference": cfg.get("oldness_preference", "newer"),
+                "weightsUpdatedAt": cfg.get("weightsUpdatedAt", 0),
+                "weightsVersion": cfg.get("weightsVersion", 0),
             }
             if key:
                 data["api_key_last4"] = key[-4:]
@@ -1741,52 +1837,54 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._set_json(400)
                 self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
                 return
-            from .services.config import (
-                set_winner_weights_raw,
-                set_winner_order_raw,
-                get_winner_order_raw,
-                set_weights_enabled_raw,
-                get_weights_enabled_raw,
-                compute_effective_int,
-                ALLOWED_FIELDS,
+            weights_in = (
+                data.get("weights")
+                or data.get("winner_weights")
+                or {k: v for k, v in data.items() if k in winner_calc.ALLOWED_FIELDS}
             )
-            from .services import winner_score
+            if not isinstance(weights_in, dict):
+                weights_in = {}
 
-            payload_map = (
-                data.get("winner_weights")
-                or data.get("weights")
-                or {k: v for k, v in data.items() if k in ALLOWED_FIELDS}
-            )
-            saved = set_winner_weights_raw(payload_map)
-            order_in = data.get("order") if isinstance(data, dict) else None
-            if isinstance(order_in, list):
-                order = [k for k in order_in if k in saved]
+            cfg = config.load_config()
+            sanitized = _sanitize_weights_map(cfg.get("winner_weights"))
+            for key, value in weights_in.items():
+                if key in winner_calc.ALLOWED_FIELDS:
+                    sanitized[key] = _clamp_weight_value(value)
+            for key in DEFAULT_ORDER_LIST:
+                sanitized.setdefault(key, 50)
+
+            order_in = data.get("order") or data.get("weights_order")
+            if not isinstance(order_in, list) or not order_in:
+                order_in = cfg.get("winner_order") or list(DEFAULT_ORDER_LIST)
+            order = _normalize_order_list(order_in, sanitized)
+
+            weights_enabled_in = data.get("weights_enabled")
+            if isinstance(weights_enabled_in, dict):
+                weights_enabled = _sanitize_enabled_map(weights_enabled_in, order)
             else:
-                order = get_winner_order_raw()
-            if "awareness" not in order:
-                order.append("awareness")
-            saved_order = set_winner_order_raw(order)
-            en_in = data.get("weights_enabled") if isinstance(data, dict) else None
-            if isinstance(en_in, dict):
-                set_weights_enabled_raw(en_in)
-            enabled = get_weights_enabled_raw()
-            winner_score.invalidate_weights_cache()
-            eff_map = {k: (saved.get(k, 0) if enabled.get(k, True) else 0) for k in saved}
-            resp = {
-                **saved,
-                "weights": saved,
-                "order": saved_order,
-                "effective": {"int": compute_effective_int(eff_map, saved_order)},
-                "weights_enabled": enabled,
-                "weights_order": saved_order,
-            }
+                weights_enabled = _sanitize_enabled_map(cfg.get("weights_enabled"), order)
+
+            cfg["winner_weights"] = sanitized
+            cfg["winner_order"] = order[:]
+            cfg["weights_order"] = order[:]
+            cfg["weights_enabled"] = weights_enabled
+            cfg["weightsUpdatedAt"] = int(time.time())
+            config.save_config(cfg)
+            winner_calc.invalidate_weights_cache()
+
+            resp_cfg = dict(cfg)
+            resp_cfg.pop("api_key", None)
+            resp_cfg["weights"] = dict(cfg["winner_weights"])
+            resp_cfg["order"] = list(order)
+            resp_cfg["weights_order"] = list(order)
+
             publish_progress({
                 "event": "weights",
                 "action": "updated",
-                "payload": resp,
+                "payload": resp_cfg,
             })
             self._set_json()
-            self.wfile.write(json.dumps(resp).encode('utf-8'))
+            self.wfile.write(json.dumps(resp_cfg).encode('utf-8'))
             return
         self.send_error(404)
 
@@ -2625,29 +2723,35 @@ class RequestHandler(BaseHTTPRequestHandler):
             ),
         )
 
-        from .services.config import set_winner_weights_raw, set_winner_order_raw
+        int_weights = {k: int(final_weights.get(k, 0)) for k in allowed}
+        new_order = list(order)
 
-        saved_weights = set_winner_weights_raw(final_weights)
-        saved_order = set_winner_order_raw(order)
+        cfg = config.load_config()
+        cfg["winner_weights"] = int_weights
+        cfg["winner_order"] = new_order[:]
+        cfg["weights_order"] = new_order[:]
+        cfg["weights_enabled"] = _sanitize_enabled_map(
+            cfg.get("weights_enabled"), new_order
+        )
+        cfg["weightsUpdatedAt"] = int(time.time())
+        config.save_config(cfg)
         winner_calc.invalidate_weights_cache()
-        order = list(saved_order)
-        final_weights = saved_weights
 
         # Logs (útiles para ti): ahora ai_raw/ints son lo mismo (0..100 independientes)
         logger.info(
             "ai_raw=%s enabled_only=%s ints=%s order=%s sum=%s",
-            final_weights,
-            final_weights,
-            final_weights,
-            order,
-            sum(final_weights.values()),
+            int_weights,
+            int_weights,
+            int_weights,
+            new_order,
+            sum(int_weights.values()),
         )
 
         # Respuesta para el frontend; los valores ya quedaron persistidos en backend.
         resp = {
-            "weights": final_weights,      # 0..100 independientes
-            "weights_order": order,        # prioridad explícita
-            "order": order,
+            "weights": int_weights,      # 0..100 independientes
+            "weights_order": new_order,  # prioridad explícita
+            "order": new_order,
             "method": "gpt",
             "diagnostics": {"notes": notes},
         }

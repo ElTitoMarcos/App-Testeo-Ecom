@@ -1,4 +1,6 @@
 from flask import request, jsonify, current_app
+import time
+
 from . import app
 
 from product_research_app.services.winner_score import (
@@ -11,11 +13,14 @@ from product_research_app.services.config import (
     ALLOWED_FIELDS,
     compute_effective_int,
 )
+from product_research_app.config import DEFAULT_WINNER_ORDER
 
 
 def _coerce_weights(raw: dict | None) -> dict[str, int]:
     out: dict[str, int] = {}
     for k, v in (raw or {}).items():
+        if k not in ALLOWED_FIELDS:
+            continue
         try:
             iv = int(round(float(v)))
         except Exception:
@@ -28,6 +33,30 @@ def _merge_winner_weights(current: dict | None, incoming: dict | None) -> dict:
     cur = dict(current or {})
     cur.update(incoming or {})
     return cur
+
+
+def _normalize_order(order, weights: dict[str, int]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for key in order or []:
+        if key in weights and key not in seen:
+            out.append(key)
+            seen.add(key)
+    for key in DEFAULT_WINNER_ORDER:
+        if key in weights and key not in seen:
+            out.append(key)
+            seen.add(key)
+    for key in weights.keys():
+        if key not in seen:
+            out.append(key)
+            seen.add(key)
+    return out
+
+
+def _sanitize_enabled(raw_enabled, keys: list[str]) -> dict[str, bool]:
+    if not isinstance(raw_enabled, dict):
+        return {k: True for k in keys}
+    return {k: bool(raw_enabled.get(k, True)) for k in keys}
 
 
 """Endpoints for winner weight configuration.
@@ -44,21 +73,58 @@ accepts any of the shapes described above.
 @app.route("/api/config/winner-weights", methods=["GET"])
 def api_get_winner_weights():
     settings = load_settings()
+    changed = False
     weights = _coerce_weights(settings.get("winner_weights"))
-    order = settings.get("winner_order") or list(weights.keys())
-    enabled_raw = settings.get("weights_enabled") if isinstance(settings.get("weights_enabled"), dict) else {}
-    enabled = {k: bool(enabled_raw.get(k, True)) for k in weights.keys()}
-    weights_eff = {k: (weights.get(k, 0) if enabled.get(k, True) else 0) for k in weights.keys()}
+    if not weights:
+        weights = {k: 50 for k in DEFAULT_WINNER_ORDER}
+    else:
+        for key in DEFAULT_WINNER_ORDER:
+            weights.setdefault(key, 50)
+    if weights != settings.get("winner_weights"):
+        settings["winner_weights"] = dict(weights)
+        changed = True
+
+    order = settings.get("winner_order")
+    if not isinstance(order, list) or len(order) != 8:
+        order = list(DEFAULT_WINNER_ORDER)
+        settings["winner_order"] = order[:]
+        settings["weights_order"] = order[:]
+        changed = True
+
+    weights_order = settings.get("weights_order")
+    if not isinstance(weights_order, list) or len(weights_order) != 8:
+        settings["weights_order"] = order[:]
+        weights_order = settings["weights_order"]
+        changed = True
+
+    order = _normalize_order(weights_order, weights)
+    if order != settings.get("winner_order"):
+        settings["winner_order"] = order[:]
+        settings["weights_order"] = order[:]
+        changed = True
+
+    weights_enabled = _sanitize_enabled(settings.get("weights_enabled"), order)
+    if weights_enabled != settings.get("weights_enabled"):
+        settings["weights_enabled"] = weights_enabled
+        changed = True
+
+    if changed:
+        save_settings(settings)
+
+    weights_eff = {
+        k: (weights.get(k, 0) if weights_enabled.get(k, True) else 0)
+        for k in weights.keys()
+    }
     eff = compute_effective_int(weights_eff, order)
     resp = jsonify({
         **weights,
         "weights": weights,
         "order": order,
         "effective": {"int": eff},
-        "weights_enabled": enabled,
-        "weights_order": settings.get("weights_order") or order,
+        "weights_enabled": weights_enabled,
+        "weights_order": order,
     })
-    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     return resp, 200
 
 
@@ -75,26 +141,26 @@ def api_patch_winner_weights():
 
     settings = load_settings()
     current = _coerce_weights(settings.get("winner_weights"))
-    if "awareness" not in incoming and "awareness" not in current:
-        incoming["awareness"] = 50
-    settings["winner_weights"] = _merge_winner_weights(current, incoming)
+    merged = _merge_winner_weights(current, incoming)
+    for key in DEFAULT_WINNER_ORDER:
+        merged.setdefault(key, merged.get(key, 50))
+    settings["winner_weights"] = merged
 
     order_in = body.get("order") or body.get("weights_order")
-    if isinstance(order_in, list):
-        order = [k for k in order_in if k in ALLOWED_FIELDS]
-    else:
-        order = settings.get("winner_order") or list(settings["winner_weights"].keys())
-    if "awareness" not in order:
-        order.append("awareness")
-    settings["winner_order"] = order
-    settings["weights_order"] = order
+    if not isinstance(order_in, list) or not order_in:
+        order_in = settings.get("winner_order") or list(DEFAULT_WINNER_ORDER)
+    order = _normalize_order(order_in, merged)
+    settings["winner_order"] = order[:]
+    settings["weights_order"] = order[:]
 
     en_in = body.get("weights_enabled")
     if isinstance(en_in, dict):
-        current_en = settings.get("weights_enabled", {})
-        enabled = {k: bool(en_in.get(k, current_en.get(k, True))) for k in ALLOWED_FIELDS}
-        settings["weights_enabled"] = enabled
+        weights_enabled = _sanitize_enabled(en_in, order)
+    else:
+        weights_enabled = _sanitize_enabled(settings.get("weights_enabled"), order)
+    settings["weights_enabled"] = weights_enabled
 
+    settings["weightsUpdatedAt"] = int(time.time())
     save_settings(settings)
     invalidate_weights_cache()
 
@@ -104,6 +170,17 @@ def api_patch_winner_weights():
     except Exception as e:
         current_app.logger.warning("recompute on save failed: %s", e)
 
-    resp = jsonify({"ok": True, "winner_weights": settings["winner_weights"], "winner_order": order, "updated": updated})
-    resp.headers["Cache-Control"] = "no-store"
+    resp_payload = dict(settings)
+    resp_payload.pop("api_key", None)
+    resp_payload.update(
+        {
+            "weights": dict(settings["winner_weights"]),
+            "order": list(order),
+            "weights_order": list(order),
+            "ok": True,
+            "updated": updated,
+        }
+    )
+    resp = jsonify(resp_payload)
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     return resp, 200

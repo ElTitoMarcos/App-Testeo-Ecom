@@ -6,10 +6,19 @@ const SettingsCache = (() => {
   let inflight = null;
 
   const norm = (cfg) => {
-    const weights = cfg?.weights || {};
-    const order = (Array.isArray(cfg?.weights_order) && cfg.weights_order.length)
-      ? cfg.weights_order.slice()
-      : Object.keys(weights);
+    const weights = cfg?.weights || cfg?.winner_weights || {};
+    let order =
+      (Array.isArray(cfg?.weights_order) && cfg.weights_order.length)
+        ? cfg.weights_order.slice()
+        : (Array.isArray(cfg?.winner_order) && cfg.winner_order.length)
+          ? cfg.winner_order.slice()
+          : [
+              'awareness','desire','revenue','competition',
+              'units_sold','price','oldness','rating'
+            ];
+    for (const key of Object.keys(weights || {})) {
+      if (!order.includes(key)) order.push(key);
+    }
     const enabled = {};
     for (const k of order) enabled[k] = cfg?.weights_enabled?.[k] ?? true;
     return { order, weights, enabled };

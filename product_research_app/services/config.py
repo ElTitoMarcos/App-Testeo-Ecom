@@ -35,13 +35,37 @@ def _coerce_weights(raw: Dict[str, object] | None) -> Dict[str, int]:
 
 def _normalize_order(order, weights: Dict[str, int]) -> List[str]:
     seen: set[str] = set()
-    out: List[str] = [k for k in (order or []) if k in weights and not (k in seen or seen.add(k))]
-    out += [k for k in weights.keys() if k not in out]
+    out: List[str] = []
+    for key in order or []:
+        if key in weights and key not in seen:
+            out.append(key)
+            seen.add(key)
+    for key in DEFAULT_WINNER_ORDER:
+        if key in weights and key not in seen:
+            out.append(key)
+            seen.add(key)
+    for key in weights.keys():
+        if key not in seen:
+            out.append(key)
+            seen.add(key)
     return out
 
 
 def init_app_config() -> None:
     cfg = load_config()
+    # Garantizar orden en ambas claves y persistir si faltaba
+    order = cfg.get("winner_order")
+    if not isinstance(order, list) or len(order) != 8:
+        order = list(DEFAULT_WINNER_ORDER)
+        cfg["winner_order"] = order[:]
+        cfg["weights_order"] = order[:]
+        save_config(cfg)  # persistir para sobrevivir reinicios
+
+    # Si solo falta weights_order, refléjalo desde winner_order
+    if not isinstance(cfg.get("weights_order"), list) or len(cfg["weights_order"]) != 8:
+        cfg["weights_order"] = cfg["winner_order"][:]
+        save_config(cfg)
+
     changed = False
     weights = cfg.get("winner_weights")
     if not isinstance(weights, dict):
@@ -56,14 +80,19 @@ def init_app_config() -> None:
 
     order = cfg.get("winner_order")
     if not isinstance(order, list):
-        cfg["winner_order"] = DEFAULT_ORDER.copy()
-        cfg["weights_order"] = DEFAULT_ORDER.copy()
+        order = DEFAULT_ORDER.copy()
+        cfg["winner_order"] = order[:]
+        cfg["weights_order"] = order[:]
         changed = True
-    else:
-        if "awareness" not in order:
-            order.append("awareness")
-            changed = True
-        cfg.setdefault("weights_order", order.copy())
+    normalized_order = _normalize_order(order, cfg["winner_weights"])
+    if normalized_order != order:
+        cfg["winner_order"] = normalized_order[:]
+        order = normalized_order
+        changed = True
+    weights_order = cfg.get("weights_order")
+    if not isinstance(weights_order, list) or weights_order != order:
+        cfg["weights_order"] = order[:]
+        changed = True
 
     enabled = cfg.get("weights_enabled")
     if not isinstance(enabled, dict):
@@ -90,12 +119,23 @@ def _load() -> Tuple[Dict[str, int], List[str], Dict[str, bool]]:
     weights = _coerce_weights(weights)
     for k, v in DEFAULT_WEIGHTS_RAW.items():
         weights.setdefault(k, v)
-    order = _normalize_order(cfg.get("winner_order"), weights)
+    order_raw = cfg.get("winner_order")
+    order = _normalize_order(order_raw, weights)
+    cfg_changed = False
+    if order_raw != order:
+        cfg["winner_order"] = order[:]
+        cfg_changed = True
+    weights_order = cfg.get("weights_order")
+    if not isinstance(weights_order, list) or weights_order != order:
+        cfg["weights_order"] = order[:]
+        cfg_changed = True
     enabled = cfg.get("weights_enabled")
     if not isinstance(enabled, dict):
         enabled = DEFAULT_ENABLED.copy()
     else:
         enabled = {k: bool(enabled.get(k, True)) for k in DEFAULT_ENABLED.keys()}
+    if cfg_changed:
+        save_config(cfg)
     return weights, order, enabled
 
 
@@ -130,8 +170,8 @@ def update_winner_settings(
         }
 
     cfg["winner_weights"] = weights
-    cfg["winner_order"] = order
-    cfg["weights_order"] = order
+    cfg["winner_order"] = order[:]
+    cfg["weights_order"] = order[:]
     cfg["weights_enabled"] = enabled
     cfg["weightsUpdatedAt"] = int(time.time())
     save_config(cfg)
