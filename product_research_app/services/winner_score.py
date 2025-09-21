@@ -15,10 +15,9 @@ from .config import (
     get_winner_weights_raw,
     set_winner_weights_raw,
     get_winner_order_raw,
-    DEFAULT_ORDER as CONFIG_DEFAULT_ORDER,
     DB_PATH as CONFIG_DB_PATH,
 )
-from ..config import load_config, save_config
+from ..config import load_config, save_config, DEFAULT_ORDER as GLOBAL_DEFAULT_ORDER
 
 logger = logging.getLogger(__name__)
 
@@ -652,10 +651,14 @@ def compute_winner_score_v2(
         if (enabled.get("oldness", True) if enabled else True)
         else 0
     )
+    cfg = load_config()
+    cfg_order = cfg.get("winner_order")
+    if not isinstance(cfg_order, list) or not cfg_order:
+        cfg_order = list(GLOBAL_DEFAULT_ORDER)
     if order is None:
-        order = get_winner_order_raw()
-    if not order:
-        order = list(CONFIG_DEFAULT_ORDER)
+        order = list(cfg_order)
+    else:
+        order = list(order)
     seen: set[str] = set()
     normalized_order: list[str] = []
     for key in order:
@@ -671,7 +674,13 @@ def compute_winner_score_v2(
     eff_weights = {k: eff_all.get(k, 0.0) for k in norms.keys()}
 
     sum_filtered = sum(eff_weights.values())
-    score_float = sum(eff_weights.get(k, 0.0) * norms[k] for k in norms)
+    EPS = 1e-6
+    total_slots = len(order)
+    priority_bonus = 0.0
+    if total_slots:
+        for idx, key in enumerate(order):
+            priority_bonus += (total_slots - idx) * EPS * norms.get(key, 0.0)
+    score_float = sum(eff_weights.get(k, 0.0) * norms[k] for k in norms) + priority_bonus
     score_int = int(round(score_float * 100))
 
     eff_all_full = {k: eff_all.get(k, 0.0) for k in ALLOWED_FIELDS}

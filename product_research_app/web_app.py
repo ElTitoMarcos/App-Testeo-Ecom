@@ -884,8 +884,18 @@ class RequestHandler(BaseHTTPRequestHandler):
                 compute_effective_int,
             )
 
+            cfg = config.load_config()
+            order = list(cfg.get("winner_order") or config.DEFAULT_ORDER)
+            if not cfg.get("winner_order"):
+                persisted = {**cfg, "winner_order": list(order)}
+                config.save_config(persisted)
+                cfg = persisted
+                if hasattr(config, "_CFG_CACHE"):
+                    config._CFG_CACHE = None
+                winner_calc.invalidate_weights_cache()
+
             raw = get_winner_weights_raw()
-            order = get_winner_order_raw()
+            order = get_winner_order_raw() or order
             enabled = get_weights_enabled_raw()
             raw_eff = {k: (raw.get(k, 0) if enabled.get(k, True) else 0) for k in raw}
             eff_int = compute_effective_int(raw_eff, order)
@@ -896,7 +906,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 "order": order,
                 "effective": {"int": eff_int},
                 "weights_enabled": enabled,
-                "weights_order": order,
+                "weights_order": cfg.get("weights_order") or order,
+                "version": "v2",
             }
             self._set_json()
             self.wfile.write(json.dumps(resp).encode("utf-8"))
@@ -2607,31 +2618,27 @@ class RequestHandler(BaseHTTPRequestHandler):
             final_weights[k] = int(round(v))
 
         # ORDER: por peso desc; a igualdad conserva el orden previo
-        prev_settings = winner_calc.load_settings()
-        prev_order = (
-            prev_settings.get("winner_order")
-            or prev_settings.get("weights_order")
-        )
+        cfg = config.load_config()
+        prev_order = cfg.get("winner_order") or cfg.get("weights_order") or []
         if not isinstance(prev_order, list) or not prev_order:
-            from .services.config import DEFAULT_ORDER as DEFAULT_WINNER_ORDER
-
-            prev_order = list(DEFAULT_WINNER_ORDER)
-        rank = {k: i for i, k in enumerate(prev_order)}
+            prev_order = list(config.DEFAULT_ORDER)
+        rank_prev = {k: i for i, k in enumerate(prev_order)}
         order = sorted(
             final_weights.keys(),
-            key=lambda k: (
-                -final_weights[k],
-                rank.get(k, len(rank) + allowed.index(k) if k in allowed else len(rank) + 999),
-            ),
+            key=lambda k: (-int(final_weights[k]), rank_prev.get(k, 999)),
         )
 
-        from .services.config import set_winner_weights_raw, set_winner_order_raw
-
-        saved_weights = set_winner_weights_raw(final_weights)
-        saved_order = set_winner_order_raw(order)
+        persisted_cfg = {
+            **cfg,
+            "winner_weights": dict(final_weights),
+            "winner_order": list(order),
+            "weights_order": list(order),
+            "weightsUpdatedAt": int(time.time()),
+        }
+        config.save_config(persisted_cfg)
+        if hasattr(config, "_CFG_CACHE"):
+            config._CFG_CACHE = None
         winner_calc.invalidate_weights_cache()
-        order = list(saved_order)
-        final_weights = saved_weights
 
         # Logs (útiles para ti): ahora ai_raw/ints son lo mismo (0..100 independientes)
         logger.info(

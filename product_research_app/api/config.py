@@ -1,6 +1,7 @@
 from flask import request, jsonify, current_app
 from . import app
 
+from product_research_app import config as app_config
 from product_research_app.services.winner_score import (
     recompute_scores_for_all_products,
     load_settings,
@@ -43,10 +44,17 @@ accepts any of the shapes described above.
 # GET /api/config/winner-weights
 @app.route("/api/config/winner-weights", methods=["GET"])
 def api_get_winner_weights():
-    settings = load_settings()
-    weights = _coerce_weights(settings.get("winner_weights"))
-    order = settings.get("winner_order") or list(weights.keys())
-    enabled_raw = settings.get("weights_enabled") if isinstance(settings.get("weights_enabled"), dict) else {}
+    cfg = app_config.load_config()
+    weights = _coerce_weights(cfg.get("winner_weights"))
+    order = list(cfg.get("winner_order") or app_config.DEFAULT_ORDER)
+    if not cfg.get("winner_order"):
+        persisted = {**cfg, "winner_order": list(order)}
+        app_config.save_config(persisted)
+        cfg = persisted
+        if hasattr(app_config, "_CFG_CACHE"):
+            app_config._CFG_CACHE = None
+        invalidate_weights_cache()
+    enabled_raw = cfg.get("weights_enabled") if isinstance(cfg.get("weights_enabled"), dict) else {}
     enabled = {k: bool(enabled_raw.get(k, True)) for k in weights.keys()}
     weights_eff = {k: (weights.get(k, 0) if enabled.get(k, True) else 0) for k in weights.keys()}
     eff = compute_effective_int(weights_eff, order)
@@ -56,7 +64,8 @@ def api_get_winner_weights():
         "order": order,
         "effective": {"int": eff},
         "weights_enabled": enabled,
-        "weights_order": settings.get("weights_order") or order,
+        "weights_order": cfg.get("weights_order") or order,
+        "version": "v2",
     })
     resp.headers["Cache-Control"] = "no-store"
     return resp, 200

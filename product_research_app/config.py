@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 
-DEFAULT_WINNER_ORDER = [
+DEFAULT_ORDER = [
     "awareness",
     "desire",
     "revenue",
@@ -22,6 +22,9 @@ DEFAULT_WINNER_ORDER = [
     "oldness",
     "rating",
 ]
+
+
+DEFAULT_WINNER_ORDER = list(DEFAULT_ORDER)
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -76,6 +79,12 @@ def load_config() -> Dict[str, Any]:
             data = {}
 
     changed = False
+    if not data.get("winner_order"):
+        data["winner_order"] = list(DEFAULT_ORDER)
+        changed = True
+        save_config(data)
+        if "_CFG_CACHE" in globals():
+            globals()["_CFG_CACHE"] = None
     if "weights" not in data and isinstance(data.get("weights_v2"), dict):
         data["weights"] = data["weights_v2"]
         changed = True
@@ -113,6 +122,8 @@ def load_config() -> Dict[str, Any]:
 
     if changed:
         save_config(data)
+        if "_CFG_CACHE" in globals():
+            globals()["_CFG_CACHE"] = None
     return data
 
 
