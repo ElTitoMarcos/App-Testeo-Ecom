@@ -25,6 +25,23 @@ DEFAULT_WINNER_ORDER = [
 ]
 
 
+AI_CFG_DEFAULTS: Dict[str, Any] = {
+    "model": "gpt-4o-mini",
+    "temperature": 0,
+    "top_p": 0,
+    "response_format": "json",
+    "parallelism": 12,
+    "microbatch": 96,
+    "max_desc_chars": 220,
+    "max_title_chars": 120,
+    "tpm_limit": None,
+    "rpm_limit": None,
+    "costCapUSD": None,
+    "cache_enabled": True,
+    "version": 2,
+}
+
+
 DEFAULT_CONFIG: Dict[str, Any] = {
     "autoFillIAOnImport": True,
     "aiBatch": {
@@ -34,11 +51,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "TIME_LIMIT_SECONDS": 300,
     },
     "aiCost": {
-        "model": "gpt-4.1-mini",
+        "model": "gpt-4o-mini",
         "useBatchWhenCountGte": 300,
-        "costCapUSD": 0.25,
-        "estTokensPerItemIn": 300,
-        "estTokensPerItemOut": 80,
+        "costCapUSD": None,
+        "estTokensPerItemIn": 120,
+        "estTokensPerItemOut": 40,
     },
     "aiCalibration": {
         "enabled": True,
@@ -48,13 +65,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "min_medium_pct": 0.05,
         "min_high_pct": 0.05,
     },
-    "ai": {
-        "parallelism": 8,
-        "microbatch": 32,
-        "cache_enabled": True,
-        "version": 1,
-        "tpm_limit": None,
-    },
+    "ai": dict(AI_CFG_DEFAULTS),
     "includeImageInAI": True,
     "aiImageCostMaxUSD": 0.02,
     "weightsVersion": 0,
@@ -206,7 +217,7 @@ def get_ai_runtime_config() -> Dict[str, Any]:
             base[k] = v
 
     cpu_parallel = max(1, (os.cpu_count() or 1) * 2)
-    default_parallel = min(8, cpu_parallel)
+    default_parallel = min(int(AI_CFG_DEFAULTS["parallelism"]), cpu_parallel)
     try:
         parallel = int(base.get("parallelism") or 0)
     except Exception:
@@ -218,16 +229,45 @@ def get_ai_runtime_config() -> Dict[str, Any]:
     try:
         micro = int(base.get("microbatch") or 0)
     except Exception:
-        micro = DEFAULT_CONFIG["ai"]["microbatch"]
+        micro = AI_CFG_DEFAULTS["microbatch"]
     if micro <= 0:
-        micro = DEFAULT_CONFIG["ai"]["microbatch"]
+        micro = AI_CFG_DEFAULTS["microbatch"]
     base["microbatch"] = max(1, micro)
 
     base["cache_enabled"] = bool(base.get("cache_enabled", True))
     try:
-        base["version"] = int(base.get("version", DEFAULT_CONFIG["ai"]["version"]))
+        base["version"] = int(base.get("version", AI_CFG_DEFAULTS["version"]))
     except Exception:
-        base["version"] = DEFAULT_CONFIG["ai"]["version"]
+        base["version"] = AI_CFG_DEFAULTS["version"]
+
+    for key in ("max_desc_chars", "max_title_chars"):
+        try:
+            val = int(base.get(key) or 0)
+        except Exception:
+            val = AI_CFG_DEFAULTS[key]
+        if val <= 0:
+            val = AI_CFG_DEFAULTS[key]
+        base[key] = val
+
+    try:
+        temperature = float(base.get("temperature", AI_CFG_DEFAULTS["temperature"]))
+    except Exception:
+        temperature = AI_CFG_DEFAULTS["temperature"]
+    base["temperature"] = max(0.0, temperature)
+
+    try:
+        top_p = float(base.get("top_p", AI_CFG_DEFAULTS["top_p"]))
+    except Exception:
+        top_p = AI_CFG_DEFAULTS["top_p"]
+    base["top_p"] = max(0.0, min(1.0, top_p))
+
+    resp_format = base.get("response_format") or AI_CFG_DEFAULTS["response_format"]
+    if isinstance(resp_format, dict):
+        base["response_format"] = resp_format
+    else:
+        base["response_format"] = str(resp_format)
+
+    base["model"] = str(base.get("model") or AI_CFG_DEFAULTS["model"])
 
     tpm_limit = base.get("tpm_limit")
     if tpm_limit is None:
@@ -239,6 +279,26 @@ def get_ai_runtime_config() -> Dict[str, Any]:
             base["tpm_limit"] = None
         else:
             base["tpm_limit"] = max(0, limit_val) or None
+
+    rpm_limit = base.get("rpm_limit")
+    if rpm_limit is None:
+        base["rpm_limit"] = None
+    else:
+        try:
+            rpm_val = int(rpm_limit)
+        except Exception:
+            base["rpm_limit"] = None
+        else:
+            base["rpm_limit"] = max(0, rpm_val) or None
+
+    cost_cap = base.get("costCapUSD")
+    if cost_cap is None:
+        base["costCapUSD"] = None
+    else:
+        try:
+            base["costCapUSD"] = float(cost_cap)
+        except Exception:
+            base["costCapUSD"] = None
 
     return base
 
