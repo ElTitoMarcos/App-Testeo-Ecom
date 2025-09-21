@@ -51,10 +51,6 @@ function updateMasterState(){
   }
 }
 
-function firesFor(score0to5){
-  const n = Math.max(0, Math.min(5, Math.round(score0to5 || 0)));
-  return '🔥'.repeat(n);
-}
 const table = document.getElementById('productTable');
 if(bottomBar){
   const legendBtn = document.getElementById('legendBtn');

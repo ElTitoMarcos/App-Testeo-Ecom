@@ -51,6 +51,7 @@ from .prompts.registry import normalize_task
 from . import title_analyzer
 from . import product_enrichment
 from .sse import publish_progress
+from .utils import sanitize_product_name
 from .utils.db import row_to_dict, rget
 
 WINNER_SCORE_FIELDS = list(winner_calc.FEATURE_MAP.keys())
@@ -1009,7 +1010,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 desire_val = (desire_db or "").strip() or None
                 row = {
                     "id": rget(p, "id"),
-                    "name": rget(p, "name"),
+                    "name": sanitize_product_name(rget(p, "name")),
                     "category": rget(p, "category"),
                     "price": price_val,
                     "image_url": rget(p, "image_url"),
@@ -1120,7 +1121,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                             breakdown_data = {}
                     row = {
                         "id": p["id"],
-                        "name": p["name"],
+                        "name": sanitize_product_name(p["name"]),
                         "category": p["category"],
                         "price": p["price"],
                         "image_url": p["image_url"],
@@ -1228,18 +1229,18 @@ class RequestHandler(BaseHTTPRequestHandler):
                         cat_rev[cat] += revenue
                     if revenue > top_product_rev:
                         top_product_rev = revenue
-                        top_product_name = p["name"]
+                        top_product_name = name_clean
                 if item_sold is not None:
                     total_units += item_sold
                     if cat:
                         cat_units[cat] += item_sold
-                name = (p["name"] or "").lower()
+                name = name_clean.lower()
                 words = re.split(r"[^a-záéíóúüñ0-9]+", name)
                 for w in words:
                     if not w or w in stopwords or len(w) < 3:
                         continue
                     word_counter[w] += 1
-                tokens = re.split(r"[^A-Za-z0-9]+", p["name"] or "")
+                tokens = re.split(r"[^A-Za-z0-9]+", name_clean)
                 if tokens:
                     brand = tokens[0].lower()
                     if brand and brand not in stopwords and len(brand) >= 3:
@@ -1251,7 +1252,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                             "x": rating,
                             "y": revenue,
                             "r": item_sold,
-                            "label": p["name"],
+                            "label": name_clean,
                             "units": item_sold,
                             "rating": rating,
                             "revenue": revenue,
@@ -1275,7 +1276,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         scatter_price_revenue.append({
                             "x": avg_price,
                             "y": revenue,
-                            "label": p["name"],
+                            "label": name_clean,
                             "units": item_sold,
                             "rating": rating,
                             "revenue": revenue,
@@ -1335,7 +1336,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                     except Exception:
                         score_val = None
                 if score_val is not None:
-                    rows.append((p["id"], p["name"], score_val))
+                    clean_name = sanitize_product_name(p["name"]) or ""
+                    rows.append((p["id"], clean_name, score_val))
             rows.sort(key=lambda x: x[2], reverse=True)
             key_name = "winner_score"
             top_products = [{"id": r[0], "name": r[1], "winner_score": r[2]} for r in rows[:10]]
@@ -1390,7 +1392,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 rows.append(
                     [
                         p['id'],
-                        p['name'],
+                        sanitize_product_name(p['name']) or "",
                         score_val,
                         p['desire'],
                         p['desire_magnitude'],
