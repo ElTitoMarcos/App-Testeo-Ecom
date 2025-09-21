@@ -440,19 +440,18 @@ def initialize_database(conn: sqlite3.Connection) -> None:
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS ai_cache (
-            sig_hash TEXT PRIMARY KEY,
-            model TEXT,
-            desire TEXT,
-            desire_magnitude TEXT,
+            digest TEXT PRIMARY KEY,
+            desire_label TEXT,
+            desire_magnitude REAL,
             awareness_level TEXT,
             competition_level TEXT,
-            updated_at INTEGER,
-            version INTEGER
+            created_at TEXT
         )
         """
     )
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_cache_model ON ai_cache(model)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_cache_updated ON ai_cache(updated_at)")
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ai_cache_created_at ON ai_cache(created_at)"
+    )
 
     # Batch metrics for observability
     cur.execute(
@@ -1489,70 +1488,6 @@ def upsert_enrichment_cache(
     if commit:
         conn.commit()
 
-
-def get_ai_cache_entries(
-    conn: sqlite3.Connection,
-    sig_hashes: Sequence[str],
-    *,
-    model: str,
-    version: int,
-) -> Dict[str, sqlite3.Row]:
-    if not sig_hashes:
-        return {}
-    placeholders = ",".join(["?"] * len(sig_hashes))
-    cur = conn.cursor()
-    cur.execute(
-        f"""
-        SELECT sig_hash, model, desire, desire_magnitude, awareness_level, competition_level, updated_at, version
-        FROM ai_cache
-        WHERE sig_hash IN ({placeholders}) AND model=? AND version=?
-        """,
-        (*sig_hashes, model, int(version)),
-    )
-    return {row["sig_hash"]: row for row in cur.fetchall()}
-
-
-def upsert_ai_cache_entry(
-    conn: sqlite3.Connection,
-    sig_hash: str,
-    *,
-    model: str,
-    version: int,
-    desire: Optional[str],
-    desire_magnitude: Optional[str],
-    awareness_level: Optional[str],
-    competition_level: Optional[str],
-    commit: bool = False,
-) -> None:
-    now = int(time.time())
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO ai_cache (
-            sig_hash, model, desire, desire_magnitude, awareness_level, competition_level, updated_at, version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(sig_hash) DO UPDATE SET
-            model=excluded.model,
-            desire=excluded.desire,
-            desire_magnitude=excluded.desire_magnitude,
-            awareness_level=excluded.awareness_level,
-            competition_level=excluded.competition_level,
-            updated_at=excluded.updated_at,
-            version=excluded.version
-        """,
-        (
-            sig_hash,
-            model,
-            desire,
-            desire_magnitude,
-            awareness_level,
-            competition_level,
-            now,
-            int(version),
-        ),
-    )
-    if commit:
-        conn.commit()
 
 
 def update_enrichment_metrics(
