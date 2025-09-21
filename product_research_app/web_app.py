@@ -2577,6 +2577,23 @@ class RequestHandler(BaseHTTPRequestHandler):
             pref = str(data.get('oldness_preference', '')).strip().lower()
             if pref in ("older", "newer"):
                 cfg['oldness_preference'] = pref
+        if 'ai' in data and isinstance(data['ai'], dict):
+            ai_cfg = dict(cfg.get('ai', {}))
+            ai_cfg.update({k: v for k, v in data['ai'].items()})
+            truncate_cfg = ai_cfg.get('truncate') if isinstance(ai_cfg.get('truncate'), dict) else {}
+            sanitized_truncate = {}
+            default_truncate = config.AI_CFG_DEFAULTS["truncate"]
+            for key in ("title", "description"):
+                try:
+                    val = int(truncate_cfg.get(key, 0))
+                except Exception:
+                    val = default_truncate[key]
+                if val <= 0:
+                    val = default_truncate[key]
+                sanitized_truncate[key] = val
+            ai_cfg['truncate'] = sanitized_truncate
+            ai_cfg['enableCache'] = bool(ai_cfg.get('enableCache', ai_cfg.get('cache_enabled', True)))
+            cfg['ai'] = ai_cfg
         config.save_config(cfg)
         self._set_json()
         self.wfile.write(json.dumps({"status": "ok"}).encode('utf-8'))

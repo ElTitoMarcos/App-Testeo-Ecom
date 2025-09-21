@@ -1,0 +1,71 @@
+{
+  "autoFillIAOnImport": true,
+  "aiBatch": {
+    "BATCH_SIZE": 10,
+    "MAX_CONCURRENCY": 2,
+    "MAX_RETRIES": 3,
+    "TIME_LIMIT_SECONDS": 300
+  },
+  "aiCost": {
+    "model": "gpt-4o-mini",
+    "useBatchWhenCountGte": 300,
+    "costCapUSD": null,
+    "estTokensPerItemIn": 120,
+    "estTokensPerItemOut": 40
+  },
+  "aiCalibration": {
+    "enabled": true,
+    "mode": "terciles",
+    "winsorize_pct": 0.05,
+    "min_low_pct": 0.05,
+    "min_medium_pct": 0.05,
+    "min_high_pct": 0.05
+  },
+  "ai": {
+    "model": "gpt-4o-mini",
+    "temperature": 0.0,
+    "top_p": 0.1,
+    "topP": 0.1,
+    "response_format": "json",
+    "parallelism": 32,
+    "microbatch": 128,
+    "max_desc_chars": 240,
+    "max_title_chars": 120,
+    "tpm_limit": null,
+    "rpm_limit": null,
+    "costCapUSD": null,
+    "cache_enabled": true,
+    "enableCache": true,
+    "maxOutputTokensPerItem": 8,
+    "truncate": {
+      "title": 120,
+      "description": 240
+    },
+    "version": 2
+  },
+  "includeImageInAI": true,
+  "aiImageCostMaxUSD": 0.02,
+  "weightsVersion": 0,
+  "weightsUpdatedAt": 0,
+  "oldness_preference": "newer",
+  "winner_order": [
+    "awareness",
+    "desire",
+    "revenue",
+    "competition",
+    "units_sold",
+    "price",
+    "oldness",
+    "rating"
+  ],
+  "weights_order": [
+    "awareness",
+    "desire",
+    "revenue",
+    "competition",
+    "units_sold",
+    "price",
+    "oldness",
+    "rating"
+  ]
+}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -31,6 +32,7 @@ StatusCallback = Callable[..., None]
 class Candidate:
     id: int
     sig_hash: str
+    digest: str
     payload: Dict[str, Any]
     extra: Dict[str, Any]
 
@@ -61,6 +63,21 @@ def _clean_text(value: Optional[str], max_chars: int) -> str:
 
 def _get(obj: Dict[str, Any], key: str) -> Any:
     return obj.get(key) or obj.get(key.replace("_level", "")) or obj.get(key.replace("_", ""))
+
+
+def _normalize_for_digest(value: Optional[str]) -> str:
+    text = (value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"\s+", " ", text)
+    return text.lower()
+
+
+def _make_digest(parts: Dict[str, str]) -> str:
+    joined = "|".join(
+        _normalize_for_digest(parts.get(key)) for key in ("title", "brand", "category", "description")
+    )
+    return hashlib.sha1(joined.encode("utf-8")).hexdigest()
 
 
 def _normalize_tri(value: Any) -> Optional[str]:
@@ -214,11 +231,13 @@ async def _perform_single_request(
     max_retries: int,
     rate_limiter: AsyncRateLimiter,
     stop_event: asyncio.Event,
+    max_output_tokens_per_item: int,
 ) -> Dict[str, Any]:
     request_payload = _build_request_payload(payload_items)
     user_content = json.dumps(request_payload, ensure_ascii=False)
     estimated_in = _estimate_input_tokens(user_content, len(payload_items))
     estimated_out = _estimate_output_tokens(len(payload_items))
+    max_output_tokens = max(64, len(payload_items) * max_output_tokens_per_item)
     last_error = "error"
     status_code = 0
     for attempt in range(max_retries + 1):
@@ -243,6 +262,7 @@ async def _perform_single_request(
                 temperature=temperature,
                 top_p=top_p,
                 response_format=response_format,
+                max_output_tokens=max_output_tokens,
                 input=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": user_content},
@@ -338,6 +358,7 @@ async def _run_batch_task(
     stop_event: asyncio.Event,
     semaphore: asyncio.Semaphore,
     results_queue: "asyncio.Queue[Dict[str, Any]]",
+    max_output_tokens_per_item: int,
 ) -> None:
     item_ids = [cand.id for cand in candidates]
     payload_items = [cand.payload for cand in candidates]
@@ -372,6 +393,7 @@ async def _run_batch_task(
                 max_retries=max_retries,
                 rate_limiter=rate_limiter,
                 stop_event=stop_event,
+                max_output_tokens_per_item=max_output_tokens_per_item,
             )
         except Exception:
             logger.exception("AI batch task failed", exc_info=True)
@@ -605,14 +627,18 @@ def _apply_ai_updates(conn, updates: Dict[int, Dict[str, Any]]) -> None:
             f"UPDATE products SET {', '.join(assignments)} WHERE id=?",
             params,
         )
-    conn.commit()
 
 
-def _build_payload(row: Any, extra: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
-    max_title_default = int(config.AI_CFG_DEFAULTS.get("max_title_chars", 120))
-    max_desc_default = int(config.AI_CFG_DEFAULTS.get("max_desc_chars", 220))
-    max_title = int(cfg.get("max_title_chars") or max_title_default)
-    max_desc = int(cfg.get("max_desc_chars") or max_desc_default)
+def _build_payload(
+    row: Any, extra: Dict[str, Any], cfg: Dict[str, Any]
+) -> tuple[Dict[str, Any], Dict[str, str]]:
+    truncate_cfg = cfg.get("truncate") if isinstance(cfg.get("truncate"), dict) else {}
+    max_title = int(truncate_cfg.get("title") or cfg.get("max_title_chars") or 0)
+    if max_title <= 0:
+        max_title = int(config.AI_CFG_DEFAULTS["truncate"]["title"])
+    max_desc = int(truncate_cfg.get("description") or cfg.get("max_desc_chars") or 0)
+    if max_desc <= 0:
+        max_desc = int(config.AI_CFG_DEFAULTS["truncate"]["description"])
     title_source = (
         extra.get("title")
         or extra.get("name")
@@ -634,13 +660,25 @@ def _build_payload(row: Any, extra: Dict[str, Any], cfg: Dict[str, Any]) -> Dict
         or extra.get("categoria")
         or extra.get("cat")
     )
-    return {
+    title = _clean_text(title_source or row.get("name"), max_title)
+    description = _clean_text(desc_source, max_desc)
+    brand = _clean_text(brand_source, BRAND_MAX_CHARS)
+    category = _clean_text(category_source, CATEGORY_MAX_CHARS)
+    payload = {
         "id": row["id"],
-        "title": _clean_text(title_source or row.get("name"), max_title),
-        "desc": _clean_text(desc_source, max_desc),
-        "brand": _clean_text(brand_source, BRAND_MAX_CHARS),
-        "category": _clean_text(category_source, CATEGORY_MAX_CHARS),
+        "title": title,
+        "brand": brand,
+        "category": category,
     }
+    if description:
+        payload["desc"] = description
+    normalized = {
+        "title": title,
+        "brand": brand,
+        "category": category,
+        "description": description,
+    }
+    return payload, normalized
 
 
 def _emit_status(
@@ -698,8 +736,9 @@ def run_ai_fill_job(
         microbatch_size = int(micro_default or 1)
     microbatch_size = max(1, microbatch_size)
 
-    cache_enabled = bool(runtime_cfg.get("cache_enabled", True))
-    cache_version = int(runtime_cfg.get("version", 1) or 1)
+    cache_enabled = bool(
+        runtime_cfg.get("enableCache", runtime_cfg.get("cache_enabled", True))
+    )
 
     tpm_limit_raw = runtime_cfg.get("tpm_limit")
     try:
@@ -727,6 +766,15 @@ def run_ai_fill_job(
     except Exception:
         top_p = 0.0
     response_format = _resolve_response_format(runtime_cfg.get("response_format"))
+
+    try:
+        max_output_tokens_per_item = int(
+            runtime_cfg.get("maxOutputTokensPerItem", config.AI_CFG_DEFAULTS["maxOutputTokensPerItem"])
+        )
+    except Exception:
+        max_output_tokens_per_item = config.AI_CFG_DEFAULTS["maxOutputTokensPerItem"]
+    if max_output_tokens_per_item <= 0:
+        max_output_tokens_per_item = config.AI_CFG_DEFAULTS["maxOutputTokensPerItem"]
 
     cost_cap_val = runtime_cfg.get("costCapUSD")
     if cost_cap_val is None:
@@ -794,14 +842,16 @@ def run_ai_fill_job(
         sig_hash = row.get("sig_hash") or compute_sig_hash(name, brand, asin, product_url)
         if sig_hash and not row.get("sig_hash"):
             sig_updates.append((sig_hash, pid))
-        payload = _build_payload(row, extra, runtime_cfg)
-        candidates.append(Candidate(id=pid, sig_hash=sig_hash, payload=payload, extra=extra))
+        payload, normalized = _build_payload(row, extra, runtime_cfg)
+        digest = _make_digest(normalized)
+        candidates.append(
+            Candidate(id=pid, sig_hash=sig_hash, payload=payload, extra=extra, digest=digest)
+        )
 
     if sig_updates:
         cur = conn.cursor()
         for sig_hash, pid in sig_updates:
             cur.execute("UPDATE products SET sig_hash=? WHERE id=?", (sig_hash, pid))
-        conn.commit()
 
     total_items = len(candidates)
 
@@ -829,6 +879,8 @@ def run_ai_fill_job(
         "ko": 0,
         "cached": 0,
         "retried": 0,
+        "cached_hits": 0,
+        "cached_misses": 0,
     }
     cost_spent = 0.0
     pending_set: set[int] = {cand.id for cand in candidates}
@@ -846,6 +898,7 @@ def run_ai_fill_job(
         if job_updates_enabled and skipped_existing:
             database.set_import_job_ai_counts(conn, int(job_id), counts_with_cost, [])
         _emit_status(status_cb, phase="enrich", counts=counts_with_cost, total=total_items, done=0)
+        conn.commit()
         conn.close()
         return {
             "counts": counts_with_cost,
@@ -859,46 +912,40 @@ def run_ai_fill_job(
 
     candidate_map = {cand.id: cand for cand in candidates}
 
-    cache_rows: Dict[str, Any] = {}
+    cache_rows: Dict[str, Dict[str, Any]] = {}
     if cache_enabled:
-        sig_hashes = [cand.sig_hash for cand in candidates if cand.sig_hash]
-        if sig_hashes:
-            cache_rows = database.get_ai_cache_entries(
-                conn,
-                sig_hashes,
-                model=model,
-                version=cache_version,
-            )
+        digests = [cand.digest for cand in candidates if cand.digest]
+        if digests:
+            cache_rows = database.get_ai_cache_entries(conn, digests)
 
     remaining: List[Candidate] = []
     if cache_rows:
         cached_updates: Dict[int, Dict[str, Any]] = {}
         for cand in candidates:
-            cache_row = cache_rows.get(cand.sig_hash)
+            cache_row = cache_rows.get(cand.digest)
             if not cache_row:
+                counts["cached_misses"] += 1
                 remaining.append(cand)
                 continue
+            stored_payload = cache_row.get("payload") or {}
             update_payload = {
-                "desire": cache_row["desire"],
-                "desire_magnitude": cache_row["desire_magnitude"],
-                "awareness_level": cache_row["awareness_level"],
-                "competition_level": cache_row["competition_level"],
+                "desire": stored_payload.get("desire"),
+                "desire_magnitude": stored_payload.get("desire_magnitude")
+                or cache_row.get("desire_label"),
+                "awareness_level": stored_payload.get("awareness_level"),
+                "competition_level": stored_payload.get("competition_level")
+                or cache_row.get("competition_label"),
             }
+            if not any(update_payload.values()):
+                counts["cached_misses"] += 1
+                remaining.append(cand)
+                continue
             cached_updates[cand.id] = update_payload
             applied_outputs[cand.id] = {k: v for k, v in update_payload.items() if v is not None}
-            if cand.sig_hash:
-                database.upsert_ai_cache_entry(
-                    conn,
-                    cand.sig_hash,
-                    model=model,
-                    version=cache_version,
-                    desire=update_payload.get("desire"),
-                    desire_magnitude=update_payload.get("desire_magnitude"),
-                    awareness_level=update_payload.get("awareness_level"),
-                    competition_level=update_payload.get("competition_level"),
-                )
             pending_set.discard(cand.id)
+            fail_reasons.pop(cand.id, None)
             counts["cached"] += 1
+            counts["cached_hits"] += 1
         if cached_updates:
             _apply_ai_updates(conn, cached_updates)
         counts_with_cost = {**counts, "cost_spent_usd": cost_spent}
@@ -916,6 +963,8 @@ def run_ai_fill_job(
         )
     else:
         remaining = candidates
+        if cache_enabled and candidates:
+            counts["cached_misses"] += len(candidates)
 
     if not api_key:
         result_error = "missing_api_key"
@@ -933,6 +982,7 @@ def run_ai_fill_job(
             done=counts["cached"],
             message="IA pendiente",
         )
+        conn.commit()
         conn.close()
         return {
             "counts": counts_with_cost,
@@ -949,12 +999,17 @@ def run_ai_fill_job(
     comp_scores: List[Tuple[str, float]] = []
 
     batches: List[List[Candidate]] = []
-    for idx in range(0, len(remaining), microbatch_size):
-        chunk = remaining[idx : idx + microbatch_size]
-        if chunk:
-            batches.append(chunk)
+    if len(remaining) <= microbatch_size:
+        if remaining:
+            batches.append(list(remaining))
+    else:
+        for idx in range(0, len(remaining), microbatch_size):
+            chunk = remaining[idx : idx + microbatch_size]
+            if chunk:
+                batches.append(chunk)
 
     stop_event = asyncio.Event()
+    batch_latencies: List[float] = []
 
     async def _process_batches() -> Tuple[float, bool]:
         if not batches:
@@ -979,6 +1034,7 @@ def run_ai_fill_job(
                         stop_event=stop_event,
                         semaphore=semaphore,
                         results_queue=results_queue,
+                        max_output_tokens_per_item=max_output_tokens_per_item,
                     )
                 )
                 for batch_no, batch_candidates in enumerate(batches, start=1)
@@ -1000,6 +1056,7 @@ def run_ai_fill_job(
                 tokens_in = int(result.get("tokens_in", 0) or 0)
                 tokens_out = int(result.get("tokens_out", 0) or 0)
                 status_code = result.get("status_code", 0)
+                batch_latencies.append(duration)
                 if usage:
                     local_cost += _calculate_cost(usage, price_in, price_out)
                 success_updates: Dict[int, Dict[str, Any]] = {}
@@ -1023,7 +1080,12 @@ def run_ai_fill_job(
                     for pid, payload in success_updates.items():
                         candidate = candidate_map.get(pid)
                         sig_hash = candidate.sig_hash if candidate else ""
-                        record = {"sig_hash": sig_hash, "updates": payload.copy()}
+                        digest = candidate.digest if candidate else ""
+                        record = {
+                            "sig_hash": sig_hash,
+                            "digest": digest,
+                            "updates": payload.copy(),
+                        }
                         parsed_desire = _parse_score(payload.get("desire_magnitude"))
                         parsed_comp = _parse_score(payload.get("competition_level"))
                         if parsed_desire is not None:
@@ -1060,7 +1122,7 @@ def run_ai_fill_job(
                     done=done_val,
                     message=f"IA columnas {done_val}/{total_items}",
                 )
-                logger.info(
+                logger.debug(
                     "AI_ENRICH batch k=%s dur_ms=%.0f rps=%.2f tokens_in=%d tokens_out=%d rc=%s",
                     result.get("batch_no", processed),
                     duration * 1000.0,
@@ -1071,7 +1133,10 @@ def run_ai_fill_job(
                 )
                 if cost_cap is not None and local_cost >= float(cost_cap) and not stop_event.is_set():
                     stop_event.set()
-            await asyncio.gather(*tasks)
+            finished = await asyncio.gather(*tasks, return_exceptions=True)
+            for idx, outcome in enumerate(finished, start=1):
+                if isinstance(outcome, Exception):
+                    logger.error("AI batch worker exception batch=%s error=%s", idx, outcome)
         return local_cost, stop_event.is_set()
 
     cost_limit_hit = False
@@ -1128,7 +1193,6 @@ def run_ai_fill_job(
                     rec["updates"]["competition_level"] = label
                     if pid in applied_outputs:
                         applied_outputs[pid]["competition_level"] = label
-        conn.commit()
         logger.info(
             "ai_calibration_desire: dist=%s info=%s", dist_desire if desire_scores else {}, desire_info,
         )
@@ -1137,20 +1201,17 @@ def run_ai_fill_job(
         )
 
     for pid, rec in success_records.items():
-        sig_hash = rec.get("sig_hash")
+        digest = rec.get("digest")
         updates = rec.get("updates", {})
-        if sig_hash:
-            database.upsert_ai_cache_entry(
-                conn,
-                sig_hash,
-                model=model,
-                version=cache_version,
-                desire=updates.get("desire"),
-                desire_magnitude=updates.get("desire_magnitude"),
-                awareness_level=updates.get("awareness_level"),
-                competition_level=updates.get("competition_level"),
-            )
-    conn.commit()
+        if not digest or not updates:
+            continue
+        cache_payload = updates.copy()
+        if "_desire_score" in rec and rec["_desire_score"] is not None:
+            cache_payload["_desire_score"] = rec["_desire_score"]
+        if "_competition_score" in rec and rec["_competition_score"] is not None:
+            cache_payload["_competition_score"] = rec["_competition_score"]
+        cache_payload["sig_hash"] = rec.get("sig_hash")
+        database.upsert_ai_cache_entry(conn, digest, cache_payload)
 
     pending_ids = sorted(pending_set)
     done_val = counts["ok"] + counts["cached"]
@@ -1168,8 +1229,16 @@ def run_ai_fill_job(
         message=f"IA columnas {done_val}/{total_items}",
     )
 
+    latency_p99_ms = 0.0
+    if batch_latencies:
+        sorted_latencies = sorted(batch_latencies)
+        idx = max(0, int(math.ceil(0.99 * len(sorted_latencies)) - 1))
+        if idx >= len(sorted_latencies):
+            idx = len(sorted_latencies) - 1
+        latency_p99_ms = sorted_latencies[idx] * 1000.0
+
     logger.info(
-        "run_ai_fill_job: job=%s model=%s parallelism=%d micro=%d total=%d ok=%d cached=%d ko=%d cost=%.4f cost_hit=%s pending=%d error=%s duration=%.2fs",
+        "run_ai_fill_job: job=%s model=%s parallelism=%d micro=%d total=%d ok=%d cached=%d ko=%d cost=%.4f cost_hit=%s pending=%d error=%s duration=%.2fs cached_hits=%d cached_misses=%d lat_p99_ms=%.0f",
         job_id,
         model,
         parallelism,
@@ -1183,8 +1252,12 @@ def run_ai_fill_job(
         len(pending_ids),
         result_error,
         time.perf_counter() - start_ts,
+        counts.get("cached_hits", 0),
+        counts.get("cached_misses", 0),
+        latency_p99_ms,
     )
 
+    conn.commit()
     conn.close()
     return {
         "counts": counts_with_cost,

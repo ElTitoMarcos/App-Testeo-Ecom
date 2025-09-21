@@ -27,17 +27,21 @@ DEFAULT_WINNER_ORDER = [
 
 AI_CFG_DEFAULTS: Dict[str, Any] = {
     "model": "gpt-4o-mini",
-    "temperature": 0,
-    "top_p": 0,
+    "temperature": 0.0,
+    "top_p": 0.1,
+    "topP": 0.1,
     "response_format": "json",
-    "parallelism": 12,
-    "microbatch": 96,
-    "max_desc_chars": 220,
+    "parallelism": 32,
+    "microbatch": 128,
+    "max_desc_chars": 240,
     "max_title_chars": 120,
     "tpm_limit": None,
     "rpm_limit": None,
     "costCapUSD": None,
     "cache_enabled": True,
+    "enableCache": True,
+    "maxOutputTokensPerItem": 8,
+    "truncate": {"title": 120, "description": 240},
     "version": 2,
 }
 
@@ -216,6 +220,12 @@ def get_ai_runtime_config() -> Dict[str, Any]:
         for k, v in user.items():
             base[k] = v
 
+    if "topP" in base and not user.get("top_p"):
+        try:
+            base["top_p"] = float(base.get("topP"))
+        except Exception:
+            pass
+
     cpu_parallel = max(1, (os.cpu_count() or 1) * 2)
     default_parallel = min(int(AI_CFG_DEFAULTS["parallelism"]), cpu_parallel)
     try:
@@ -234,20 +244,32 @@ def get_ai_runtime_config() -> Dict[str, Any]:
         micro = AI_CFG_DEFAULTS["microbatch"]
     base["microbatch"] = max(1, micro)
 
-    base["cache_enabled"] = bool(base.get("cache_enabled", True))
+    enable_cache = base.get("enableCache")
+    if enable_cache is None:
+        enable_cache = base.get("cache_enabled", True)
+    base["enableCache"] = bool(enable_cache)
+    base["cache_enabled"] = base["enableCache"]
+
     try:
         base["version"] = int(base.get("version", AI_CFG_DEFAULTS["version"]))
     except Exception:
         base["version"] = AI_CFG_DEFAULTS["version"]
 
-    for key in ("max_desc_chars", "max_title_chars"):
-        try:
-            val = int(base.get(key) or 0)
-        except Exception:
-            val = AI_CFG_DEFAULTS[key]
-        if val <= 0:
-            val = AI_CFG_DEFAULTS[key]
-        base[key] = val
+    truncate_defaults = dict(AI_CFG_DEFAULTS["truncate"])
+    truncate_cfg = base.get("truncate")
+    sanitized_truncate = truncate_defaults.copy()
+    if isinstance(truncate_cfg, dict):
+        for key in ("title", "description"):
+            try:
+                val = int(truncate_cfg.get(key, 0))
+            except Exception:
+                val = truncate_defaults[key]
+            if val <= 0:
+                val = truncate_defaults[key]
+            sanitized_truncate[key] = val
+    base["truncate"] = sanitized_truncate
+    base["max_title_chars"] = sanitized_truncate["title"]
+    base["max_desc_chars"] = sanitized_truncate["description"]
 
     try:
         temperature = float(base.get("temperature", AI_CFG_DEFAULTS["temperature"]))
@@ -260,6 +282,7 @@ def get_ai_runtime_config() -> Dict[str, Any]:
     except Exception:
         top_p = AI_CFG_DEFAULTS["top_p"]
     base["top_p"] = max(0.0, min(1.0, top_p))
+    base["topP"] = base["top_p"]
 
     resp_format = base.get("response_format") or AI_CFG_DEFAULTS["response_format"]
     if isinstance(resp_format, dict):
@@ -268,6 +291,14 @@ def get_ai_runtime_config() -> Dict[str, Any]:
         base["response_format"] = str(resp_format)
 
     base["model"] = str(base.get("model") or AI_CFG_DEFAULTS["model"])
+
+    try:
+        max_tokens = int(base.get("maxOutputTokensPerItem", AI_CFG_DEFAULTS["maxOutputTokensPerItem"]))
+    except Exception:
+        max_tokens = AI_CFG_DEFAULTS["maxOutputTokensPerItem"]
+    if max_tokens <= 0:
+        max_tokens = AI_CFG_DEFAULTS["maxOutputTokensPerItem"]
+    base["maxOutputTokensPerItem"] = max_tokens
 
     tpm_limit = base.get("tpm_limit")
     if tpm_limit is None:

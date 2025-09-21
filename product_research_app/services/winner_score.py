@@ -5,6 +5,7 @@ import math
 import hashlib
 import logging
 import sqlite3
+import time
 import unicodedata
 from datetime import datetime, date
 from typing import Dict, Any, Iterable, Optional, Callable
@@ -741,6 +742,7 @@ def generate_winner_scores(
 
     prepare_oldness_bounds(rows)
 
+    start_ts = time.perf_counter()
     processed = 0
     updated_int = 0
     now = datetime.utcnow().isoformat()
@@ -748,6 +750,9 @@ def generate_winner_scores(
     diag_missing: Optional[Iterable[str]] = None
     diag_sum_filtered: float = 0.0
     diag_eff: Dict[str, float] = {}
+    score_rankings: list[tuple[int, int]] = []
+    last_eff_weights: Dict[str, float] = {}
+    last_order: list[str] = []
     for row in rows:
         pid = row["id"]
         old_score = row["winner_score"]
@@ -763,6 +768,8 @@ def generate_winner_scores(
         weights_hash_eff = eff_hash
         eff_w_int = {k: int(round(v * 100)) for k, v in res.get("effective_weights", {}).items()}
         ord_list = res.get("order", order)
+        last_eff_weights = eff_w
+        last_order = list(ord_list)
 
         if debug and diag_present is None:
             diag_present = present
@@ -772,6 +779,7 @@ def generate_winner_scores(
 
         score_raw_0_100 = max(0.0, min(1.0, sf)) * 100.0
         new_score = int(round(score_raw_0_100))
+        score_rankings.append((new_score, pid))
 
         if new_score != old_score or row["winner_score_raw"] != score_raw_0_100:
             conn.execute(
@@ -782,7 +790,7 @@ def generate_winner_scores(
                 updated_int += 1
 
         if not present:
-            logger.warning(
+            logger.debug(
                 "Winner Score: product=%s score_int=%s score_raw=%.3f weights_all=%s weights_eff=%s present=%s missing=%s disabled=%s "
                 "effective_weights=%s order=%s weights_effective_int=%s oldness_dir=%s oldness_intensity=%.3f oldness_ui=%.1f no_features_present",
                 pid,
@@ -801,7 +809,7 @@ def generate_winner_scores(
                 oldness_ui,
             )
         else:
-            logger.info(
+            logger.debug(
                 "Winner Score: product=%s score_int=%s score_raw=%.3f weights_all=%s weights_eff=%s present=%s missing=%s disabled=%s "
                 "effective_weights=%s order=%s weights_effective_int=%s oldness_dir=%s oldness_intensity=%.3f oldness_ui=%.1f",
                 pid,
@@ -822,6 +830,22 @@ def generate_winner_scores(
         processed += 1
 
     conn.commit()
+    duration = time.perf_counter() - start_ts
+    top_summary = [
+        {"product_id": pid, "score": score}
+        for score, pid in sorted(score_rankings, key=lambda item: item[0], reverse=True)[:5]
+    ]
+    logger.info(
+        "winner_scores_summary: processed=%s updated=%s duration=%.2fs top5=%s oldness_pref=%s oldness_intensity=%.3f effective_weights=%s order=%s",
+        processed,
+        updated_int,
+        duration,
+        top_summary,
+        dir_old_label,
+        w_old_intensity,
+        last_eff_weights,
+        last_order,
+    )
     result: Dict[str, Any] = {
         "processed": processed,
         "updated": updated_int,

@@ -438,21 +438,38 @@ def initialize_database(conn: sqlite3.Connection) -> None:
 
     # Cache for AI column results (dedup across imports)
     cur.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='ai_cache'"
+    )
+    row = cur.fetchone()
+    if row:
+        cur.execute("PRAGMA table_info(ai_cache)")
+        columns = {info[1] for info in cur.fetchall()}
+        expected = {
+            "digest",
+            "desire_label",
+            "desire_magnitude",
+            "competition_label",
+            "competition_magnitude",
+            "created_at",
+            "payload_json",
+        }
+        # Drop obsolete schema (previously keyed by sig_hash/model/version)
+        if columns and not expected.issubset(columns):
+            cur.execute("DROP TABLE ai_cache")
+    cur.execute(
         """
         CREATE TABLE IF NOT EXISTS ai_cache (
-            sig_hash TEXT PRIMARY KEY,
-            model TEXT,
-            desire TEXT,
-            desire_magnitude TEXT,
-            awareness_level TEXT,
-            competition_level TEXT,
-            updated_at INTEGER,
-            version INTEGER
+            digest TEXT PRIMARY KEY,
+            desire_label TEXT,
+            desire_magnitude REAL,
+            competition_label TEXT,
+            competition_magnitude REAL,
+            created_at TEXT,
+            payload_json TEXT
         )
         """
     )
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_cache_model ON ai_cache(model)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_cache_updated ON ai_cache(updated_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_cache_created ON ai_cache(created_at)")
 
     # Batch metrics for observability
     cur.execute(
@@ -1492,63 +1509,99 @@ def upsert_enrichment_cache(
 
 def get_ai_cache_entries(
     conn: sqlite3.Connection,
-    sig_hashes: Sequence[str],
-    *,
-    model: str,
-    version: int,
-) -> Dict[str, sqlite3.Row]:
-    if not sig_hashes:
+    digests: Sequence[str],
+) -> Dict[str, Dict[str, Any]]:
+    if not digests:
         return {}
-    placeholders = ",".join(["?"] * len(sig_hashes))
+    placeholders = ",".join(["?"] * len(digests))
     cur = conn.cursor()
     cur.execute(
         f"""
-        SELECT sig_hash, model, desire, desire_magnitude, awareness_level, competition_level, updated_at, version
+        SELECT digest, desire_label, desire_magnitude, competition_label, competition_magnitude, created_at, payload_json
         FROM ai_cache
-        WHERE sig_hash IN ({placeholders}) AND model=? AND version=?
+        WHERE digest IN ({placeholders})
         """,
-        (*sig_hashes, model, int(version)),
+        tuple(digests),
     )
-    return {row["sig_hash"]: row for row in cur.fetchall()}
+    rows = cur.fetchall()
+    results: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        payload: Dict[str, Any] = {}
+        raw_payload = row["payload_json"]
+        if raw_payload:
+            try:
+                payload = json.loads(raw_payload)
+            except Exception:
+                payload = {}
+        results[row["digest"]] = {
+            "digest": row["digest"],
+            "desire_label": row["desire_label"],
+            "desire_magnitude": row["desire_magnitude"],
+            "competition_label": row["competition_label"],
+            "competition_magnitude": row["competition_magnitude"],
+            "created_at": row["created_at"],
+            "payload": payload,
+        }
+    return results
 
 
 def upsert_ai_cache_entry(
     conn: sqlite3.Connection,
-    sig_hash: str,
+    digest: str,
+    payload: Dict[str, Any],
     *,
-    model: str,
-    version: int,
-    desire: Optional[str],
-    desire_magnitude: Optional[str],
-    awareness_level: Optional[str],
-    competition_level: Optional[str],
     commit: bool = False,
 ) -> None:
-    now = int(time.time())
+    now = datetime.utcnow().isoformat()
+    desire_label = payload.get("desire_magnitude") or payload.get("desire_label")
+    competition_label = payload.get("competition_level") or payload.get("competition_label")
+
+    def _label_to_float(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        text = str(value).strip().lower()
+        mapping = {"low": 0.0, "medium": 0.5, "high": 1.0}
+        if text in mapping:
+            return mapping[text]
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    desire_score = _label_to_float(payload.get("_desire_score"))
+    if desire_score is None:
+        desire_score = _label_to_float(payload.get("desire_score"))
+    if desire_score is None:
+        desire_score = _label_to_float(desire_label)
+
+    competition_score = _label_to_float(payload.get("_competition_score"))
+    if competition_score is None:
+        competition_score = _label_to_float(payload.get("competition_score"))
+    if competition_score is None:
+        competition_score = _label_to_float(competition_label)
+
     cur = conn.cursor()
     cur.execute(
         """
         INSERT INTO ai_cache (
-            sig_hash, model, desire, desire_magnitude, awareness_level, competition_level, updated_at, version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(sig_hash) DO UPDATE SET
-            model=excluded.model,
-            desire=excluded.desire,
+            digest, desire_label, desire_magnitude, competition_label, competition_magnitude, created_at, payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(digest) DO UPDATE SET
+            desire_label=excluded.desire_label,
             desire_magnitude=excluded.desire_magnitude,
-            awareness_level=excluded.awareness_level,
-            competition_level=excluded.competition_level,
-            updated_at=excluded.updated_at,
-            version=excluded.version
+            competition_label=excluded.competition_label,
+            competition_magnitude=excluded.competition_magnitude,
+            created_at=excluded.created_at,
+            payload_json=excluded.payload_json
         """,
         (
-            sig_hash,
-            model,
-            desire,
-            desire_magnitude,
-            awareness_level,
-            competition_level,
+            digest,
+            desire_label,
+            desire_score,
+            competition_label,
+            competition_score,
             now,
-            int(version),
+            json.dumps(payload, ensure_ascii=False),
         ),
     )
     if commit:
