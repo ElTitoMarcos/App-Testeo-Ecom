@@ -15,10 +15,9 @@ from .config import (
     get_winner_weights_raw,
     set_winner_weights_raw,
     get_winner_order_raw,
-    DEFAULT_ORDER as CONFIG_DEFAULT_ORDER,
     DB_PATH as CONFIG_DB_PATH,
 )
-from ..config import load_config, save_config
+from ..config import load_config, save_config, DEFAULT_WINNER_ORDER
 
 logger = logging.getLogger(__name__)
 
@@ -318,6 +317,8 @@ def load_winner_settings() -> tuple[Dict[str, float], list[str], Dict[str, bool]
         return WEIGHTS_CACHE, ORDER_CACHE, ENABLED_CACHE
     weights = get_winner_weights_raw()
     order = get_winner_order_raw()
+    if not order:
+        order = list(DEFAULT_WINNER_ORDER)
     from .config import get_weights_enabled_raw
 
     enabled = get_weights_enabled_raw()
@@ -655,7 +656,7 @@ def compute_winner_score_v2(
     if order is None:
         order = get_winner_order_raw()
     if not order:
-        order = list(CONFIG_DEFAULT_ORDER)
+        order = list(DEFAULT_WINNER_ORDER)
     seen: set[str] = set()
     normalized_order: list[str] = []
     for key in order:
@@ -715,6 +716,8 @@ def generate_winner_scores(
         from .config import get_weights_enabled_raw
 
         enabled = get_weights_enabled_raw()
+        if not order:
+            order = list(DEFAULT_WINNER_ORDER)
 
     dir_old, w_old_intensity = _oldness_pref_and_weight(weights)
     oldness_ui = float(weights.get("oldness", 50))
