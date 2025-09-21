@@ -7,6 +7,7 @@ file. If the file does not exist, default values are returned.
 """
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -46,6 +47,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "min_low_pct": 0.05,
         "min_medium_pct": 0.05,
         "min_high_pct": 0.05,
+    },
+    "ai": {
+        "parallelism": 8,
+        "microbatch": 32,
+        "cache_enabled": True,
+        "version": 1,
+        "tpm_limit": None,
     },
     "includeImageInAI": True,
     "aiImageCostMaxUSD": 0.02,
@@ -186,6 +194,52 @@ def get_ai_calibration_config() -> Dict[str, Any]:
             base[k] = tmp
         else:
             base[k] = v
+    return base
+
+
+def get_ai_runtime_config() -> Dict[str, Any]:
+    cfg = load_config()
+    base = DEFAULT_CONFIG["ai"].copy()
+    user = cfg.get("ai", {})
+    if isinstance(user, dict):
+        for k, v in user.items():
+            base[k] = v
+
+    cpu_parallel = max(1, (os.cpu_count() or 1) * 2)
+    default_parallel = min(8, cpu_parallel)
+    try:
+        parallel = int(base.get("parallelism") or 0)
+    except Exception:
+        parallel = default_parallel
+    if parallel <= 0:
+        parallel = default_parallel
+    base["parallelism"] = max(1, parallel)
+
+    try:
+        micro = int(base.get("microbatch") or 0)
+    except Exception:
+        micro = DEFAULT_CONFIG["ai"]["microbatch"]
+    if micro <= 0:
+        micro = DEFAULT_CONFIG["ai"]["microbatch"]
+    base["microbatch"] = max(1, micro)
+
+    base["cache_enabled"] = bool(base.get("cache_enabled", True))
+    try:
+        base["version"] = int(base.get("version", DEFAULT_CONFIG["ai"]["version"]))
+    except Exception:
+        base["version"] = DEFAULT_CONFIG["ai"]["version"]
+
+    tpm_limit = base.get("tpm_limit")
+    if tpm_limit is None:
+        base["tpm_limit"] = None
+    else:
+        try:
+            limit_val = int(tpm_limit)
+        except Exception:
+            base["tpm_limit"] = None
+        else:
+            base["tpm_limit"] = max(0, limit_val) or None
+
     return base
 
 

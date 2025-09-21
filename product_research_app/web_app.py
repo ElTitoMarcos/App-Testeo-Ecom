@@ -422,6 +422,110 @@ def parse_xlsx(binary: bytes):
         return records
 
 
+def _schedule_post_import_tasks(
+    job_id: int,
+    product_ids: List[int],
+    rows_imported: int,
+    task_key: str,
+) -> None:
+    auto_ai = config.is_auto_fill_ia_on_import_enabled()
+
+    def status_cb(**payload: Any) -> None:
+        payload.setdefault("job_id", job_id)
+        payload.setdefault("task_id", task_key)
+        _update_import_status(task_key, **payload)
+
+    def worker() -> None:
+        conn = database.get_connection(DB_PATH)
+        try:
+            final_counts: Dict[str, Any] = {
+                "queued": len(product_ids),
+                "sent": 0,
+                "ok": 0,
+                "ko": 0,
+                "cached": 0,
+                "retried": 0,
+                "cost_spent_usd": 0.0,
+            }
+            pending_ids: List[int] = list(product_ids)
+            try:
+                if auto_ai and product_ids:
+                    result = ai_columns.run_ai_fill_job(job_id, product_ids, status_cb=status_cb)
+                    final_counts = result.get("counts", final_counts)
+                    pending_ids = result.get("pending_ids", pending_ids)
+                    error = result.get("error")
+                    if error:
+                        database.set_import_job_ai_error(conn, job_id, str(error))
+                else:
+                    final_counts = {
+                        "queued": 0,
+                        "sent": 0,
+                        "ok": 0,
+                        "ko": 0,
+                        "cached": 0,
+                        "retried": 0,
+                        "cost_spent_usd": 0.0,
+                    }
+                    pending_ids = []
+                    database.set_import_job_ai_counts(conn, job_id, final_counts, pending_ids)
+                    database.update_import_job_ai_progress(conn, job_id, 0)
+            except Exception as exc:
+                logger.exception("AI enrichment failed job=%s", job_id)
+                final_counts = {
+                    "queued": len(product_ids),
+                    "sent": 0,
+                    "ok": 0,
+                    "ko": len(product_ids),
+                    "cached": 0,
+                    "retried": 0,
+                    "cost_spent_usd": 0.0,
+                }
+                pending_ids = list(product_ids)
+                database.set_import_job_ai_error(conn, job_id, str(exc))
+                database.set_import_job_ai_counts(conn, job_id, final_counts, pending_ids)
+                database.update_import_job_ai_progress(conn, job_id, 0)
+            total_ai = int(final_counts.get("queued", 0) or 0)
+            done_ai = int(final_counts.get("ok", 0) + final_counts.get("cached", 0))
+            _update_import_status(
+                task_key,
+                phase="winner",
+                ai_counts=final_counts,
+                ai_total=total_ai,
+                ai_done=done_ai,
+                ai_pending=pending_ids,
+                message="Calculando Winner Score",
+            )
+            database.update_import_job_progress(conn, job_id, phase="winner")
+            updated_scores = 0
+            try:
+                res_scores = winner_calc.generate_winner_scores(conn, product_ids=product_ids)
+                updated_scores = int(res_scores.get("updated", 0))
+            except Exception as exc:
+                logger.exception("Winner score recalculation failed job=%s", job_id)
+            database.complete_import_job(conn, job_id, rows_imported, updated_scores)
+            _set_import_progress(
+                task_key,
+                pct=100,
+                message="Completado",
+                state="done",
+                stage="done",
+                imported=rows_imported,
+                finished_at=time.time(),
+                phase="done",
+                ai_counts=final_counts,
+                ai_total=total_ai,
+                ai_done=done_ai,
+                ai_pending=pending_ids,
+            )
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
 def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
     """Background task to import XLSX data into the database."""
     conn = ensure_db()
@@ -688,39 +792,28 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                 total=total_valid or rows_imported,
             )
 
-        if inserted_ids and config.is_auto_fill_ia_on_import_enabled():
-            _set_import_progress(task_key, pct=88, message="Completando columnas con IA")
-            database.start_import_job_ai(conn, job_id, len(inserted_ids))
-            cfg_cost = config.get_ai_cost_config()
-            res = ai_columns.fill_ai_columns(
-                inserted_ids,
-                model=cfg_cost.get("model"),
-                batch_mode=len(inserted_ids) >= cfg_cost.get("useBatchWhenCountGte", 300),
-                cost_cap_usd=cfg_cost.get("costCapUSD"),
-            )
-            counts = res.get("counts", {})
-            database.update_import_job_ai_progress(conn, job_id, counts.get("n_procesados", 0))
-            database.set_import_job_ai_counts(conn, job_id, counts, res.get("pending_ids", []))
-            if res.get("error"):
-                database.set_import_job_ai_error(conn, job_id, "No se pudieron completar las columnas con IA: revisa la API.")
-        _set_import_progress(task_key, pct=92, message="Calculando Winner Score")
-        res_scores = winner_calc.generate_winner_scores(conn, product_ids=inserted_ids)
-        updated_scores = int(res_scores.get("updated", 0))
-        logger.info(
-            "Winner Score import/post: imported=%d updated=%d",
-            len(inserted_ids),
-            updated_scores,
+        next_phase = "enrich" if inserted_ids and config.is_auto_fill_ia_on_import_enabled() else "winner"
+        database.update_import_job_progress(
+            conn,
+            job_id,
+            phase=next_phase,
+            status="running",
+            processed=rows_imported,
+            total=rows_imported,
+            rows_imported=rows_imported,
         )
-        database.complete_import_job(conn, job_id, rows_imported, updated_scores)
         _set_import_progress(
             task_key,
-            pct=100,
-            message="Completado",
+            pct=90,
+            message="Importación completada",
             state="done",
             stage="done",
             imported=rows_imported,
-            finished_at=time.time(),
+            done=rows_imported,
+            total=rows_imported,
+            phase=next_phase,
         )
+        _schedule_post_import_tasks(job_id, inserted_ids, rows_imported, task_key)
     except Exception as exc:
         try:
             conn.rollback()
@@ -1081,6 +1174,18 @@ class RequestHandler(BaseHTTPRequestHandler):
                 }
                 for row in database.get_recent_import_metrics(conn, limit)
             ]
+            ai_batches = [
+                {
+                    "job_id": row["job_id"],
+                    "batch": row["batch_no"],
+                    "rows": row["rows"],
+                    "duration_ms": row["duration_ms"],
+                    "throughput_rps": row["throughput"],
+                    "cached_hits": row["cached_hits"],
+                    "created_at": row["created_at"],
+                }
+                for row in database.get_recent_ai_metrics(conn, limit)
+            ]
             jobs_payload = []
             for row in database.get_import_history(conn, limit):
                 payload = _job_payload_from_row(row)
@@ -1092,7 +1197,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             }
             self.safe_write(
                 lambda: self.send_json(
-                    {"jobs": jobs_payload, "batches": batches, "config": config_payload}
+                    {
+                        "jobs": jobs_payload,
+                        "batches": batches,
+                        "ai_batches": ai_batches,
+                        "config": config_payload,
+                    }
                 )
             )
             return
@@ -2183,25 +2293,34 @@ class RequestHandler(BaseHTTPRequestHandler):
                     done_val = int(snapshot.get("processed") or imported_count or 0)
                     total_val = int(snapshot.get("total") or done_val)
                     imported_val = int(snapshot.get("rows_imported") or imported_count or done_val)
+                    inserted_ids = database.get_job_product_ids(conn, job_id)
+                    rows_imported = len(inserted_ids) or imported_val
+                    next_phase = (
+                        "enrich"
+                        if rows_imported and config.is_auto_fill_ia_on_import_enabled()
+                        else "winner"
+                    )
+                    database.update_import_job_progress(
+                        conn,
+                        job_id,
+                        phase=next_phase,
+                        status="running",
+                        processed=done_val,
+                        total=total_val,
+                        rows_imported=rows_imported,
+                    )
                     _set_import_progress(
                         task_id,
-                        pct=95,
-                        message="Finalizando importación",
-                        done=done_val,
-                        total=total_val,
-                    )
-                    _update_import_status(
-                        task_id,
-                        job_id=job_id,
+                        pct=90,
+                        message="Importación completada",
                         state="done",
                         stage="done",
                         done=done_val,
                         total=total_val,
-                        imported=imported_val,
-                        finished_at=time.time(),
-                        pct=100,
-                        message="Completado",
+                        imported=rows_imported,
+                        phase=next_phase,
                     )
+                    _schedule_post_import_tasks(job_id, inserted_ids, rows_imported, task_id)
                 except Exception as exc:
                     logger.exception("Fast CSV import failed: filename=%s", filename)
                     _update_import_status(
@@ -2315,27 +2434,36 @@ class RequestHandler(BaseHTTPRequestHandler):
                     job_row = database.get_import_job(conn, job_id)
                     snapshot = _job_payload_from_row(job_row) or {}
                     done_val = int(snapshot.get("processed") or imported_count or total_records)
-                    total_val = int(snapshot.get("total") or total_records)
+                    total_val = int(snapshot.get("total") or total_records or done_val)
                     imported_val = int(snapshot.get("rows_imported") or imported_count or done_val)
+                    inserted_ids = database.get_job_product_ids(conn, job_id)
+                    rows_imported = len(inserted_ids) or imported_val
+                    next_phase = (
+                        "enrich"
+                        if rows_imported and config.is_auto_fill_ia_on_import_enabled()
+                        else "winner"
+                    )
+                    database.update_import_job_progress(
+                        conn,
+                        job_id,
+                        phase=next_phase,
+                        status="running",
+                        processed=done_val,
+                        total=total_val,
+                        rows_imported=rows_imported,
+                    )
                     _set_import_progress(
                         task_id,
-                        pct=95,
-                        message="Finalizando importación",
-                        done=done_val,
-                        total=total_val,
-                    )
-                    _update_import_status(
-                        task_id,
-                        job_id=job_id,
+                        pct=90,
+                        message="Importación completada",
                         state="done",
                         stage="done",
                         done=done_val,
                         total=total_val,
-                        imported=imported_val,
-                        finished_at=time.time(),
-                        pct=100,
-                        message="Completado",
+                        imported=rows_imported,
+                        phase=next_phase,
                     )
+                    _schedule_post_import_tasks(job_id, inserted_ids, rows_imported, task_id)
                 except Exception as exc:
                     logger.exception("Fast JSON import failed: filename=%s", filename)
                     _update_import_status(
