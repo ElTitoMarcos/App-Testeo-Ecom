@@ -449,6 +449,10 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    cur.execute("PRAGMA table_info(ai_cache)")
+    ai_cache_cols = {row[1] for row in cur.fetchall()}
+    if "created_at" not in ai_cache_cols:
+        cur.execute("ALTER TABLE ai_cache ADD COLUMN created_at TEXT")
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_ai_cache_created_at ON ai_cache(created_at)"
     )
