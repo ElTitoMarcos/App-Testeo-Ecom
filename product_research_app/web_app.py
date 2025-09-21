@@ -118,7 +118,6 @@ def _normalize_order_list(order, available: Dict[str, Any]) -> List[str]:
             seen.add(key)
     return out
 
-
 def _apply_weights_reset(existing: Dict[str, Any] | None = None) -> Dict[str, Any]:
     cfg = dict(existing or config.load_config())
     default_weights = get_default_winner_weights()
@@ -156,7 +155,6 @@ def _build_weights_payload(cfg: Dict[str, Any]) -> Dict[str, Any]:
     if "weightsVersion" in cfg:
         payload["weightsVersion"] = cfg["weightsVersion"]
     return payload
-
 
 def _sanitize_enabled_map(raw_enabled, keys: List[str]) -> Dict[str, bool]:
     if not isinstance(raw_enabled, dict):
@@ -999,6 +997,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 config.save_config(cfg)
 
             logger.info("CONFIG served weights_order=%s", cfg.get("weights_order"))
+            
             raw_eff = {
                 k: (weights_map.get(k, 0) if weights_enabled.get(k, True) else 0)
                 for k in weights_map
@@ -1896,6 +1895,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._set_json()
                 self.wfile.write(json.dumps(payload).encode('utf-8'))
                 return
+              
             weights_in = (
                 data.get("weights")
                 or data.get("winner_weights")

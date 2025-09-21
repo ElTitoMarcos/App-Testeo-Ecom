@@ -59,7 +59,6 @@ def _sanitize_enabled(raw_enabled, keys: list[str]) -> dict[str, bool]:
         return {k: True for k in keys}
     return {k: bool(raw_enabled.get(k, True)) for k in keys}
 
-
 def _apply_reset(settings: dict | None = None) -> dict:
     cfg = dict(settings or load_settings() or {})
     default_weights = get_default_winner_weights()
@@ -96,7 +95,6 @@ def _build_reset_payload(cfg: dict) -> dict:
         if key in cfg:
             payload[key] = cfg[key]
     return payload
-
 
 """Endpoints for winner weight configuration.
 
