@@ -922,52 +922,55 @@ def test_export_kalodata_minimal_success(tmp_path, monkeypatch):
     assert len(rows) == 3
     row1, row2, row3 = rows
 
-    assert row1[0] == "Alpha"
-    assert row2[0] == "Beta"
-    assert row3[0] == "Gamma"
-    assert row1[4] is None
-    assert row3[4] == "(no image)"
-    assert row1[5] == "Beauty"
-    assert row1[6] == 19.99
-    assert row1[7] == 4.8
-    assert row1[8] == 1200
-    assert row1[9] == 1550.0
-    assert row1[10].strftime("%Y-%m-%d") == "2024-01-01"
-    assert row1[11] == "Fuerte deseo"
-    assert row1[12] == 80
-    assert row1[13] == "Solution-aware"
-    assert row1[14] == "Low"
+    assert row1[0] == "https://img.example/alpha.jpg"
+    assert row2[0] == "https://img.example/beta.png"
+    assert row3[0] == "https://img.example/gamma-missing.png"
+    assert row1[1] == "Alpha"
+    assert row2[1] == "Beta"
+    assert row3[1] == "Gamma"
+    assert row1[13] is None
+    assert row3[13] == "(no image)"
+    assert row1[2] == "Beauty"
+    assert row1[3] == 19.99
+    assert row1[4] == 4.8
+    assert row1[6] == 1200
+    assert row1[5] == 1550.0
+    assert row1[14].strftime("%Y-%m-%d") == "2024-01-01"
+    assert row1[7] == "Fuerte deseo"
+    assert row1[8] == 80
+    assert row1[9] == "Solution-aware"
+    assert row1[10] == "Low"
 
-    assert row2[5] == "Home"
-    assert row2[6] == 29.0
-    assert row2[7] == 4.1
-    assert row2[8] == 80
-    assert row2[9] == 500.0
-    assert row2[10].strftime("%Y-%m-%d") == "2023-12-15"
-    assert row2[11] == "Resuelve dolor"
-    assert row2[12] == 65
-    assert row2[13] == "Product-aware"
-    assert row2[14] == "Medium"
+    assert row2[2] == "Home"
+    assert row2[3] == 29.0
+    assert row2[4] == 4.1
+    assert row2[6] == 80
+    assert row2[5] == 500.0
+    assert row2[14].strftime("%Y-%m-%d") == "2023-12-15"
+    assert row2[7] == "Resuelve dolor"
+    assert row2[8] == 65
+    assert row2[9] == "Product-aware"
+    assert row2[10] == "Medium"
 
-    assert row3[5] == "Kitchen"
-    assert row3[6] == 15.5
-    assert row3[7] == 4.5
-    assert row3[8] == 500
-    assert row3[9] == 300.0
-    assert row3[10].strftime("%Y-%m-%d") == "2023-11-30"
-    assert row3[11] == "Resolver frustración"
-    assert row3[12] == 50
-    assert row3[13] == "Most aware"
-    assert row3[14] == "High"
+    assert row3[2] == "Kitchen"
+    assert row3[3] == 15.5
+    assert row3[4] == 4.5
+    assert row3[6] == 500
+    assert row3[5] == 300.0
+    assert row3[14].strftime("%Y-%m-%d") == "2023-11-30"
+    assert row3[7] == "Resolver frustración"
+    assert row3[8] == 50
+    assert row3[9] == "Most aware"
+    assert row3[10] == "High"
 
     assert ws.column_dimensions["A"].width == 40
-    assert ws.column_dimensions["E"].width == 38
-    assert ws.column_dimensions["L"].width == 45
+    assert ws.column_dimensions["N"].width == 38
+    assert ws.column_dimensions["H"].width == 45
     assert "tbl_products" in ws.tables
     assert ws.tables["tbl_products"].ref == "A1:O4"
 
     dv_ranges = [dv.sqref for dv in ws.data_validations.dataValidation]
-    assert any(str(dv) == "M2:M4" for dv in dv_ranges)
+    assert any(str(dv) == "I2:I4" for dv in dv_ranges)
 
     cf_ranges = list(ws.conditional_formatting)
 
