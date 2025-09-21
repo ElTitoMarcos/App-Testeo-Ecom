@@ -2,7 +2,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from ..config import load_config, save_config
+from ..config import load_config, save_config, DEFAULT_WINNER_ORDER
 
 ALLOWED_FIELDS = (
     "price",
@@ -15,7 +15,7 @@ ALLOWED_FIELDS = (
     "awareness",
 )
 DEFAULT_WEIGHTS_RAW: Dict[str, int] = {k: 50 for k in ALLOWED_FIELDS}
-DEFAULT_ORDER: List[str] = list(ALLOWED_FIELDS)
+DEFAULT_ORDER: List[str] = list(DEFAULT_WINNER_ORDER)
 DEFAULT_ENABLED: Dict[str, bool] = {k: True for k in ALLOWED_FIELDS}
 
 # Compatibility placeholder; not used but kept for tests that monkeypatch it
