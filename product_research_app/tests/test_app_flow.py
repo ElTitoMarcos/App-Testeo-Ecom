@@ -3,6 +3,7 @@ import json
 import logging
 import sqlite3
 import sys
+import time
 from pathlib import Path
 from typing import List
 from urllib.parse import urlparse
@@ -63,6 +64,7 @@ def test_app_startup(tmp_path, monkeypatch):
 
 def test_import_generates_scores(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "is_auto_fill_ia_on_import_enabled", lambda: False)
     xlsx = tmp_path / "products.xlsx"
     make_xlsx(
         xlsx,
@@ -73,6 +75,15 @@ def test_import_generates_scores(tmp_path, monkeypatch):
     )
     job_id = database.create_import_job(conn, str(xlsx))
     web_app._process_import_job(job_id, xlsx, "products.xlsx")
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        job_row = database.get_import_job(conn, job_id)
+        payload = web_app._job_payload_from_row(job_row)
+        if payload and payload.get("phase") == "done" and payload.get("status") == "done":
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("import job did not complete in time")
     products = [row_to_dict(r) for r in database.list_products(conn)]
     assert len(products) == 2
     for p in products:
@@ -489,6 +500,7 @@ def test_weight_changes_persist_without_score_reset(tmp_path, monkeypatch):
 def test_import_new_batch_preserves_existing_scores(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)
     monkeypatch.setattr(web_app, "ensure_db", lambda: conn)
+    monkeypatch.setattr(config, "is_auto_fill_ia_on_import_enabled", lambda: False)
     pid = database.insert_product(
         conn,
         name="Old", description="", category="", price=None, currency=None,
@@ -501,6 +513,15 @@ def test_import_new_batch_preserves_existing_scores(tmp_path, monkeypatch):
     make_xlsx(xlsx, [["New", 10, 4.5, 100, 1000, 50, 3, 5, 0.3, "High", "Low"]])
     job_id = database.create_import_job(conn, str(xlsx))
     web_app._process_import_job(job_id, xlsx, "batch.xlsx")
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        job_row = database.get_import_job(conn, job_id)
+        payload = web_app._job_payload_from_row(job_row)
+        if payload and payload.get("phase") == "done" and payload.get("status") == "done":
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("import job did not finish")
 
     prod_old = database.get_product(conn, pid)
     assert prod_old["winner_score"] == 10
