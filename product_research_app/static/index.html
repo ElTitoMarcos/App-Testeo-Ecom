@@ -249,7 +249,6 @@ body.dark .skeleton{background:#333;}
   </div>
   <div id="legendPop" class="popover hidden">
   <div>• Fila roja: duplicado</div>
-  <div>• 🔥 x1–x5: tendencia en el nombre</div>
   </div>
   <div id="columnsPanel" class="popover hidden"></div>
 </section>
@@ -945,19 +944,12 @@ function renderTable() {
           showOverlay(value);
         };
         td.appendChild(img);
-      } else if (key === 'name' && value) {
-        const fireCount = item.trending || 0;
-        const fireText = firesFor(fireCount);
-        const nameSpan = document.createElement('span');
-        nameSpan.textContent = value + (fireText ? ' ' : '');
-        td.appendChild(nameSpan);
-        if (fireCount > 0) {
-          const fireSpan = document.createElement('span');
-          fireSpan.className = 'fires';
-          fireSpan.textContent = fireText;
-          fireSpan.setAttribute('aria-label', `Tendencia: x${fireCount}`);
-          fireSpan.title = `Tendencia: x${fireCount}`;
-          td.appendChild(fireSpan);
+      } else if (key === 'name') {
+        const safeName = value == null ? '' : String(value);
+        if (safeName) {
+          const nameSpan = document.createElement('span');
+          nameSpan.textContent = safeName;
+          td.appendChild(nameSpan);
         }
         // If Kalodata URL exists, add copy link button
         const kal = item.extras && item.extras['KalodataUrl'];

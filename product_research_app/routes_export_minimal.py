@@ -26,6 +26,7 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.worksheet.cell_range import CellRange
 
 from . import database
+from .utils import sanitize_product_name
 from .utils.db import row_to_dict
 
 logger = logging.getLogger(__name__)
@@ -647,6 +648,7 @@ def _convert_row(row: Mapping[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]
     sources = _prepare_sources(row, extras)
 
     product_name = _coerce_text(_value_from_sources(sources, TEXT_FIELD_KEYS["Product Name"]))
+    product_name = sanitize_product_name(product_name) or ""
     tiktok_url = _coerce_text(_value_from_sources(sources, TEXT_FIELD_KEYS["TikTokUrl"]))
     kalodata_url = _coerce_text(_value_from_sources(sources, TEXT_FIELD_KEYS["KalodataUrl"]))
     image_url = _coerce_text(_value_from_sources(sources, TEXT_FIELD_KEYS["Img_url"]))

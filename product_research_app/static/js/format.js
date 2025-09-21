@@ -33,3 +33,7 @@ export function fmtPct(n) {
   return fmtNumber(n, 1) + '%';
 }
 
+export function nameWithFlames(name/*, trendingScore*/) {
+  return String(name ?? "");
+}
+
