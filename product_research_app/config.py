@@ -47,13 +47,21 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "min_low_pct": 0.05,
         "min_medium_pct": 0.05,
         "min_high_pct": 0.05,
+        "fallback_percentiles": {
+            "desire": [0.33, 0.66],
+            "competition": [0.33, 0.66],
+        },
     },
     "ai": {
         "parallelism": 8,
-        "microbatch": 32,
+        "microbatch": 12,
         "cache_enabled": True,
         "version": 1,
         "tpm_limit": None,
+        "rpm_limit": 150,
+        "timeout": 45,
+        "trunc_title": 180,
+        "trunc_desc": 800,
     },
     "includeImageInAI": True,
     "aiImageCostMaxUSD": 0.02,
@@ -205,6 +213,52 @@ def get_ai_runtime_config() -> Dict[str, Any]:
         for k, v in user.items():
             base[k] = v
 
+    def _env_int(name: str) -> Optional[int]:
+        raw = os.environ.get(name)
+        if raw is None:
+            return None
+        try:
+            return int(float(raw))
+        except Exception:
+            return None
+
+    def _env_float(name: str) -> Optional[float]:
+        raw = os.environ.get(name)
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except Exception:
+            return None
+
+    env_micro = _env_int("AI_MICROBATCH")
+    if env_micro is not None:
+        base["microbatch"] = env_micro
+
+    env_parallel = _env_int("AI_PARALLELISM")
+    if env_parallel is not None:
+        base["parallelism"] = env_parallel
+
+    env_timeout = _env_float("AI_TIMEOUT")
+    if env_timeout is not None:
+        base["timeout"] = env_timeout
+
+    env_rpm = _env_int("AI_RPM")
+    if env_rpm is not None:
+        base["rpm_limit"] = env_rpm
+
+    env_tpm = _env_int("AI_TPM")
+    if env_tpm is not None:
+        base["tpm_limit"] = env_tpm
+
+    env_trunc_title = _env_int("AI_TRUNC_TITLE")
+    if env_trunc_title is not None:
+        base["trunc_title"] = env_trunc_title
+
+    env_trunc_desc = _env_int("AI_TRUNC_DESC")
+    if env_trunc_desc is not None:
+        base["trunc_desc"] = env_trunc_desc
+
     cpu_parallel = max(1, (os.cpu_count() or 1) * 2)
     default_parallel = min(8, cpu_parallel)
     try:
@@ -239,6 +293,30 @@ def get_ai_runtime_config() -> Dict[str, Any]:
             base["tpm_limit"] = None
         else:
             base["tpm_limit"] = max(0, limit_val) or None
+
+    try:
+        rpm_val = int(base.get("rpm_limit", DEFAULT_CONFIG["ai"].get("rpm_limit", 0)))
+    except Exception:
+        rpm_val = DEFAULT_CONFIG["ai"].get("rpm_limit", 0)
+    base["rpm_limit"] = max(0, rpm_val) or None
+
+    try:
+        timeout_val = float(base.get("timeout", DEFAULT_CONFIG["ai"].get("timeout", 45)))
+    except Exception:
+        timeout_val = DEFAULT_CONFIG["ai"].get("timeout", 45)
+    base["timeout"] = max(5.0, timeout_val)
+
+    try:
+        trunc_title = int(base.get("trunc_title", DEFAULT_CONFIG["ai"].get("trunc_title", 180)))
+    except Exception:
+        trunc_title = DEFAULT_CONFIG["ai"].get("trunc_title", 180)
+    base["trunc_title"] = max(40, trunc_title)
+
+    try:
+        trunc_desc = int(base.get("trunc_desc", DEFAULT_CONFIG["ai"].get("trunc_desc", 800)))
+    except Exception:
+        trunc_desc = DEFAULT_CONFIG["ai"].get("trunc_desc", 800)
+    base["trunc_desc"] = max(80, trunc_desc)
 
     return base
 
