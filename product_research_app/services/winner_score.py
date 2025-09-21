@@ -672,6 +672,12 @@ def compute_winner_score_v2(
 
     sum_filtered = sum(eff_weights.values())
     score_float = sum(eff_weights.get(k, 0.0) * norms[k] for k in norms)
+    cfg_for_order = load_config()
+    persisted_order = cfg_for_order.get("winner_order") or list(CONFIG_DEFAULT_ORDER)
+    EPS = 1e-6
+    length = len(persisted_order)
+    for idx, key in enumerate(persisted_order):
+        score_float += (length - idx) * EPS * norms.get(key, 0.0)
     score_int = int(round(score_float * 100))
 
     eff_all_full = {k: eff_all.get(k, 0.0) for k in ALLOWED_FIELDS}

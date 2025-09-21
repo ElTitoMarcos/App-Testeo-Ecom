@@ -724,12 +724,17 @@ class RequestHandler(BaseHTTPRequestHandler):
         super().setup()
         self.wfile = _SilentWriter(self.wfile)
 
-    def _set_json(self, status=200):
+    def _set_json(self, status=200, extra_headers=None):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
+        for key, value in (extra_headers or {}).items():
+            try:
+                self.send_header(key, value)
+            except Exception:
+                continue
         self.end_headers()
 
     def _set_html(self, status=200):
@@ -877,6 +882,11 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(resp).encode("utf-8"))
             return
         if path == "/api/config/winner-weights":
+            cfg = config.load_config()
+            prev_order = list(cfg.get("winner_order", [])) if isinstance(cfg.get("winner_order"), list) else None
+            config.ensure_winner_order(cfg)
+            if prev_order != cfg.get("winner_order"):
+                config.save_config(cfg)
             from .services.config import (
                 get_winner_weights_raw,
                 get_winner_order_raw,
@@ -885,7 +895,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             )
 
             raw = get_winner_weights_raw()
-            order = get_winner_order_raw()
+            order = cfg.get("winner_order") or get_winner_order_raw()
             enabled = get_weights_enabled_raw()
             raw_eff = {k: (raw.get(k, 0) if enabled.get(k, True) else 0) for k in raw}
             eff_int = compute_effective_int(raw_eff, order)
@@ -898,7 +908,15 @@ class RequestHandler(BaseHTTPRequestHandler):
                 "weights_enabled": enabled,
                 "weights_order": order,
             }
-            self._set_json()
+            logger.info("winner_order served = %s", order)
+            headers = {
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+            }
+            try:
+                self._set_json(extra_headers=headers)
+            except TypeError:
+                self._set_json()
             self.wfile.write(json.dumps(resp).encode("utf-8"))
             return
         if path == "/_import_history":
@@ -1039,18 +1057,32 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/config":
             # return stored configuration (without exposing the API key)
             cfg = config.load_config()
+            prev_order = list(cfg.get("winner_order", [])) if isinstance(cfg.get("winner_order"), list) else None
+            config.ensure_winner_order(cfg)
+            if prev_order != cfg.get("winner_order"):
+                config.save_config(cfg)
+            order = cfg.get("winner_order") or list(config.DEFAULT_ORDER)
             key = cfg.get("api_key") or ""
             data = {
                 "model": cfg.get("model", "gpt-4o"),
                 "weights": config.get_weights(),
                 "has_api_key": bool(key),
                 "oldness_preference": cfg.get("oldness_preference", "newer"),
+                "winner_order": order,
             }
             if key:
                 data["api_key_last4"] = key[-4:]
                 data["api_key_length"] = len(key)
                 data["api_key_hash"] = hashlib.sha256(key.encode("utf-8")).hexdigest()
-            self._set_json()
+            logger.info("winner_order served = %s", order)
+            headers = {
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+            }
+            try:
+                self._set_json(extra_headers=headers)
+            except TypeError:
+                self._set_json()
             self.wfile.write(json.dumps(data).encode("utf-8"))
             return
         if path == "/settings/winner-score":
@@ -2606,32 +2638,27 @@ class RequestHandler(BaseHTTPRequestHandler):
             v = max(0.0, min(100.0, v))
             final_weights[k] = int(round(v))
 
-        # ORDER: por peso desc; a igualdad conserva el orden previo
-        prev_settings = winner_calc.load_settings()
-        prev_order = (
-            prev_settings.get("winner_order")
-            or prev_settings.get("weights_order")
+        weights_int = {k: int(v) for k, v in final_weights.items()}
+        cfg = config.load_config()
+        prev_cfg_order = cfg.get("winner_order") or cfg.get("weights_order")
+        config.ensure_winner_order(cfg)
+        prev_order = cfg.get("winner_order") or list(config.DEFAULT_ORDER)
+        rank_prev = {k: i for i, k in enumerate(prev_order)}
+        keys = list(weights_int.keys())
+        new_order = sorted(
+            keys,
+            key=lambda k: (-int(weights_int.get(k, 0)), rank_prev.get(k, 999)),
         )
-        if not isinstance(prev_order, list) or not prev_order:
-            from .services.config import DEFAULT_ORDER as DEFAULT_WINNER_ORDER
-
-            prev_order = list(DEFAULT_WINNER_ORDER)
-        rank = {k: i for i, k in enumerate(prev_order)}
-        order = sorted(
-            final_weights.keys(),
-            key=lambda k: (
-                -final_weights[k],
-                rank.get(k, len(rank) + allowed.index(k) if k in allowed else len(rank) + 999),
-            ),
-        )
-
-        from .services.config import set_winner_weights_raw, set_winner_order_raw
-
-        saved_weights = set_winner_weights_raw(final_weights)
-        saved_order = set_winner_order_raw(order)
+        cfg["winner_weights"] = weights_int
+        cfg["winner_order"] = new_order
+        cfg["weights_order"] = new_order
+        cfg["weightsUpdatedAt"] = int(time.time())
+        config.save_config(cfg)
         winner_calc.invalidate_weights_cache()
-        order = list(saved_order)
-        final_weights = saved_weights
+        logger.info("winner_order updated -> %s (from %s)", new_order, prev_cfg_order or prev_order)
+
+        order = list(new_order)
+        final_weights = weights_int
 
         # Logs (útiles para ti): ahora ai_raw/ints son lo mismo (0..100 independientes)
         logger.info(

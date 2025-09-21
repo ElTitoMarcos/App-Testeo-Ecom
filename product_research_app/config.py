@@ -7,12 +7,16 @@ file. If the file does not exist, default values are returned.
 """
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 
-DEFAULT_WINNER_ORDER = [
+logger = logging.getLogger(__name__)
+
+
+DEFAULT_ORDER = [
     "awareness",
     "desire",
     "revenue",
@@ -22,6 +26,9 @@ DEFAULT_WINNER_ORDER = [
     "oldness",
     "rating",
 ]
+
+# Backwards compatibility alias for older imports
+DEFAULT_WINNER_ORDER = list(DEFAULT_ORDER)
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -56,6 +63,42 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 
 
 CONFIG_FILE = Path(__file__).resolve().parent / "config.json"
+
+
+def ensure_winner_order(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Ensure ``winner_order`` exists and contains the canonical keys."""
+
+    aliases = {
+        "unitsSold": "units_sold",
+        "oldness": "oldness",
+        "rating": "rating",
+        "price": "price",
+        "revenue": "revenue",
+        "desire": "desire",
+        "awareness": "awareness",
+        "competition": "competition",
+    }
+
+    order_raw = cfg.get("winner_order")
+    normalized: list[str] = []
+    if isinstance(order_raw, (list, tuple)):
+        seen: set[str] = set()
+        for item in order_raw:
+            if item is None:
+                continue
+            key = aliases.get(str(item), str(item))
+            if key in DEFAULT_ORDER and key not in seen:
+                normalized.append(key)
+                seen.add(key)
+
+    if not normalized:
+        cfg["winner_order"] = list(DEFAULT_ORDER)
+    else:
+        if len(normalized) != len(DEFAULT_ORDER) or set(normalized) != set(DEFAULT_ORDER):
+            cfg["winner_order"] = list(DEFAULT_ORDER)
+        else:
+            cfg["winner_order"] = normalized
+    return cfg
 
 
 def load_config() -> Dict[str, Any]:
@@ -101,14 +144,13 @@ def load_config() -> Dict[str, Any]:
                 if k not in enabled:
                     enabled[k] = True
                     changed = True
-    winner_order = data.get("winner_order")
-    if not isinstance(winner_order, list) or not winner_order:
-        data["winner_order"] = list(DEFAULT_WINNER_ORDER)
-        winner_order = data["winner_order"]
+    prev_order = list(data.get("winner_order", [])) if isinstance(data.get("winner_order"), list) else None
+    ensure_winner_order(data)
+    if prev_order != data.get("winner_order"):
         changed = True
 
-    if "weights_order" not in data and isinstance(winner_order, list):
-        data["weights_order"] = list(winner_order)
+    if "weights_order" not in data and isinstance(data.get("winner_order"), list):
+        data["weights_order"] = list(data["winner_order"])
         changed = True
 
     if changed:

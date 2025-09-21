@@ -1,6 +1,7 @@
 from flask import request, jsonify, current_app
 from . import app
 
+from product_research_app.config import DEFAULT_ORDER, ensure_winner_order
 from product_research_app.services.winner_score import (
     recompute_scores_for_all_products,
     load_settings,
@@ -44,8 +45,12 @@ accepts any of the shapes described above.
 @app.route("/api/config/winner-weights", methods=["GET"])
 def api_get_winner_weights():
     settings = load_settings()
+    prev_order = list(settings.get("winner_order", [])) if isinstance(settings.get("winner_order"), list) else None
+    ensure_winner_order(settings)
+    if prev_order != settings.get("winner_order"):
+        save_settings(settings)
     weights = _coerce_weights(settings.get("winner_weights"))
-    order = settings.get("winner_order") or list(weights.keys())
+    order = settings.get("winner_order") or list(DEFAULT_ORDER)
     enabled_raw = settings.get("weights_enabled") if isinstance(settings.get("weights_enabled"), dict) else {}
     enabled = {k: bool(enabled_raw.get(k, True)) for k in weights.keys()}
     weights_eff = {k: (weights.get(k, 0) if enabled.get(k, True) else 0) for k in weights.keys()}
@@ -58,7 +63,9 @@ def api_get_winner_weights():
         "weights_enabled": enabled,
         "weights_order": settings.get("weights_order") or order,
     })
-    resp.headers["Cache-Control"] = "no-store"
+    current_app.logger.info("winner_order served = %s", order)
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
     return resp, 200
 
 
@@ -95,6 +102,7 @@ def api_patch_winner_weights():
         enabled = {k: bool(en_in.get(k, current_en.get(k, True))) for k in ALLOWED_FIELDS}
         settings["weights_enabled"] = enabled
 
+    ensure_winner_order(settings)
     save_settings(settings)
     invalidate_weights_cache()
 
@@ -105,5 +113,6 @@ def api_patch_winner_weights():
         current_app.logger.warning("recompute on save failed: %s", e)
 
     resp = jsonify({"ok": True, "winner_weights": settings["winner_weights"], "winner_order": order, "updated": updated})
-    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
     return resp, 200

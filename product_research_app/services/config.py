@@ -1,8 +1,14 @@
+import logging
 import time
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from ..config import load_config, save_config, DEFAULT_WINNER_ORDER
+from ..config import (
+    DEFAULT_ORDER as BASE_DEFAULT_ORDER,
+    ensure_winner_order,
+    load_config,
+    save_config,
+)
 
 ALLOWED_FIELDS = (
     "price",
@@ -15,11 +21,14 @@ ALLOWED_FIELDS = (
     "awareness",
 )
 DEFAULT_WEIGHTS_RAW: Dict[str, int] = {k: 50 for k in ALLOWED_FIELDS}
-DEFAULT_ORDER: List[str] = list(DEFAULT_WINNER_ORDER)
+DEFAULT_ORDER: List[str] = list(BASE_DEFAULT_ORDER)
 DEFAULT_ENABLED: Dict[str, bool] = {k: True for k in ALLOWED_FIELDS}
 
 # Compatibility placeholder; not used but kept for tests that monkeypatch it
 DB_PATH = Path(__file__).resolve().parents[1] / "data.sqlite3"
+
+
+logger = logging.getLogger(__name__)
 
 
 def _coerce_weights(raw: Dict[str, object] | None) -> Dict[str, int]:
@@ -43,6 +52,10 @@ def _normalize_order(order, weights: Dict[str, int]) -> List[str]:
 def init_app_config() -> None:
     cfg = load_config()
     changed = False
+    prev_order = list(cfg.get("winner_order", [])) if isinstance(cfg.get("winner_order"), list) else None
+    ensure_winner_order(cfg)
+    if prev_order != cfg.get("winner_order"):
+        changed = True
     weights = cfg.get("winner_weights")
     if not isinstance(weights, dict):
         cfg["winner_weights"] = DEFAULT_WEIGHTS_RAW.copy()
@@ -80,10 +93,12 @@ def init_app_config() -> None:
         changed = True
     if changed:
         save_config(cfg)
+    logger.info("winner_order on boot = %s", cfg.get("winner_order"))
 
 
 def _load() -> Tuple[Dict[str, int], List[str], Dict[str, bool]]:
     cfg = load_config()
+    ensure_winner_order(cfg)
     weights = cfg.get("winner_weights")
     if not isinstance(weights, dict) or not weights:
         weights = DEFAULT_WEIGHTS_RAW.copy()
@@ -106,6 +121,7 @@ def update_winner_settings(
 ) -> Tuple[Dict[str, int], List[str], Dict[str, bool]]:
     init_app_config()
     cfg = load_config()
+    ensure_winner_order(cfg)
     weights = cfg.get("winner_weights", DEFAULT_WEIGHTS_RAW.copy())
     order = cfg.get("winner_order", DEFAULT_ORDER.copy())
     enabled = cfg.get("weights_enabled", DEFAULT_ENABLED.copy())
