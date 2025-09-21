@@ -18,6 +18,7 @@ All date/time fields are stored as ISO 8601 strings for simplicity.
 
 import json
 import sqlite3
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -435,6 +436,24 @@ def initialize_database(conn: sqlite3.Connection) -> None:
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_enrichment_cache_updated ON enrichment_cache(updated_at)")
 
+    # Cache for AI column results (dedup across imports)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_cache (
+            sig_hash TEXT PRIMARY KEY,
+            model TEXT,
+            desire TEXT,
+            desire_magnitude TEXT,
+            awareness_level TEXT,
+            competition_level TEXT,
+            updated_at INTEGER,
+            version INTEGER
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_cache_model ON ai_cache(model)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_cache_updated ON ai_cache(updated_at)")
+
     # Batch metrics for observability
     cur.execute(
         """
@@ -451,6 +470,24 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         """
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_import_job_metrics_job ON import_job_metrics(job_id)")
+
+    # Metrics for AI micro-batches
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_job_metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL,
+            batch_no INTEGER NOT NULL,
+            rows INTEGER NOT NULL,
+            duration_ms REAL NOT NULL,
+            throughput REAL NOT NULL,
+            cached_hits INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY(job_id) REFERENCES import_jobs(id) ON DELETE CASCADE
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_job_metrics_job ON ai_job_metrics(job_id)")
     conn.commit()
 
 
@@ -587,6 +624,20 @@ def get_product(conn: sqlite3.Connection, product_id: int) -> Optional[sqlite3.R
         (product_id,),
     )
     return cur.fetchone()
+
+
+def get_products_by_ids(
+    conn: sqlite3.Connection, product_ids: Sequence[int]
+) -> List[sqlite3.Row]:
+    if not product_ids:
+        return []
+    placeholders = ",".join(["?"] * len(product_ids))
+    cur = conn.cursor()
+    cur.execute(
+        f"SELECT * FROM products WHERE id IN ({placeholders})",
+        tuple(int(pid) for pid in product_ids),
+    )
+    return cur.fetchall()
 
 
 def update_product(
@@ -990,7 +1041,13 @@ def start_import_job_ai(conn: sqlite3.Connection, job_id: int, total: int) -> No
     cur.execute(
         """
         UPDATE import_jobs
-        SET status='ai', updated_at=?, ai_total=?, ai_done=0, ai_error=NULL
+        SET
+            updated_at=?,
+            phase='enrich',
+            status=CASE WHEN status IN ('done', 'error') THEN 'running' ELSE status END,
+            ai_total=?,
+            ai_done=0,
+            ai_error=NULL
         WHERE id=?
         """,
         (now, total, job_id),
@@ -1193,6 +1250,53 @@ def get_recent_import_metrics(conn: sqlite3.Connection, limit: int = 50) -> List
     return cur.fetchall()
 
 
+def append_ai_job_metric(
+    conn: sqlite3.Connection,
+    job_id: int,
+    batch_no: int,
+    rows: int,
+    duration_ms: float,
+    throughput: float,
+    *,
+    cached_hits: int = 0,
+    commit: bool = False,
+) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO ai_job_metrics (job_id, batch_no, rows, duration_ms, throughput, cached_hits)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            job_id,
+            batch_no,
+            int(rows),
+            float(duration_ms),
+            float(throughput),
+            int(cached_hits),
+        ),
+    )
+    if commit:
+        conn.commit()
+
+
+def get_recent_ai_metrics(
+    conn: sqlite3.Connection,
+    limit: int = 50,
+) -> List[sqlite3.Row]:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT job_id, batch_no, rows, duration_ms, throughput, cached_hits, created_at
+        FROM ai_job_metrics
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    return cur.fetchall()
+
+
 def transition_job_items(
     conn: sqlite3.Connection,
     job_id: int,
@@ -1225,6 +1329,21 @@ def list_items_by_state(
         (job_id, state),
     )
     return cur.fetchall()
+
+
+def get_job_product_ids(conn: sqlite3.Connection, job_id: int) -> List[int]:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT DISTINCT p.id
+        FROM items i
+        JOIN products p ON p.sig_hash = i.sig_hash
+        WHERE i.job_id=?
+        ORDER BY p.id
+        """,
+        (job_id,),
+    )
+    return [int(row[0]) for row in cur.fetchall()]
 
 
 def mark_item_enriched(
@@ -1366,6 +1485,71 @@ def upsert_enrichment_cache(
             source=excluded.source
         """,
         (sig_hash, desire, awareness, reason, now, source),
+    )
+    if commit:
+        conn.commit()
+
+
+def get_ai_cache_entries(
+    conn: sqlite3.Connection,
+    sig_hashes: Sequence[str],
+    *,
+    model: str,
+    version: int,
+) -> Dict[str, sqlite3.Row]:
+    if not sig_hashes:
+        return {}
+    placeholders = ",".join(["?"] * len(sig_hashes))
+    cur = conn.cursor()
+    cur.execute(
+        f"""
+        SELECT sig_hash, model, desire, desire_magnitude, awareness_level, competition_level, updated_at, version
+        FROM ai_cache
+        WHERE sig_hash IN ({placeholders}) AND model=? AND version=?
+        """,
+        (*sig_hashes, model, int(version)),
+    )
+    return {row["sig_hash"]: row for row in cur.fetchall()}
+
+
+def upsert_ai_cache_entry(
+    conn: sqlite3.Connection,
+    sig_hash: str,
+    *,
+    model: str,
+    version: int,
+    desire: Optional[str],
+    desire_magnitude: Optional[str],
+    awareness_level: Optional[str],
+    competition_level: Optional[str],
+    commit: bool = False,
+) -> None:
+    now = int(time.time())
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO ai_cache (
+            sig_hash, model, desire, desire_magnitude, awareness_level, competition_level, updated_at, version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(sig_hash) DO UPDATE SET
+            model=excluded.model,
+            desire=excluded.desire,
+            desire_magnitude=excluded.desire_magnitude,
+            awareness_level=excluded.awareness_level,
+            competition_level=excluded.competition_level,
+            updated_at=excluded.updated_at,
+            version=excluded.version
+        """,
+        (
+            sig_hash,
+            model,
+            desire,
+            desire_magnitude,
+            awareness_level,
+            competition_level,
+            now,
+            int(version),
+        ),
     )
     if commit:
         conn.commit()

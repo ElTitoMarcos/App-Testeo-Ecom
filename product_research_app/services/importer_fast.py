@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 import io
-import hashlib
 import logging
 import re
 import sqlite3
@@ -21,6 +20,7 @@ from product_research_app.database import (
     transition_job_items,
     update_import_job_progress,
 )
+from product_research_app.utils.signature import compute_sig_hash
 
 logger = logging.getLogger(__name__)
 
@@ -83,24 +83,6 @@ ALIASES_SANITIZED = {
     field: [_sanitize(alias) for alias in aliases]
     for field, aliases in FIELD_ALIASES.items()
 }
-
-_SIG_NORMALIZE_RE = re.compile(r"\s+")
-
-
-def _normalize_sig_part(value: Optional[str]) -> str:
-    if value is None:
-        return ""
-    text = str(value).strip().lower()
-    if not text:
-        return ""
-    return _SIG_NORMALIZE_RE.sub(" ", text)
-
-
-def _compute_sig_hash(name: str, brand: Optional[str], asin: Optional[str], url: Optional[str]) -> str:
-    payload = "|".join(
-        _normalize_sig_part(part) for part in (name, brand, asin, url)
-    )
-    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
 def _parse_optional_number(value: Any, *, as_int: bool = False) -> Optional[float]:
@@ -369,7 +351,7 @@ class BulkImporter:
                 if not value:
                     continue
             extras[key] = value
-        sig_hash = _compute_sig_hash(name, brand, asin, product_url)
+        sig_hash = compute_sig_hash(name, brand, asin, product_url)
         if not sig_hash:
             return None
         return {
