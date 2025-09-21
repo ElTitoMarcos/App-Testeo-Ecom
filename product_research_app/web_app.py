@@ -2608,8 +2608,30 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         # ORDER: por peso desc; a igualdad conserva el orden previo
         prev_settings = winner_calc.load_settings()
-        prev_order = prev_settings.get("weights_order") or list(allowed)
-        order = sorted(final_weights.keys(), key=lambda k: (-final_weights[k], prev_order.index(k) if k in prev_order else 999))
+        prev_order = (
+            prev_settings.get("winner_order")
+            or prev_settings.get("weights_order")
+        )
+        if not isinstance(prev_order, list) or not prev_order:
+            from .services.config import DEFAULT_ORDER as DEFAULT_WINNER_ORDER
+
+            prev_order = list(DEFAULT_WINNER_ORDER)
+        rank = {k: i for i, k in enumerate(prev_order)}
+        order = sorted(
+            final_weights.keys(),
+            key=lambda k: (
+                -final_weights[k],
+                rank.get(k, len(rank) + allowed.index(k) if k in allowed else len(rank) + 999),
+            ),
+        )
+
+        from .services.config import set_winner_weights_raw, set_winner_order_raw
+
+        saved_weights = set_winner_weights_raw(final_weights)
+        saved_order = set_winner_order_raw(order)
+        winner_calc.invalidate_weights_cache()
+        order = list(saved_order)
+        final_weights = saved_weights
 
         # Logs (útiles para ti): ahora ai_raw/ints son lo mismo (0..100 independientes)
         logger.info(
@@ -2621,7 +2643,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             sum(final_weights.values()),
         )
 
-        # Respuesta para el frontend (este ya hace el PATCH /api/config/winner-weights)
+        # Respuesta para el frontend; los valores ya quedaron persistidos en backend.
         resp = {
             "weights": final_weights,      # 0..100 independientes
             "weights_order": order,        # prioridad explícita

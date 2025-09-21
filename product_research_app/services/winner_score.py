@@ -15,6 +15,7 @@ from .config import (
     get_winner_weights_raw,
     set_winner_weights_raw,
     get_winner_order_raw,
+    DEFAULT_ORDER as CONFIG_DEFAULT_ORDER,
     DB_PATH as CONFIG_DB_PATH,
 )
 from ..config import load_config, save_config
@@ -652,7 +653,20 @@ def compute_winner_score_v2(
         else 0
     )
     if order is None:
-        order = list(weights_for_priority.keys())
+        order = get_winner_order_raw()
+    if not order:
+        order = list(CONFIG_DEFAULT_ORDER)
+    seen: set[str] = set()
+    normalized_order: list[str] = []
+    for key in order:
+        if key in weights_for_priority and key not in seen:
+            normalized_order.append(key)
+            seen.add(key)
+    for key in weights_for_priority.keys():
+        if key not in seen:
+            normalized_order.append(key)
+            seen.add(key)
+    order = normalized_order
     eff_all = compute_effective_weights(weights_for_priority, order)
     eff_weights = {k: eff_all.get(k, 0.0) for k in norms.keys()}
 

@@ -12,6 +12,18 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 
+DEFAULT_WINNER_ORDER = [
+    "awareness",
+    "desire",
+    "revenue",
+    "competition",
+    "units_sold",
+    "price",
+    "oldness",
+    "rating",
+]
+
+
 DEFAULT_CONFIG: Dict[str, Any] = {
     "autoFillIAOnImport": True,
     "aiBatch": {
@@ -89,8 +101,14 @@ def load_config() -> Dict[str, Any]:
                 if k not in enabled:
                     enabled[k] = True
                     changed = True
-    if "winner_order" in data and "weights_order" not in data:
-        data["weights_order"] = list(data["winner_order"])
+    winner_order = data.get("winner_order")
+    if not isinstance(winner_order, list) or not winner_order:
+        data["winner_order"] = list(DEFAULT_WINNER_ORDER)
+        winner_order = data["winner_order"]
+        changed = True
+
+    if "weights_order" not in data and isinstance(winner_order, list):
+        data["weights_order"] = list(winner_order)
         changed = True
 
     if changed:
