@@ -14,6 +14,7 @@ from product_research_app.routes_export_minimal import COLUMNS as EXPORT_COLUMNS
 from product_research_app.services import winner_score
 from product_research_app.services import config as cfg_service
 from product_research_app.utils.db import row_to_dict
+from openpyxl.utils import get_column_letter
 
 def setup_env(tmp_path, monkeypatch):
     monkeypatch.setattr(web_app, "DB_PATH", tmp_path / "data.sqlite3")
@@ -786,6 +787,8 @@ def test_export_kalodata_minimal_not_found(tmp_path, monkeypatch):
 def test_export_kalodata_minimal_success(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)
     monkeypatch.setattr(web_app, "ensure_db", lambda: conn)
+    monkeypatch.setattr(routes_export_minimal, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(routes_export_minimal, "EXPORT_DIR", tmp_path / "exports")
 
     extra1 = {
         "TikTokUrl": "https://tiktok.example/alpha",
@@ -902,7 +905,8 @@ def test_export_kalodata_minimal_success(tmp_path, monkeypatch):
     web_app.RequestHandler.handle_export_kalodata_minimal(handler)
 
     assert handler.status == 200
-    assert "kalodata_for_analysis_" in handler.sent_headers.get("Content-Disposition", "")
+    disposition = handler.sent_headers.get("Content-Disposition", "")
+    assert disposition == "attachment; filename=Analisis_Export_0001.xlsx"
 
     payload = handler.wfile.getvalue()
     assert payload
@@ -978,25 +982,27 @@ def test_export_kalodata_minimal_success(tmp_path, monkeypatch):
     dv_ranges = [dv.sqref for dv in ws.data_validations.dataValidation]
     assert any(str(dv) == "J2:J4" for dv in dv_ranges)
 
-    cf_ranges = list(ws.conditional_formatting)
-
-    def _cfvo_values(cfvo):
-        values = []
-        for obj in cfvo:
-            try:
-                raw = getattr(obj, "value", getattr(obj, "val", None))
-                values.append(float(raw))
-            except (TypeError, ValueError):
-                values.append(None)
-        return values
-
-    assert any(
-        getattr(rule, "type", "") == "dataBar"
-        and rule.dataBar is not None
-        and _cfvo_values(rule.dataBar.cfvo) == [0.0, 100.0]
-        for cf in cf_ranges
+    cf_rules = [
+        rule
+        for cf in ws.conditional_formatting
         for rule in cf.rules
-    )
+    ]
+    assert not any(getattr(rule, "type", "") == "dataBar" for rule in cf_rules)
+
+    dm_index = header.index("desire magnitude")
+    dm_letter = get_column_letter(dm_index + 1)
+    for row_idx in range(2, ws.max_row + 1):
+        cell = ws[f"{dm_letter}{row_idx}"]
+        assert cell.fill.fill_type is None
+
+    saved_files = sorted((routes_export_minimal.EXPORT_DIR).glob("Analisis_Export_*.xlsx"))
+    assert saved_files
+    assert saved_files[0].name == "Analisis_Export_0001.xlsx"
+    seq_path = routes_export_minimal.STATE_DIR / "export_seq.json"
+    assert seq_path.exists()
+    with seq_path.open("r", encoding="utf-8") as fh:
+        seq_payload = json.load(fh)
+    assert seq_payload == {"export_seq": 1}
 
     assert len(getattr(ws, "_images", [])) == 2
     assert ws.row_dimensions[2].height == routes_export_minimal._IMG_ROW_HEIGHT

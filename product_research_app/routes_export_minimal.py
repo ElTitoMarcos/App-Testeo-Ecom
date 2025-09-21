@@ -7,9 +7,12 @@ import io
 import json
 import logging
 import math
+import os
 import re
+import threading
 import time
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 import pandas as pd
@@ -20,12 +23,72 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.table import Table, TableStyleInfo
-from openpyxl.formatting.rule import DataBarRule
+from openpyxl.worksheet.cell_range import CellRange
 
 from . import database
 from .utils.db import row_to_dict
 
 logger = logging.getLogger(__name__)
+
+APP_DIR = Path(__file__).resolve().parent
+STATE_DIR = (APP_DIR / ".." / "state").resolve()
+EXPORT_DIR = (APP_DIR / ".." / "exports").resolve()
+
+_SEQ_LOCK = threading.Lock()
+_SEQ_FILE_NAME = "export_seq.json"
+_DESIRE_MAG_HEADERS = {
+    "desire magnitude",
+    "desire_magnitude",
+    "desire mag",
+    "desire_mag",
+    "magnitud del deseo",
+}
+
+
+def _seq_path() -> Path:
+    return STATE_DIR / _SEQ_FILE_NAME
+
+
+def next_export_id() -> int:
+    seq_path = _seq_path()
+    with _SEQ_LOCK:
+        try:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            logger.exception("failed to ensure export state directory exists: %s", STATE_DIR)
+        current = 0
+        if seq_path.exists():
+            try:
+                with seq_path.open("r", encoding="utf-8") as fh:
+                    payload = json.load(fh) or {}
+                current = int(payload.get("export_seq", 0))
+            except Exception:
+                logger.exception("failed to read export sequence from %s", seq_path)
+                current = 0
+        current += 1
+        tmp_path = seq_path.with_suffix(f"{seq_path.suffix}.tmp")
+        try:
+            with tmp_path.open("w", encoding="utf-8") as fh:
+                json.dump({"export_seq": current}, fh)
+            os.replace(tmp_path, seq_path)
+        except Exception:
+            logger.exception("failed to persist export sequence to %s", seq_path)
+        return current
+
+
+def build_export_filename(base_dir: os.PathLike[str] | str) -> Path:
+    base_path = Path(base_dir)
+    try:
+        base_path.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        logger.exception("failed to ensure export directory exists: %s", base_path)
+    export_id = next_export_id()
+    return base_path / f"Analisis_Export_{export_id:04d}.xlsx"
+
+
+def _is_desire_magnitude_header(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().lower() in _DESIRE_MAG_HEADERS
+
 
 ResponseHandler = Any
 EnsureDbFn = Callable[[], Any]
@@ -323,9 +386,9 @@ def export_kalodata_minimal(handler: ResponseHandler, ensure_db: EnsureDbFn) -> 
         handler.send_json({"error": "products_not_found"}, 404)
         return
 
-    wb_data = _build_workbook(rows)
-    timestamp = datetime.now(timezone.utc)
-    filename = f"kalodata_for_analysis_{timestamp:%Y%m%d_%H%M}.xlsx"
+    export_path = build_export_filename(EXPORT_DIR)
+    wb_data = _build_workbook(rows, export_path)
+    filename = export_path.name
 
     handler.send_response(200)
     handler.send_header(
@@ -341,7 +404,9 @@ def export_kalodata_minimal(handler: ResponseHandler, ensure_db: EnsureDbFn) -> 
     logger.info("kalodata minimal export ok products=%d duration=%.3fs", len(rows), duration)
 
 
-def _build_workbook(rows: Sequence[Mapping[str, Any]]) -> bytes:
+def _build_workbook(
+    rows: Sequence[Mapping[str, Any]], output_path: Optional[Path] = None
+) -> bytes:
     records: List[Dict[str, Any]] = []
     metadata: List[Dict[str, Any]] = []
 
@@ -378,9 +443,20 @@ def _build_workbook(rows: Sequence[Mapping[str, Any]]) -> bytes:
         df.to_excel(writer, sheet_name="products", index=False)
         ws = writer.sheets["products"]
         _apply_sheet_format(ws)
+        _clear_desire_magnitude_styles(ws)
         _embed_images(ws)
 
-    return buffer.getvalue()
+    data = buffer.getvalue()
+
+    if output_path is not None:
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with output_path.open("wb") as fh:
+                fh.write(data)
+        except Exception:
+            logger.exception("failed to persist export workbook to %s", output_path)
+
+    return data
 
 
 def _apply_sheet_format(ws) -> None:
@@ -499,15 +575,6 @@ def _apply_sheet_format(ws) -> None:
                 f"{get_column_letter(desire_mag_col)}{ws.max_row}"
             )
             dv.add(dv_range)
-            bar_rule = DataBarRule(
-                start_type="num",
-                start_value=0,
-                end_type="num",
-                end_value=100,
-                color="1F497D",
-                showValue=None,
-            )
-            ws.conditional_formatting.add(dv_range, bar_rule)
 
     table_ref = f"A1:{get_column_letter(ws.max_column)}{ws.max_row}"
     table = Table(displayName="tbl_products", ref=table_ref)
@@ -519,6 +586,61 @@ def _apply_sheet_format(ws) -> None:
         showColumnStripes=False,
     )
     ws.add_table(table)
+
+
+def _cell_range_includes_column(range_string: str, column_index: int) -> bool:
+    try:
+        cell_range = CellRange(range_string)
+    except ValueError:
+        return False
+    return cell_range.min_col <= column_index <= cell_range.max_col
+
+
+def _clear_desire_magnitude_styles(ws) -> None:
+    if ws.max_row < 2:
+        return
+
+    col_idx: Optional[int] = None
+    for cell in ws[1]:
+        if _is_desire_magnitude_header(cell.value):
+            col_idx = cell.col_idx
+            break
+
+    if col_idx is None:
+        header_map = _build_header_index_map(ws)
+        col_idx = _resolve_column_index(
+            header_map,
+            "desire magnitude",
+            "desire_mag",
+            "desire mag",
+            "magnitud del deseo",
+        )
+
+    if col_idx is None:
+        return
+
+    try:
+        cf = ws.conditional_formatting
+        cf_rules = getattr(cf, "_cf_rules", None)
+        if cf_rules:
+            keep: List[Tuple[str, Any]] = []
+            for key, rules in list(cf_rules.items()):
+                ranges = str(key).replace(",", " ").split()
+                if any(_cell_range_includes_column(rng, col_idx) for rng in ranges):
+                    continue
+                keep.append((key, rules))
+            cf_rules.clear()
+            for key, rules in keep:
+                cf_rules[key] = rules
+    except Exception:
+        logger.exception("failed to prune conditional formats for desire magnitude")
+
+    for row in ws.iter_rows(
+        min_row=2, min_col=col_idx, max_col=col_idx, max_row=ws.max_row
+    ):
+        cell = row[0]
+        cell.fill = PatternFill()
+
 
 def _convert_row(row: Mapping[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     extras = _ensure_dict(row.get("extra"))
