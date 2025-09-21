@@ -20,6 +20,7 @@ Then open http://host:port in a browser.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import io
@@ -450,7 +451,14 @@ def _schedule_post_import_tasks(
             pending_ids: List[int] = list(product_ids)
             try:
                 if auto_ai and product_ids:
-                    result = ai_columns.run_ai_fill_job(job_id, product_ids, status_cb=status_cb)
+                    result = asyncio.run(
+                        ai_columns.run_ai_fill_job(
+                            job_id,
+                            product_ids,
+                            status_cb=status_cb,
+                            db_path=DB_PATH,
+                        )
+                    )
                     final_counts = result.get("counts", final_counts)
                     pending_ids = result.get("pending_ids", pending_ids)
                     error = result.get("error")

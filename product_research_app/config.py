@@ -36,7 +36,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "aiCost": {
         "model": "gpt-4.1-mini",
         "useBatchWhenCountGte": 300,
-        "costCapUSD": 0.25,
+        "costCapUSD": None,
         "estTokensPerItemIn": 300,
         "estTokensPerItemOut": 80,
     },
@@ -49,11 +49,17 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "min_high_pct": 0.05,
     },
     "ai": {
+        "model": "gpt-4o-mini",
         "parallelism": 8,
         "microbatch": 32,
         "cache_enabled": True,
         "version": 1,
         "tpm_limit": None,
+        "rpm_limit": None,
+        "temperature": 0.0,
+        "top_p": 0.0,
+        "response_format": "json",
+        "costCapUSD": None,
     },
     "includeImageInAI": True,
     "aiImageCostMaxUSD": 0.02,
@@ -146,10 +152,23 @@ def _merge_defaults(dst: Dict[str, Any], src: Dict[str, Any]) -> bool:
 
 
 def get_api_key() -> Optional[str]:
-    """Return the stored OpenAI API key if present."""
+    """Return the API key following the documented priority order."""
 
-    config = load_config()
-    return config.get("api_key")
+    cfg = load_config()
+    key = str(cfg.get("api_key") or "").strip()
+    if key:
+        return key
+    enrich_key = os.environ.get("ENRICH_API_KEY")
+    if enrich_key:
+        enrich_key = enrich_key.strip()
+        if enrich_key:
+            return enrich_key
+    openai_key = os.environ.get("OPENAI_API_KEY")
+    if openai_key:
+        openai_key = openai_key.strip()
+        if openai_key:
+            return openai_key
+    return None
 
 
 def get_model() -> str:
@@ -201,46 +220,65 @@ def get_ai_runtime_config() -> Dict[str, Any]:
     cfg = load_config()
     base = DEFAULT_CONFIG["ai"].copy()
     user = cfg.get("ai", {})
-    if isinstance(user, dict):
-        for k, v in user.items():
-            base[k] = v
+    for key, value in (user or {}).items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            tmp = base.get(key, {}).copy()
+            tmp.update(value)
+            base[key] = tmp
+        else:
+            base[key] = value
 
     cpu_parallel = max(1, (os.cpu_count() or 1) * 2)
     default_parallel = min(8, cpu_parallel)
-    try:
-        parallel = int(base.get("parallelism") or 0)
-    except Exception:
-        parallel = default_parallel
-    if parallel <= 0:
-        parallel = default_parallel
-    base["parallelism"] = max(1, parallel)
 
-    try:
-        micro = int(base.get("microbatch") or 0)
-    except Exception:
-        micro = DEFAULT_CONFIG["ai"]["microbatch"]
-    if micro <= 0:
-        micro = DEFAULT_CONFIG["ai"]["microbatch"]
-    base["microbatch"] = max(1, micro)
-
-    base["cache_enabled"] = bool(base.get("cache_enabled", True))
-    try:
-        base["version"] = int(base.get("version", DEFAULT_CONFIG["ai"]["version"]))
-    except Exception:
-        base["version"] = DEFAULT_CONFIG["ai"]["version"]
-
-    tpm_limit = base.get("tpm_limit")
-    if tpm_limit is None:
-        base["tpm_limit"] = None
-    else:
+    def _coerce_int(value: Any, default: int) -> int:
         try:
-            limit_val = int(tpm_limit)
+            num = int(value)
         except Exception:
-            base["tpm_limit"] = None
-        else:
-            base["tpm_limit"] = max(0, limit_val) or None
+            return default
+        return default if num <= 0 else num
 
-    return base
+    def _coerce_optional_int(value: Any) -> Optional[int]:
+        if value in (None, "", 0, "0"):
+            return None
+        try:
+            num = int(value)
+        except Exception:
+            return None
+        return num if num > 0 else None
+
+    def _coerce_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except Exception:
+            return default
+
+    def _coerce_optional_float(value: Any) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    runtime: Dict[str, Any] = {}
+    runtime["model"] = str(base.get("model") or "gpt-4o-mini")
+    runtime["parallelism"] = max(1, _coerce_int(base.get("parallelism"), default_parallel))
+    runtime["microbatch"] = max(1, _coerce_int(base.get("microbatch"), DEFAULT_CONFIG["ai"]["microbatch"]))
+    runtime["cache_enabled"] = bool(base.get("cache_enabled", True))
+    runtime["version"] = _coerce_int(base.get("version", DEFAULT_CONFIG["ai"]["version"]), DEFAULT_CONFIG["ai"]["version"])
+    runtime["temperature"] = _coerce_float(base.get("temperature"), 0.0)
+    runtime["top_p"] = _coerce_float(base.get("top_p"), 0.0)
+    runtime["response_format"] = str(base.get("response_format") or "json")
+    runtime["rpm_limit"] = _coerce_optional_int(base.get("rpm_limit"))
+    runtime["tpm_limit"] = _coerce_optional_int(base.get("tpm_limit"))
+
+    cost_cap = base.get("costCapUSD")
+    if cost_cap is None:
+        cost_cap = cfg.get("aiCost", {}).get("costCapUSD")
+    runtime["costCapUSD"] = _coerce_optional_float(cost_cap)
+
+    return runtime
 
 
 def is_auto_fill_ia_on_import_enabled() -> bool:
