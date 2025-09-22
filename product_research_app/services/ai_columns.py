@@ -857,9 +857,21 @@ def run_ai_fill_job(
 
     if sig_updates:
         cur = conn.cursor()
+        skipped_sig_hash = 0
         for sig_hash, pid in sig_updates:
-            cur.execute("UPDATE products SET sig_hash=? WHERE id=?", (sig_hash, pid))
-        conn.commit()
+            cur.execute(
+                "UPDATE OR IGNORE products SET sig_hash=? WHERE id=?",
+                (sig_hash, pid),
+            )
+            if cur.rowcount == 0:
+                skipped_sig_hash += 1
+        if conn.in_transaction:
+            conn.commit()
+        if skipped_sig_hash:
+            logger.debug(
+                "skipped %d sig_hash updates due to existing conflicts",
+                skipped_sig_hash,
+            )
 
     total_items = len(candidates)
 
