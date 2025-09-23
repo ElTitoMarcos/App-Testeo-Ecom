@@ -1,0 +1,7 @@
+# Windows scripts -> CRLF
+*.bat text eol=crlf
+*.vbs text eol=crlf
+
+# Unix/mac scripts -> LF
+*.sh text eol=lf
+*.command text eol=lf
