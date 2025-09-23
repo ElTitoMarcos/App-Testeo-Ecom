@@ -1,20 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Ejecutar siempre desde la carpeta del script
 cd "$(dirname "$0")"
 
-# ======== CONFIG ========
-ENTRYPOINT="main.py"          # <<< CAMBIAR si tu entrada no es main.py
 LOGFILE="logs/session.log"
-# ========================
-
-echo "[INFO] Directorio: $(pwd)"
 mkdir -p logs
 
 # Crear venv si no existe
 if [ ! -x ".venv/bin/python3" ]; then
   echo "[INFO] Creando entorno virtual .venv ..."
-  /usr/bin/python3 -m venv .venv || { echo "[ERROR] No se pudo crear .venv"; read -r -p "Enter para salir" _; exit 1; }
+  /usr/bin/python3 -m venv .venv
 fi
 
 # Activar venv
@@ -27,11 +21,7 @@ echo "[INFO] Python en venv: $(python3 -V || echo 'no disponible')"
 if [ -f "requirements.txt" ]; then
   echo "[INFO] Instalando dependencias (si faltan)..."
   python3 -m pip install --upgrade pip >/dev/null
-  if ! pip3 install -r requirements.txt; then
-    echo "[ERROR] Fallo instalando requirements.txt"
-    read -r -p "Enter para salir" _
-    exit 1
-  fi
+  pip3 install -r requirements.txt
 fi
 
 export PYTHONUTF8=1
@@ -39,18 +29,14 @@ export PYTHONIOENCODING=utf-8
 
 echo
 echo "============================"
-echo "Ejecutando: python3 -u \"$ENTRYPOINT\""
-echo "(se vera en consola y se guardara en $LOGFILE)"
+echo "Ejecutando: python3 -u -m product_research_app"
+echo "(consola + log en $LOGFILE)"
 echo "Ctrl+C para parar el servidor."
 echo "============================"
 echo
 
-# -u para salida sin buffer; tee duplica a consola y a fichero
-set +e
-python3 -u "$ENTRYPOINT" 2>&1 | tee -a "$LOGFILE"
+python3 -u -m product_research_app 2>&1 | tee -a "$LOGFILE"
 RC=${PIPESTATUS[0]}
-set -e
-
 echo
 if [ "$RC" -ne 0 ]; then
   echo "[ERROR] Salio con codigo $RC"

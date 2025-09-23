@@ -1,14 +1,8 @@
 @echo off
 setlocal enableextensions
-REM Ejecutar siempre desde la carpeta del script
 cd /d "%~dp0"
 
-REM ======== CONFIG ========
-set "ENTRYPOINT=main.py"   REM <<< CAMBIAR si tu entrada no es main.py
 set "LOGFILE=logs\session.log"
-REM ========================
-
-echo [INFO] Directorio: %CD%
 if not exist "logs" mkdir "logs"
 
 REM Resolver Python del sistema
@@ -55,23 +49,22 @@ set "PYTHONIOENCODING=utf-8"
 
 echo.
 echo ============================
-echo Ejecutando: python -u "%ENTRYPOINT%"
-echo (se vera en consola y se guardara en %LOGFILE%)
+echo Ejecutando: python -u -m product_research_app
+echo (consola + log en %LOGFILE%)
 echo Ctrl+C para parar el servidor.
 echo ============================
 echo.
 
-REM Ejecutar con salida sin buffer (-u) y TEAR a fichero conservando consola
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$p='python'; & $p -u '%ENTRYPOINT%' 2>&1 ^| Tee-Object -FilePath '%LOGFILE%' -Append"
+  "$p='python'; & $p -u -m product_research_app 2>&1 ^| Tee-Object -FilePath '%LOGFILE%' -Append"
 
 set ERR=%ERRORLEVEL%
 echo.
 if not "%ERR%"=="0" (
-  echo [ERROR] El proceso termino con codigo %ERR%.
+  echo [ERROR] Salio con codigo %ERR%.
 ) else (
   echo [OK] Proceso finalizado.
 )
 echo.
 pause
-endlocal & exit /b %ERR%
+endlocal
