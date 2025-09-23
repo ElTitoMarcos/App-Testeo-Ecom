@@ -1,24 +1,38 @@
 @echo off
-:: Batch file to launch the Product Research Copilot
-:: This script should be run from Windows.  It installs dependencies if
-:: necessary and then starts the application.
+setlocal enableextensions
+pushd "%~dp0"
 
-REM Change to the directory containing this batch file
-cd /d %~dp0
+if not exist "logs" mkdir "logs"
 
-REM Install Python dependencies (requires pip).  Errors are ignored if already installed.
-echo Comprobando e instalando dependencias de Python...
-python -m pip install --quiet --no-input -r requirements.txt 2>NUL
+if not exist ".venv" (
+  where py >nul 2>&1 && (py -3.11 -m venv .venv || py -3 -m venv .venv) || (python -m venv .venv)
+)
 
-REM Launch the web application in a new window and open the browser automatically
-echo Iniciando la interfaz web de Ecom Testing App...
-REM Start the Python server in a new window so the batch script can continue
-start "Ecom Testing App" python -m product_research_app.web_app
-REM Espera un momento para que el servidor arranque
-timeout /t 2 >nul
-REM Abrir automáticamente el navegador predeterminado
-start "" http://127.0.0.1:8000
+REM Activar venv
+call ".venv\Scripts\activate.bat"
 
-echo.
-echo La interfaz web debería abrirse automáticamente en su navegador.  Si no es así, visite http://127.0.0.1:8000
-echo Cierre esta ventana para detener el servidor.
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
+
+REM Instalar dependencias si fuese necesario
+if exist "requirements.txt" (
+  python -m pip install --quiet -r requirements.txt 1>>"logs\setup.out.log" 2>>"logs\setup.err.log"
+)
+
+for %%I in (".venv\Scripts\pythonw.exe") do set "PYW_PATH=%%~fI"
+if not exist "%PYW_PATH%" (
+  echo No se encontró pythonw.exe en la venv. >"logs\run.err.log"
+  popd
+  endlocal
+  exit /b 1
+)
+
+REM Lanzar sin consola con pythonw.exe y redirigir salidas a logs
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "Start-Process -FilePath '%PYW_PATH%' -ArgumentList '-m','product_research_app.web_app' -WindowStyle Hidden -RedirectStandardOutput 'logs\\run.out.log' -RedirectStandardError 'logs\\run.err.log'"
+
+REM Abrir navegador tras 3s (ajusta URL si procede)
+powershell -NoProfile -Command "Start-Sleep -Seconds 3; Start-Process 'http://127.0.0.1:8000'" >nul 2>&1
+
+popd
+endlocal
