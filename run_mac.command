@@ -1,30 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Ejecutar desde la carpeta del script
+# Ejecutar siempre desde la carpeta del script
 cd "$(dirname "$0")"
-
-# ======== CONFIG ========
-MODULE="product_research_app.web_app"   # <<< Cambia a product_research_app.main si prefieres la CLI
-HOST="127.0.0.1"
-PORT="8000"
-# ========================
 
 echo "[INFO] Directorio: $(pwd)"
 mkdir -p logs
 
-# Crear venv si no existe
+# ====== Crear venv si no existe ======
 if [ ! -x ".venv/bin/python3" ]; then
   echo "[INFO] Creando entorno virtual .venv ..."
   /usr/bin/python3 -m venv .venv
 fi
 
-# Activar venv
+# ====== Activar venv ======
 # shellcheck disable=SC1091
-source ".venv/bin/activate" || { echo "[ERROR] No se pudo activar el venv"; read -r -p "Enter para salir"; exit 1; }
+source ".venv/bin/activate" || { echo "[ERROR] No se pudo activar .venv"; read -r -p "Enter para salir" _; exit 1; }
 
-echo "[INFO] Python: $(python3 -V || echo 'no disponible')"
+echo "[INFO] Python en venv: $(python3 -V || echo 'no disponible')"
 
-# Instalar deps si existe requirements.txt
+# ====== Instalar dependencias si procede ======
 if [ -f "requirements.txt" ]; then
   echo "[INFO] Instalando dependencias (si faltan)..."
   python3 -m pip install --upgrade pip >/dev/null
@@ -34,19 +28,31 @@ fi
 export PYTHONUTF8=1
 export PYTHONIOENCODING=utf-8
 
+# ====== Autodeteccion de entrypoint ======
+RUN_CMD=""
+if [ -f "product_research_app/web_app.py" ]; then
+  RUN_CMD='python3 -m product_research_app.web_app'
+elif [ -f "main.py" ]; then
+  RUN_CMD='python3 main.py'
+elif [ -f "product_research_app/__main__.py" ]; then
+  RUN_CMD='python3 -m product_research_app'
+fi
+
+if [ -z "$RUN_CMD" ]; then
+  echo "[ERROR] No se encontro entrypoint: busca web_app.py, main.py o __main__.py"
+  read -r -p "Enter para salir" _
+  exit 1
+fi
+
 echo
 echo "============================"
-echo "Iniciando ${MODULE} en http://${HOST}:${PORT}"
+echo "Ejecutando: $RUN_CMD"
 echo "(esta ventana quedara abierta)"
 echo "============================"
 echo
 
-python3 -m "$MODULE" --host "$HOST" --port "$PORT" || {
-  rc=$?
-  echo "[ERROR] El proceso termino con codigo $rc"
-  read -r -p "Enter para cerrar..." _
-  exit "$rc"
-}
+# Ejecutar en primer plano para ver errores en la misma ventana
+eval "$RUN_CMD" || { rc=$?; echo "[ERROR] Salio con codigo $rc"; read -r -p "Enter para salir" _; exit "$rc"; }
 
 echo
 read -r -p "Enter para cerrar..." _
