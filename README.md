@@ -33,3 +33,18 @@ run_ai_fill_job: job=42 total=100 ok=92 cached=8 ko=0 cost=0.2150 pending=0 erro
 ```
 
 Logs tagged `ai_columns.request` are useful to verify concurrency in smoke tests: you should see eight or nine overlapping requests for 100 products with the defaults.
+
+## Desktop launchers
+
+The repository includes helpers to start the local server without leaving an open terminal window.
+
+### Windows
+
+1. Double-click `run_silent.vbs`. It provisions the virtual environment if needed, starts `main.py` with `pythonw.exe`, and writes output to `./logs/run.out.log` and `./logs/run.err.log`.
+2. After a short delay the default browser opens `http://127.0.0.1:8000`.
+
+### macOS
+
+1. Ensure the launcher is executable: `chmod +x run_mac.command`.
+2. Double-click `run_mac.command` to create/activate the virtual environment, launch `main.py` in the background, and capture output in `./logs/run.out.log` and `./logs/run.err.log`.
+3. The command waits briefly before opening `http://127.0.0.1:8000` in the default browser.
