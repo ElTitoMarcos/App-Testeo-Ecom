@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# === Ubicación del proyecto (puede estar en USB solo-lectura) ===
+# === Paths base (el proyecto puede estar en USB solo-lectura) ===
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
@@ -14,19 +14,81 @@ HASH_FILE="$VENV_DIR/.req.sha256"
 
 mkdir -p "$APP_STATE_DIR" "$LOG_DIR"
 
-# === Selección de Python 3.10+ ===
-find_python() {
-  for c in "${PYTHON_BIN:-}" python3.12 python3.11 python3.10 python3; do
-    if [[ -n "$c" ]] && command -v "$c" >/dev/null 2>&1; then
-      echo "$c"; return 0
+# === Preferencias de Python: intenta el más moderno disponible ===
+candidate_pythons=()
+# variable de entorno opcional
+[[ -n "${PYTHON_BIN:-}" ]] && candidate_pythons+=("$PYTHON_BIN")
+# Homebrew (Apple Silicon / Intel)
+candidate_pythons+=("/opt/homebrew/bin/python3.12" "/opt/homebrew/bin/python3.11" "/opt/homebrew/bin/python3.10")
+candidate_pythons+=("/usr/local/bin/python3.12" "/usr/local/bin/python3.11" "/usr/local/bin/python3.10")
+# Framework oficial
+candidate_pythons+=("/Library/Frameworks/Python.framework/Versions/3.12/bin/python3"
+                    "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3"
+                    "/Library/Frameworks/Python.framework/Versions/3.10/bin/python3")
+# pyenv (si existe)
+if command -v pyenv >/dev/null 2>&1; then
+  for v in 3.12 3.11 3.10; do
+    p="$(pyenv root)/versions/$v.*/bin/python3" || true
+    # glob simple
+    for g in $(echo $p); do candidate_pythons+=("$g"); done
+  done
+fi
+# Por último, lo que haya en PATH
+candidate_pythons+=("python3")
+
+pick_python() {
+  for p in "${candidate_pythons[@]}"; do
+    if [[ -x "$p" ]] || command -v "$p" >/dev/null 2>&1; then
+      command -v "$p" >/dev/null 2>&1 && p="$(command -v "$p")"
+      "$p" - <<'PY' >/dev/null 2>&1 || continue
+import sys; assert sys.version_info.major==3
+PY
+      echo "$p"; return 0
     fi
   done
-  echo "No se encontró Python 3.10+. Instálalo desde https://www.python.org" >&2
-  exit 1
+  return 1
 }
-PY="$(find_python)"
 
-# === Venv en carpeta de usuario (escribible) ===
+PY="$(pick_python || true)"
+if [[ -z "${PY:-}" ]]; then
+  echo "No se encontró Python 3. Instálalo (p.ej. Homebrew: brew install python@3.11) y vuelve a ejecutar." >&2
+  exit 1
+fi
+
+# Versión detectada
+PY_VER_STR="$("$PY" -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')"
+PY_MAJ="$("$PY" -c 'import sys; print(sys.version_info[0])')"
+PY_MIN="$("$PY" -c 'import sys; print(sys.version_info[1])')"
+
+MIN_MAJOR=3
+MIN_MINOR=10
+ALLOW_PY39="${ALLOW_PY39:-0}"
+
+if ! "$PY" - <<PY >/dev/null 2>&1; then
+import sys
+req=(3,10)
+ok = sys.version_info[:2] >= req
+raise SystemExit(0 if ok else 1)
+PY
+then
+  if [[ "$ALLOW_PY39" == "1" && "$PY_MAJ" -eq 3 && "$PY_MIN" -eq 9 ]]; then
+    echo "⚠️ Ejecutando con Python ${PY_VER_STR} (<3.10). Modo compatibilidad ALLOW_PY39=1 habilitado." >&2
+  else
+    cat >&2 <<MSG
+Se requiere Python >=3.10. Detectado: $PY_VER_STR en $PY
+
+Opciones rápidas:
+  • Homebrew (recomendado):
+      /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+      brew install python@3.11
+  • Volver a ejecutar forzando temporalmente 3.9 (bajo tu responsabilidad):
+      ALLOW_PY39=1 ./mac_run_app
+MSG
+    exit 1
+  fi
+fi
+
+# === Venv residente en ~/Library (siempre escribible) ===
 if [[ ! -d "$VENV_DIR" ]]; then
   "$PY" -m venv "$VENV_DIR"
 fi
@@ -34,13 +96,15 @@ fi
 # shellcheck source=/dev/null
 source "$VENV_DIR/bin/activate"
 
+# Verificación mínima dentro del venv (permite 3.9 si está ALLOW_PY39=1)
 python - <<'PY'
-import sys, platform
+import os, sys, platform
 maj, min = sys.version_info[:2]
-if (maj, min) < (3, 10):
+if (maj, min) < (3,10) and os.getenv("ALLOW_PY39") != "1":
     raise SystemExit(f"Se requiere Python>=3.10 en el venv, encontrado {platform.python_version()}")
 PY
 
+# === Instalar deps solo si cambia requirements.txt ===
 calc_hash() { shasum -a 256 "$REQ_FILE" | awk '{print $1}'; }
 
 if [[ ! -f "$HASH_FILE" || "$(calc_hash)" != "$(cat "$HASH_FILE" 2>/dev/null || true)" ]]; then
