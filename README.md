@@ -33,3 +33,7 @@ run_ai_fill_job: job=42 total=100 ok=92 cached=8 ko=0 cost=0.2150 pending=0 erro
 ```
 
 Logs tagged `ai_columns.request` are useful to verify concurrency in smoke tests: you should see eight or nine overlapping requests for 100 products with the defaults.
+
+## Desktop distributions
+
+See [docs/macos_distribution.md](docs/macos_distribution.md) for the end-to-end macOS build, update and release process that mirrors the Windows automation provided by `run_app.bat`.
