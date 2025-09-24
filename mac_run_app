@@ -1,43 +1,58 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# ==== Resolve project root ====
+# === Ubicación del proyecto (puede estar en USB solo-lectura) ===
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-LOG_DIR="$SCRIPT_DIR/logs"
-mkdir -p "$LOG_DIR"
+APP_ID="product_research_app"
+APP_STATE_DIR="${APP_STATE_DIR:-$HOME/Library/Application Support/$APP_ID}"
+LOG_DIR="${LOG_DIR:-$HOME/Library/Logs/$APP_ID}"
+VENV_DIR="$APP_STATE_DIR/.venv"
+REQ_FILE="$SCRIPT_DIR/requirements.txt"
+HASH_FILE="$VENV_DIR/.req.sha256"
 
-# ==== Python selection ====
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+mkdir -p "$APP_STATE_DIR" "$LOG_DIR"
 
-# ==== Venv bootstrap only once ====
-if [[ ! -d ".venv" ]]; then
-  "$PYTHON_BIN" -m venv ".venv"
-  BOOTSTRAP=1
-else
-  BOOTSTRAP=0
+# === Selección de Python 3.10+ ===
+find_python() {
+  for c in "${PYTHON_BIN:-}" python3.12 python3.11 python3.10 python3; do
+    if [[ -n "$c" ]] && command -v "$c" >/dev/null 2>&1; then
+      echo "$c"; return 0
+    fi
+  done
+  echo "No se encontró Python 3.10+. Instálalo desde https://www.python.org" >&2
+  exit 1
+}
+PY="$(find_python)"
+
+# === Venv en carpeta de usuario (escribible) ===
+if [[ ! -d "$VENV_DIR" ]]; then
+  "$PY" -m venv "$VENV_DIR"
 fi
 
 # shellcheck source=/dev/null
-source ".venv/bin/activate"
+source "$VENV_DIR/bin/activate"
 
-# ==== Install deps only on first run or when requirements.txt changes ====
-REQ_FILE="requirements.txt"
-HASH_FILE=".venv/.req.sha256"
+python - <<'PY'
+import sys, platform
+maj, min = sys.version_info[:2]
+if (maj, min) < (3, 10):
+    raise SystemExit(f"Se requiere Python>=3.10 en el venv, encontrado {platform.python_version()}")
+PY
 
 calc_hash() { shasum -a 256 "$REQ_FILE" | awk '{print $1}'; }
 
-if [[ "$BOOTSTRAP" -eq 1 || ! -f "$HASH_FILE" || "$(calc_hash)" != "$(cat "$HASH_FILE" 2>/dev/null || true)" ]]; then
+if [[ ! -f "$HASH_FILE" || "$(calc_hash)" != "$(cat "$HASH_FILE" 2>/dev/null || true)" ]]; then
   python -m pip install --upgrade pip
   pip install -r "$REQ_FILE"
   calc_hash > "$HASH_FILE"
 fi
 
-# ==== Run app ====
 export PYTHONUNBUFFERED=1
-# Abre el navegador en segundo plano tras breve delay
+
+# Abre el navegador en segundo plano
 ( sleep 2; open -g "http://127.0.0.1:8000" ) >/dev/null 2>&1 &
 
-# Lanza la app y tee al log
+# Ejecuta la app desde el directorio del proyecto
 python -u -m product_research_app 2>&1 | tee "$LOG_DIR/session.log"
