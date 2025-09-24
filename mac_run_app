@@ -1,0 +1,141 @@
+#!/bin/bash
+# ==================================
+# Ecom Testing App — mac_run_app (todo en uno para macOS)
+# ==================================
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+LOG_DIR="$ROOT/logs"
+LOG_FILE="$LOG_DIR/session.log"
+PY_EXPECTED_MIN="3.11"
+PY_SETUP_VER="3.12.6"
+APP_DEFAULT_PORT="8000"
+
+mkdir -p "$LOG_DIR"
+{
+  echo "=================================="
+  echo "$(date '+%Y-%m-%d %H:%M:%S') — Bootstrap mac_run_app"
+} >>"$LOG_FILE"
+
+log() {
+  echo "$1"
+  echo "$1" >>"$LOG_FILE"
+}
+
+warn() {
+  log "[WARN] $1"
+}
+
+error() {
+  log "[ERROR] $1"
+}
+
+info() {
+  log "[INFO] $1"
+}
+
+# ---------- Detectar Python preferentemente en .venv ----------
+PYEXE=""
+if [ -x "$ROOT/.venv/bin/python3" ]; then
+  PYEXE="$ROOT/.venv/bin/python3"
+fi
+
+# ---------- Buscar Python del sistema ----------
+if [ -z "$PYEXE" ]; then
+  # python3 recomendado en macOS recientes
+  if command -v python3 >/dev/null 2>&1; then
+    PYEXE="$(command -v python3)"
+  elif command -v python >/dev/null 2>&1; then
+    PYEXE="$(command -v python)"
+  fi
+fi
+
+if [ -z "$PYEXE" ]; then
+  error "Python no encontrado. Instálalo desde https://www.python.org/downloads/macos/ o mediante Homebrew (brew install python)."
+  exit 1
+fi
+
+info "Python detectado: $PYEXE"
+
+# ---------- Verificar versión mínima ----------
+PYVER_RAW="$($PYEXE -V 2>&1 | awk '{print $2}')"
+info "Version Python: $PYVER_RAW"
+
+parse_version() {
+  echo "$1" | awk -F'.' '{printf("%d%03d", $1, $2)}'
+}
+
+REQUIRED_NUM=$(parse_version "$PY_EXPECTED_MIN")
+CURRENT_NUM=$(parse_version "$PYVER_RAW")
+
+if [ "$CURRENT_NUM" -lt "$REQUIRED_NUM" ]; then
+  warn "Python $PYVER_RAW < $PY_EXPECTED_MIN. Se intentará usar un entorno aislado si existe."
+fi
+
+# ---------- Preparar entorno virtual ----------
+IS_SYSTEM=1
+if [[ "$PYEXE" == "$ROOT/.venv/bin/python3" ]]; then
+  IS_SYSTEM=0
+else
+  if [ ! -x "$ROOT/.venv/bin/python3" ]; then
+    info "Creando entorno virtual .venv ..."
+    "$PYEXE" -m venv "$ROOT/.venv"
+  fi
+  PYEXE="$ROOT/.venv/bin/python3"
+  IS_SYSTEM=0
+fi
+
+info "Actualizando instaladores (pip, wheel, setuptools)..."
+"$PYEXE" -m pip install --upgrade pip wheel setuptools >>"$LOG_FILE" 2>&1
+
+if [ -f "$ROOT/requirements.txt" ]; then
+  info "Instalando dependencias desde requirements.txt ..."
+  if ! "$PYEXE" -m pip install -r "$ROOT/requirements.txt" >>"$LOG_FILE" 2>&1; then
+    error "Fallo instalando dependencias. Revisa $LOG_FILE"
+    exit 1
+  fi
+else
+  warn "No se encontró requirements.txt"
+fi
+
+# ---------- Detectar paquete principal ----------
+PKG="product_research_app"
+if [ ! -f "$ROOT/$PKG/__init__.py" ]; then
+  for candidate in "$ROOT"/*; do
+    if [ -d "$candidate" ] && [ -f "$candidate/__init__.py" ]; then
+      PKG="$(basename "$candidate")"
+      break
+    fi
+  done
+fi
+info "Paquete detectado: $PKG"
+
+# ---------- Abrir navegador cuando esté listo ----------
+start_browser() {
+  for i in $(seq 1 60); do
+    if curl -I -s "http://127.0.0.1:$APP_DEFAULT_PORT" >/dev/null 2>&1; then
+      if command -v open >/dev/null 2>&1; then
+        open "http://127.0.0.1:$APP_DEFAULT_PORT" >/dev/null 2>&1 &
+      fi
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+start_browser &
+BROWSER_PID=$!
+
+echo "Iniciando servidor de Ecom Testing App..."
+info "Lanzando: -m $PKG.web_app"
+
+if ! "$PYEXE" -m "$PKG".web_app; then
+  RC=$?
+  error "El servidor no se inició correctamente (código $RC)."
+  exit "$RC"
+fi
+
+wait $BROWSER_PID 2>/dev/null || true
+info "Proceso terminado con éxito"
