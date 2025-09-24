@@ -18,47 +18,56 @@ mkdir -p "$STATE_DIR" "$LOG_DIR"
 xattr -d com.apple.quarantine "$0" 2>/dev/null || true
 
 # ===== Utilidades =====
-msg() { printf "\033[1;34m[mac_run]\033[0m %s\n" "$*"; }
-err() { printf "\033[1;31m[mac_run ERROR]\033[0m %s\n" "$*" >&2; }
+bold() { printf "\033[1m%s\033[0m" "$*"; }
+msg()  { printf "\033[1;34m[mac_run]\033[0m %s\n" "$*"; }
+err()  { printf "\033[1;31m[mac_run ERROR]\033[0m %s\n" "$*" >&2; }
+
+require_clt() {
+  if xcode-select -p >/dev/null 2>&1; then return 0; fi
+  err "Faltan las Command Line Tools de Xcode."
+  printf "%s\n" "Ejecuta en una terminal aparte: $(bold "xcode-select --install") y cuando finalice, vuelve a lanzar este script."
+  exit 1
+}
 
 ensure_brew() {
+  export HOMEBREW_NO_AUTO_UPDATE=1
+  export HOMEBREW_NO_ANALYTICS=1
+  export HOMEBREW_NO_ENV_HINTS=1
+
   if command -v brew >/dev/null 2>&1; then
-    # Cargar entorno brew en esta sesión
-    local bp
-    bp="$(command -v brew)"
-    eval "$("$bp" shellenv)"
+    eval "$(brew shellenv)"
     return 0
   fi
-  msg "Instalando Homebrew..."
+
+  msg "Instalando Homebrew (esto puede abrir prompts del sistema)..."
   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-  # Post-instalación: shellenv
-  if [[ -x /opt/homebrew/bin/brew ]]; then
+
+  if command -v brew >/dev/null 2>&1; then
+    eval "$(brew shellenv)"
+  elif [[ -x /opt/homebrew/bin/brew ]]; then
     eval "$(/opt/homebrew/bin/brew shellenv)"
   elif [[ -x /usr/local/bin/brew ]]; then
     eval "$(/usr/local/bin/brew shellenv)"
   else
-    err "No se pudo ubicar brew tras la instalación."
-    return 1
+    err "Homebrew no quedó disponible tras la instalación."
+    exit 1
   fi
-  return 0
 }
 
 persist_path_line() {
   local line="$1"
   local file="$HOME/.zprofile"
   touch "$file"
-  if ! grep -Fqs "$line" "$file"; then
-    printf "%s\n" "$line" >> "$file"
-  fi
+  grep -Fqs "$line" "$file" || printf "%s\n" "$line" >> "$file"
 }
 
 ensure_py311() {
-  # Si ya hay python3.12/3.11/3.10 preferirlos; si no, instalar 3.11 con brew
+  # Intentar un Python >=3.10 ya disponible
   local cand
   for cand in \
     "${PYTHON_BIN:-}" \
     "/opt/homebrew/bin/python3.12" "/opt/homebrew/bin/python3.11" "/opt/homebrew/bin/python3.10" \
-    "/usr/local/bin/python3.12" "/usr/local/bin/python3.11" "/usr/local/bin/python3.10" \
+    "/usr/local/bin/python3.12"    "/usr/local/bin/python3.11"    "/usr/local/bin/python3.10" \
     "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3" \
     "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3" \
     "/Library/Frameworks/Python.framework/Versions/3.10/bin/python3" \
@@ -71,44 +80,49 @@ ensure_py311() {
       maj="$("$cand" -c 'import sys; print(sys.version_info[0])')" || true
       min="$("$cand" -c 'import sys; print(sys.version_info[1])')" || true
       if [[ "$maj" =~ ^[0-9]+$ && "$min" =~ ^[0-9]+$ && ( $maj -gt 3 || ( $maj -eq 3 && $min -ge 10 ) ) ]]; then
-        echo "$cand"
-        return 0
+        echo "$cand"; return 0
       fi
     fi
   done
 
-  # No hay >=3.10 → instalar python@3.11 con brew
-  ensure_brew || { err "Homebrew no disponible."; return 1; }
-  msg "Instalando python@3.11 (puede tardar)..."
+  # No hay >=3.10 → Brew python@3.11
+  ensure_brew
+  msg "Instalando python@3.11 con Homebrew..."
   brew list python@3.11 >/dev/null 2>&1 || brew install python@3.11
 
-  local bp prefix py
-  bp="$(command -v brew)"
-  prefix="$("$bp" --prefix)"
-  # Cargar brew para esta sesión y futuras
-  eval "$("$bp" shellenv)"
-  persist_path_line "eval \"\$($bp shellenv)\""
+  local prefix py
+  prefix="$(brew --prefix)"
+  # Priorizar en ESTA sesión y persistir para las siguientes
+  eval "$(brew shellenv)"
+  persist_path_line "eval \"\$(brew shellenv)\""
   persist_path_line "export PATH=\"$prefix/opt/python@3.11/bin:\$PATH\""
   export PATH="$prefix/opt/python@3.11/bin:$PATH"
 
-  # Ruta final de python3.11
   if [[ -x "$prefix/opt/python@3.11/bin/python3.11" ]]; then
     py="$prefix/opt/python@3.11/bin/python3.11"
   else
     py="$(command -v python3.11 || true)"
   fi
-  [[ -x "$py" ]] || { err "No se encontró python3.11 tras brew."; return 1; }
+  [[ -x "$py" ]] || { err "python3.11 no encontrado tras brew."; exit 1; }
   echo "$py"
 }
 
-# ===== Selección/instalación de Python =====
-PY_BIN="$(ensure_py311)" || {
-  err "No se pudo preparar un Python >=3.10. Instálalo manualmente e inténtalo de nuevo."
-  exit 1
+wait_for_url() {
+  local url="${1:-http://127.0.0.1:8000}"
+  local max="${2:-30}"
+  for ((i=1; i<=max; i++)); do
+    if curl -fsS "$url" >/dev/null 2>&1; then return 0; fi
+    sleep 1
+  done
+  return 1
 }
-msg "Usando Python: $PY_BIN ($("$PY_BIN" -V))"
 
-# ===== Venv: recrear si no existe, si el intérprete cambió o si <3.10 =====
+# ===== Flujo =====
+require_clt
+PY_BIN="$(ensure_py311)"
+msg "Usando Python: $PY_BIN ($("$PY_BIN" -V 2>/dev/null || true))"
+
+# Venv: recrear si no existe, cambió intérprete o es <3.10
 needs_rebuild=0
 if [[ ! -x "$VENV_DIR/bin/python" ]]; then
   needs_rebuild=1
@@ -120,7 +134,6 @@ import sys
 raise SystemExit(0 if sys.version_info[:2] >= (3,10) else 1)
 PY
 fi
-
 if [[ "$needs_rebuild" -eq 1 ]]; then
   msg "Creando venv con $PY_BIN ..."
   rm -rf "$VENV_DIR"
@@ -132,7 +145,7 @@ fi
 source "$VENV_DIR/bin/activate"
 printf "%s" "$PY_BIN" > "$PY_PATH_FILE"
 
-# ===== Instalar deps solo si cambia requirements o se reconstruyó venv =====
+# Deps: solo si cambia requirements o se reconstruye venv
 calc_hash() { [[ -f "$REQ_FILE" ]] && shasum -a 256 "$REQ_FILE" | awk '{print $1}'; }
 old="$(cat "$HASH_FILE" 2>/dev/null || true)"
 new="$(calc_hash || true)"
@@ -146,8 +159,12 @@ if [[ "$needs_rebuild" -eq 1 || "$new" != "$old" ]]; then
 fi
 
 export PYTHONUNBUFFERED=1
-( sleep 2; open -g "http://127.0.0.1:8000" ) >/dev/null 2>&1 &
 
-# ===== Lanzar la app =====
+# URL destino (variable para personalizar, por defecto 8000)
+APP_URL="${APP_URL:-http://127.0.0.1:8000}"
+
+# Abrir navegador cuando esté arriba
+( wait_for_url "$APP_URL" 40 && open -g "$APP_URL" ) >/dev/null 2>&1 &
+
 msg "Lanzando product_research_app..."
 python -u -m product_research_app 2>&1 | tee "$LOG_DIR/session.log"
