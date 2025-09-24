@@ -1,0 +1,4 @@
+- Instalación silenciosa de Python 3.12 desde python.org; fallback a winget (fuente "winget") y a Python embebido.
+- Evita alias de Microsoft Store; rutas con espacios OK.
+- Crea .venv, instala requirements y lanza servidor sin tuberías PowerShell; no se relanza tras /shutdown.
+- Abre navegador cuando el puerto responde; logs en logs/session.log.
