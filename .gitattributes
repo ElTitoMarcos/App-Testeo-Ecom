@@ -1,0 +1,8 @@
+# Unix scripts → LF
+*.sh text eol=lf
+mac_run_app text eol=lf
+mac_run_app.command text eol=lf
+
+# Windows scripts → CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
