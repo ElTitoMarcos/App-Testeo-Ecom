@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# === Proyecto puede estar en USB (solo-lectura) ===
+# === Proyecto (puede estar en USB solo-lectura) ===
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
@@ -14,7 +14,7 @@ HASH_FILE="$VENV_DIR/.req.sha256"
 
 mkdir -p "$APP_STATE_DIR" "$LOG_DIR"
 
-# === Selección de Python: preferir 3.12→3.11→3.10; permitir 3.9 con ALLOW_PY39 ===
+# === Selección de Python: preferir 3.12→3.11→3.10; 3.9 solo si ALLOW_PY39=1 ===
 candidates=()
 [[ -n "${PYTHON_BIN:-}" ]] && candidates+=("$PYTHON_BIN")
 candidates+=("/opt/homebrew/bin/python3.12" "/opt/homebrew/bin/python3.11" "/opt/homebrew/bin/python3.10")
@@ -29,7 +29,12 @@ for p in "${candidates[@]}"; do
   if command -v "$p" >/dev/null 2>&1; then pick="$(command -v "$p")"; break; fi
 done
 if [[ -z "$pick" ]]; then
-  echo "No se encontró Python 3. Instálalo (p.ej. Homebrew: brew install python@3.11)." >&2
+  cat >&2 <<'MSG'
+No se encontró Python 3 en el sistema.
+Sugerencia rápida (Homebrew):
+  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  brew install python@3.11
+MSG
   exit 1
 fi
 PY="$pick"
@@ -42,20 +47,21 @@ if (( PY_MAJ < 3 || (PY_MAJ == 3 && PY_MIN < 10) )); then
   if [[ "${ALLOW_PY39:-0}" == "1" && "$PY_MAJ" -eq 3 && "$PY_MIN" -eq 9 ]]; then
     echo "⚠️  Ejecutando con Python $PY_VER_STR (<3.10) por ALLOW_PY39=1." >&2
   else
-    cat >&2 <<MSG
-Se requiere Python >=3.10. Detectado: $PY_VER_STR ($PY)
+    cat >&2 <<'MSG'
+Se requiere Python >= 3.10.
 Opciones:
-  • Homebrew:
+  • Instalar con Homebrew:
       /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
       brew install python@3.11
-  • Arranque temporal bajo tu responsabilidad:
+  • Arranque temporal (bajo tu responsabilidad) con Python 3.9:
       ALLOW_PY39=1 ./mac_run_app
 MSG
+    echo "Detectado: $PY_VER_STR ($PY)" >&2
     exit 1
   fi
 fi
 
-# === Venv en ~/Library (escribible aunque el proyecto esté en USB) ===
+# === Venv en ~/Library (siempre escribible) ===
 if [[ ! -d "$VENV_DIR" ]]; then
   "$PY" -m venv "$VENV_DIR"
 fi
@@ -63,7 +69,7 @@ fi
 # shellcheck source=/dev/null
 source "$VENV_DIR/bin/activate"
 
-# Verificación mínima dentro del venv (permite 3.9 si se fuerza)
+# Verificación mínima dentro del venv (permite 3.9 si ALLOW_PY39=1)
 python - <<'PY'
 import os, sys, platform
 if sys.version_info[:2] < (3,10) and os.getenv("ALLOW_PY39") != "1":
@@ -72,10 +78,12 @@ PY
 
 # === Instalar deps solo si cambia requirements.txt ===
 calc_hash() { shasum -a 256 "$REQ_FILE" | awk '{print $1}'; }
-if [[ ! -f "$HASH_FILE" || "$(calc_hash)" != "$(cat "$HASH_FILE" 2>/dev/null || true)" ]]; then
-  python -m pip install --upgrade pip
-  pip install -r "$REQ_FILE"
-  calc_hash > "$HASH_FILE"
+if [[ -f "$REQ_FILE" ]]; then
+  if [[ ! -f "$HASH_FILE" || "$(calc_hash)" != "$(cat "$HASH_FILE" 2>/dev/null || true)" ]]; then
+    python -m pip install --upgrade pip
+    pip install -r "$REQ_FILE"
+    calc_hash > "$HASH_FILE"
+  fi
 fi
 
 export PYTHONUNBUFFERED=1
@@ -83,6 +91,5 @@ export PYTHONUNBUFFERED=1
 # Abre el navegador en segundo plano
 ( sleep 2; open -g "http://127.0.0.1:8000" ) >/dev/null 2>&1 &
 
-# Ejecuta la app (desde la carpeta del proyecto)
+# Ejecuta la app desde la carpeta del proyecto
 python -u -m product_research_app 2>&1 | tee "$LOG_DIR/session.log"
-
