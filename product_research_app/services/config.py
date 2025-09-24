@@ -1,6 +1,6 @@
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from ..config import load_config, save_config, DEFAULT_WINNER_ORDER
 
@@ -29,7 +29,7 @@ def get_default_winner_weights() -> Dict[str, int]:
 DB_PATH = Path(__file__).resolve().parents[1] / "data.sqlite3"
 
 
-def _coerce_weights(raw: Dict[str, object] | None) -> Dict[str, int]:
+def _coerce_weights(raw: Optional[Dict[str, object]]) -> Dict[str, int]:
     out: Dict[str, int] = {}
     for k, v in (raw or {}).items():
         try:
@@ -216,7 +216,9 @@ def set_weights_enabled_raw(enabled: Dict[str, object]) -> Dict[str, bool]:
 
 
 # Útil para logs/cálculo: pesos efectivos enteros 0..100 considerando prioridad
-def compute_effective_int(weights_raw: Dict[str, int], order: List[str] | None = None) -> Dict[str, int]:
+def compute_effective_int(
+    weights_raw: Dict[str, int], order: Optional[List[str]] = None
+) -> Dict[str, int]:
     from . import winner_score  # lazy to avoid circular import
 
     eff = winner_score.compute_effective_weights(weights_raw, order or list(weights_raw.keys()))

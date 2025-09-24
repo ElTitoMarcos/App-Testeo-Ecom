@@ -26,7 +26,7 @@ additional transformations.
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from . import winner_score as winner_calc
 
@@ -63,7 +63,7 @@ COVERAGE_THRESHOLD = 0.35
 LOW_COVERAGE_MAX_WEIGHT = 15
 
 
-def _to_float(value: Any) -> float | None:
+def _to_float(value: Any) -> Optional[float]:
     try:
         if value is None:
             return None
@@ -76,7 +76,7 @@ def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
-def _extract_metrics(payload: Dict[str, Any] | None) -> Dict[str, Dict[str, Any]]:
+def _extract_metrics(payload: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     """Return the metrics block from an aggregates payload."""
 
     if not isinstance(payload, dict):
@@ -99,7 +99,7 @@ def _extract_metrics(payload: Dict[str, Any] | None) -> Dict[str, Dict[str, Any]
     return filtered
 
 
-def _distribution_position(stats: Dict[str, Any]) -> float | None:
+def _distribution_position(stats: Dict[str, Any]) -> Optional[float]:
     min_v = _to_float(stats.get("min"))
     max_v = _to_float(stats.get("max"))
     if min_v is None or max_v is None or max_v <= min_v:
@@ -167,7 +167,7 @@ def _zero_result(note: str) -> Dict[str, Any]:
     }
 
 
-def calculate_weights_from_aggregates(payload: Dict[str, Any] | None) -> Dict[str, Any]:
+def calculate_weights_from_aggregates(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Derive Winner Score weights from aggregate statistics."""
 
     metrics = _extract_metrics(payload)

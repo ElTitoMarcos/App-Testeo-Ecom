@@ -6,7 +6,7 @@ prompt_version = "prompt-maestro-v3".
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 PROMPT_VERSION = "prompt-maestro-v3"
 PROMPT_RELEASE_DATE = "2024-09-15"
@@ -174,7 +174,7 @@ def is_json_only(task: str) -> bool:
     return JSON_ONLY.get(canonical, False)
 
 
-def get_json_schema(task: str) -> Dict[str, Any] | None:
+def get_json_schema(task: str) -> Optional[Dict[str, Any]]:
     """Return the JSON schema associated with a task, if any."""
     canonical = _normalize_task(task)
     return JSON_SCHEMAS.get(canonical)

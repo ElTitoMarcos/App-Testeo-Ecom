@@ -834,7 +834,7 @@ def delete_list(
     conn: sqlite3.Connection,
     list_id: int,
     mode: str = "remove",
-    target_list_id: int | None = None,
+    target_list_id: Optional[int] = None,
 ) -> dict:
     """Delete a list with options to detach or move products.
 

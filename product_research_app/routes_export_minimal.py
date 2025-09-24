@@ -13,7 +13,7 @@ import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple, Union
 
 import pandas as pd
 import requests
@@ -77,7 +77,7 @@ def next_export_id() -> int:
         return current
 
 
-def build_export_filename(base_dir: os.PathLike[str] | str) -> Path:
+def build_export_filename(base_dir: Union[os.PathLike[str], str]) -> Path:
     base_path = Path(base_dir)
     try:
         base_path.mkdir(parents=True, exist_ok=True)

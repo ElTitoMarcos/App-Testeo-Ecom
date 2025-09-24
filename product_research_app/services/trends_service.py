@@ -3,7 +3,7 @@ import logging
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 from .. import database
 
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 DB_PATH = Path(__file__).resolve().parents[1] / "data.sqlite3"
 
 
-def _parse_extra(extra: str | bytes | None) -> Dict[str, Any]:
+def _parse_extra(extra: Optional[Union[str, bytes]]) -> Dict[str, Any]:
     if not extra:
         return {}
     try:

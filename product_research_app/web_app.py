@@ -37,7 +37,7 @@ import sqlite3
 import math
 import hashlib
 from datetime import date, datetime, timedelta
-from typing import Dict, Any, List
+from typing import Any, Dict, List, Optional, Union
 
 from . import database
 from .db import get_db, get_last_performance_config
@@ -89,7 +89,7 @@ def _clamp_weight_value(value: Any) -> int:
         return 0
 
 
-def _sanitize_weights_map(raw: Dict[str, Any] | None) -> Dict[str, int]:
+def _sanitize_weights_map(raw: Optional[Dict[str, Any]]) -> Dict[str, int]:
     sanitized: Dict[str, int] = {}
     base = raw or {}
     for key in DEFAULT_ORDER_LIST:
@@ -118,7 +118,7 @@ def _normalize_order_list(order, available: Dict[str, Any]) -> List[str]:
             seen.add(key)
     return out
 
-def _apply_weights_reset(existing: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def _apply_weights_reset(existing: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     cfg = dict(existing or config.load_config())
     default_weights = get_default_winner_weights()
     cfg["winner_weights"] = dict(default_weights)
@@ -163,7 +163,7 @@ def _sanitize_enabled_map(raw_enabled, keys: List[str]) -> Dict[str, bool]:
 
 
 _DB_INIT = False
-_DB_INIT_PATH: str | None = None
+_DB_INIT_PATH: Optional[str] = None
 _DB_INIT_LOCK = threading.Lock()
 
 IMPORT_STATUS: Dict[str, Dict[str, Any]] = {}
@@ -222,8 +222,8 @@ def _update_import_status(task_id: str, **updates) -> Dict[str, Any]:
 
 def _set_import_progress(
     task_id: str,
-    pct: float | int | None = None,
-    message: str | None = None,
+    pct: Optional[Union[float, int]] = None,
+    message: Optional[str] = None,
     **updates: Any,
 ) -> Dict[str, Any]:
     payload: Dict[str, Any] = {}
@@ -287,7 +287,7 @@ def _job_payload_from_row(row):
     return data
 
 
-def _get_import_status(task_id: str) -> Dict[str, Any] | None:
+def _get_import_status(task_id: str) -> Optional[Dict[str, Any]]:
     with _IMPORT_STATUS_LOCK:
         snapshot = dict(IMPORT_STATUS.get(task_id) or {})
     job_id = snapshot.get("job_id")
@@ -600,7 +600,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
 
             metric_cols = {m: find_key(headers, [sanitize(m)]) for m in metric_names}
 
-            def parse_number(val: Any) -> float | None:
+            def parse_number(val: Any) -> Optional[float]:
                 if val in (None, ''):
                     return None
                 s = str(val).strip()
@@ -617,7 +617,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                 except Exception:
                     return None
 
-            def parse_text(val: Any) -> str | None:
+            def parse_text(val: Any) -> Optional[str]:
                 if val is None:
                     return None
                 s = str(val).strip()
@@ -1391,7 +1391,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             qs = parse_qs(parsed.query)
             start_str = qs.get("start", [None])[0]
             end_str = qs.get("end", [None])[0]
-            def parse_date_str(val: str | None):
+            def parse_date_str(val: Optional[str]):
                 if not val:
                     return None
                 for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d/%m/%Y"):

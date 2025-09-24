@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import re
+from typing import Optional
 
 FLAME = "\U0001F525"
 _FLAMES_RE = re.compile(rf"{FLAME}+$")
 
 
-def sanitize_product_name(name: str | None):
+def sanitize_product_name(name: Optional[str]):
     """Remove trailing flame emojis from product names."""
 
     if not isinstance(name, str):

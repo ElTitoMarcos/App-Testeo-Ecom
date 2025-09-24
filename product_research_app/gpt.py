@@ -81,7 +81,7 @@ class InvalidJSONError(OpenAIError):
     pass
 
 
-def _dumps_payload(payload: Any | None) -> str:
+def _dumps_payload(payload: Optional[Any]) -> str:
     data = {} if payload is None else payload
     return json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
 

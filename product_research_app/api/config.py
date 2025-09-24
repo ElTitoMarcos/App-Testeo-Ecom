@@ -1,5 +1,6 @@
 from flask import request, jsonify, current_app
 import time
+from typing import Optional
 
 from . import app
 
@@ -17,7 +18,7 @@ from product_research_app.services.config import (
 from product_research_app.config import DEFAULT_WINNER_ORDER
 
 
-def _coerce_weights(raw: dict | None) -> dict[str, int]:
+def _coerce_weights(raw: Optional[dict]) -> dict[str, int]:
     out: dict[str, int] = {}
     for k, v in (raw or {}).items():
         if k not in ALLOWED_FIELDS:
@@ -30,7 +31,7 @@ def _coerce_weights(raw: dict | None) -> dict[str, int]:
     return out
 
 
-def _merge_winner_weights(current: dict | None, incoming: dict | None) -> dict:
+def _merge_winner_weights(current: Optional[dict], incoming: Optional[dict]) -> dict:
     cur = dict(current or {})
     cur.update(incoming or {})
     return cur
@@ -59,7 +60,7 @@ def _sanitize_enabled(raw_enabled, keys: list[str]) -> dict[str, bool]:
         return {k: True for k in keys}
     return {k: bool(raw_enabled.get(k, True)) for k in keys}
 
-def _apply_reset(settings: dict | None = None) -> dict:
+def _apply_reset(settings: Optional[dict] = None) -> dict:
     cfg = dict(settings or load_settings() or {})
     default_weights = get_default_winner_weights()
     cfg["winner_weights"] = dict(default_weights)

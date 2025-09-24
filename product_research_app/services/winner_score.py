@@ -7,7 +7,7 @@ import logging
 import sqlite3
 import unicodedata
 from datetime import datetime, date
-from typing import Dict, Any, Iterable, Optional, Callable
+from typing import Any, Callable, Dict, Iterable, Optional, Union
 
 from ..utils.db import rget
 from .. import database
@@ -135,7 +135,7 @@ def _parse_date(s):
         return None
 
 
-def _oldness_days(product: dict) -> int | None:
+def _oldness_days(product: dict) -> Optional[int]:
     dr = (product.get("date_range") or product.get("Date Range") or "").strip()
     start = None
     if "~" in dr:
@@ -173,13 +173,15 @@ def prepare_oldness_bounds(rows: Iterable[Any]) -> None:
         OLDNESS_MIN = OLDNESS_MAX = 0.0
 
 
-WEIGHTS_CACHE: Dict[str, float] | None = None
-ORDER_CACHE: list[str] | None = None
-ENABLED_CACHE: Dict[str, bool] | None = None
+WEIGHTS_CACHE: Optional[Dict[str, float]] = None
+ORDER_CACHE: Optional[list[str]] = None
+ENABLED_CACHE: Optional[Dict[str, bool]] = None
 WEIGHTS_VERSION: int = 0
 
 
-def compute_effective_weights(weights: dict[str, int | float], order: list[str]) -> dict[str, float]:
+def compute_effective_weights(
+    weights: Dict[str, Union[int, float]], order: list[str]
+) -> dict[str, float]:
     order = list(order)
     if "awareness" in weights and "awareness" not in order:
         order.append("awareness")
@@ -193,7 +195,7 @@ def compute_effective_weights(weights: dict[str, int | float], order: list[str])
     s = sum(eff.values()) or 1.0
     return {k: v / s for k, v in eff.items()}
 
-def sanitize_weights(weights: dict | None) -> dict:
+def sanitize_weights(weights: Optional[dict]) -> dict:
     w = (weights or {}).copy()
     w = {k: float(v) for k, v in w.items() if k in ALLOWED_FIELDS}
     if not w:
@@ -410,7 +412,9 @@ def compute_ranges(products: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str,flo
         "ventas_por_dia": _percentiles(vpd),
     }
 
-def normalize_metric(name: str, value: Any, ranges: Dict[str, Dict[str,float]]) -> float | None:
+def normalize_metric(
+    name: str, value: Any, ranges: Dict[str, Dict[str, float]]
+) -> Optional[float]:
     if value is None:
         return None
     if name in MAPS:
@@ -435,10 +439,10 @@ def normalize_metric(name: str, value: Any, ranges: Dict[str, Dict[str,float]]) 
 def score_product(
     prod: Dict[str, Any],
     weights: Dict[str, float],
-    ranges: Dict[str, Dict[str, float]] | None = None,
-    missing: list[str] | None = None,
-    used: list[str] | None = None,
-) -> float | None:
+    ranges: Optional[Dict[str, Dict[str, float]]] = None,
+    missing: Optional[list[str]] = None,
+    used: Optional[list[str]] = None,
+) -> Optional[float]:
     if ranges is None:
         ranges = compute_ranges([prod])
     total_w = 0.0
