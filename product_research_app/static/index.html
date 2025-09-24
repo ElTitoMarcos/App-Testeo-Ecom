@@ -8,6 +8,7 @@
 <link rel="stylesheet" href="/static/css/loading.css">
 <script type="module" src="/static/js/config.js" defer></script>
 <script type="module" src="/static/js/net.js" defer></script>
+<script type="module" src="/static/js/update.js" defer></script>
 <script defer src="/static/js/legacy-progress-shim.js"></script>
 <style>
 /* Basic layout */
@@ -38,8 +39,13 @@ tbody tr:hover {
   transform: translateY(-2px);
   transition: box-shadow 0.2s, transform 0.2s;
 }
-#importBanner { background:rgba(122,83,214,0.2); color:#7a53d6; border:1px solid rgba(122,83,214,0.3); }
-body.dark #importBanner { background:rgba(122,83,214,0.2); color:#c9b9f3; border:1px solid rgba(122,83,214,0.4); }
+#importBanner, #updateBanner { background:rgba(122,83,214,0.2); color:#7a53d6; border:1px solid rgba(122,83,214,0.3); }
+body.dark #importBanner, body.dark #updateBanner { background:rgba(122,83,214,0.2); color:#c9b9f3; border:1px solid rgba(122,83,214,0.4); }
+#updateBanner { display:none; margin:12px auto; max-width:900px; border-radius:12px; padding:12px; box-shadow:0 4px 10px rgba(0,0,0,0.15); }
+#updateBanner strong { display:block; margin-bottom:6px; font-size:1rem; }
+#updateBanner p { margin:4px 0; font-size:0.9rem; }
+#updateBanner .actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+#updateBanner button { background: linear-gradient(90deg,#3a3cad,#7a53d6); }
 /* History & Details */
 #history details { margin-bottom:8px; }
 details summary { cursor:pointer; font-weight:600; color:#0062ff; }
@@ -136,6 +142,7 @@ body.dark .skeleton{background:#333;}
     </div>
   </div>
 </header>
+<div id="updateBanner" role="alert" aria-live="polite"></div>
 <div id="importBanner" style="display:none; padding:8px; text-align:center;"></div>
 <div id="config" style="display:none;">
   <div class="config-controls">

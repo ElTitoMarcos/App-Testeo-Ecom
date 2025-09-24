@@ -53,6 +53,7 @@ from . import title_analyzer
 from . import product_enrichment
 from .sse import publish_progress
 from .utils import sanitize_product_name
+from .utils.auto_update import AUTO_UPDATER
 from .utils.db import row_to_dict, rget
 
 WINNER_SCORE_FIELDS = list(winner_calc.FEATURE_MAP.keys())
@@ -1000,6 +1001,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._set_json()
             self.wfile.write(json.dumps({"path": str(LOG_PATH)}).encode("utf-8"))
             return
+        if path == "/api/update/status":
+            status = AUTO_UPDATER.status()
+            self.safe_write(lambda: self.send_json({"ok": True, "status": status}))
+            return
         if path == "/api/auth/has-key":
             has_key = bool(config.get_api_key())
             self._set_json()
@@ -1709,6 +1714,25 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/export/kalodata-minimal":
             self.handle_export_kalodata_minimal()
+            return
+        if path == "/api/update/check":
+            status = AUTO_UPDATER.check_now()
+            self.safe_write(lambda: self.send_json({"ok": True, "status": status}))
+            return
+        if path == "/api/update/apply":
+            try:
+                applied = AUTO_UPDATER.apply_update()
+            except Exception as exc:  # pragma: no cover - network/IO heavy
+                logger.error("apply update failed: %s", exc)
+                self.safe_write(
+                    lambda: self.send_json({"ok": False, "error": str(exc)}, status=400)
+                )
+                return
+            self.safe_write(lambda: self.send_json({"ok": bool(applied), "restart_required": True}))
+            return
+        if path == "/api/update/ack-restart":
+            AUTO_UPDATER.acknowledge_restart()
+            self.safe_write(lambda: self.send_json({"ok": True}))
             return
         if path == "/api/auth/set-key":
             length = int(self.headers.get('Content-Length', 0))
@@ -3240,6 +3264,10 @@ class RequestHandler(BaseHTTPRequestHandler):
         """Shutdown the HTTP server."""
         self._set_json()
         self.wfile.write(json.dumps({"ok": True}).encode('utf-8'))
+        try:
+            AUTO_UPDATER.stop()
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning("failed to stop auto updater: %s", exc)
         threading.Thread(target=self.server.shutdown, daemon=True).start()
 
     def handle_delete(self):
@@ -3328,6 +3356,10 @@ class RequestHandler(BaseHTTPRequestHandler):
 
 
 def run(host: str = '127.0.0.1', port: int = 8000):
+    try:
+        AUTO_UPDATER.start()
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.warning("auto-updater failed to start: %s", exc)
     ensure_db()
     resume_incomplete_imports()
     httpd = HTTPServer((host, port), RequestHandler)
