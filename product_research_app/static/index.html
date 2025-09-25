@@ -871,11 +871,13 @@ function renderTable() {
   // Render rows
   products.forEach(item => {
     const tr = document.createElement('tr');
+    tr.setAttribute('data-product-id', item.id);
     if (item.isDuplicate) {
       tr.classList.add('is-duplicate');
     }
     // Selection checkbox
     const tdSel = document.createElement('td');
+    tdSel.setAttribute('data-col', 'select');
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.classList.add('rowCheck');
@@ -895,6 +897,7 @@ function renderTable() {
       const td = document.createElement('td');
       const key = col.key;
       td.setAttribute('data-key', key);
+      td.setAttribute('data-col', key);
       if (col.cellClass) td.className = col.cellClass;
       if (col.dataEcCol) td.setAttribute('data-ec-col', col.dataEcCol);
       if (col.width) td.style.width = col.width + 'px';

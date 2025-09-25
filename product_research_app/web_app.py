@@ -26,6 +26,7 @@ import io
 import re
 import logging
 import requests
+import socketserver
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
@@ -47,6 +48,7 @@ from .services import winner_score as winner_calc
 from .services import trends_service
 from .services.config import get_default_winner_weights
 from .services.importer_fast import DEFAULT_BATCH_SIZE, fast_import, fast_import_records
+from .services.ai_audit import run_audit
 from . import gpt
 from .prompts.registry import normalize_task
 from . import title_analyzer
@@ -172,6 +174,83 @@ _IMPORT_STATUS_LOCK = threading.Lock()
 _ENRICH_WORKERS: Dict[int, threading.Thread] = {}
 _ENRICH_LOCK = threading.Lock()
 
+EVENT_SUBS: set[Any] = set()
+_EVENT_LOCK = threading.Lock()
+
+
+def sse_subscribe(writer) -> None:
+    with _EVENT_LOCK:
+        EVENT_SUBS.add(writer)
+
+
+def sse_unsubscribe(writer) -> None:
+    with _EVENT_LOCK:
+        EVENT_SUBS.discard(writer)
+
+
+def sse_broadcast(event: str, data_dict: Dict[str, Any]) -> None:
+    payload = json.dumps({"event": event, "data": data_dict})
+    dead = []
+    with _EVENT_LOCK:
+        targets = list(EVENT_SUBS)
+    for writer in targets:
+        try:
+            writer.write(f"data: {payload}\n\n".encode("utf-8"))
+            writer.flush()
+        except Exception:
+            dead.append(writer)
+    if dead:
+        with _EVENT_LOCK:
+            for writer in dead:
+                EVENT_SUBS.discard(writer)
+
+
+_BROADCAST_FIELDS = {
+    "desire",
+    "desire_primary",
+    "desire_magnitude",
+    "awareness_level",
+    "competition_level",
+    "ai_desire_label",
+}
+
+
+def _coerce_broadcast_value(key: str, value: Any) -> Any:
+    if key == "desire_magnitude" and isinstance(value, str):
+        text = value.strip()
+        if text.startswith("{") or text.startswith("["):
+            try:
+                return json.loads(text)
+            except Exception:
+                return value
+    return value
+
+
+def broadcast_product_update(
+    product_id: int, fields: Dict[str, Any], *, reason: str | None = None
+) -> None:
+    if not fields:
+        return
+    payload: Dict[str, Any] = {}
+    for key in _BROADCAST_FIELDS:
+        if key in fields:
+            payload[key] = _coerce_broadcast_value(key, fields[key])
+    if not payload:
+        return
+    message: Dict[str, Any] = {"id": int(product_id), "fields": payload}
+    sse_broadcast("product_update", message)
+
+
+def _ai_update_callback(product_id: int, fields: Dict[str, Any], reason: str) -> None:
+    broadcast_product_update(product_id, fields, reason=reason)
+
+
+ai_columns.register_update_callback(_ai_update_callback)
+
+
+class ThreadingHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+
 
 def _parse_date(s: str):
     s = (s or "").strip()
@@ -208,6 +287,18 @@ def ensure_db():
                 logger.info("Database ready at %s", DB_PATH)
                 _DB_INIT = True
                 _DB_INIT_PATH = target_path
+                def _startup_audit() -> None:
+                    try:
+                        summary = run_audit(conn, None)
+                        logger.info("startup_audit: %s", summary)
+                    except Exception:
+                        logger.exception("startup_audit failed")
+
+                threading.Thread(
+                    target=_startup_audit,
+                    name="ai-audit-startup",
+                    daemon=True,
+                ).start()
     return conn
 
 
@@ -517,6 +608,22 @@ def _schedule_post_import_tasks(
                 ai_done=done_ai,
                 ai_pending=pending_ids,
             )
+            if product_ids:
+                ids_copy = list(product_ids)
+
+                def _post_import_audit() -> None:
+                    try:
+                        audit_conn = ensure_db()
+                        run_audit(audit_conn, ids_copy)
+                    except Exception:
+                        logger.exception("post_import_audit failed ids=%s", ids_copy)
+
+                threading.Thread(
+                    target=_post_import_audit,
+                    name=f"ai-audit-post-import-{job_id}",
+                    daemon=True,
+                ).start()
+                logger.info("post_import_audit: scheduled ids=%d", len(ids_copy))
         finally:
             try:
                 conn.close()
@@ -996,6 +1103,30 @@ class RequestHandler(BaseHTTPRequestHandler):
             rel = path[len("/static/") :]
             self._serve_static(rel)
             return
+        if path == "/events":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            sse_subscribe(self.wfile)
+            self.close_connection = False
+            try:
+                try:
+                    self.wfile.write(b":ok\n\n")
+                    self.wfile.flush()
+                except Exception:
+                    pass
+                while True:
+                    time.sleep(15)
+                    try:
+                        self.wfile.write(b":ping\n\n")
+                        self.wfile.flush()
+                    except Exception:
+                        break
+            finally:
+                sse_unsubscribe(self.wfile)
+            return
         if path == "/api/log-path":
             self._set_json()
             self.wfile.write(json.dumps({"path": str(LOG_PATH)}).encode("utf-8"))
@@ -1239,9 +1370,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "price": price_val,
                     "image_url": rget(p, "image_url"),
                     "desire": desire_val,
+                    "desire_primary": rget(p, "desire_primary"),
                     "desire_magnitude": rget(p, "desire_magnitude"),
                     "awareness_level": rget(p, "awareness_level"),
                     "competition_level": rget(p, "competition_level"),
+                    "ai_desire_label": rget(p, "ai_desire_label"),
                     "rating": extra_dict.get("rating"),
                     "units_sold": extra_dict.get("units_sold"),
                     "revenue": extra_dict.get("revenue"),
@@ -1989,6 +2122,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             product = row_to_dict(database.get_product(conn, pid))
             self._set_json()
             self.wfile.write(json.dumps(product).encode('utf-8'))
+            try:
+                broadcast_product_update(pid, product, reason="manual_patch")
+            except Exception:
+                logger.exception("sse broadcast failed for patch pid=%s", pid)
             return
         if path == "/api/config/winner-weights":
             length = int(self.headers.get('Content-Length', 0))
@@ -3383,7 +3520,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 def run(host: str = '127.0.0.1', port: int = 8000):
     ensure_db()
     resume_incomplete_imports()
-    httpd = HTTPServer((host, port), RequestHandler)
+    httpd = ThreadingHTTPServer((host, port), RequestHandler)
     print(f"Servidor iniciado en http://{host}:{port}")
     try:
         httpd.serve_forever()
