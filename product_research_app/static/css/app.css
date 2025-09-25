@@ -1048,6 +1048,13 @@ th.col-desire, td.col-desire { width: 360px; max-width: 360px; }
   word-break: break-word;
   line-height: 1.25;
 }
+.desire-cell {
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: normal;
+}
 /* Editor multi-línea para Desire */
 .desire-editor {
   width: 100%;

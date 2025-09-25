@@ -24,6 +24,36 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
+def _ensure_text_column(conn: sqlite3.Connection, table: str, column: str) -> None:
+    """Ensure a column uses the TEXT affinity without truncation limits."""
+
+    cur = conn.cursor()
+    try:
+        cur.execute(f"PRAGMA table_info({table})")
+    except sqlite3.DatabaseError:
+        return
+    info = cur.fetchall()
+    if not info:
+        return
+    colinfo = {row[1]: row for row in info}
+    data = colinfo.get(column)
+    if not data:
+        return
+    decl = (data[2] or "").strip().upper()
+    if decl in {"", "TEXT"}:
+        return
+    temp_col = f"__{column}_text"
+    try:
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {temp_col} TEXT")
+        cur.execute(f"UPDATE {table} SET {temp_col} = {column}")
+        cur.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+        cur.execute(f"ALTER TABLE {table} RENAME COLUMN {temp_col} TO {column}")
+        conn.commit()
+    except sqlite3.DatabaseError:
+        conn.rollback()
+        raise
+
+
 def get_connection(db_path: Path) -> sqlite3.Connection:
     """Return a SQLite connection to the specified database file.
 
@@ -68,6 +98,8 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             source TEXT,
             import_date TEXT NOT NULL,
             desire TEXT,
+            desire_primary TEXT,
+            ai_desire_label TEXT,
             desire_magnitude TEXT,
             awareness_level TEXT,
             competition_level TEXT,
@@ -80,9 +112,16 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         """
     )
     cur.execute("PRAGMA table_info(products)")
-    cols = [row[1] for row in cur.fetchall()]
+    info = cur.fetchall()
+    cols = [row[1] for row in info]
     if "desire" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN desire TEXT")
+    else:
+        _ensure_text_column(conn, "products", "desire")
+    if "desire_primary" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN desire_primary TEXT")
+    if "ai_desire_label" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN ai_desire_label TEXT")
     if "desire_magnitude" not in cols and "magnitud_deseo" in cols:
         cur.execute("ALTER TABLE products RENAME COLUMN magnitud_deseo TO desire_magnitude")
     elif "desire_magnitude" not in cols:
@@ -383,6 +422,8 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             source TEXT,
             import_date TEXT NOT NULL,
             desire TEXT,
+            desire_primary TEXT,
+            ai_desire_label TEXT,
             desire_magnitude TEXT,
             awareness_level TEXT,
             competition_level TEXT,
@@ -393,6 +434,15 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    cur.execute("PRAGMA table_info(products_staging)")
+    staging_info = cur.fetchall()
+    staging_cols = [row[1] for row in staging_info]
+    if "desire_primary" not in staging_cols:
+        cur.execute("ALTER TABLE products_staging ADD COLUMN desire_primary TEXT")
+    if "ai_desire_label" not in staging_cols:
+        cur.execute("ALTER TABLE products_staging ADD COLUMN ai_desire_label TEXT")
+    if "desire" in staging_cols:
+        _ensure_text_column(conn, "products_staging", "desire")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_products_staging_job ON products_staging(job_id)")
     cur.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_products_staging_job_sig ON products_staging(job_id, sig_hash)"
@@ -443,6 +493,9 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             sig_hash TEXT PRIMARY KEY,
             model TEXT,
             desire TEXT,
+            desire_statement TEXT,
+            desire_primary TEXT,
+            ai_desire_label TEXT,
             desire_magnitude TEXT,
             awareness_level TEXT,
             competition_level TEXT,
@@ -453,6 +506,21 @@ def initialize_database(conn: sqlite3.Connection) -> None:
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_cache_model ON ai_cache(model)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_cache_updated ON ai_cache(updated_at)")
+    cur.execute("PRAGMA table_info(ai_cache)")
+    ai_info = cur.fetchall()
+    ai_cols = [row[1] for row in ai_info]
+    if "desire_primary" not in ai_cols:
+        cur.execute("ALTER TABLE ai_cache ADD COLUMN desire_primary TEXT")
+    if "ai_desire_label" not in ai_cols:
+        cur.execute("ALTER TABLE ai_cache ADD COLUMN ai_desire_label TEXT")
+    if "desire_statement" not in ai_cols:
+        cur.execute("ALTER TABLE ai_cache ADD COLUMN desire_statement TEXT")
+        ai_cols.append("desire_statement")
+    _ensure_text_column(conn, "ai_cache", "desire")
+    if "desire_statement" in ai_cols:
+        cur.execute(
+            "UPDATE ai_cache SET desire_statement = desire WHERE desire_statement IS NULL"
+        )
 
     # Batch metrics for observability
     cur.execute(
@@ -501,6 +569,8 @@ def insert_product(
     image_url: Optional[str] = None,
     source: Optional[str] = None,
     desire: Optional[str] = None,
+    desire_primary: Optional[str] = None,
+    ai_desire_label: Optional[str] = None,
     desire_magnitude: Optional[str] = None,
     awareness_level: Optional[str] = None,
     competition_level: Optional[str] = None,
@@ -547,14 +617,16 @@ def insert_product(
     }
     if awareness_level not in allowed_awareness:
         awareness_level = None
+    extra_json = json_dump(extra) if extra is not None else "{}"
+
     if product_id is not None:
         cur.execute(
             """
             INSERT INTO products (
                 id, name, description, category, price, currency, image_url, source,
-                import_date, desire, desire_magnitude, awareness_level,
+                import_date, desire, desire_primary, ai_desire_label, desire_magnitude, awareness_level,
                 competition_level, date_range, extra, sig_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?), ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 product_id,
@@ -567,11 +639,13 @@ def insert_product(
                 source,
                 import_date,
                 desire,
+                desire_primary,
+                ai_desire_label,
                 desire_magnitude,
                 awareness_level,
                 competition_level,
                 date_range,
-                json_dump(extra) if extra is not None else "{}",
+                extra_json,
                 sig_hash,
             ),
         )
@@ -580,9 +654,9 @@ def insert_product(
             """
             INSERT INTO products (
                 name, description, category, price, currency, image_url, source,
-                import_date, desire, desire_magnitude, awareness_level,
+                import_date, desire, desire_primary, ai_desire_label, desire_magnitude, awareness_level,
                 competition_level, date_range, extra, sig_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?), ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 name,
@@ -594,11 +668,13 @@ def insert_product(
                 source,
                 import_date,
                 desire,
+                desire_primary,
+                ai_desire_label,
                 desire_magnitude,
                 awareness_level,
                 competition_level,
                 date_range,
-                json_dump(extra) if extra is not None else "{}",
+                extra_json,
                 sig_hash,
             ),
         )
@@ -661,6 +737,8 @@ def update_product(
         "image_url",
         "source",
         "desire",
+        "desire_primary",
+        "ai_desire_label",
         "desire_magnitude",
         "awareness_level",
         "competition_level",
@@ -1503,7 +1581,7 @@ def get_ai_cache_entries(
     cur = conn.cursor()
     cur.execute(
         f"""
-        SELECT sig_hash, model, desire, desire_magnitude, awareness_level, competition_level, updated_at, version
+        SELECT sig_hash, model, desire, desire_statement, desire_primary, ai_desire_label, desire_magnitude, awareness_level, competition_level, updated_at, version
         FROM ai_cache
         WHERE sig_hash IN ({placeholders}) AND model=? AND version=?
         """,
@@ -1519,6 +1597,9 @@ def upsert_ai_cache_entry(
     model: str,
     version: int,
     desire: Optional[str],
+    desire_statement: Optional[str],
+    desire_primary: Optional[str],
+    ai_desire_label: Optional[str],
     desire_magnitude: Optional[str],
     awareness_level: Optional[str],
     competition_level: Optional[str],
@@ -1529,11 +1610,14 @@ def upsert_ai_cache_entry(
     cur.execute(
         """
         INSERT INTO ai_cache (
-            sig_hash, model, desire, desire_magnitude, awareness_level, competition_level, updated_at, version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            sig_hash, model, desire, desire_statement, desire_primary, ai_desire_label, desire_magnitude, awareness_level, competition_level, updated_at, version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(sig_hash) DO UPDATE SET
             model=excluded.model,
             desire=excluded.desire,
+            desire_statement=excluded.desire_statement,
+            desire_primary=excluded.desire_primary,
+            ai_desire_label=excluded.ai_desire_label,
             desire_magnitude=excluded.desire_magnitude,
             awareness_level=excluded.awareness_level,
             competition_level=excluded.competition_level,
@@ -1544,6 +1628,9 @@ def upsert_ai_cache_entry(
             sig_hash,
             model,
             desire,
+            desire_statement,
+            desire_primary,
+            ai_desire_label,
             desire_magnitude,
             awareness_level,
             competition_level,
@@ -1650,12 +1737,12 @@ def merge_staging_into_products(conn: sqlite3.Connection, job_id: int) -> None:
         """
         INSERT INTO products (
             name, description, category, price, currency, image_url, source,
-            import_date, desire, desire_magnitude, awareness_level,
+            import_date, desire, desire_primary, ai_desire_label, desire_magnitude, awareness_level,
             competition_level, date_range, winner_score, extra, sig_hash
         )
         SELECT
             name, description, category, price, currency, image_url, source,
-            import_date, desire, desire_magnitude, awareness_level,
+            import_date, desire, desire_primary, ai_desire_label, desire_magnitude, awareness_level,
             competition_level, date_range, winner_score, extra, sig_hash
         FROM products_staging
         WHERE job_id=?
@@ -1669,6 +1756,8 @@ def merge_staging_into_products(conn: sqlite3.Connection, job_id: int) -> None:
             source=excluded.source,
             import_date=excluded.import_date,
             desire=excluded.desire,
+            desire_primary=excluded.desire_primary,
+            ai_desire_label=excluded.ai_desire_label,
             desire_magnitude=excluded.desire_magnitude,
             awareness_level=excluded.awareness_level,
             competition_level=excluded.competition_level,

@@ -901,6 +901,7 @@ function renderTable() {
       if (col.minWidth) td.style.minWidth = col.minWidth + 'px';
       if (col.maxWidth) td.style.maxWidth = col.maxWidth + 'px';
       if (col.align) td.style.textAlign = col.align;
+      if (key === 'desire') td.classList.add('desire-cell');
       let value = '';
       if (key === 'desire') {
         // La columna textual "Desire" NUNCA debe tratarse como métrica
@@ -969,9 +970,9 @@ function renderTable() {
         }
       } else if (key === 'desire') {
         let current = value || '';
-        td.title = current;
         const render = () => {
           td.innerHTML = '';
+          td.title = current;
           const wrap = document.createElement('div');
           wrap.className = 'desire-wrap';
           wrap.textContent = current;

@@ -11,7 +11,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import httpx
 
@@ -24,7 +24,14 @@ APP_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = APP_DIR / "data.sqlite3"
 CALIBRATION_CACHE_FILE = APP_DIR / "ai_calibration_cache.json"
 
-AI_FIELDS = ("desire", "desire_magnitude", "awareness_level", "competition_level")
+AI_FIELDS = (
+    "desire",
+    "desire_primary",
+    "ai_desire_label",
+    "desire_magnitude",
+    "awareness_level",
+    "competition_level",
+)
 StatusCallback = Callable[..., None]
 
 
@@ -89,13 +96,15 @@ class _AsyncRateLimiter:
 
 SYSTEM_PROMPT = (
     "Eres un analista de marketing. Devuelve únicamente un JSON con claves de producto. "
-    "Cada valor debe incluir desire (string corta), desire_magnitude (Low|Medium|High), "
+    "Cada valor debe incluir desire_statement (micro-párrafo 220-360 caracteres), desire_primary "
+    "(health|sex|status|belonging|control|comfort), desire_magnitude (Low|Medium|High), "
     "awareness_level (Unaware|Problem-Aware|Solution-Aware|Product-Aware|Most Aware) y "
     "competition_level (Low|Medium|High)."
 )
 USER_INSTRUCTION = (
     "Analiza los siguientes productos y responde solo con un JSON cuyas claves sean los IDs. "
-    "Cada entrada debe incluir desire, desire_magnitude, awareness_level y competition_level."
+    "Cada entrada debe incluir desire_statement, desire_primary, desire_magnitude, "
+    "awareness_level y competition_level. Usa únicamente la información proporcionada."
 )
 
 
@@ -631,8 +640,51 @@ async def _call_batch_with_retries(
                     if not isinstance(entry, dict):
                         ko[pid] = "missing"
                         continue
+                    desire_statement_raw = entry.get("desire_statement")
+                    desire_statement = (
+                        str(desire_statement_raw).strip()
+                        if isinstance(desire_statement_raw, str)
+                        else None
+                    )
+                    desire_raw = entry.get("desire")
+                    desire_text = (
+                        str(desire_raw).strip()
+                        if isinstance(desire_raw, str)
+                        else None
+                    )
+                    desire_value = desire_statement or desire_text or ""
+                    if isinstance(desire_value, str):
+                        desire_value = desire_value.strip()
+                    if not desire_statement:
+                        desire_statement = desire_value or None
+                    desire_primary_raw = entry.get("desire_primary")
+                    desire_primary = (
+                        str(desire_primary_raw).strip()
+                        if isinstance(desire_primary_raw, str)
+                        else None
+                    )
+                    if desire_primary == "":
+                        desire_primary = None
+                    ai_label_raw = entry.get("ai_desire_label")
+                    ai_label = (
+                        str(ai_label_raw).strip()
+                        if isinstance(ai_label_raw, str)
+                        else None
+                    )
+                    if ai_label == "":
+                        ai_label = None
+                    if not ai_label:
+                        if desire_primary:
+                            ai_label = desire_primary
+                        else:
+                            label_source = desire_statement or desire_text or ""
+                            label = " ".join(str(label_source).split()[:8]).strip()
+                            ai_label = label or None
                     ok[pid] = {
-                        "desire": entry.get("desire"),
+                        "desire": desire_value,
+                        "desire_statement": desire_statement,
+                        "desire_primary": desire_primary,
+                        "ai_desire_label": ai_label,
                         "desire_magnitude": gpt._norm_tri(entry.get("desire_magnitude")),
                         "awareness_level": gpt._norm_awareness(entry.get("awareness_level")),
                         "competition_level": gpt._norm_tri(entry.get("competition_level")),
@@ -974,12 +1026,31 @@ def run_ai_fill_job(
             if not cache_row:
                 remaining.append(cand)
                 continue
+            cache_dict = dict(cache_row)
+            cached_statement_raw = cache_dict.get("desire_statement")
+            if not isinstance(cached_statement_raw, str) or not cached_statement_raw.strip():
+                cached_statement_raw = cache_dict.get("desire")
+            cached_statement = (
+                cached_statement_raw.strip()
+                if isinstance(cached_statement_raw, str)
+                else ""
+            )
             update_payload = {
-                "desire": cache_row["desire"],
-                "desire_magnitude": cache_row["desire_magnitude"],
-                "awareness_level": cache_row["awareness_level"],
-                "competition_level": cache_row["competition_level"],
+                "desire": cached_statement,
+                "desire_statement": cached_statement,
+                "desire_primary": cache_dict.get("desire_primary"),
+                "ai_desire_label": cache_dict.get("ai_desire_label"),
+                "desire_magnitude": cache_dict.get("desire_magnitude"),
+                "awareness_level": cache_dict.get("awareness_level"),
+                "competition_level": cache_dict.get("competition_level"),
             }
+            if not update_payload.get("ai_desire_label"):
+                primary = update_payload.get("desire_primary")
+                if primary:
+                    update_payload["ai_desire_label"] = primary
+                else:
+                    label = " ".join(str(update_payload.get("desire", "")).split()[:8]).strip()
+                    update_payload["ai_desire_label"] = label or None
             cached_updates[cand.id] = update_payload
             applied_outputs[cand.id] = {k: v for k, v in update_payload.items() if v is not None}
             if cand.sig_hash:
@@ -989,6 +1060,9 @@ def run_ai_fill_job(
                     model=model,
                     version=cache_version,
                     desire=update_payload.get("desire"),
+                    desire_statement=update_payload.get("desire_statement"),
+                    desire_primary=update_payload.get("desire_primary"),
+                    ai_desire_label=update_payload.get("ai_desire_label"),
                     desire_magnitude=update_payload.get("desire_magnitude"),
                     awareness_level=update_payload.get("awareness_level"),
                     competition_level=update_payload.get("competition_level"),
@@ -1410,6 +1484,9 @@ def run_ai_fill_job(
                 model=model,
                 version=cache_version,
                 desire=updates.get("desire"),
+                desire_statement=updates.get("desire_statement"),
+                desire_primary=updates.get("desire_primary"),
+                ai_desire_label=updates.get("ai_desire_label"),
                 desire_magnitude=updates.get("desire_magnitude"),
                 awareness_level=updates.get("awareness_level"),
                 competition_level=updates.get("competition_level"),
@@ -1462,6 +1539,61 @@ def run_ai_fill_job(
         "skipped_existing": skipped_existing,
         "total_requested": len(requested_ids),
     }
+
+
+def backfill_desire_long(
+    rows: Sequence[Mapping[str, Any]], *, job_id: Optional[int] = None
+) -> Dict[str, Any]:
+    """Re-run DESIRE task for items lacking a long-form statement."""
+
+    def _normalize_text(value: Any) -> Optional[str]:
+        if isinstance(value, str):
+            text = value.strip()
+            return text or None
+        return None
+
+    missing_ids: List[int] = []
+    seen: set[int] = set()
+    for item in rows:
+        if not isinstance(item, Mapping):
+            continue
+        pid = item.get("id") or item.get("product_id")
+        try:
+            pid_int = int(pid)
+        except Exception:
+            continue
+        if pid_int in seen:
+            continue
+        seen.add(pid_int)
+        desire_statement = _normalize_text(item.get("desire_statement"))
+        desire_text = _normalize_text(item.get("desire"))
+        if desire_statement and len(desire_statement) >= 220:
+            continue
+        if desire_text and len(desire_text) >= 220:
+            continue
+        missing_ids.append(pid_int)
+
+    if not missing_ids:
+        empty_counts: Dict[str, Any] = {
+            "queued": 0,
+            "sent": 0,
+            "ok": 0,
+            "ko": 0,
+            "cached": 0,
+            "retried": 0,
+            "cost_spent_usd": 0.0,
+        }
+        return {
+            "counts": empty_counts,
+            "pending_ids": [],
+            "error": None,
+            "ok": {},
+            "ko": {},
+            "skipped_existing": 0,
+            "total_requested": 0,
+        }
+
+    return run_ai_fill_job(job_id or 0, missing_ids)
 
 
 def fill_ai_columns(

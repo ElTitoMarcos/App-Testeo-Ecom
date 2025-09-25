@@ -405,6 +405,8 @@ class BulkImporter:
                 row["source"],
                 row["import_date"],
                 row.get("desire"),
+                row.get("desire_primary"),
+                row.get("ai_desire_label"),
                 row.get("desire_magnitude"),
                 row.get("awareness_level"),
                 row.get("competition_level"),
@@ -426,10 +428,10 @@ class BulkImporter:
             INSERT OR REPLACE INTO products_staging (
                 job_id, sig_hash, name, description, category, price, currency,
                 image_url, brand, asin, product_url, source, import_date,
-                desire, desire_magnitude, awareness_level, competition_level,
+                desire, desire_primary, ai_desire_label, desire_magnitude, awareness_level, competition_level,
                 date_range, winner_score, extra
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
             """,
             staging_payload,
         )

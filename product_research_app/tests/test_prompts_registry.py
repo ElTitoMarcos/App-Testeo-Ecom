@@ -51,6 +51,9 @@ def test_json_schema_task_e_auto() -> None:
 def test_json_schema_task_desire() -> None:
     schema = registry.get_json_schema("DESIRE")
     assert schema is not None
+    statement = schema["schema"]["properties"]["desire_statement"]
+    assert statement["minLength"] == 220
+    assert statement["maxLength"] == 360
     magnitude = schema["schema"]["properties"]["desire_magnitude"]
     for key in ["scope", "urgency", "staying_power", "overall"]:
         bounds = magnitude["properties"][key]

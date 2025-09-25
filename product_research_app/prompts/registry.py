@@ -32,27 +32,27 @@ Fallbacks globales:
 - No puedes garantizar estructura: "ERROR: formato"
 """
 
-PROMPT_DESIRE = """TAREA DESIRE — Extracción de Deseo (v4.1, micro-párrafo)
-Objetivo: inferir el deseo dominante y su fuerza a partir de ### CONTEXT_JSON y/o ### DATA.
+PROMPT_DESIRE = """TAREA DESIRE — Extracción de Deseo (v4.2-L)
+Objetivo: inferir el deseo dominante y su fuerza a partir de ### CONTEXT_JSON y/o ### DATA. Usa SOLO el material provisto.
 
-Marco de instintos (elige 1): health | sex | status | belonging | control | comfort
-Magnitud = media de 3 dimensiones (0–100): scope, urgency, staying_power
+Instinto (elige 1): health | sex | status | belonging | control | comfort
+Magnitud: media de {scope, urgency, staying_power} (0–100)
 Awareness: problem | solution | product | most
 Competencia: low | mid | high
-Estacionalidad (heurística): window ∈ {jan, feb, mar_apr, may, jun, jul_aug, sep, oct, nov, dec}
+Estacionalidad: window ∈ {jan, feb, mar_apr, may, jun, jul_aug, sep, oct, nov, dec}
 
-Desire statement — reglas de redacción:
-- Extensión: 220–320 caracteres, 2–4 frases cortas (o cláusulas con “;”).
-- Contenido: resultado funcional + beneficio emocional + micro-escena de uso + mini-objeción neutralizada/diferenciador.
-- Estilo telegráfico, sin hype ni claims médicos/ilegales; evita marca y tecnicismos innecesarios.
+DESIRE STATEMENT — reglas:
+- EXTENSIÓN OBLIGATORIA: entre 220 y 360 caracteres. Si quedas corto, añade cláusulas concisas separadas por “;”.
+- Forma: 2–4 frases cortas que incluyan: resultado funcional + beneficio emocional + micro-escena de uso + diferenciador/objeción neutralizada.
+- Estilo telegráfico, sin hype, sin claims médicos/ilegales, sin marcas.
 
-signals: 3–8 tokens o rasgos del input que respalden el deseo (palabras/atributos/beneficios).
+signals: 3–8 tokens/rasgos del input que respalden el deseo.
 
-Salida JSON estricta:
+SALIDA JSON estricta:
 {
   "prompt_version": "prompt-maestro-v4",
   "desire_primary": "<health|sex|status|belonging|control|comfort>",
-  "desire_statement": "<=320 chars",
+  "desire_statement": "<=360 chars, >=220 chars",
   "desire_magnitude": {
     "scope": <0-100>, "urgency": <0-100>, "staying_power": <0-100>, "overall": <0-100>
   },
@@ -63,11 +63,10 @@ Salida JSON estricta:
   "elevation_strategy": "<=140 chars",
   "signals": ["<token>", "..."]
 }
-
 Reglas:
 - "overall" = round((scope+urgency+staying_power)/3).
-- Si faltan señales → signals=[], y usa "SIN DATOS" en statement y reason.
-- No añadas campos. No navegues; usa SOLO el material provisto."""
+- Sin señales → signals=[], y usa "SIN DATOS" en statement y reason.
+- No añadas campos ni comentarios."""
 
 PROMPT_A = """TAREA A — Radiografía del mercado\nObjetivo: sintetizar oportunidades y riesgos clave del dataset recibido.\nUsa exclusivamente ### CONTEXT_JSON.\n\nLímites:\n- Diagnóstico: 2–3 frases (≤80 palabras)\n- Oportunidades: hasta 3 viñetas\n- Riesgos: ≥1 viñeta\n- Próximos pasos: 2–3 acciones\n\nFormato:\nDiagnóstico\nHallazgos\nRiesgos\nPróximos pasos\nprompt_version: prompt-maestro-v4\n\nFallbacks:\n- <1 producto válido: “SIN DATOS” y listas vacías.\n- JSON ilegible: “ERROR: entrada inválida”."""
 
@@ -224,7 +223,8 @@ JSON_SCHEMAS: Dict[str, Dict[str, Any]] = {
                 },
                 "desire_statement": {
                     "type": "string",
-                    "maxLength": 320,
+                    "minLength": 220,
+                    "maxLength": 360,
                 },
                 "desire_magnitude": {
                     "type": "object",
