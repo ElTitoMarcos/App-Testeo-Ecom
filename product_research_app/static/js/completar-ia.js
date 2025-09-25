@@ -1,3 +1,5 @@
+import { subscribe as subscribeSSE } from './sse.js';
+
 const EC_BATCH_SIZE = 10;
 const EC_MODEL = "gpt-4o-mini-2024-07-18";
 
@@ -24,7 +26,8 @@ function isEditing(pid, field) {
   return td.dataset.key === field;
 }
 
-function applyUpdates(product, updates) {
+function applyUpdates(product, updates, opts = {}) {
+  const persist = opts.persist !== false;
   const applied = {};
   const row = document.querySelector(`input.rowCheck[data-id="${product.id}"]`)?.closest('tr');
   const map = {
@@ -44,7 +47,7 @@ function applyUpdates(product, updates) {
     }
     applied[k] = nv;
   });
-  if (Object.keys(applied).length) {
+  if (persist && Object.keys(applied).length) {
     fetch(`/products/${product.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -163,3 +166,67 @@ window.handleCompletarIA = async function(opts = {}) {
   if (!opts.silent) toast.info(`IA: ${okTotal}/${all.length} completados`);
   updateMasterState();
 };
+
+function updateProductCaches(productId, updates) {
+  const collections = [window.products, window.allProducts, window.__visibleProducts, window.__allProducts];
+  collections.forEach(list => {
+    if (!Array.isArray(list)) return;
+    const found = list.find(item => String(item.id) === String(productId));
+    if (!found) return;
+    Object.keys(updates).forEach(key => {
+      if (updates[key] !== undefined) {
+        found[key] = updates[key];
+      }
+    });
+  });
+}
+
+function applyRealtimeDom(productId, updates) {
+  const tr = document.querySelector(`tr[data-product-id="${productId}"]`);
+  if (!tr) return;
+  if (Object.prototype.hasOwnProperty.call(updates, 'desire')) {
+    const cell = tr.querySelector('td[data-col="desire"]');
+    if (cell && !cell.querySelector('textarea.desire-editor')) {
+      const text = updates.desire || '';
+      cell.title = text;
+      const wrap = cell.querySelector('.desire-text');
+      if (wrap) {
+        wrap.textContent = text;
+      }
+    }
+  }
+  const selectSelectors = {
+    desire_magnitude: 'td[data-col="desire_magnitude"] select',
+    awareness_level: 'td[data-col="awareness_level"] select',
+    competition_level: 'td[data-col="competition_level"] select'
+  };
+  Object.entries(selectSelectors).forEach(([field, selector]) => {
+    if (!Object.prototype.hasOwnProperty.call(updates, field)) return;
+    const select = tr.querySelector(selector);
+    if (!select) return;
+    if (document.activeElement === select) return;
+    select.value = updates[field] || '';
+  });
+}
+
+subscribeSSE('ai-columns', ({ data }) => {
+  if (!data || typeof data !== 'object') return;
+  const rows = Array.isArray(data.rows) ? data.rows : [];
+  rows.forEach(row => {
+    if (!row || typeof row !== 'object') return;
+    const productId = row.id;
+    if (productId === undefined || productId === null) return;
+    const updates = {};
+    ['desire', 'desire_magnitude', 'awareness_level', 'competition_level'].forEach(field => {
+      if (Object.prototype.hasOwnProperty.call(row, field)) {
+        updates[field] = row[field];
+      }
+    });
+    if (!Object.keys(updates).length) return;
+    updateProductCaches(productId, updates);
+    applyRealtimeDom(productId, updates);
+  });
+  if (window.ecAutoFitColumns && window.gridRoot) {
+    try { ecAutoFitColumns(window.gridRoot); } catch (err) { /* noop */ }
+  }
+});

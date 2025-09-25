@@ -577,6 +577,7 @@ window.updateResultsBadge = updateResultsBadge;
 window.allProducts = allProducts;
 window.products = products;
 const gridRoot = document.getElementById('productTable');
+window.gridRoot = gridRoot;
 
 document.addEventListener('filters-changed', (e) => {
   if (e && e.detail) ensureAppState().filters = e.detail;
@@ -874,6 +875,7 @@ function renderTable() {
     if (item.isDuplicate) {
       tr.classList.add('is-duplicate');
     }
+    tr.dataset.productId = String(item.id);
     // Selection checkbox
     const tdSel = document.createElement('td');
     const cb = document.createElement('input');
@@ -897,6 +899,9 @@ function renderTable() {
       td.setAttribute('data-key', key);
       if (col.cellClass) td.className = col.cellClass;
       if (col.dataEcCol) td.setAttribute('data-ec-col', col.dataEcCol);
+      if (['desire','desire_magnitude','awareness_level','competition_level'].includes(key)) {
+        td.setAttribute('data-col', key);
+      }
       if (col.width) td.style.width = col.width + 'px';
       if (col.minWidth) td.style.minWidth = col.minWidth + 'px';
       if (col.maxWidth) td.style.maxWidth = col.maxWidth + 'px';

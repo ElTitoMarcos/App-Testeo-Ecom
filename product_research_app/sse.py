@@ -42,28 +42,47 @@ def _json_default(value: Any) -> Any:
         return repr(value)
 
 
-def publish_progress(payload: dict[str, Any]) -> None:
-    """Broadcast a JSON payload to all connected SSE clients."""
-
-    if not SSE_ENABLED:
-        return
+def _format_message(event: str | None, payload: dict[str, Any]) -> str:
     try:
-        msg = json.dumps(payload, separators=(",", ":"), default=_json_default)
+        data = json.dumps(payload, separators=(",", ":"), default=_json_default)
     except TypeError:  # pragma: no cover - defensive fallback
         logger.exception("Failed to encode SSE payload")
+        return ""
+    prefix = f"event: {event}\n" if event else ""
+    return f"{prefix}data: {data}\n\n"
+
+
+def _broadcast(message: str) -> None:
+    if not message:
         return
     dead: list[queue.Queue[str]] = []
     with _clients_lock:
         targets = list(_clients)
     for q in targets:
         try:
-            q.put_nowait(msg)
+            q.put_nowait(message)
         except queue.Full:
             dead.append(q)
     if dead:
         with _clients_lock:
             for q in dead:
                 _clients.discard(q)
+
+
+def publish_progress(payload: dict[str, Any]) -> None:
+    """Broadcast a JSON payload to all connected SSE clients."""
+
+    if not SSE_ENABLED:
+        return
+    msg = _format_message(None, payload)
+    _broadcast(msg)
+
+
+def publish_event(event: str, payload: dict[str, Any]) -> None:
+    if not SSE_ENABLED:
+        return
+    msg = _format_message(event, payload)
+    _broadcast(msg)
 
 
 @sse_bp.route("/events")
@@ -82,7 +101,7 @@ def events() -> Response:
                 except queue.Empty:
                     yield ":keepalive\n\n"
                 else:
-                    yield f"data: {msg}\n\n"
+                    yield msg
         finally:
             with _clients_lock:
                 _clients.discard(client_queue)
