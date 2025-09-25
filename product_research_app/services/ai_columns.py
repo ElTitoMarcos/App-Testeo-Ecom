@@ -29,6 +29,23 @@ AI_FIELDS = ("desire", "desire_magnitude", "awareness_level", "competition_level
 StatusCallback = Callable[..., None]
 
 
+def _normalize_product_ids(product_ids: Optional[Sequence[int]]) -> List[int]:
+    if not product_ids:
+        return []
+    seen: set[int] = set()
+    normalized: List[int] = []
+    for raw in product_ids:
+        try:
+            pid = int(raw)  # type: ignore[arg-type]
+        except Exception:
+            continue
+        if pid in seen:
+            continue
+        seen.add(pid)
+        normalized.append(pid)
+    return normalized
+
+
 @dataclass
 class Candidate:
     id: int
@@ -1675,3 +1692,212 @@ def fill_ai_columns(
         "ui_cost_message": None,
         "error": result.get("error"),
     }
+
+
+def validate_and_fill_ai_columns(
+    *,
+    db_conn: Optional[Any] = None,
+    product_ids: Optional[Sequence[int]] = None,
+    batch_size: int = 64,
+    parallel: int = 3,
+    job_id: Optional[int] = None,
+    status_cb: Optional[StatusCallback] = None,
+    allow_generation: bool = True,
+) -> Dict[str, Any]:
+    """Validate AI columns and backfill missing entries.
+
+    Args:
+        db_conn: Optional SQLite connection to reuse.  When ``None`` a new
+            connection is created.
+        product_ids: Optional sequence restricting validation to specific
+            products.  When omitted every product is checked.
+        batch_size: Microbatch size forwarded to ``run_ai_fill_job``.
+        parallel: Degree of parallelism forwarded to ``run_ai_fill_job``.
+        job_id: Optional import job identifier used for progress tracking.
+        status_cb: Optional callback invoked by ``run_ai_fill_job``.
+        allow_generation: When ``False`` the function only reports missing
+            entries without invoking the AI model.
+
+    Returns:
+        A dictionary mirroring the structure of ``run_ai_fill_job`` augmented
+        with a ``checked`` entry describing how many rows were inspected.
+    """
+
+    close_conn = False
+    conn: Any
+    if db_conn is None:
+        conn = _ensure_conn()
+        close_conn = True
+    elif hasattr(db_conn, "cursor"):
+        conn = db_conn
+    else:
+        conn = getattr(db_conn, "connection", None)
+        if conn is None:
+            conn = _ensure_conn()
+            close_conn = True
+
+    try:
+        ids = _normalize_product_ids(product_ids)
+        rows: List[Dict[str, Any]] = []
+        cur = conn.cursor()
+        if ids:
+            placeholders = ",".join(["?"] * len(ids))
+            cur.execute(
+                f"""
+                SELECT
+                   id, name,
+                   desire,
+                   desire_magnitude,
+                   awareness_level,
+                   competition_level
+                FROM products
+                WHERE id IN ({placeholders})
+                ORDER BY id
+                """,
+                tuple(ids),
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+        elif product_ids is None:
+            cur.execute(
+                """
+                SELECT
+                   id, name,
+                   desire,
+                   desire_magnitude,
+                   awareness_level,
+                   competition_level
+                FROM products
+                ORDER BY id
+                """
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+        else:
+            rows = []
+
+        pending: List[int] = []
+        for row in rows:
+            try:
+                pid = int(row["id"])
+            except Exception:
+                continue
+            desire = str(row.get("desire") or "").strip()
+            desire_magnitude = str(row.get("desire_magnitude") or "").strip()
+            awareness_level = str(row.get("awareness_level") or "").strip()
+            competition_level = str(row.get("competition_level") or "").strip()
+            if (
+                len(desire) < 5
+                or not desire_magnitude
+                or not awareness_level
+                or not competition_level
+            ):
+                pending.append(pid)
+
+        checked = len(rows)
+        logger.debug(
+            "validate_and_fill_ai_columns: checked=%d pending=%d allow_generation=%s job_id=%s",
+            checked,
+            len(pending),
+            allow_generation,
+            job_id,
+        )
+
+        if not pending or not allow_generation:
+            counts = {
+                "queued": len(pending) if allow_generation else 0,
+                "sent": 0,
+                "ok": 0,
+                "ko": 0,
+                "cached": 0,
+                "retried": 0,
+                "cost_spent_usd": 0.0,
+            }
+            result = {
+                "checked": checked,
+                "counts": counts,
+                "pending_ids": pending,
+                "error": None,
+                "ok": {},
+                "ko": {},
+                "skipped_existing": 0,
+                "total_requested": len(pending),
+            }
+            if job_id is not None:
+                try:
+                    database.set_import_job_ai_counts(
+                        conn,
+                        int(job_id),
+                        counts,
+                        sorted(set(pending)),
+                    )
+                    database.update_import_job_ai_progress(
+                        conn,
+                        int(job_id),
+                        counts.get("ok", 0) + counts.get("cached", 0),
+                    )
+                except Exception:
+                    logger.debug("failed to update job progress during validation", exc_info=True)
+            return result
+
+        job_result = run_ai_fill_job(
+            job_id if job_id is not None else None,
+            pending,
+            microbatch=batch_size,
+            parallelism=parallel,
+            status_cb=status_cb,
+        )
+        job_result["checked"] = checked
+        return job_result
+    finally:
+        if close_conn and conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def audit_and_backfill_all(
+    conn: Any,
+    *,
+    batch_size: int = 64,
+    parallel: int = 3,
+) -> Dict[str, Any]:
+    """Audit the entire catalog and backfill missing AI columns."""
+
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id FROM products
+        WHERE TRIM(COALESCE(desire,''))=''
+           OR TRIM(COALESCE(desire_magnitude,''))=''
+           OR TRIM(COALESCE(awareness_level,''))=''
+           OR TRIM(COALESCE(competition_level,''))=''
+        ORDER BY id
+        """
+    )
+    ids = [int(row["id"]) for row in cur.fetchall() if row["id"] is not None]
+    if not ids:
+        return {
+            "checked": 0,
+            "counts": {
+                "queued": 0,
+                "sent": 0,
+                "ok": 0,
+                "ko": 0,
+                "cached": 0,
+                "retried": 0,
+                "cost_spent_usd": 0.0,
+            },
+            "pending_ids": [],
+            "error": None,
+            "ok": {},
+            "ko": {},
+            "skipped_existing": 0,
+            "total_requested": 0,
+        }
+    return validate_and_fill_ai_columns(
+        db_conn=conn,
+        product_ids=ids,
+        batch_size=batch_size,
+        parallel=parallel,
+        job_id=None,
+    )

@@ -172,6 +172,8 @@ _IMPORT_STATUS_LOCK = threading.Lock()
 _ENRICH_WORKERS: Dict[int, threading.Thread] = {}
 _ENRICH_LOCK = threading.Lock()
 
+_STARTUP_VALIDATED = False
+
 
 def _parse_date(s: str):
     s = (s or "").strip()
@@ -185,7 +187,7 @@ def _parse_date(s: str):
     return None
 
 def ensure_db():
-    global _DB_INIT, _DB_INIT_PATH
+    global _DB_INIT, _DB_INIT_PATH, _STARTUP_VALIDATED
 
     target_path = str(DB_PATH)
     conn = get_db(target_path)
@@ -208,6 +210,16 @@ def ensure_db():
                 logger.info("Database ready at %s", DB_PATH)
                 _DB_INIT = True
                 _DB_INIT_PATH = target_path
+    if not _STARTUP_VALIDATED:
+        _STARTUP_VALIDATED = True
+        try:
+            ai_columns.validate_and_fill_ai_columns(
+                db_conn=conn,
+                batch_size=64,
+                parallel=3,
+            )
+        except Exception:
+            logger.exception("startup ai validation failed")
     return conn
 
 
@@ -428,8 +440,6 @@ def _schedule_post_import_tasks(
     rows_imported: int,
     task_key: str,
 ) -> None:
-    auto_ai = config.is_auto_fill_ia_on_import_enabled()
-
     def status_cb(**payload: Any) -> None:
         payload.setdefault("job_id", job_id)
         payload.setdefault("task_id", task_key)
@@ -449,8 +459,15 @@ def _schedule_post_import_tasks(
             }
             pending_ids: List[int] = list(product_ids)
             try:
-                if auto_ai and product_ids:
-                    result = ai_columns.run_ai_fill_job(job_id, product_ids, status_cb=status_cb)
+                if product_ids:
+                    result = ai_columns.validate_and_fill_ai_columns(
+                        db_conn=conn,
+                        product_ids=product_ids,
+                        batch_size=64,
+                        parallel=3,
+                        job_id=job_id,
+                        status_cb=status_cb,
+                    )
                     final_counts = result.get("counts", final_counts)
                     pending_ids = result.get("pending_ids", pending_ids)
                     error = result.get("error")
