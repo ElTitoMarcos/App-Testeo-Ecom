@@ -135,10 +135,17 @@ def load_config() -> Dict[str, Any]:
 def save_config(config: Dict[str, Any]) -> None:
     """Persist configuration to disk atomically."""
 
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = CONFIG_FILE.with_suffix(".tmp")
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
-    tmp_path.replace(CONFIG_FILE)
+        f.flush()
+        os.fsync(f.fileno())
+    try:
+        tmp_path.replace(CONFIG_FILE)
+    except FileNotFoundError:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
 
 
 def _merge_defaults(dst: Dict[str, Any], src: Dict[str, Any]) -> bool:

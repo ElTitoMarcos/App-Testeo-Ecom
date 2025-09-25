@@ -68,9 +68,11 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             source TEXT,
             import_date TEXT NOT NULL,
             desire TEXT,
+            desire_primary TEXT,
             desire_magnitude TEXT,
             awareness_level TEXT,
             competition_level TEXT,
+            ai_desire_label TEXT,
             date_range TEXT,
             extra JSON,
             winner_score_raw REAL,
@@ -95,6 +97,10 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         cur.execute("ALTER TABLE products RENAME COLUMN saturacion_mercado TO competition_level")
     elif "competition_level" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN competition_level TEXT")
+    if "desire_primary" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN desire_primary TEXT")
+    if "ai_desire_label" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN ai_desire_label TEXT")
     if "date_range" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN date_range TEXT")
     if "ai_columns_completed_at" not in cols:
@@ -501,6 +507,7 @@ def insert_product(
     image_url: Optional[str] = None,
     source: Optional[str] = None,
     desire: Optional[str] = None,
+    desire_primary: Optional[str] = None,
     desire_magnitude: Optional[str] = None,
     awareness_level: Optional[str] = None,
     competition_level: Optional[str] = None,
@@ -509,6 +516,7 @@ def insert_product(
     commit: bool = True,
     product_id: Optional[int] = None,
     sig_hash: Optional[str] = None,
+    ai_desire_label: Optional[str] = None,
 ) -> int:
     """Insert a new product into the database.
 
@@ -522,9 +530,11 @@ def insert_product(
         image_url: Optional URL or path to image
         source: Optional source string describing where the product was imported from
         desire: Optional text describing the desire
+        desire_primary: Optional primary desire label
         desire_magnitude: One of 'Low', 'Medium', 'High'
         awareness_level: One of 'Unaware','Problem-Aware','Solution-Aware','Product-Aware','Most Aware'
         competition_level: One of 'Low', 'Medium', 'High'
+        ai_desire_label: Optional human-readable label derived from the desire
         extra: Optional dictionary of additional attributes (will be stored as JSON)
         product_id: Explicit ID for the row. If ``None`` the database assigns one.
 
@@ -547,14 +557,16 @@ def insert_product(
     }
     if awareness_level not in allowed_awareness:
         awareness_level = None
+    placeholders_with_id = ", ".join(["?"] * 16 + ["json(?)", "?"])
+    placeholders_no_id = ", ".join(["?"] * 15 + ["json(?)", "?"])
     if product_id is not None:
         cur.execute(
-            """
+            f"""
             INSERT INTO products (
                 id, name, description, category, price, currency, image_url, source,
-                import_date, desire, desire_magnitude, awareness_level,
-                competition_level, date_range, extra, sig_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?), ?)
+                import_date, desire, desire_primary, desire_magnitude, awareness_level,
+                competition_level, ai_desire_label, date_range, extra, sig_hash)
+            VALUES ({placeholders_with_id})
             """,
             (
                 product_id,
@@ -567,9 +579,11 @@ def insert_product(
                 source,
                 import_date,
                 desire,
+                desire_primary,
                 desire_magnitude,
                 awareness_level,
                 competition_level,
+                ai_desire_label,
                 date_range,
                 json_dump(extra) if extra is not None else "{}",
                 sig_hash,
@@ -577,12 +591,12 @@ def insert_product(
         )
     else:
         cur.execute(
-            """
+            f"""
             INSERT INTO products (
                 name, description, category, price, currency, image_url, source,
-                import_date, desire, desire_magnitude, awareness_level,
-                competition_level, date_range, extra, sig_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?), ?)
+                import_date, desire, desire_primary, desire_magnitude, awareness_level,
+                competition_level, ai_desire_label, date_range, extra, sig_hash)
+            VALUES ({placeholders_no_id})
             """,
             (
                 name,
@@ -594,9 +608,11 @@ def insert_product(
                 source,
                 import_date,
                 desire,
+                desire_primary,
                 desire_magnitude,
                 awareness_level,
                 competition_level,
+                ai_desire_label,
                 date_range,
                 json_dump(extra) if extra is not None else "{}",
                 sig_hash,
@@ -680,11 +696,13 @@ def update_product(
         "image_url",
         "source",
         "desire",
+        "desire_primary",
         "desire_magnitude",
         "awareness_level",
         "competition_level",
         "date_range",
         "ai_columns_completed_at",
+        "ai_desire_label",
         "magnitud_deseo",
         "nivel_consciencia_headroom",
         "evidencia_demanda",

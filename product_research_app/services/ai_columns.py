@@ -25,8 +25,36 @@ APP_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = APP_DIR / "data.sqlite3"
 CALIBRATION_CACHE_FILE = APP_DIR / "ai_calibration_cache.json"
 
-AI_FIELDS = ("desire", "desire_magnitude", "awareness_level", "competition_level")
+AI_FIELDS = (
+    "desire",
+    "desire_primary",
+    "desire_magnitude",
+    "awareness_level",
+    "competition_level",
+)
 StatusCallback = Callable[..., None]
+
+
+_UPDATE_CALLBACK: Optional[Callable[[int, Dict[str, Any], str], None]] = None
+
+
+def register_update_callback(
+    callback: Optional[Callable[[int, Dict[str, Any], str], None]]
+) -> None:
+    global _UPDATE_CALLBACK
+    _UPDATE_CALLBACK = callback
+
+
+def emit_update(product_id: int, fields: Dict[str, Any], *, reason: str = "ai") -> None:
+    if not fields:
+        return
+    callback = _UPDATE_CALLBACK
+    if callback is None:
+        return
+    try:
+        callback(int(product_id), dict(fields), reason)
+    except Exception:  # pragma: no cover - defensive logging
+        logger.exception("ai_columns.emit_update failed pid=%s", product_id)
 
 
 @dataclass
@@ -610,7 +638,7 @@ async def _call_batch_with_retries(
                         "model": model,
                         "temperature": 0,
                         "top_p": 1,
-                        "max_tokens": 380,
+                        "max_tokens": 450,
                         "response_format": {"type": "json_object"},
                         "messages": [
                             {"role": "system", "content": SYSTEM_PROMPT},
@@ -755,36 +783,56 @@ def _calculate_cost(usage: Dict[str, Any], price_in: float, price_out: float) ->
     return (prompt_val / 1_000_000.0) * price_in + (completion_val / 1_000_000.0) * price_out
 
 
-def _apply_ai_updates(conn, updates: Dict[int, Dict[str, Any]]) -> None:
+def _apply_ai_updates(
+    conn,
+    updates: Dict[int, Dict[str, Any]],
+    *,
+    reason: str,
+    commit_each: bool,
+) -> None:
     if not updates:
         return
     now_iso = datetime.utcnow().isoformat()
+    updated_payloads: List[Tuple[int, Dict[str, Any]]] = []
     cur = conn.cursor()
     began_tx = False
     try:
-        if not conn.in_transaction:
+        if not commit_each and not conn.in_transaction:
             conn.execute("BEGIN IMMEDIATE")
             began_tx = True
         for product_id, payload in updates.items():
+            pid = int(product_id)
             assignments: List[str] = []
             params: List[Any] = []
+            broadcast_fields: Dict[str, Any] = {}
             for field in AI_FIELDS:
                 if field in payload and payload[field] is not None:
                     assignments.append(f"{field}=?")
                     params.append(payload[field])
+                    broadcast_fields[field] = payload[field]
             assignments.append("ai_columns_completed_at=?")
             params.append(now_iso)
-            params.append(int(product_id))
+            params.append(pid)
             cur.execute(
                 f"UPDATE products SET {', '.join(assignments)} WHERE id=?",
                 params,
             )
-        if began_tx:
+            if commit_each:
+                conn.commit()
+                if broadcast_fields:
+                    emit_update(pid, broadcast_fields, reason=reason)
+            else:
+                updated_payloads.append((pid, broadcast_fields))
+        if not commit_each and began_tx:
             conn.commit()
     except Exception:
-        if began_tx and conn.in_transaction:
+        if not commit_each and began_tx and conn.in_transaction:
             conn.rollback()
         raise
+    if not commit_each:
+        for pid, fields in updated_payloads:
+            if fields:
+                emit_update(pid, fields, reason=reason)
 
 
 def _build_payload(row: Any, extra: Dict[str, Any]) -> Dict[str, Any]:
@@ -909,6 +957,8 @@ def run_ai_fill_job(
     microbatch: int = 32,
     parallelism: Optional[int] = None,
     status_cb: Optional[StatusCallback] = None,
+    reason: str = "import",
+    commit_each: bool = False,
 ) -> Dict[str, Any]:
     start_ts = time.perf_counter()
     conn = _ensure_conn()
@@ -1113,7 +1163,12 @@ def run_ai_fill_job(
             pending_set.discard(cand.id)
             counts["cached"] += 1
         if cached_updates:
-            _apply_ai_updates(conn, cached_updates)
+            _apply_ai_updates(
+                conn,
+                cached_updates,
+                reason=reason,
+                commit_each=commit_each,
+            )
         candidates = remaining
         counts_with_cost = {**counts, "cost_spent_usd": cost_spent}
         done_val = counts["ok"] + counts["cached"]
@@ -1234,7 +1289,12 @@ def run_ai_fill_job(
             fail_reasons[pid] = reason or "error"
 
         if success_updates:
-            _apply_ai_updates(conn, success_updates)
+            _apply_ai_updates(
+                conn,
+                success_updates,
+                reason=reason,
+                commit_each=commit_each,
+            )
             for pid, payload in success_updates.items():
                 candidate = candidate_map.get(pid)
                 sig_hash = candidate.sig_hash if candidate else ""
@@ -1390,6 +1450,7 @@ def run_ai_fill_job(
                             rec["updates"]["desire_magnitude"] = label
                             if pid in applied_outputs:
                                 applied_outputs[pid]["desire_magnitude"] = label
+                            emit_update(pid, {"desire_magnitude": label}, reason=reason)
                 if comp_scores:
                     labels, dist_comp, comp_info = _classify_scores(
                         comp_scores,
@@ -1409,6 +1470,7 @@ def run_ai_fill_job(
                             rec["updates"]["competition_level"] = label
                             if pid in applied_outputs:
                                 applied_outputs[pid]["competition_level"] = label
+                            emit_update(pid, {"competition_level": label}, reason=reason)
                 if began_tx:
                     conn.commit()
             except Exception:
@@ -1488,6 +1550,7 @@ def run_ai_fill_job(
                             rec["updates"]["desire_magnitude"] = label
                             if pid in applied_outputs:
                                 applied_outputs[pid]["desire_magnitude"] = label
+                            emit_update(pid, {"desire_magnitude": label}, reason=reason)
                     for pid_str, label in comp_labels.items():
                         pid = int(pid_str)
                         rec = success_records.get(pid)
@@ -1499,6 +1562,7 @@ def run_ai_fill_job(
                             rec["updates"]["competition_level"] = label
                             if pid in applied_outputs:
                                 applied_outputs[pid]["competition_level"] = label
+                            emit_update(pid, {"competition_level": label}, reason=reason)
                     if began_tx:
                         conn.commit()
                 except Exception:

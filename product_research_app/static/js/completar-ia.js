@@ -1,6 +1,94 @@
 const EC_BATCH_SIZE = 10;
 const EC_MODEL = "gpt-4o-mini-2024-07-18";
 
+try {
+  const ev = new EventSource('/events');
+  ev.onmessage = (e) => {
+    try {
+      const payload = JSON.parse(e.data || '{}');
+      if (!payload || payload.event !== 'product_update') return;
+      const data = payload.data || {};
+      const id = data.id;
+      const fields = data.fields || {};
+      if (id == null) return;
+      const row = document.querySelector(`[data-product-id="${id}"]`);
+      const list = Array.isArray(window.products) ? window.products : [];
+      const allList = Array.isArray(window.allProducts) ? window.allProducts : [];
+      const product = list.find(p => String(p.id) === String(id));
+      const fullProduct = allList.find(p => String(p.id) === String(id));
+      const updateField = (key, value) => {
+        if (product) {
+          product[key] = value;
+        }
+        if (fullProduct) {
+          fullProduct[key] = value;
+        }
+      };
+      if (fields.desire !== undefined) {
+        updateField('desire', fields.desire);
+        if (row) {
+          const cell = row.querySelector('[data-col="desire"]');
+          if (cell) {
+            const editor = cell.querySelector('textarea.desire-editor');
+            if (editor) editor.value = fields.desire || '';
+            const wrap = cell.querySelector('.desire-text');
+            if (wrap) wrap.textContent = fields.desire || '';
+            else cell.textContent = fields.desire || '';
+          }
+        }
+      }
+      if (fields.desire_primary !== undefined) {
+        updateField('desire_primary', fields.desire_primary);
+        if (row) {
+          const cell = row.querySelector('[data-col="desire_primary"]');
+          if (cell) cell.textContent = fields.desire_primary || '';
+        }
+      }
+      if (fields.awareness_level !== undefined) {
+        updateField('awareness_level', fields.awareness_level);
+        if (row) {
+          const cell = row.querySelector('[data-col="awareness_level"]');
+          const select = cell ? cell.querySelector('select') : null;
+          if (select) select.value = fields.awareness_level || '';
+          else if (cell) cell.textContent = fields.awareness_level || '';
+        }
+      }
+      if (fields.competition_level !== undefined) {
+        updateField('competition_level', fields.competition_level);
+        if (row) {
+          const cell = row.querySelector('[data-col="competition_level"]');
+          const select = cell ? cell.querySelector('select') : null;
+          if (select) select.value = fields.competition_level || '';
+          else if (cell) cell.textContent = fields.competition_level || '';
+        }
+      }
+      if (fields.desire_magnitude !== undefined) {
+        const val = fields.desire_magnitude && typeof fields.desire_magnitude === 'object'
+          ? fields.desire_magnitude.overall ?? fields.desire_magnitude
+          : fields.desire_magnitude;
+        updateField('desire_magnitude', val);
+        if (row) {
+          const cell = row.querySelector('[data-col="desire_magnitude"]');
+          const select = cell ? cell.querySelector('select') : null;
+          if (select) select.value = val || '';
+          else if (cell) cell.textContent = val || '';
+        }
+      }
+      if (fields.ai_desire_label !== undefined) {
+        updateField('ai_desire_label', fields.ai_desire_label);
+        if (row) {
+          const cell = row.querySelector('[data-col="ai_desire_label"]');
+          if (cell) cell.textContent = fields.ai_desire_label || '';
+        }
+      }
+    } catch (err) {
+      console.warn('SSE update error', err);
+    }
+  };
+} catch (err) {
+  console.warn('EventSource unavailable', err);
+}
+
 function getAllFilteredRows() {
   if (typeof window.getAllFilteredRows === 'function') {
     try {
