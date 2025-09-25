@@ -17,7 +17,13 @@ import httpx
 
 from .. import config, database, gpt
 from ..utils.signature import compute_sig_hash
-from .desire_utils import cleanse, looks_like_product_desc
+from .desire_utils import (
+    cleanse,
+    dedupe_clauses,
+    looks_like_product_desc,
+    sanitize_desire_text,
+)
+from .json_utils import coerce_bounds, extract_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +74,7 @@ class Candidate:
 @dataclass
 class BatchRequest:
     req_id: str
+    job_id: Optional[int]
     candidates: List[Candidate]
     user_text: str
     prompt_tokens_est: int
@@ -225,6 +232,8 @@ def _build_batch_request(
     candidates: List[Candidate],
     trunc_title: int,
     trunc_desc: int,
+    *,
+    job_id: Optional[int],
 ) -> BatchRequest:
     product_lines: List[str] = []
     for cand in candidates:
@@ -236,6 +245,7 @@ def _build_batch_request(
     prompt_tokens_est = _estimate_tokens_from_text(SYSTEM_PROMPT, user_text) + len(candidates) * 8
     return BatchRequest(
         req_id=req_id,
+        job_id=job_id,
         candidates=candidates,
         user_text=user_text,
         prompt_tokens_est=prompt_tokens_est,
@@ -631,6 +641,7 @@ async def _call_batch_with_retries(
             start_iso = datetime.utcnow().isoformat()
             status = "ok"
             error_message: Optional[str] = None
+            raw_usage: Dict[str, Any] = {}
             try:
                 response = await client.post(
                     "/v1/chat/completions",
@@ -648,65 +659,87 @@ async def _call_batch_with_retries(
                 )
                 response.raise_for_status()
                 raw = response.json()
+                raw_usage = raw.get("usage", {}) or {}
                 payload = _extract_response_payload(raw)
                 if not isinstance(payload, dict):
                     raise gpt.InvalidJSONError("Respuesta IA no es JSON")
                 data_map = {str(k): v for k, v in payload.items()}
                 ok: Dict[str, Dict[str, Any]] = {}
                 ko: Dict[str, str] = {}
+                if attempt == 0:
+                    job_label = request.job_id if request.job_id is not None else request.req_id
+                    logger.info(
+                        "DESIRE job=%s items=%d",
+                        job_label,
+                        len(request.candidates),
+                    )
+                fail_count = 0
                 for cand in request.candidates:
                     pid = str(cand.id)
                     entry = data_map.get(pid)
-                    if not isinstance(entry, dict):
+                    if entry is None:
                         ko[pid] = "missing"
                         continue
-                    desire_payload = dict(entry)
+                    if isinstance(entry, dict):
+                        obj = dict(entry)
+                        raw_text = json.dumps(entry, ensure_ascii=False)
+                        jerr = None
+                    else:
+                        raw_text = str(entry or "")
+                        try:
+                            obj = json.loads(raw_text)
+                            jerr = None
+                        except Exception:
+                            obj, jerr = extract_json_object(raw_text)
+                    if obj is None:
+                        fail_count += 1
+                        sample = (raw_text or "")[:240]
+                        if fail_count <= 3:
+                            logger.warning("DESIRE parse failed jerr=%s sample=%s", jerr, sample)
+                        ko[pid] = f"json:{jerr}" if jerr else "json:error"
+                        continue
+                    if not isinstance(obj, dict):
+                        fail_count += 1
+                        sample = (raw_text or "")[:240]
+                        if fail_count <= 3:
+                            logger.warning("DESIRE parse failed jerr=%s sample=%s", "type", sample)
+                        ko[pid] = "json:type"
+                        continue
+
                     draft_raw = str(
-                        desire_payload.get("desire_statement")
-                        or desire_payload.get("desire")
+                        obj.get("desire_statement")
+                        or obj.get("desire")
                         or ""
                     ).strip()
-                    extra_title = (cand.extra or {}).get("title") if isinstance(cand.extra, dict) else None
-                    title = str(cand.payload.get("name") or extra_title or "")
-                    if len(draft_raw) < 280 or looks_like_product_desc(draft_raw, title):
-                        refined = await _refine_desire_statement(cand, draft_raw)
+                    title_extra = (cand.extra or {}).get("title") if isinstance(cand.extra, dict) else None
+                    title = str(cand.payload.get("name") or title_extra or "")
+                    ds = sanitize_desire_text(dedupe_clauses(draft_raw))
+                    ds = coerce_bounds(ds, 280, 420)
+                    if len(ds) < 280 or looks_like_product_desc(ds, title):
+                        refined = await _refine_desire_statement(cand, ds)
                         if isinstance(refined, dict):
-                            merged = dict(desire_payload)
-                            merged.update(refined)
-                            desire_payload = merged
-                            draft_raw = str(
-                                desire_payload.get("desire_statement")
-                                or desire_payload.get("desire")
-                                or ""
-                            ).strip()
-                    if not draft_raw:
-                        draft_raw = str(entry.get("desire") or "")
-                    cleaned_txt = cleanse(draft_raw)
-                    if not cleaned_txt:
-                        cleaned_txt = draft_raw
-                    cleaned_txt = cleaned_txt.strip()
-                    desire_primary = desire_payload.get("desire_primary")
-                    if desire_primary is None:
-                        desire_primary = entry.get("desire_primary")
-                    desire_magnitude_raw = desire_payload.get("desire_magnitude")
-                    if desire_magnitude_raw is None:
-                        desire_magnitude_raw = entry.get("desire_magnitude")
-                    if isinstance(desire_magnitude_raw, dict):
-                        desire_magnitude_raw = desire_magnitude_raw.get("overall")
+                            obj2 = dict(refined)
+                            ds2 = sanitize_desire_text(
+                                dedupe_clauses((obj2.get("desire_statement") or "").strip())
+                            )
+                            ds2 = coerce_bounds(ds2, 280, 420)
+                            if len(ds2) >= 280 and not looks_like_product_desc(ds2, title):
+                                obj = obj2
+                                ds = ds2
+                    if len(ds) < 280 or looks_like_product_desc(ds, title):
+                        ko[pid] = "desire:invalid"
+                        continue
+
                     ok[pid] = {
-                        "desire": cleaned_txt,
-                        "desire_primary": desire_primary,
-                        "desire_magnitude": gpt._norm_tri(desire_magnitude_raw),
-                        "awareness_level": gpt._norm_awareness(
-                            desire_payload.get("awareness_level")
-                        ),
-                        "competition_level": gpt._norm_tri(
-                            desire_payload.get("competition_level")
-                        ),
+                        "desire": ds,
+                        "desire_primary": obj.get("desire_primary"),
+                        "desire_magnitude": obj.get("desire_magnitude"),
+                        "awareness_level": obj.get("awareness_level"),
+                        "competition_level": obj.get("competition_level"),
                     }
                 duration = time.perf_counter() - start_ts
                 end_iso = datetime.utcnow().isoformat()
-                usage = raw.get("usage", {}) or {}
+                usage = raw_usage
                 logger.info(
                     "ai_columns.request: req_id=%s items=%d prompt_tokens_est=%d start=%s end=%s duration=%.2fs status=%s retries=%d",
                     request.req_id,
@@ -755,7 +788,7 @@ async def _call_batch_with_retries(
                     "candidates": request.candidates,
                     "ok": {},
                     "ko": {str(cand.id): error_message for cand in request.candidates},
-                    "usage": {},
+                    "usage": raw_usage,
                     "duration": duration,
                     "retries": attempt,
                     "error": error_message,
@@ -783,6 +816,61 @@ def _calculate_cost(usage: Dict[str, Any], price_in: float, price_out: float) ->
     return (prompt_val / 1_000_000.0) * price_in + (completion_val / 1_000_000.0) * price_out
 
 
+def _broadcast_product_update(product_id: int, fields: Dict[str, Any], *, reason: str) -> None:
+    if not fields:
+        return
+    emit_update(product_id, fields, reason=reason)
+    try:
+        from product_research_app.web_app import sse_broadcast
+
+        sse_broadcast("product_update", {"id": product_id, "fields": fields})
+    except Exception:
+        pass
+
+
+def save_desire_fields(
+    conn,
+    *,
+    product_id: int,
+    desire: Optional[str],
+    desire_primary: Optional[str],
+    desire_magnitude: Any,
+    awareness_level: Optional[str],
+    competition_level: Optional[str],
+    commit: bool = True,
+    reason: str = "ai",
+) -> Dict[str, Any]:
+    assignments: List[str] = []
+    params: List[Any] = []
+    broadcast_fields: Dict[str, Any] = {}
+    for field, value in (
+        ("desire", desire),
+        ("desire_primary", desire_primary),
+        ("desire_magnitude", desire_magnitude),
+        ("awareness_level", awareness_level),
+        ("competition_level", competition_level),
+    ):
+        if value is None:
+            continue
+        assignments.append(f"{field}=?")
+        params.append(value)
+        broadcast_fields[field] = value
+    if not assignments:
+        return {}
+    now_iso = datetime.utcnow().isoformat()
+    assignments.append("ai_columns_completed_at=?")
+    params.append(now_iso)
+    params.append(int(product_id))
+    conn.execute(
+        f"UPDATE products SET {', '.join(assignments)} WHERE id=?",
+        params,
+    )
+    if commit:
+        conn.commit()
+        _broadcast_product_update(int(product_id), broadcast_fields, reason=reason)
+    return broadcast_fields
+
+
 def _apply_ai_updates(
     conn,
     updates: Dict[int, Dict[str, Any]],
@@ -792,9 +880,7 @@ def _apply_ai_updates(
 ) -> None:
     if not updates:
         return
-    now_iso = datetime.utcnow().isoformat()
     updated_payloads: List[Tuple[int, Dict[str, Any]]] = []
-    cur = conn.cursor()
     began_tx = False
     try:
         if not commit_each and not conn.in_transaction:
@@ -802,26 +888,18 @@ def _apply_ai_updates(
             began_tx = True
         for product_id, payload in updates.items():
             pid = int(product_id)
-            assignments: List[str] = []
-            params: List[Any] = []
-            broadcast_fields: Dict[str, Any] = {}
-            for field in AI_FIELDS:
-                if field in payload and payload[field] is not None:
-                    assignments.append(f"{field}=?")
-                    params.append(payload[field])
-                    broadcast_fields[field] = payload[field]
-            assignments.append("ai_columns_completed_at=?")
-            params.append(now_iso)
-            params.append(pid)
-            cur.execute(
-                f"UPDATE products SET {', '.join(assignments)} WHERE id=?",
-                params,
+            broadcast_fields = save_desire_fields(
+                conn,
+                product_id=pid,
+                desire=payload.get("desire"),
+                desire_primary=payload.get("desire_primary"),
+                desire_magnitude=payload.get("desire_magnitude"),
+                awareness_level=payload.get("awareness_level"),
+                competition_level=payload.get("competition_level"),
+                commit=commit_each,
+                reason=reason,
             )
-            if commit_each:
-                conn.commit()
-                if broadcast_fields:
-                    emit_update(pid, broadcast_fields, reason=reason)
-            else:
+            if not commit_each:
                 updated_payloads.append((pid, broadcast_fields))
         if not commit_each and began_tx:
             conn.commit()
@@ -831,8 +909,7 @@ def _apply_ai_updates(
         raise
     if not commit_each:
         for pid, fields in updated_payloads:
-            if fields:
-                emit_update(pid, fields, reason=reason)
+            _broadcast_product_update(pid, fields, reason=reason)
 
 
 def _build_payload(row: Any, extra: Dict[str, Any]) -> Dict[str, Any]:
@@ -1220,7 +1297,13 @@ def run_ai_fill_job(
                 if not chunk:
                     break
                 req_id = f"{req_counter + 1:03d}"
-                batch = _build_batch_request(req_id, chunk, trunc_title, trunc_desc)
+                batch = _build_batch_request(
+                    req_id,
+                    chunk,
+                    trunc_title,
+                    trunc_desc,
+                    job_id=job_id if job_id is not None else None,
+                )
                 if tpm_limit and batch.prompt_tokens_est > tpm_limit and size > 1:
                     size = max(1, size - 1)
                     continue

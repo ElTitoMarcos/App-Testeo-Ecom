@@ -224,8 +224,14 @@ def call_gpt(
     if is_json_only(canonical) and schema:
         response_format = {"type": "json_schema", "json_schema": schema}
 
+    force_json_mode = canonical == "DESIRE"
+    if force_json_mode:
+        response_format = {"type": "json_object"}
+
     default_max_tokens = 450 if canonical == "DESIRE" else None
     call_max_tokens = max_tokens if max_tokens is not None else default_max_tokens
+    if canonical == "DESIRE" and call_max_tokens is not None:
+        call_max_tokens = max(450, int(call_max_tokens))
 
     try:
         raw = call_openai_chat(
@@ -236,6 +242,7 @@ def call_gpt(
             response_format=response_format,
             max_tokens=call_max_tokens,
             stop=stop,
+            force_json_mode=force_json_mode,
         )
     except OpenAIError as exc:
         if response_format and _looks_like_response_format_error(str(exc)):
@@ -246,6 +253,7 @@ def call_gpt(
                 temperature=temperature,
                 max_tokens=call_max_tokens,
                 stop=stop,
+                force_json_mode=False,
             )
         else:
             raise
@@ -412,6 +420,7 @@ def call_openai_chat(
     response_format: Optional[Dict[str, Any]] = None,
     max_tokens: Optional[int] = None,
     stop: Optional[Any] = None,
+    force_json_mode: bool = False,
 ) -> Dict[str, Any]:
     """Send a chat completion request to the OpenAI API.
 
@@ -443,6 +452,11 @@ def call_openai_chat(
         payload["stop"] = stop
     if response_format is not None:
         payload["response_format"] = response_format
+    if force_json_mode:
+        payload["response_format"] = {"type": "json_object"}
+        payload.pop("stop", None)
+        current_max = int(payload.get("max_tokens", 0) or 0)
+        payload["max_tokens"] = max(450, current_max) if current_max else 450
     try:
         response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
     except requests.RequestException as exc:
