@@ -209,9 +209,7 @@ function applyRealtimeDom(productId, updates) {
   });
 }
 
-subscribeSSE('ai-columns', ({ data }) => {
-  if (!data || typeof data !== 'object') return;
-  const rows = Array.isArray(data.rows) ? data.rows : [];
+function handleRealtimeRows(rows) {
   rows.forEach(row => {
     if (!row || typeof row !== 'object') return;
     const productId = row.id;
@@ -229,4 +227,16 @@ subscribeSSE('ai-columns', ({ data }) => {
   if (window.ecAutoFitColumns && window.gridRoot) {
     try { ecAutoFitColumns(window.gridRoot); } catch (err) { /* noop */ }
   }
+}
+
+subscribeSSE('ai-columns', ({ data }) => {
+  if (!data || typeof data !== 'object') return;
+  const rows = Array.isArray(data.rows) ? data.rows : [];
+  handleRealtimeRows(rows);
+});
+
+subscribeSSE('products.patch', ({ data }) => {
+  if (!data || typeof data !== 'object') return;
+  const rows = Array.isArray(data.rows) ? data.rows : [];
+  handleRealtimeRows(rows);
 });

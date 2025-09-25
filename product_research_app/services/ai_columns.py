@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -27,32 +26,6 @@ PARALLELISM = 3
 MAX_RETRIES = 3
 MODEL_NAME = "gpt-4o-mini"
 SYSTEM_PROMPT = "Eres un analista. Respondes UN JSON válido."
-
-
-def _extract_json_obj(s: str) -> Dict[str, Any]:
-    s = (s or "").strip()
-    if not s:
-        raise ValueError("json:empty")
-    if s.startswith("{"):
-        return json.loads(s)
-
-    fence = re.search(r"```json\s*(\{.*?\})\s*```", s, re.S)
-    if fence:
-        return json.loads(fence.group(1))
-
-    depth = 0
-    start = None
-    for idx, ch in enumerate(s):
-        if ch == "{":
-            if depth == 0:
-                start = idx
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0 and start is not None:
-                return json.loads(s[start : idx + 1])
-
-    raise ValueError("json:no_fence")
 
 
 def _ensure_conn():
@@ -93,9 +66,19 @@ def _apply_ai_updates(conn, updates: Dict[int, Dict[str, Any]]) -> None:
         raise
 
 
-def _emit_ai_updates(updates: Dict[int, Dict[str, Any]]) -> None:
-    if not updates:
+def broadcast_products_patch(conn, rows: List[Dict[str, Any]]) -> None:
+    del conn  # compatibility placeholder
+    if not rows:
         return
+    try:
+        publish_event("products.patch", {"rows": rows})
+    except Exception:  # pragma: no cover - best effort broadcast
+        logger.debug("Failed to publish products.patch SSE", exc_info=True)
+
+
+def _emit_ai_updates(updates: Dict[int, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not updates:
+        return []
     rows: List[Dict[str, Any]] = []
     for pid, payload in updates.items():
         if not isinstance(payload, dict):
@@ -109,7 +92,7 @@ def _emit_ai_updates(updates: Dict[int, Dict[str, Any]]) -> None:
         if has_value:
             rows.append(row_data)
     if not rows:
-        return
+        return []
     try:
         publish_event(
             "ai-columns",
@@ -120,6 +103,11 @@ def _emit_ai_updates(updates: Dict[int, Dict[str, Any]]) -> None:
         )
     except Exception:  # pragma: no cover - best effort broadcast
         logger.debug("Failed to publish ai-columns SSE", exc_info=True)
+    try:
+        broadcast_products_patch(None, rows)
+    except Exception:  # pragma: no cover - best effort broadcast
+        logger.debug("Failed to broadcast products.patch SSE", exc_info=True)
+    return rows
 
 
 def _deserialize_extra(raw: Any) -> Dict[str, Any]:
@@ -155,6 +143,12 @@ def _rows_to_payloads(rows: Sequence[dict]) -> List[dict]:
             }
         )
     return payloads
+
+
+def _chunked(seq: Sequence[int], size: int):
+    chunk_size = max(1, int(size or 1))
+    for i in range(0, len(seq), chunk_size):
+        yield list(seq[i : i + chunk_size])
 
 
 def _build_prompt(chunk_rows: List[Dict[str, Any]]) -> str:
@@ -207,6 +201,7 @@ def run_ai_fill_job(
     parallelism: int = PARALLELISM,
     cost_cap_usd: Optional[float] = None,
     status_cb=None,
+    apply_updates_flag: bool = True,
 ) -> Dict[str, Any]:
     del job_id, parallelism, cost_cap_usd  # compatibility placeholders
     conn = _ensure_conn()
@@ -293,9 +288,13 @@ def run_ai_fill_job(
         model = config.get_model() or MODEL_NAME
         cache_version = 1
         cached_updates = _merge_cache(conn, model, cache_version, sig_map)
+        pending_apply: Dict[int, Dict[str, Any]] = {}
         if cached_updates:
-            _apply_ai_updates(conn, cached_updates)
-            _emit_ai_updates(cached_updates)
+            if apply_updates_flag:
+                _apply_ai_updates(conn, cached_updates)
+                _emit_ai_updates(cached_updates)
+            else:
+                pending_apply.update({int(pid): data for pid, data in cached_updates.items()})
 
         counts = {
             "queued": len(normalized),
@@ -339,7 +338,7 @@ def run_ai_fill_job(
             attempt = 1
             while attempt <= MAX_RETRIES:
                 try:
-                    raw_response = call_gpt_json(
+                    response_payload = call_gpt_json(
                         api_key=api_key,
                         model=model or MODEL_NAME,
                         system=SYSTEM_PROMPT,
@@ -347,7 +346,9 @@ def run_ai_fill_job(
                         max_tokens=2500,
                         temperature=0.2,
                     )
-                    response = _extract_json_obj(raw_response)
+                    if not isinstance(response_payload, dict):
+                        raise ValueError("json:expected_object")
+                    response = response_payload
                     if attempt > 1:
                         counts["retried"] += attempt - 1
                     break
@@ -407,8 +408,12 @@ def run_ai_fill_job(
                         competition_level=updates[pid]["competition_level"],
                     )
 
-            _apply_ai_updates(conn, updates)
-            _emit_ai_updates(updates)
+            if apply_updates_flag:
+                _apply_ai_updates(conn, updates)
+                _emit_ai_updates(updates)
+            else:
+                for pid, payload in updates.items():
+                    pending_apply[int(pid)] = payload
             ok.update({pid: data for pid, data in updates.items() if pid not in ko})
             counts["ok"] = len(ok)
             counts["ko"] = len(ko)
@@ -420,7 +425,7 @@ def run_ai_fill_job(
                     logger.debug("status callback failed", exc_info=True)
 
         pending_ids = [pid for pid in normalized if pid not in ok and pid not in cached_updates]
-        return {
+        result: Dict[str, Any] = {
             "ok": ok,
             "ko": ko,
             "counts": counts,
@@ -429,6 +434,9 @@ def run_ai_fill_job(
             "total_requested": len(normalized),
             "inspected": len(normalized),
         }
+        if not apply_updates_flag and pending_apply:
+            result["pending_updates"] = pending_apply
+        return result
     finally:
         try:
             conn.close()
@@ -512,3 +520,59 @@ def recalc_desire_for_all(*, batch_size: int = 64, parallel: int = PARALLELISM) 
         parallelism=parallel,
     )
     return result.get("counts", {}).get("ok", 0) + result.get("counts", {}).get("cached", 0)
+
+
+def apply_updates(conn, result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if not isinstance(result, dict):
+        return []
+    raw_updates = result.get("pending_updates") or result.get("ok")
+    updates: Dict[int, Dict[str, Any]] = {}
+    if isinstance(raw_updates, dict):
+        for pid, payload in raw_updates.items():
+            try:
+                pid_int = int(pid)
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            updates[pid_int] = payload
+    if not updates:
+        return []
+    _apply_ai_updates(conn, updates)
+    return _emit_ai_updates(updates)
+
+
+def audit_and_backfill_all(conn, batch_size: int = 50) -> int:
+    try:
+        size = int(batch_size)
+    except Exception:
+        size = 50
+    size = max(1, size)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id FROM products
+        WHERE COALESCE(ai_desire,'')='' OR COALESCE(desire_magnitude,'')=''
+           OR COALESCE(awareness_level,'')='' OR COALESCE(competition_level,'')=''
+        ORDER BY id
+        """
+    )
+    missing_ids = [int(row["id"]) for row in cur.fetchall() if row["id"] is not None]
+    if not missing_ids:
+        return 0
+    total_applied = 0
+    for chunk in _chunked(missing_ids, size):
+        try:
+            result = run_ai_fill_job(
+                job_id=None,
+                product_ids=chunk,
+                microbatch=BATCH_SIZE,
+                parallelism=PARALLELISM,
+                apply_updates_flag=False,
+            )
+        except Exception:
+            logger.exception("Audit batch failed for ids", extra={"ids": chunk})
+            continue
+        applied_rows = apply_updates(conn, result)
+        total_applied += len(applied_rows)
+    return total_applied

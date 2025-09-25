@@ -22,14 +22,21 @@ from __future__ import annotations
 import json
 import logging
 import os
-import time
 import re
+import time
 import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 import requests
+
+try:  # pragma: no cover - optional dependency
+    import h2  # noqa: F401
+
+    _HTTP2_OK = True
+except Exception:  # pragma: no cover - optional dependency
+    _HTTP2_OK = False
 
 from . import database, config
 from .prompts.registry import (
@@ -45,6 +52,8 @@ logger = logging.getLogger(__name__)
 
 APP_DIR = Path(__file__).resolve().parent
 DB_PATH = APP_DIR / "data.sqlite3"
+
+MODEL_JSON = os.getenv("OPENAI_MODEL_JSON") or config.DEFAULT_CONFIG["aiCost"]["model"]
 
 # Cache for baseline arrays recalculated every 10 minutes
 _BASELINE_CACHE: Dict[str, Any] = {"ts": 0, "data": None}
@@ -166,6 +175,28 @@ def _parse_json_content(text: str) -> Any:
     if not isinstance(obj, (dict, list)):
         raise InvalidJSONError("La respuesta JSON debe ser un objeto o lista")
     return obj
+
+
+def _coerce_json(text: str):
+    """Attempt to coerce a string into JSON, tolerating fences and prefix text."""
+
+    if not isinstance(text, str):
+        raise ValueError("json:parse_failed")
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    fence = re.search(r"```json\s*(\{.*\})\s*```", text, re.S)
+    if fence:
+        try:
+            return json.loads(fence.group(1))
+        except Exception:
+            pass
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return json.loads(text[start : end + 1])
+    raise ValueError("json:parse_failed")
 
 
 def build_messages(
@@ -312,15 +343,16 @@ def call_gpt_json(
     temperature: float = 0.2,
     max_tokens: int = 2000,
     timeout: httpx.Timeout | float | int | None = None,
-) -> str:
-    """Call the Chat Completions API and return the raw JSON string."""
+) -> Dict[str, Any]:
+    """Call the Chat Completions API and return the parsed JSON object."""
 
     messages = [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
+    model_name = model or MODEL_JSON
     payload = {
-        "model": model,
+        "model": model_name,
         "messages": messages,
         "response_format": {"type": "json_object"},
         "temperature": temperature,
@@ -333,19 +365,28 @@ def call_gpt_json(
 
     timeout_conf = _normalize_timeout(timeout)
     last_error: Exception | None = None
-    with httpx.Client(timeout=timeout_conf, http2=True) as client:
+    url = f"{OPENAI_BASE}/chat/completions"
+
+    def _send(client: httpx.Client) -> Dict[str, Any]:
+        nonlocal last_error
         for attempt, delay in enumerate(_BACKOFF_DELAYS, start=1):
             if delay:
                 time.sleep(delay)
             try:
-                response = client.post(
-                    f"{OPENAI_BASE}/chat/completions",
-                    json=payload,
-                    headers=headers,
-                )
+                response = client.post(url, json=payload, headers=headers)
                 response.raise_for_status()
                 data = response.json()
-                return data["choices"][0]["message"]["content"]
+                message = data["choices"][0]["message"]
+                content = message.get("content", "")
+                if isinstance(content, list):
+                    content = "".join(
+                        part.get("text", "")
+                        for part in content
+                        if isinstance(part, dict)
+                    )
+                elif not isinstance(content, str):
+                    content = json.dumps(content, ensure_ascii=False)
+                return _coerce_json(content)
             except (
                 httpx.ReadTimeout,
                 httpx.ConnectTimeout,
@@ -359,9 +400,19 @@ def call_gpt_json(
                 last_error = exc
                 if attempt == len(_BACKOFF_DELAYS):
                     raise
-    if last_error:
-        raise last_error
-    raise RuntimeError("call_gpt_json failed without raising")
+        raise RuntimeError("call_gpt_json failed without raising")
+
+    use_http2_env = os.getenv("HTTP2", "0") in ("1", "true", "True")
+    http2_flag = use_http2_env and _HTTP2_OK
+
+    try:
+        with httpx.Client(timeout=timeout_conf, http2=http2_flag) as client:
+            return _send(client)
+    except ImportError:
+        pass
+
+    with httpx.Client(timeout=timeout_conf, http2=False) as client:
+        return _send(client)
 
 
 def _build_image_message(image_bytes: bytes, instructions: str, filename: str) -> list:

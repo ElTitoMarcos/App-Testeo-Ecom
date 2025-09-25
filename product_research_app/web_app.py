@@ -502,6 +502,10 @@ def _schedule_post_import_tasks(
                 updated_scores = int(res_scores.get("updated", 0))
             except Exception as exc:
                 logger.exception("Winner score recalculation failed job=%s", job_id)
+            try:
+                ai_columns.audit_and_backfill_all(conn)
+            except Exception:
+                logger.exception("AI audit backfill failed job=%s", job_id)
             database.complete_import_job(conn, job_id, rows_imported, updated_scores)
             _set_import_progress(
                 task_key,
