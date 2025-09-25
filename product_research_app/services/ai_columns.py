@@ -655,6 +655,8 @@ async def _call_batch_with_retries(
                     desire_value = desire_statement or desire_text or ""
                     if isinstance(desire_value, str):
                         desire_value = desire_value.strip()
+                    if not desire_statement:
+                        desire_statement = desire_value or None
                     desire_primary_raw = entry.get("desire_primary")
                     desire_primary = (
                         str(desire_primary_raw).strip()
@@ -1025,9 +1027,17 @@ def run_ai_fill_job(
                 remaining.append(cand)
                 continue
             cache_dict = dict(cache_row)
+            cached_statement_raw = cache_dict.get("desire_statement")
+            if not isinstance(cached_statement_raw, str) or not cached_statement_raw.strip():
+                cached_statement_raw = cache_dict.get("desire")
+            cached_statement = (
+                cached_statement_raw.strip()
+                if isinstance(cached_statement_raw, str)
+                else ""
+            )
             update_payload = {
-                "desire": (cache_dict.get("desire") or ""),
-                "desire_statement": (cache_dict.get("desire") or ""),
+                "desire": cached_statement,
+                "desire_statement": cached_statement,
                 "desire_primary": cache_dict.get("desire_primary"),
                 "ai_desire_label": cache_dict.get("ai_desire_label"),
                 "desire_magnitude": cache_dict.get("desire_magnitude"),
@@ -1050,6 +1060,7 @@ def run_ai_fill_job(
                     model=model,
                     version=cache_version,
                     desire=update_payload.get("desire"),
+                    desire_statement=update_payload.get("desire_statement"),
                     desire_primary=update_payload.get("desire_primary"),
                     ai_desire_label=update_payload.get("ai_desire_label"),
                     desire_magnitude=update_payload.get("desire_magnitude"),
@@ -1473,6 +1484,7 @@ def run_ai_fill_job(
                 model=model,
                 version=cache_version,
                 desire=updates.get("desire"),
+                desire_statement=updates.get("desire_statement"),
                 desire_primary=updates.get("desire_primary"),
                 ai_desire_label=updates.get("ai_desire_label"),
                 desire_magnitude=updates.get("desire_magnitude"),
