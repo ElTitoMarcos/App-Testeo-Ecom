@@ -45,6 +45,7 @@ from .db import get_db, get_last_performance_config
 from . import config
 from .services import ai_columns
 from .services import desire_backfill
+from .services.post_import_audit import run_audit as run_post_import_audit
 from .services import winner_score as winner_calc
 from .services import trends_service
 from .services.config import get_default_winner_weights
@@ -178,6 +179,10 @@ _DESIRE_STATUS: Dict[str, Dict[str, Any]] = {}
 _DESIRE_RESULTS: Dict[str, Dict[str, Any]] = {}
 _DESIRE_LOCK = threading.Lock()
 
+_AUDIT_STATUS: Dict[str, Dict[str, Any]] = {}
+_AUDIT_THREADS: Dict[str, threading.Thread] = {}
+_AUDIT_LOCK = threading.Lock()
+
 
 def _parse_date(s: str):
     s = (s or "").strip()
@@ -243,6 +248,30 @@ def _set_import_progress(
         payload["message"] = message
     payload.update(updates)
     return _update_import_status(task_id, **payload)
+
+
+def _set_audit_status(task_id: str, **updates: Any) -> Dict[str, Any]:
+    base = {
+        "status": "queued",
+        "progress": 0.0,
+        "checked": 0,
+        "updated": 0,
+        "failed": 0,
+        "skipped": 0,
+    }
+    with _AUDIT_LOCK:
+        state = _AUDIT_STATUS.setdefault(task_id, base.copy())
+        state.update(updates)
+        snapshot = dict(state)
+    return snapshot
+
+
+def _get_audit_status(task_id: str) -> Dict[str, Any]:
+    with _AUDIT_LOCK:
+        state = _AUDIT_STATUS.get(task_id)
+        if not state:
+            return {}
+        return dict(state)
 
 
 def _maybe_json(value):
@@ -1108,6 +1137,17 @@ class RequestHandler(BaseHTTPRequestHandler):
             else:
                 self.safe_write(lambda: self.send_json(status))
             return
+        if path == "/_audit_status":
+            params = parse_qs(parsed.query)
+            task_id = params.get("task_id", [""])[0]
+            if not task_id:
+                self.safe_write(lambda: self.send_json({"status": "unknown"}))
+                return
+            status = _get_audit_status(task_id)
+            if not status:
+                status = {"status": "unknown"}
+            self.safe_write(lambda: self.send_json(status))
+            return
         if path == "/_desire_results":
             params = parse_qs(parsed.query)
             task_id = params.get("task_id", [""])[0]
@@ -1829,6 +1869,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/desire/backfill":
             self.handle_desire_backfill()
+            return
+        if path == "/api/audit/run":
+            self.handle_audit_run()
             return
         if path == "/auto_weights":
             self.handle_auto_weights()
@@ -3012,6 +3055,76 @@ class RequestHandler(BaseHTTPRequestHandler):
         ).start()
 
         self._set_json(202)
+        self.wfile.write(json.dumps({"task_id": task_id}).encode('utf-8'))
+
+    def handle_audit_run(self):
+        length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(length).decode('utf-8') if length else ""
+        try:
+            data = json.loads(body or "{}")
+            if not isinstance(data, dict):
+                raise ValueError
+        except Exception:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "invalid_json"}).encode('utf-8'))
+            return
+
+        ids_field = data.get("ids")
+        target_ids: Optional[List[int]] = None
+        if ids_field is not None:
+            if not isinstance(ids_field, list):
+                self._set_json(400)
+                self.wfile.write(json.dumps({"error": "invalid_ids"}).encode('utf-8'))
+                return
+            target_ids = []
+            for raw in ids_field:
+                try:
+                    target_ids.append(int(raw))
+                except Exception:
+                    continue
+
+        task_id = secrets.token_hex(8)
+        _set_audit_status(task_id, status="queued", progress=0.0)
+
+        def worker() -> None:
+            conn = database.get_connection(DB_PATH)
+            try:
+                _set_audit_status(task_id, status="running", progress=0.0)
+                summary = run_post_import_audit(
+                    conn,
+                    ids=target_ids if target_ids else None,
+                    batch_size=32,
+                    parallel=3,
+                    logger_obj=logger,
+                )
+                payload = {
+                    "status": "done",
+                    "progress": 1.0,
+                    **(summary or {}),
+                }
+                _set_audit_status(task_id, **payload)
+            except Exception as exc:
+                logger.exception("audit run failed task_id=%s", task_id)
+                _set_audit_status(
+                    task_id,
+                    status="error",
+                    progress=1.0,
+                    message=str(exc),
+                )
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                with _AUDIT_LOCK:
+                    _AUDIT_THREADS.pop(task_id, None)
+
+        thread = threading.Thread(target=worker, name=f"audit-{task_id}", daemon=True)
+        with _AUDIT_LOCK:
+            _AUDIT_THREADS[task_id] = thread
+        thread.start()
+
+        self._set_json()
         self.wfile.write(json.dumps({"task_id": task_id}).encode('utf-8'))
 
     def handle_auto_weights(self):

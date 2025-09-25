@@ -6,6 +6,7 @@ import logging
 import re
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Iterable, Iterator, Mapping, Optional, Sequence
@@ -21,11 +22,15 @@ from product_research_app.database import (
     update_import_job_progress,
 )
 from product_research_app.utils.signature import compute_sig_hash
+from product_research_app.services.post_import_audit import run_audit
 
 logger = logging.getLogger(__name__)
 
 StatusCallback = Callable[..., None]
 DEFAULT_BATCH_SIZE = 2000
+
+
+EXECUTOR = ThreadPoolExecutor(max_workers=2)
 
 
 def _sanitize(name: str) -> str:
@@ -532,6 +537,11 @@ def fast_import(
                 "batch_size": batch_size,
             },
         )
+        try:
+            EXECUTOR.submit(run_audit, resolved_path, None, 32, 3)
+            logger.info("post_import_audit: scheduled after import")
+        except Exception:
+            logger.exception("post_import_audit: failed to schedule")
         return summary.unique_rows
     except Exception as exc:
         logger.exception("Fast import failed job=%s", job_id)
@@ -601,6 +611,11 @@ def fast_import_records(
                 "batch_size": batch_size,
             },
         )
+        try:
+            EXECUTOR.submit(run_audit, resolved_path, None, 32, 3)
+            logger.info("post_import_audit: scheduled after import")
+        except Exception:
+            logger.exception("post_import_audit: failed to schedule")
         return summary.unique_rows
     except Exception as exc:
         logger.exception("Fast record import failed job=%s", job_id)
