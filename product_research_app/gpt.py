@@ -154,7 +154,7 @@ def build_messages(
     aggregates: Optional[Dict[str, Any]] = None,
     data: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Construye los mensajes para Prompt Maestro v3."""
+    """Construye los mensajes para Prompt Maestro v4."""
 
     try:
         canonical = normalize_task(task)
@@ -165,11 +165,11 @@ def build_messages(
     task_prompt = get_task_prompt(canonical)
     sections = [task_prompt]
 
-    if canonical in {"A", "C", "D", "E"}:
+    if canonical in {"A", "C", "D", "E", "DESIRE"}:
         sections.append("### CONTEXT_JSON\n" + _dumps_payload(context_json))
     elif canonical == "B":
         sections.append("### AGGREGATES\n" + _dumps_payload(aggregates))
-    elif canonical == "E_auto":
+    if canonical in {"E_auto", "DESIRE"}:
         sections.append("### DATA\n" + _dumps_payload(data))
 
     user_content = "\n\n".join(sections).strip()
@@ -186,7 +186,7 @@ def call_gpt(
     data: Optional[Dict[str, Any]] = None,
     temperature: float = 0,
 ) -> Dict[str, Any]:
-    """Ejecuta una llamada estándar a Prompt Maestro v3."""
+    """Ejecuta una llamada estándar a Prompt Maestro v4."""
 
     try:
         canonical = normalize_task(task)
