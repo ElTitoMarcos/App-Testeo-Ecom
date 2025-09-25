@@ -21,6 +21,25 @@ DB_PATH = APP_DIR / "data.sqlite3"
 
 AI_FIELDS = ["desire", "desire_magnitude", "awareness_level", "competition_level"]
 
+
+def ensure_ai_schema(conn) -> None:
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(products)")
+    cols = {row[1] for row in cur.fetchall()}
+    statements: List[str] = []
+    if "ai_desire" not in cols:
+        statements.append("ALTER TABLE products ADD COLUMN ai_desire REAL")
+    if "ai_desire_label" not in cols:
+        statements.append("ALTER TABLE products ADD COLUMN ai_desire_label TEXT")
+    if "desire_magnitude" not in cols:
+        statements.append("ALTER TABLE products ADD COLUMN desire_magnitude TEXT")
+    for sql in statements:
+        cur.execute(sql)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_products_ai_desire ON products(ai_desire)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_products_desire ON products(desire)")
+    if statements and not conn.in_transaction:
+        conn.commit()
+
 BATCH_SIZE = 32
 PARALLELISM = 3
 MAX_RETRIES = 3
@@ -31,6 +50,10 @@ SYSTEM_PROMPT = "Eres un analista. Respondes UN JSON válido."
 def _ensure_conn():
     conn = database.get_connection(DB_PATH)
     database.initialize_database(conn)
+    try:
+        ensure_ai_schema(conn)
+    except Exception:
+        logger.debug("ensure_ai_schema failed", exc_info=True)
     return conn
 
 
@@ -543,36 +566,53 @@ def apply_updates(conn, result: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def audit_and_backfill_all(conn, batch_size: int = 50) -> int:
+    ensure_ai_schema(conn)
     try:
         size = int(batch_size)
     except Exception:
         size = 50
     size = max(1, size)
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT id FROM products
-        WHERE COALESCE(ai_desire,'')='' OR COALESCE(desire_magnitude,'')=''
-           OR COALESCE(awareness_level,'')='' OR COALESCE(competition_level,'')=''
-        ORDER BY id
-        """
-    )
-    missing_ids = [int(row["id"]) for row in cur.fetchall() if row["id"] is not None]
-    if not missing_ids:
-        return 0
     total_applied = 0
-    for chunk in _chunked(missing_ids, size):
-        try:
-            result = run_ai_fill_job(
-                job_id=None,
-                product_ids=chunk,
-                microbatch=BATCH_SIZE,
-                parallelism=PARALLELISM,
-                apply_updates_flag=False,
-            )
-        except Exception:
-            logger.exception("Audit batch failed for ids", extra={"ids": chunk})
-            continue
-        applied_rows = apply_updates(conn, result)
-        total_applied += len(applied_rows)
+    cur = conn.cursor()
+    pending_limit = 200
+    while True:
+        rows = cur.execute(
+            """
+            SELECT id
+            FROM products
+            WHERE (
+                    (desire IS NULL OR TRIM(desire) = '')
+                    AND ai_desire IS NULL
+                )
+               OR ai_desire_label IS NULL OR TRIM(ai_desire_label) = ''
+               OR desire_magnitude IS NULL OR TRIM(desire_magnitude) = ''
+               OR awareness_level IS NULL OR TRIM(awareness_level) = ''
+               OR competition_level IS NULL OR TRIM(competition_level) = ''
+            ORDER BY id
+            LIMIT ?
+            """,
+            (pending_limit,),
+        ).fetchall()
+        missing_ids = [int(row["id"]) for row in rows if row["id"] is not None]
+        if not missing_ids:
+            break
+        applied_this_round = 0
+        for chunk in _chunked(missing_ids, size):
+            try:
+                result = run_ai_fill_job(
+                    job_id=None,
+                    product_ids=chunk,
+                    microbatch=BATCH_SIZE,
+                    parallelism=PARALLELISM,
+                    apply_updates_flag=False,
+                )
+            except Exception:
+                logger.exception("Audit batch failed for ids", extra={"ids": chunk})
+                continue
+            applied_rows = apply_updates(conn, result)
+            applied_count = len(applied_rows)
+            total_applied += applied_count
+            applied_this_round += applied_count
+        if applied_this_round == 0 or len(missing_ids) < pending_limit:
+            break
     return total_applied

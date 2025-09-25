@@ -198,6 +198,10 @@ def ensure_db():
                     logger.exception("Database initialization failed")
                     raise
                 try:
+                    ai_columns.ensure_ai_schema(conn)
+                except Exception:
+                    logger.exception("AI schema initialization failed")
+                try:
                     cur = conn.cursor()
                     cur.execute(
                         "DELETE FROM products WHERE id IN (1,2,3) OR lower(name) LIKE '%test%' OR lower(name) LIKE '%prueba%'"
@@ -983,6 +987,38 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return filename, data
         return None, None
 
+    def do_HEAD(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path in {"/", "/index.html"}:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            return
+        if path.startswith("/static/"):
+            rel = path[len("/static/") :]
+            if rel.endswith(".js"):
+                ctype = "application/javascript"
+            elif rel.endswith(".css"):
+                ctype = "text/css"
+            elif rel.endswith(".html"):
+                ctype = "text/html"
+            else:
+                ctype = "application/octet-stream"
+            self.send_response(200)
+            self.send_header("Content-Type", f"{ctype}; charset=utf-8")
+            self.end_headers()
+            return
+        if path == "/events":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            return
+        self.send_error(404)
+
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -995,6 +1031,15 @@ class RequestHandler(BaseHTTPRequestHandler):
         path = parsed.path
         if path == "/" or path == "/index.html":
             self._serve_static("index.html")
+            return
+        if path == "/events":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self._safe_write(b"retry: 60000\n\n")
             return
         if path.startswith("/static/"):
             rel = path[len("/static/") :]

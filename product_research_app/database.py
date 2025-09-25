@@ -87,6 +87,10 @@ def initialize_database(conn: sqlite3.Connection) -> None:
         cur.execute("ALTER TABLE products RENAME COLUMN magnitud_deseo TO desire_magnitude")
     elif "desire_magnitude" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN desire_magnitude TEXT")
+    if "ai_desire" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN ai_desire REAL")
+    if "ai_desire_label" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN ai_desire_label TEXT")
     if "awareness_level" not in cols and "nivel_consciencia" in cols:
         cur.execute("ALTER TABLE products RENAME COLUMN nivel_consciencia TO awareness_level")
     elif "awareness_level" not in cols:
@@ -111,6 +115,8 @@ def initialize_database(conn: sqlite3.Connection) -> None:
     if "sig_hash" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN sig_hash TEXT")
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_products_sig_hash ON products(sig_hash)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_products_ai_desire ON products(ai_desire)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_products_desire ON products(desire)")
     metric_text_cols = [
         "magnitud_deseo",
         "nivel_consciencia_headroom",

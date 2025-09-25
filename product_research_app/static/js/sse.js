@@ -1,6 +1,9 @@
 const SSE_URL = '/events';
 let eventSource = null;
+let openPromise = null;
+let sseAvailable;
 const handlerStore = new Map();
+const pendingRegistrations = [];
 
 function parseData(raw) {
   if (raw == null) return null;
@@ -13,14 +16,56 @@ function parseData(raw) {
   }
 }
 
-function ensureEventSource() {
-  if (typeof window === 'undefined') return null;
-  if (!('EventSource' in window)) return null;
-  if (eventSource) return eventSource;
-  eventSource = new EventSource(SSE_URL, { withCredentials: false });
-  eventSource.addEventListener('error', () => {
-    // keep connection alive; browsers will retry automatically
+function flushPending(es) {
+  if (!es || !pendingRegistrations.length) return;
+  const pending = pendingRegistrations.splice(0, pendingRegistrations.length);
+  pending.forEach(({ eventName, entry }) => {
+    const entries = handlerStore.get(eventName);
+    if (entries && entries.includes(entry)) {
+      es.addEventListener(eventName, entry.wrapped);
+    }
   });
+}
+
+async function openEventSource() {
+  if (eventSource) return eventSource;
+  if (sseAvailable === false) return null;
+  if (typeof window === 'undefined' || !('EventSource' in window)) {
+    sseAvailable = false;
+    return null;
+  }
+  if (openPromise) return openPromise;
+  openPromise = (async () => {
+    let ok = false;
+    try {
+      const resp = await fetch(SSE_URL, { method: 'HEAD' });
+      ok = !!resp && resp.ok;
+    } catch (err) {
+      ok = false;
+    }
+    if (!ok) {
+      sseAvailable = false;
+      pendingRegistrations.length = 0;
+      return null;
+    }
+    sseAvailable = true;
+    const es = new EventSource(SSE_URL, { withCredentials: false });
+    es.addEventListener('error', () => {
+      // browsers will retry automatically when the connection drops
+    });
+    eventSource = es;
+    flushPending(es);
+    return es;
+  })();
+  openPromise.finally(() => {
+    openPromise = null;
+  });
+  return openPromise;
+}
+
+function ensureEventSource() {
+  if (eventSource) return eventSource;
+  void openEventSource();
   return eventSource;
 }
 
@@ -28,11 +73,19 @@ export function getEventSource() {
   return ensureEventSource();
 }
 
-export function subscribe(eventName, handler) {
-  const es = ensureEventSource();
-  if (!es) {
-    return () => {};
+function registerOrQueue(eventName, entry) {
+  if (eventSource) {
+    eventSource.addEventListener(eventName, entry.wrapped);
+    return;
   }
+  if (sseAvailable === false) {
+    return;
+  }
+  pendingRegistrations.push({ eventName, entry });
+  void openEventSource();
+}
+
+export function subscribe(eventName, handler) {
   const wrapped = (ev) => {
     handler({
       event: ev.type,
@@ -41,25 +94,40 @@ export function subscribe(eventName, handler) {
       rawEvent: ev,
     });
   };
-  es.addEventListener(eventName, wrapped);
   if (!handlerStore.has(eventName)) {
     handlerStore.set(eventName, []);
   }
-  handlerStore.get(eventName).push({ original: handler, wrapped });
+  const entry = { original: handler, wrapped };
+  handlerStore.get(eventName).push(entry);
+  registerOrQueue(eventName, entry);
   return () => unsubscribe(eventName, handler);
 }
 
+function removePending(entry) {
+  for (let i = pendingRegistrations.length - 1; i >= 0; i -= 1) {
+    if (pendingRegistrations[i].entry === entry) {
+      pendingRegistrations.splice(i, 1);
+    }
+  }
+}
+
 export function unsubscribe(eventName, handler) {
-  const es = ensureEventSource();
-  if (!es) return;
   const entries = handlerStore.get(eventName);
   if (!entries || !entries.length) return;
+  let entryToRemove = null;
   for (let i = 0; i < entries.length; i += 1) {
     const entry = entries[i];
     if (entry.original === handler) {
-      es.removeEventListener(eventName, entry.wrapped);
+      entryToRemove = entry;
       entries.splice(i, 1);
       break;
+    }
+  }
+  if (entryToRemove) {
+    if (eventSource) {
+      eventSource.removeEventListener(eventName, entryToRemove.wrapped);
+    } else {
+      removePending(entryToRemove);
     }
   }
   if (!entries.length) {
