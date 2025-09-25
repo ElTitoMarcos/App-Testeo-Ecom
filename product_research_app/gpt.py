@@ -286,6 +286,23 @@ def call_gpt(
     return {"ok": True, "task": canonical, "content": content, "raw": raw}
 
 
+OPENAI_BASE = "https://api.openai.com/v1"
+DEFAULT_TIMEOUT = httpx.Timeout(connect=10, read=120, write=120, pool=120)
+_BACKOFF_DELAYS = (0, 2, 5, 12)
+
+
+def _normalize_timeout(value: httpx.Timeout | float | int | None) -> httpx.Timeout:
+    if isinstance(value, httpx.Timeout):
+        return value
+    if value is None:
+        return DEFAULT_TIMEOUT
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return DEFAULT_TIMEOUT
+    return httpx.Timeout(connect=10, read=numeric, write=numeric, pool=numeric)
+
+
 def call_gpt_json(
     *,
     api_key: str,
@@ -294,40 +311,57 @@ def call_gpt_json(
     user: str,
     temperature: float = 0.2,
     max_tokens: int = 2000,
-    timeout: float = 30.0,
-) -> Dict[str, Any]:
-    """Call the Chat Completions API expecting a strict JSON response."""
+    timeout: httpx.Timeout | float | int | None = None,
+) -> str:
+    """Call the Chat Completions API and return the raw JSON string."""
 
-    headers = {"Authorization": f"Bearer {api_key}"}
-    body = {
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    payload = {
         "model": model,
+        "messages": messages,
+        "response_format": {"type": "json_object"},
         "temperature": temperature,
         "max_tokens": max_tokens,
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {"role": "system", "content": system},
-            {
-                "role": "user",
-                "content": (
-                    "DEV MODE: Responde **UN ÚNICO** objeto JSON válido, "
-                    "sin notas ni markdown, **SIN** fences. " + user
-                ),
-            },
-        ],
     }
-    with httpx.Client(timeout=timeout) as client:
-        response = client.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers=headers,
-            json=body,
-        )
-        response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
-    try:
-        data = json.loads(content)
-    except Exception:
-        data = _salvage_json(content)
-    return data
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    timeout_conf = _normalize_timeout(timeout)
+    last_error: Exception | None = None
+    with httpx.Client(timeout=timeout_conf, http2=True) as client:
+        for attempt, delay in enumerate(_BACKOFF_DELAYS, start=1):
+            if delay:
+                time.sleep(delay)
+            try:
+                response = client.post(
+                    f"{OPENAI_BASE}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                )
+                response.raise_for_status()
+                data = response.json()
+                return data["choices"][0]["message"]["content"]
+            except (
+                httpx.ReadTimeout,
+                httpx.ConnectTimeout,
+                httpx.RemoteProtocolError,
+                httpx.HTTPStatusError,
+            ) as exc:
+                last_error = exc
+                if attempt == len(_BACKOFF_DELAYS):
+                    raise
+            except Exception as exc:  # pragma: no cover - defensive
+                last_error = exc
+                if attempt == len(_BACKOFF_DELAYS):
+                    raise
+    if last_error:
+        raise last_error
+    raise RuntimeError("call_gpt_json failed without raising")
 
 
 def _build_image_message(image_bytes: bytes, instructions: str, filename: str) -> list:

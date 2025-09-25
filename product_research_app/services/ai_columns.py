@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -10,7 +11,8 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import httpx
 from .. import config, database
-from ..gpt import InvalidJSONError, call_gpt_json
+from ..gpt import call_gpt_json
+from ..sse import publish_event
 from ..utils.signature import compute_sig_hash
 
 logger = logging.getLogger(__name__)
@@ -25,6 +27,32 @@ PARALLELISM = 3
 MAX_RETRIES = 3
 MODEL_NAME = "gpt-4o-mini"
 SYSTEM_PROMPT = "Eres un analista. Respondes UN JSON válido."
+
+
+def _extract_json_obj(s: str) -> Dict[str, Any]:
+    s = (s or "").strip()
+    if not s:
+        raise ValueError("json:empty")
+    if s.startswith("{"):
+        return json.loads(s)
+
+    fence = re.search(r"```json\s*(\{.*?\})\s*```", s, re.S)
+    if fence:
+        return json.loads(fence.group(1))
+
+    depth = 0
+    start = None
+    for idx, ch in enumerate(s):
+        if ch == "{":
+            if depth == 0:
+                start = idx
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start is not None:
+                return json.loads(s[start : idx + 1])
+
+    raise ValueError("json:no_fence")
 
 
 def _ensure_conn():
@@ -63,6 +91,35 @@ def _apply_ai_updates(conn, updates: Dict[int, Dict[str, Any]]) -> None:
         if began and conn.in_transaction:
             conn.rollback()
         raise
+
+
+def _emit_ai_updates(updates: Dict[int, Dict[str, Any]]) -> None:
+    if not updates:
+        return
+    rows: List[Dict[str, Any]] = []
+    for pid, payload in updates.items():
+        if not isinstance(payload, dict):
+            continue
+        row_data: Dict[str, Any] = {"id": pid}
+        has_value = False
+        for field in AI_FIELDS:
+            if field in payload:
+                row_data[field] = payload[field]
+                has_value = True
+        if has_value:
+            rows.append(row_data)
+    if not rows:
+        return
+    try:
+        publish_event(
+            "ai-columns",
+            {
+                "columns": AI_FIELDS,
+                "rows": rows,
+            },
+        )
+    except Exception:  # pragma: no cover - best effort broadcast
+        logger.debug("Failed to publish ai-columns SSE", exc_info=True)
 
 
 def _deserialize_extra(raw: Any) -> Dict[str, Any]:
@@ -238,6 +295,7 @@ def run_ai_fill_job(
         cached_updates = _merge_cache(conn, model, cache_version, sig_map)
         if cached_updates:
             _apply_ai_updates(conn, cached_updates)
+            _emit_ai_updates(cached_updates)
 
         counts = {
             "queued": len(normalized),
@@ -281,7 +339,7 @@ def run_ai_fill_job(
             attempt = 1
             while attempt <= MAX_RETRIES:
                 try:
-                    response = call_gpt_json(
+                    raw_response = call_gpt_json(
                         api_key=api_key,
                         model=model or MODEL_NAME,
                         system=SYSTEM_PROMPT,
@@ -289,6 +347,7 @@ def run_ai_fill_job(
                         max_tokens=2500,
                         temperature=0.2,
                     )
+                    response = _extract_json_obj(raw_response)
                     if attempt > 1:
                         counts["retried"] += attempt - 1
                     break
@@ -302,12 +361,16 @@ def run_ai_fill_job(
                     sleep_for = min(2 ** (attempt - 1), 8)
                     time.sleep(sleep_for)
                     attempt += 1
-                except InvalidJSONError:
-                    for row in chunk_rows:
-                        ko[int(row["id"])] = "invalid_json"
-                    counts["ko"] = len(ko)
-                    response = None
-                    break
+                except ValueError:
+                    if attempt >= MAX_RETRIES:
+                        for row in chunk_rows:
+                            ko[int(row["id"])] = "invalid_json"
+                        counts["ko"] = len(ko)
+                        response = None
+                        break
+                    sleep_for = min(2 ** (attempt - 1), 8)
+                    time.sleep(sleep_for)
+                    attempt += 1
                 except Exception:
                     logger.exception("Batch IA falló")
                     for row in chunk_rows:
@@ -345,6 +408,7 @@ def run_ai_fill_job(
                     )
 
             _apply_ai_updates(conn, updates)
+            _emit_ai_updates(updates)
             ok.update({pid: data for pid, data in updates.items() if pid not in ko})
             counts["ok"] = len(ok)
             counts["ko"] = len(ko)
