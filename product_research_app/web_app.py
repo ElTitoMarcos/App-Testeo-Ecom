@@ -614,6 +614,10 @@ def _schedule_post_import_tasks(
                 def _post_import_audit() -> None:
                     try:
                         audit_conn = ensure_db()
+                        try:
+                            audit_conn.row_factory = sqlite3.Row
+                        except Exception:
+                            pass
                         run_audit(audit_conn, ids_copy)
                     except Exception:
                         logger.exception("post_import_audit failed ids=%s", ids_copy)
