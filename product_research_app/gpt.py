@@ -571,16 +571,20 @@ def _norm_awareness(val: Optional[str]) -> str:
         "problemaware": "Problem-Aware",
         "problemaaware": "Problem-Aware",
         "problemaconsciente": "Problem-Aware",
+        "problem": "Problem-Aware",
         "solutionaware": "Solution-Aware",
         "solucionaware": "Solution-Aware",
         "solucionconsciente": "Solution-Aware",
+        "solution": "Solution-Aware",
         "productaware": "Product-Aware",
         "productoaware": "Product-Aware",
         "productoconciente": "Product-Aware",
+        "product": "Product-Aware",
         "mostaware": "Most Aware",
         "masaware": "Most Aware",
         "masconsciente": "Most Aware",
         "muyaware": "Most Aware",
+        "most": "Most Aware",
     }
     return mapping.get(_canonical(val), "Problem-Aware")
 

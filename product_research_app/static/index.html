@@ -847,6 +847,7 @@ function renderTable() {
       th.style.cursor = 'pointer';
       th.setAttribute('data-key', col.key);
       if (col.headerClass) th.className = col.headerClass;
+      if (col.key === 'desire') th.classList.add('col-desire');
       if (col.dataEcCol) th.setAttribute('data-ec-col', col.dataEcCol);
       if (col.width) th.style.width = col.width + 'px';
       if (col.minWidth) th.style.minWidth = col.minWidth + 'px';
@@ -896,6 +897,7 @@ function renderTable() {
       const key = col.key;
       td.setAttribute('data-key', key);
       if (col.cellClass) td.className = col.cellClass;
+      if (col.key === 'desire') td.classList.add('col-desire');
       if (col.dataEcCol) td.setAttribute('data-ec-col', col.dataEcCol);
       if (col.width) td.style.width = col.width + 'px';
       if (col.minWidth) td.style.minWidth = col.minWidth + 'px';
@@ -973,7 +975,7 @@ function renderTable() {
         const render = () => {
           td.innerHTML = '';
           const wrap = document.createElement('div');
-          wrap.className = 'desire-wrap';
+          wrap.className = 'cell-text desire-wrap';
           wrap.textContent = current;
           td.appendChild(wrap);
           wrap.addEventListener('click', () => {

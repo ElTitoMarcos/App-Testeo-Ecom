@@ -17,6 +17,7 @@ import httpx
 
 from .. import config, database, gpt
 from ..utils.signature import compute_sig_hash
+from ..utils.sanitize import sanitize_desire
 
 logger = logging.getLogger(__name__)
 
@@ -383,6 +384,26 @@ def _ensure_conn():
     conn = database.get_connection(DB_PATH)
     database.initialize_database(conn)
     return conn
+
+
+def _coerce_desire_magnitude(val: Any) -> Optional[Any]:
+    if isinstance(val, dict):
+        overall = val.get("overall")
+        try:
+            if overall is None:
+                return None
+            num = float(overall)
+        except (TypeError, ValueError):
+            return None
+        if math.isnan(num):
+            return None
+        if num <= 1:
+            num *= 100.0
+        num = max(0.0, min(100.0, num))
+        return int(round(num))
+    if val in (None, ""):
+        return None
+    return val
 
 
 def _parse_score(val: Any) -> Optional[float]:
@@ -822,6 +843,20 @@ def run_ai_fill_job(
     rows = database.get_products_by_ids(conn, requested_ids)
     row_map = {int(row["id"]): dict(row) for row in rows}
 
+    def _resolve_title_for(pid: int, candidate: Optional[Candidate] = None) -> str:
+        row_info = row_map.get(pid) or {}
+        title = ""
+        if isinstance(row_info, dict):
+            title = str(row_info.get("title") or row_info.get("name") or "").strip()
+        if not title and candidate:
+            title = str(
+                candidate.payload.get("title")
+                or candidate.payload.get("name")
+                or candidate.extra.get("title")
+                or ""
+            ).strip()
+        return title
+
     candidates: List[Candidate] = []
     sig_updates: List[tuple[str, int]] = []
     skipped_existing = 0
@@ -974,11 +1009,23 @@ def run_ai_fill_job(
             if not cache_row:
                 remaining.append(cand)
                 continue
+            title_source = _resolve_title_for(cand.id, cand)
+            cached_desire = sanitize_desire(
+                cache_row.get("desire") or "",
+                title=title_source or "",
+            )
+            cached_desire = cached_desire or None
             update_payload = {
-                "desire": cache_row["desire"],
-                "desire_magnitude": cache_row["desire_magnitude"],
-                "awareness_level": cache_row["awareness_level"],
-                "competition_level": cache_row["competition_level"],
+                "desire": cached_desire,
+                "desire_magnitude": _coerce_desire_magnitude(
+                    cache_row.get("desire_magnitude")
+                ),
+                "awareness_level": gpt._norm_awareness(
+                    cache_row.get("awareness_level")
+                ),
+                "competition_level": gpt._norm_tri(
+                    cache_row.get("competition_level")
+                ),
             }
             cached_updates[cand.id] = update_payload
             applied_outputs[cand.id] = {k: v for k, v in update_payload.items() if v is not None}
@@ -1105,7 +1152,23 @@ def run_ai_fill_job(
                 pid = int(pid_str)
             except Exception:
                 continue
-            success_updates[pid] = payload
+            candidate = candidate_map.get(pid)
+            title_source = _resolve_title_for(pid, candidate)
+            desire_text = (
+                (payload.get("desire_statement") or payload.get("desire") or "")
+            )
+            desire_value = sanitize_desire(desire_text or "", title=title_source or "")
+            desire_value = desire_value or None
+            magnitude_value = _coerce_desire_magnitude(payload.get("desire_magnitude"))
+            awareness_value = gpt._norm_awareness(payload.get("awareness_level"))
+            competition_value = gpt._norm_tri(payload.get("competition_level"))
+            update_payload = {
+                "desire": desire_value,
+                "desire_magnitude": magnitude_value,
+                "awareness_level": awareness_value,
+                "competition_level": competition_value,
+            }
+            success_updates[pid] = update_payload
             pending_set.discard(pid)
 
         for pid_str, reason in ko_map.items():

@@ -1245,3 +1245,23 @@ th[aria-sort="descending"]::after{ content:" ▼"; opacity:.6; }
   padding: 12px;
   position: relative;
 }
+
+/* SOLO columna Desire: mostrar texto completo, sin ellipsis, sin clamp */
+td.col-desire .cell-text,
+td.col-desire {
+  white-space: normal !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  max-height: none !important;
+}
+
+/* por si hay clases globales de recorte */
+td.col-desire .line-clamp,
+td.col-desire .clamp-2,
+td.col-desire .clamp-3,
+td.col-desire .clamp-4 {
+  -webkit-line-clamp: unset !important;
+  display: block !important;
+}

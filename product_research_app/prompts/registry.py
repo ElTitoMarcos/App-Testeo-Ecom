@@ -25,6 +25,95 @@ PROMPT_E = """TAREA E — Resumen ejecutivo para decisión\nObjetivo: condensar 
 
 PROMPT_E_AUTO = """TAREA E_auto — Decisión automática sobre lotes de productos\nObjetivo: clasificar cada elemento del lote y generar acciones siguientes.\n\nInstrucciones:\n1. Lee la matriz en "### DATA" (cada elemento con métricas agregadas).\n2. Para cada elemento, determina estado ("aprobado", "revisar", "descartar") según señales.\n3. Calcula un "score" 0-100 y asigna un "confidence" 0-100.\n4. Resume en una frase el motivo y propone el "next_step" (texto o null si no aplica).\n5. Añade "signals" como lista de palabras clave que respaldan la decisión.\n\nSalida obligatoria: objeto JSON con\n{\n  "prompt_version": "prompt-maestro-v3",\n  "items": [\n    {\n      "id": <string|number>,\n      "status": "aprobado"|"revisar"|"descartar",\n      "score": <0-100>,\n      "confidence": <0-100>,\n      "summary": <string>,\n      "reason": <string|null>,\n      "next_step": <string|null>,\n      "signals": [<string>, ...]\n    }, ...\n  ]\n}\n\nReglas:\n- Respeta exactamente los nombres de las claves.\n- Mantén "signals" como lista (puede ir vacía).\n- No añadas campos adicionales ni texto fuera del JSON.\n\nFallbacks específicos:\n- Si "### DATA" está vacío, devuelve items como lista vacía y reason="SIN DATOS" en cada registro generado."""
 
+PROMPT_DESIRE = """TAREA DESIRE — Outcome-only (App v5.1)\nUsa SOLO ###CONTEXT_JSON / ###DATA. Prohibido navegar.\n\nMeta: formular el DESEO HUMANO subyacente (resultado + emoción + micro-escena + fricción neutralizada). \nNo describas el producto.\n\nReglas duras (desire_statement):\n- 220–320 caracteres; 2–4 frases o cláusulas (“;” permitido).\n- Enfoque en la persona: “quien busca… / personas que desean…”.\n- Prohibido: marcas/modelos, nombres de producto o categoría (p. ej., crema, aspiradora, figura), packs/cantidades (kit, set, x2), medidas (ml/W/cm), materiales, claims médicos/ilegales, hype.\n- Si aparecen términos de producto, reescribe hasta eliminarlos.\n\nSalida JSON estricta:\n{\n  "prompt_version":"prompt-maestro-v4",\n  "desire_primary":"<health|sex|status|belonging|control|comfort>",\n  "desire_statement":"<=320, >=220",\n  "desire_magnitude":{"scope":0-100,"urgency":0-100,"staying_power":0-100,"overall":0-100},\n  "awareness_level":"<problem|solution|product|most>",\n  "competition_level":"<low|mid|high>",\n  "competition_reason":"<=140",\n  "seasonality_hint":{"window":"<jan|feb|mar_apr|may|jun|jul_aug|sep|oct|nov|dec>","confidence":0-100},\n  "elevation_strategy":"<=140",\n  "signals":["t1","t2","t3"]\n}\n\nCálculo: overall = round((scope+urgency+staying_power)/3).\nFallback: sin señales → signals=[], desire_statement="SIN DATOS", competition_reason="SIN DATOS".\nNo añadas campos ni comentarios."""
+
+PROMPT_DESIRE_SCHEMA = {
+    "name": "prompt_maestro_v4_desire",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "prompt_version",
+            "desire_primary",
+            "desire_statement",
+            "desire_magnitude",
+            "awareness_level",
+            "competition_level",
+            "competition_reason",
+            "seasonality_hint",
+            "elevation_strategy",
+            "signals",
+        ],
+        "properties": {
+            "prompt_version": {"type": "string"},
+            "desire_primary": {
+                "type": "string",
+                "enum": ["health", "sex", "status", "belonging", "control", "comfort"],
+            },
+            "desire_statement": {
+                "type": "string",
+                "minLength": 220,
+                "maxLength": 320,
+            },
+            "desire_magnitude": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["scope", "urgency", "staying_power", "overall"],
+                "properties": {
+                    "scope": {"type": "number", "minimum": 0, "maximum": 100},
+                    "urgency": {"type": "number", "minimum": 0, "maximum": 100},
+                    "staying_power": {"type": "number", "minimum": 0, "maximum": 100},
+                    "overall": {"type": "number", "minimum": 0, "maximum": 100},
+                },
+            },
+            "awareness_level": {
+                "type": "string",
+                "enum": ["problem", "solution", "product", "most"],
+            },
+            "competition_level": {
+                "type": "string",
+                "enum": ["low", "mid", "high"],
+            },
+            "competition_reason": {
+                "type": "string",
+                "maxLength": 140,
+            },
+            "seasonality_hint": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["window", "confidence"],
+                "properties": {
+                    "window": {
+                        "type": "string",
+                        "enum": [
+                            "jan",
+                            "feb",
+                            "mar_apr",
+                            "may",
+                            "jun",
+                            "jul_aug",
+                            "sep",
+                            "oct",
+                            "nov",
+                            "dec",
+                        ],
+                    },
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 100},
+                },
+            },
+            "elevation_strategy": {
+                "type": "string",
+                "maxLength": 140,
+            },
+            "signals": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+        },
+    },
+}
+
 _TASK_PROMPTS: Dict[str, str] = {
     "A": PROMPT_A,
     "B": PROMPT_B,
@@ -32,6 +121,7 @@ _TASK_PROMPTS: Dict[str, str] = {
     "D": PROMPT_D,
     "E": PROMPT_E,
     "E_auto": PROMPT_E_AUTO,
+    "DESIRE": PROMPT_DESIRE,
 }
 
 JSON_ONLY: Dict[str, bool] = {
@@ -41,6 +131,7 @@ JSON_ONLY: Dict[str, bool] = {
     "D": False,
     "E": False,
     "E_auto": True,
+    "DESIRE": True,
 }
 
 _TASK_B_METRICS = [
@@ -133,6 +224,7 @@ JSON_SCHEMAS: Dict[str, Dict[str, Any]] = {
             },
         },
     },
+    "DESIRE": PROMPT_DESIRE_SCHEMA,
 }
 
 
@@ -146,6 +238,8 @@ def _normalize_task(task: str) -> str:
     upper = normalized.upper()
     if upper == "E_AUTO" or upper == "EAUTO":
         return "E_auto"
+    if upper == "DESIRE":
+        return "DESIRE"
     if upper in {"A", "B", "C", "D", "E"}:
         return upper
     raise KeyError(f"Unknown task: {task}")
@@ -188,6 +282,8 @@ __all__ = [
     "PROMPT_D",
     "PROMPT_E",
     "PROMPT_E_AUTO",
+    "PROMPT_DESIRE",
+    "PROMPT_DESIRE_SCHEMA",
     "PROMPT_VERSION",
     "PROMPT_RELEASE_DATE",
     "JSON_ONLY",
