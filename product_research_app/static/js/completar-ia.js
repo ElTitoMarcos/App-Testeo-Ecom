@@ -124,6 +124,106 @@ async function recalcDesireVisible(opts = {}) {
 
 window.handleRecalcDesireVisible = recalcDesireVisible;
 
+async function launchDesireBackfill(opts = {}) {
+  const payload = {};
+  if (opts.scope) payload.scope = opts.scope;
+  if (Array.isArray(opts.ids) && opts.ids.length) payload.ids = opts.ids;
+  if (opts.batch_size) payload.batch_size = opts.batch_size;
+  if (opts.parallel) payload.parallel = opts.parallel;
+  if (opts.max_retries !== undefined) payload.max_retries = opts.max_retries;
+
+  let resp;
+  try {
+    resp = await fetch('/api/desire/backfill', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+  } catch (err) {
+    if (!opts.silent) toast.error(`Backfill Desire: ${err.message}`);
+    return null;
+  }
+  if (!resp.ok) {
+    let msg = resp.statusText || 'Error';
+    try {
+      const error = await resp.json();
+      if (error && error.error) msg = error.error;
+    } catch {}
+    if (!opts.silent) toast.error(`Backfill Desire: ${msg}`);
+    return null;
+  }
+  let data;
+  try {
+    data = await resp.json();
+  } catch {
+    data = {};
+  }
+  const taskId = data && data.task_id;
+  if (!taskId) {
+    if (!opts.silent) toast.error('Backfill Desire: sin task_id');
+    return null;
+  }
+  if (!opts.silent) toast.info('Backfill Desire iniciado');
+
+  const pollInterval = opts.pollInterval || 1500;
+  let finalStatus = null;
+  let lastPct = -1;
+  const start = Date.now();
+
+  while (true) {
+    await new Promise(resolve => setTimeout(resolve, pollInterval));
+    let statusResp;
+    try {
+      statusResp = await fetch(`/_desire_status?task_id=${encodeURIComponent(taskId)}`);
+    } catch {
+      continue;
+    }
+    if (!statusResp.ok) continue;
+    let status;
+    try { status = await statusResp.json(); } catch { continue; }
+    if (!status) continue;
+    finalStatus = status;
+    if (status.status === 'error') {
+      if (!opts.silent) {
+        const msg = status.message || 'Error';
+        toast.error(`Backfill Desire: ${msg}`);
+      }
+      return status;
+    }
+    if (status.status === 'done') {
+      break;
+    }
+    if (!opts.silent && status.status === 'running') {
+      const pct = Math.round((Number(status.progress) || 0) * 100);
+      if (pct >= 0 && pct !== lastPct) {
+        lastPct = pct;
+        const elapsed = Math.round((Date.now() - start) / 1000);
+        toast.info(`Backfill Desire ${pct}% (${elapsed}s)`, { duration: 1200 });
+      }
+    }
+  }
+
+  try {
+    const resResp = await fetch(`/_desire_results?task_id=${encodeURIComponent(taskId)}`);
+    if (resResp.ok) {
+      const resJson = await resResp.json();
+      if (resJson && typeof resJson === 'object') {
+        finalStatus = { ...(finalStatus || {}), result: resJson };
+      }
+    }
+  } catch {}
+
+  if (!opts.silent) {
+    const ok = Number((finalStatus && finalStatus.done) || 0);
+    const fail = Number((finalStatus && finalStatus.failed) || 0);
+    toast.info(`Backfill Desire completado (${ok} ok, ${fail} fallos)`);
+  }
+  updateMasterState();
+  return finalStatus;
+}
+
+window.launchDesireBackfill = launchDesireBackfill;
+
 window.handleCompletarIA = async function(opts = {}) {
   const ids = opts.ids;
   let all;
