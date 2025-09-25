@@ -17,7 +17,7 @@ import httpx
 
 from .. import config, database, gpt
 from ..utils.signature import compute_sig_hash
-from .desire_utils import coerce_len, sanitize_desire_text
+from .desire_utils import dedupe_clauses, needs_regen, sanitize_desire_text
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +97,12 @@ SYSTEM_PROMPT = (
 USER_INSTRUCTION = (
     "Analiza los siguientes productos y responde solo con un JSON cuyas claves sean los IDs. "
     "Cada entrada debe incluir desire, desire_magnitude, awareness_level y competition_level."
+)
+
+DESIRE_RETRY_EXTRA_USER = (
+    "El borrador quedó corto y genérico. Reescribe 'desire_statement' con 280–420 caracteres, "
+    "inicia con un verbo de resultado, usa una escena distinta y sin muletillas como "
+    "'resultados sin invertir tiempo extra ni crear desorden'."
 )
 
 
@@ -611,6 +617,7 @@ async def _call_batch_with_retries(
                         "model": model,
                         "temperature": 0,
                         "top_p": 1,
+                        "max_tokens": 380,
                         "response_format": {"type": "json_object"},
                         "messages": [
                             {"role": "system", "content": SYSTEM_PROMPT},
@@ -624,6 +631,29 @@ async def _call_batch_with_retries(
                 if not isinstance(payload, dict):
                     raise gpt.InvalidJSONError("Respuesta IA no es JSON")
                 data_map = {str(k): v for k, v in payload.items()}
+                if any(isinstance(v, dict) and needs_regen(v) for v in data_map.values()):
+                    retry_messages = [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": request.user_text},
+                        {"role": "user", "content": DESIRE_RETRY_EXTRA_USER},
+                    ]
+                    retry_response = await client.post(
+                        "/v1/chat/completions",
+                        json={
+                            "model": model,
+                            "temperature": 0,
+                            "top_p": 1,
+                            "max_tokens": 380,
+                            "response_format": {"type": "json_object"},
+                            "messages": retry_messages,
+                        },
+                    )
+                    retry_response.raise_for_status()
+                    raw = retry_response.json()
+                    payload = _extract_response_payload(raw)
+                    if not isinstance(payload, dict):
+                        raise gpt.InvalidJSONError("Respuesta IA no es JSON")
+                    data_map = {str(k): v for k, v in payload.items()}
                 ok: Dict[str, Dict[str, Any]] = {}
                 ko: Dict[str, str] = {}
                 for cand in request.candidates:
@@ -633,10 +663,12 @@ async def _call_batch_with_retries(
                         ko[pid] = "missing"
                         continue
                     desire_statement = entry.get("desire_statement") or entry.get("desire") or ""
-                    long_txt = sanitize_desire_text(str(desire_statement))
+                    long_txt_raw = str(desire_statement).strip()
+                    long_txt = sanitize_desire_text(long_txt_raw)
+                    long_txt = dedupe_clauses(long_txt)
                     if not long_txt:
-                        long_txt = "personas que buscan resultados sin invertir tiempo extra ni crear desorden"
-                    long_txt = coerce_len(long_txt, 280, 420)
+                        long_txt = long_txt_raw
+                    long_txt = long_txt.strip()
                     desire_primary = entry.get("desire_primary")
                     desire_magnitude_raw = entry.get("desire_magnitude")
                     if isinstance(desire_magnitude_raw, dict):
@@ -985,11 +1017,12 @@ def run_ai_fill_job(
             if not cache_row:
                 remaining.append(cand)
                 continue
-            cached_desire = cache_row["desire"] if cache_row["desire"] is not None else ""
-            cached_desire = sanitize_desire_text(str(cached_desire))
+            cached_desire_raw = cache_row["desire"] if cache_row["desire"] is not None else ""
+            cached_desire = sanitize_desire_text(str(cached_desire_raw))
+            cached_desire = dedupe_clauses(cached_desire)
             if not cached_desire:
-                cached_desire = "personas que buscan resultados sin invertir tiempo extra ni crear desorden"
-            cached_desire = coerce_len(cached_desire, 280, 420)
+                cached_desire = str(cached_desire_raw)
+            cached_desire = cached_desire.strip()
             update_payload = {
                 "desire": cached_desire,
                 "desire_magnitude": cache_row["desire_magnitude"],
