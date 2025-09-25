@@ -60,7 +60,25 @@ SALIDA JSON (estricta):
 
 Reglas finales:
 - Antes de imprimir, AUTOCHEQUEA: si tu texto contiene nombres de producto/categoría, medidas o marcas, reescribe el “desire_statement”.
-- No añadas campos ni comentarios."""
+- No añadas campos ni comentarios.
+---
+OUTPUT CONTRACT (STRICTO):
+Devuelve ÚNICAMENTE un objeto JSON con esta forma:
+{
+  "items": [
+    {
+      "id": <ID del producto tal como se te pasó>,
+      "desire_statement": "<280–420 chars>",
+      "desire_primary": "<enum>",
+      "awareness_level": "<enum>",
+      "competition_level": "<enum>",
+      "desire_magnitude": {"scope":0..10,"urgency":0..10,"staying_power":0..10,"overall":0..10}
+    },
+    ...
+  ]
+}
+Sin texto adicional, sin comentarios, sin markdown.
+---"""
 
 _TASK_PROMPTS: Dict[str, str] = {
     "A": PROMPT_A,

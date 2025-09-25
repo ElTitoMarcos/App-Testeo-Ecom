@@ -1,13 +1,12 @@
 import json, re
 
-JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", re.IGNORECASE)
+JSON_BLOCK_RE = re.compile(
+    r"```(?:json)?\s*(\{[\s\S]*?\})\s*```",
+    re.IGNORECASE
+)
 
 def extract_json_object(text: str):
-    """
-    Devuelve (obj, err). Intenta:
-      1) Bloque ```json ... ```
-      2) Primer objeto { ... } balanceando llaves
-    """
+    """Intenta extraer el primer objeto JSON válido de un texto con/ sin fences."""
     if not text:
         return None, "empty"
 
@@ -39,6 +38,7 @@ def extract_json_object(text: str):
             return None, f"balanced_load:{e}"
 
     return None, last_err or "unbalanced"
+
 
 def coerce_bounds(s: str, mn: int, mx: int) -> str:
     s = (s or "").strip()

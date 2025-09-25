@@ -17,6 +17,7 @@ import httpx
 
 from .. import config, database, gpt
 from ..utils.signature import compute_sig_hash
+from .batch_parser import map_desire_results
 from .desire_utils import (
     cleanse,
     dedupe_clauses,
@@ -250,22 +251,6 @@ def _build_batch_request(
         user_text=user_text,
         prompt_tokens_est=prompt_tokens_est,
     )
-
-
-def _extract_response_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
-    parsed_json, text_content = gpt._parse_message_content(raw)
-    if isinstance(parsed_json, dict):
-        return parsed_json
-    content_text = text_content.strip() if isinstance(text_content, str) else ""
-    if not content_text:
-        raise gpt.InvalidJSONError("La respuesta IA no es JSON")
-    try:
-        obj = json.loads(content_text)
-    except json.JSONDecodeError:
-        obj, _ = gpt._extract_first_json_block(content_text)
-    if not isinstance(obj, dict):
-        raise gpt.InvalidJSONError("La respuesta IA no es JSON")
-    return obj
 
 
 def _percentile(values: List[float], pct: float) -> float:
@@ -660,10 +645,36 @@ async def _call_batch_with_retries(
                 response.raise_for_status()
                 raw = response.json()
                 raw_usage = raw.get("usage", {}) or {}
-                payload = _extract_response_payload(raw)
-                if not isinstance(payload, dict):
-                    raise gpt.InvalidJSONError("Respuesta IA no es JSON")
-                data_map = {str(k): v for k, v in payload.items()}
+                parsed_json, text_content = gpt._parse_message_content(raw)
+                raw_text = ""
+                obj: Any = None
+                jerr: Optional[str] = None
+                if isinstance(parsed_json, (dict, list)):
+                    obj = parsed_json
+                    try:
+                        raw_text = json.dumps(parsed_json, ensure_ascii=False)
+                    except Exception:
+                        raw_text = ""
+                elif parsed_json is not None:
+                    raw_text = json.dumps(parsed_json, ensure_ascii=False)
+                if obj is None:
+                    raw_text = text_content or raw_text or ""
+                    try:
+                        obj = json.loads(raw_text)
+                    except Exception:
+                        obj, jerr = extract_json_object(raw_text)
+                if obj is None:
+                    sample = (raw_text or "")[:240]
+                    if attempt < 3:
+                        logger.warning("DESIRE parse failed jerr=%s sample=%s", jerr, sample)
+                    reason = f"json:{jerr}" if jerr else "json:error"
+                    raise gpt.InvalidJSONError(reason)
+
+                batch_ids = [cand.id for cand in request.candidates]
+                mapping, missing_ids, extras = map_desire_results(obj, batch_ids)
+                if extras:
+                    logger.debug("DESIRE extras (ignorados): %s", extras[:5])
+
                 ok: Dict[str, Dict[str, Any]] = {}
                 ko: Dict[str, str] = {}
                 if attempt == 0:
@@ -673,70 +684,65 @@ async def _call_batch_with_retries(
                         job_label,
                         len(request.candidates),
                     )
+
+                titles_by_id = {
+                    cand.id: str(
+                        cand.payload.get("name")
+                        or (cand.extra or {}).get("title")
+                        or ""
+                    )
+                    for cand in request.candidates
+                }
                 fail_count = 0
                 for cand in request.candidates:
-                    pid = str(cand.id)
-                    entry = data_map.get(pid)
-                    if entry is None:
-                        ko[pid] = "missing"
-                        continue
-                    if isinstance(entry, dict):
-                        obj = dict(entry)
-                        raw_text = json.dumps(entry, ensure_ascii=False)
-                        jerr = None
-                    else:
-                        raw_text = str(entry or "")
-                        try:
-                            obj = json.loads(raw_text)
-                            jerr = None
-                        except Exception:
-                            obj, jerr = extract_json_object(raw_text)
-                    if obj is None:
-                        fail_count += 1
-                        sample = (raw_text or "")[:240]
-                        if fail_count <= 3:
-                            logger.warning("DESIRE parse failed jerr=%s sample=%s", jerr, sample)
-                        ko[pid] = f"json:{jerr}" if jerr else "json:error"
-                        continue
-                    if not isinstance(obj, dict):
-                        fail_count += 1
-                        sample = (raw_text or "")[:240]
-                        if fail_count <= 3:
-                            logger.warning("DESIRE parse failed jerr=%s sample=%s", "type", sample)
-                        ko[pid] = "json:type"
+                    pid = cand.id
+                    data = mapping.get(pid)
+                    if not data:
+                        ko[str(pid)] = "missing_in_output"
                         continue
 
+                    entry = dict(data)
                     draft_raw = str(
-                        obj.get("desire_statement")
-                        or obj.get("desire")
+                        entry.get("desire_statement")
+                        or entry.get("desire")
                         or ""
                     ).strip()
-                    title_extra = (cand.extra or {}).get("title") if isinstance(cand.extra, dict) else None
-                    title = str(cand.payload.get("name") or title_extra or "")
+                    title = titles_by_id.get(pid, "")
                     ds = sanitize_desire_text(dedupe_clauses(draft_raw))
                     ds = coerce_bounds(ds, 280, 420)
                     if len(ds) < 280 or looks_like_product_desc(ds, title):
                         refined = await _refine_desire_statement(cand, ds)
                         if isinstance(refined, dict):
-                            obj2 = dict(refined)
+                            merged = dict(entry)
+                            merged.update(refined)
+                            entry = merged
                             ds2 = sanitize_desire_text(
-                                dedupe_clauses((obj2.get("desire_statement") or "").strip())
+                                dedupe_clauses((entry.get("desire_statement") or "").strip())
                             )
                             ds2 = coerce_bounds(ds2, 280, 420)
                             if len(ds2) >= 280 and not looks_like_product_desc(ds2, title):
-                                obj = obj2
                                 ds = ds2
-                    if len(ds) < 280 or looks_like_product_desc(ds, title):
-                        ko[pid] = "desire:invalid"
-                        continue
+                        if len(ds) < 280 or looks_like_product_desc(ds, title):
+                            fail_count += 1
+                            if fail_count <= 3:
+                                logger.warning("DESIRE parse failed jerr=%s sample=%s", "len_or_product_desc", ds[:120])
+                            ko[str(pid)] = "len_or_product_desc"
+                            continue
 
-                    ok[pid] = {
+                    ok[str(pid)] = {
                         "desire": ds,
-                        "desire_primary": obj.get("desire_primary"),
-                        "desire_magnitude": obj.get("desire_magnitude"),
-                        "awareness_level": obj.get("awareness_level"),
-                        "competition_level": obj.get("competition_level"),
+                        "desire_primary": entry.get("desire_primary"),
+                        "desire_magnitude": entry.get("desire_magnitude"),
+                        "awareness_level": entry.get("awareness_level"),
+                        "competition_level": entry.get("competition_level"),
                     }
+
+                if missing_ids:
+                    ratio = len(missing_ids) / max(1, len(batch_ids))
+                    if ratio > 0.25:
+                        logger.warning("DESIRE missing_ids ratio=%.2f ids=%s", ratio, missing_ids[:5])
+                    else:
+                        logger.debug("DESIRE missing_ids small=%s", missing_ids[:5])
                 duration = time.perf_counter() - start_ts
                 end_iso = datetime.utcnow().isoformat()
                 usage = raw_usage
