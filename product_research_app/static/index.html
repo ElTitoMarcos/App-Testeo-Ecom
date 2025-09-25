@@ -969,11 +969,11 @@ function renderTable() {
         }
       } else if (key === 'desire') {
         let current = value || '';
-        td.title = current;
         const render = () => {
           td.innerHTML = '';
+          td.title = current;
           const wrap = document.createElement('div');
-          wrap.className = 'desire-wrap';
+          wrap.className = 'desire-text';
           wrap.textContent = current;
           td.appendChild(wrap);
           wrap.addEventListener('click', () => {

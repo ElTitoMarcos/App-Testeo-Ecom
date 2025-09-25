@@ -204,6 +204,8 @@ def call_gpt(
     if is_json_only(canonical) and schema:
         response_format = {"type": "json_schema", "json_schema": schema}
 
+    max_tokens = 320 if canonical == "DESIRE" else None
+
     try:
         raw = call_openai_chat(
             api_key,
@@ -211,6 +213,7 @@ def call_gpt(
             messages,
             temperature=temperature,
             response_format=response_format,
+            max_tokens=max_tokens,
         )
     except OpenAIError as exc:
         if response_format and _looks_like_response_format_error(str(exc)):
@@ -219,6 +222,7 @@ def call_gpt(
                 model,
                 messages,
                 temperature=temperature,
+                max_tokens=max_tokens,
             )
         else:
             raise
@@ -383,6 +387,8 @@ def call_openai_chat(
     *,
     temperature: float = 0.2,
     response_format: Optional[Dict[str, Any]] = None,
+    max_tokens: Optional[int] = None,
+    stop: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Send a chat completion request to the OpenAI API.
 
@@ -408,6 +414,10 @@ def call_openai_chat(
         "messages": messages,
         "temperature": temperature,
     }
+    if max_tokens is not None:
+        payload["max_tokens"] = int(max_tokens)
+    if stop is not None:
+        payload["stop"] = stop
     if response_format is not None:
         payload["response_format"] = response_format
     try:

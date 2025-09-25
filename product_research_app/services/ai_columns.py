@@ -17,6 +17,7 @@ import httpx
 
 from .. import config, database, gpt
 from ..utils.signature import compute_sig_hash
+from .desire_utils import coerce_len, sanitize_desire_text
 
 logger = logging.getLogger(__name__)
 
@@ -631,9 +632,19 @@ async def _call_batch_with_retries(
                     if not isinstance(entry, dict):
                         ko[pid] = "missing"
                         continue
+                    desire_statement = entry.get("desire_statement") or entry.get("desire") or ""
+                    long_txt = sanitize_desire_text(str(desire_statement))
+                    if not long_txt:
+                        long_txt = "personas que buscan resultados sin invertir tiempo extra ni crear desorden"
+                    long_txt = coerce_len(long_txt, 280, 420)
+                    desire_primary = entry.get("desire_primary")
+                    desire_magnitude_raw = entry.get("desire_magnitude")
+                    if isinstance(desire_magnitude_raw, dict):
+                        desire_magnitude_raw = desire_magnitude_raw.get("overall")
                     ok[pid] = {
-                        "desire": entry.get("desire"),
-                        "desire_magnitude": gpt._norm_tri(entry.get("desire_magnitude")),
+                        "desire": long_txt,
+                        "desire_primary": desire_primary,
+                        "desire_magnitude": gpt._norm_tri(desire_magnitude_raw),
                         "awareness_level": gpt._norm_awareness(entry.get("awareness_level")),
                         "competition_level": gpt._norm_tri(entry.get("competition_level")),
                     }
@@ -974,12 +985,20 @@ def run_ai_fill_job(
             if not cache_row:
                 remaining.append(cand)
                 continue
+            cached_desire = cache_row["desire"] if cache_row["desire"] is not None else ""
+            cached_desire = sanitize_desire_text(str(cached_desire))
+            if not cached_desire:
+                cached_desire = "personas que buscan resultados sin invertir tiempo extra ni crear desorden"
+            cached_desire = coerce_len(cached_desire, 280, 420)
             update_payload = {
-                "desire": cache_row["desire"],
+                "desire": cached_desire,
                 "desire_magnitude": cache_row["desire_magnitude"],
                 "awareness_level": cache_row["awareness_level"],
                 "competition_level": cache_row["competition_level"],
             }
+            desire_primary_cached = cache_row["desire_primary"] if "desire_primary" in cache_row.keys() else None
+            if desire_primary_cached is not None:
+                update_payload["desire_primary"] = desire_primary_cached
             cached_updates[cand.id] = update_payload
             applied_outputs[cand.id] = {k: v for k, v in update_payload.items() if v is not None}
             if cand.sig_hash:
