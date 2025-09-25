@@ -28,6 +28,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import httpx
 import requests
 
 from . import database, config
@@ -79,6 +80,25 @@ class OpenAIError(Exception):
 class InvalidJSONError(OpenAIError):
     """Raised when the model response is not valid JSON."""
     pass
+
+
+def _salvage_json(text: str) -> Dict[str, Any]:
+    """Try to recover a JSON object from a possibly noisy string."""
+
+    if not isinstance(text, str):
+        raise InvalidJSONError("Respuesta no parece JSON")
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise InvalidJSONError("Respuesta no parece JSON")
+    chunk = text[start : end + 1]
+    try:
+        data = json.loads(chunk)
+    except Exception as exc:  # pragma: no cover - defensive
+        raise InvalidJSONError(f"JSON inválido: {exc}") from exc
+    if not isinstance(data, dict):
+        raise InvalidJSONError("La respuesta JSON debe ser un objeto")
+    return data
 
 
 def _dumps_payload(payload: Any | None) -> str:
@@ -264,6 +284,50 @@ def call_gpt(
             content = ""
 
     return {"ok": True, "task": canonical, "content": content, "raw": raw}
+
+
+def call_gpt_json(
+    *,
+    api_key: str,
+    model: str,
+    system: str,
+    user: str,
+    temperature: float = 0.2,
+    max_tokens: int = 2000,
+    timeout: float = 30.0,
+) -> Dict[str, Any]:
+    """Call the Chat Completions API expecting a strict JSON response."""
+
+    headers = {"Authorization": f"Bearer {api_key}"}
+    body = {
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": (
+                    "DEV MODE: Responde **UN ÚNICO** objeto JSON válido, "
+                    "sin notas ni markdown, **SIN** fences. " + user
+                ),
+            },
+        ],
+    }
+    with httpx.Client(timeout=timeout) as client:
+        response = client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers=headers,
+            json=body,
+        )
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"]
+    try:
+        data = json.loads(content)
+    except Exception:
+        data = _salvage_json(content)
+    return data
 
 
 def _build_image_message(image_bytes: bytes, instructions: str, filename: str) -> list:
