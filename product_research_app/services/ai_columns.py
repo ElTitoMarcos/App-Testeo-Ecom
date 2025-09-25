@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import logging
 import math
 import os
@@ -26,6 +27,38 @@ DB_PATH = APP_DIR / "data.sqlite3"
 CALIBRATION_CACHE_FILE = APP_DIR / "ai_calibration_cache.json"
 
 AI_FIELDS = ("desire", "desire_magnitude", "awareness_level", "competition_level")
+
+_TRI_CANONICAL = {
+    "low": "Low",
+    "bajo": "Low",
+    "baja": "Low",
+    "medio": "Medium",
+    "media": "Medium",
+    "med": "Medium",
+    "mid": "Medium",
+    "medium": "Medium",
+    "high": "High",
+    "alto": "High",
+    "alta": "High",
+}
+
+_AWARENESS_CANONICAL = {
+    "unaware": "Unaware",
+    "problem-aware": "Problem-Aware",
+    "problemaware": "Problem-Aware",
+    "problem_aware": "Problem-Aware",
+    "solution-aware": "Solution-Aware",
+    "solutionaware": "Solution-Aware",
+    "solution_aware": "Solution-Aware",
+    "product-aware": "Product-Aware",
+    "productaware": "Product-Aware",
+    "product_aware": "Product-Aware",
+    "most-aware": "Most Aware",
+    "mostaware": "Most Aware",
+    "most_aware": "Most Aware",
+    "mas-aware": "Most Aware",
+    "masaware": "Most Aware",
+}
 StatusCallback = Callable[..., None]
 
 
@@ -124,6 +157,44 @@ def _join_bullets(value: Any, limit: int) -> str:
         text = str(value).strip()
     text = text.replace("\n", " ").replace("\r", " ")
     return _truncate_text(text, limit)
+
+
+def _clean_desire_value(value: Any) -> tuple[Optional[str], bool]:
+    if value is None:
+        return None, True
+    text = str(value).strip()
+    if not text:
+        return None, True
+    lowered = text.lower()
+    if lowered in {"none", "null", "n/a", "na", "pending"}:
+        return None, True
+    return text, False
+
+
+def _canonical_tri_value(value: Any) -> tuple[Optional[str], bool]:
+    if value is None:
+        return None, True
+    text = str(value).strip()
+    if not text:
+        return None, True
+    lowered = text.lower()
+    canonical = _TRI_CANONICAL.get(lowered)
+    if canonical:
+        return canonical, False
+    return None, True
+
+
+def _canonical_awareness_value(value: Any) -> tuple[Optional[str], bool]:
+    if value is None:
+        return None, True
+    text = str(value).strip()
+    if not text:
+        return None, True
+    key = text.lower().replace("_", "-").replace(" ", "-")
+    canonical = _AWARENESS_CANONICAL.get(key)
+    if canonical:
+        return canonical, False
+    return None, True
 
 
 def _estimate_tokens_from_text(*texts: str) -> int:
@@ -383,6 +454,211 @@ def _ensure_conn():
     conn = database.get_connection(DB_PATH)
     database.initialize_database(conn)
     return conn
+
+
+def _prepare_ai_row_updates(row: Any) -> tuple[Dict[str, Any], bool]:
+    updates: Dict[str, Any] = {}
+    needs_fill = False
+
+    desire_clean, desire_missing = _clean_desire_value(row["desire"])
+    if desire_missing:
+        needs_fill = True
+        if row["desire"] is not None:
+            updates["desire"] = None
+    elif desire_clean != row["desire"]:
+        updates["desire"] = desire_clean
+
+    mag_clean, mag_missing = _canonical_tri_value(row["desire_magnitude"])
+    if mag_missing:
+        if row["desire_magnitude"] is not None:
+            updates["desire_magnitude"] = None
+        needs_fill = True
+    elif mag_clean is not None and mag_clean != row["desire_magnitude"]:
+        updates["desire_magnitude"] = mag_clean
+
+    awareness_clean, awareness_missing = _canonical_awareness_value(row["awareness_level"])
+    if awareness_missing:
+        if row["awareness_level"] is not None:
+            updates["awareness_level"] = None
+        needs_fill = True
+    elif awareness_clean is not None and awareness_clean != row["awareness_level"]:
+        updates["awareness_level"] = awareness_clean
+
+    comp_clean, comp_missing = _canonical_tri_value(row["competition_level"])
+    if comp_missing:
+        if row["competition_level"] is not None:
+            updates["competition_level"] = None
+        needs_fill = True
+    elif comp_clean is not None and comp_clean != row["competition_level"]:
+        updates["competition_level"] = comp_clean
+
+    if needs_fill:
+        updates.setdefault("ai_columns_completed_at", None)
+
+    return updates, needs_fill
+
+
+def _apply_ai_updates_local(
+    conn: sqlite3.Connection, updates: Sequence[tuple[int, Dict[str, Any]]]
+) -> None:
+    if not updates:
+        return
+    cur = conn.cursor()
+    began_tx = False
+    try:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+            began_tx = True
+        for product_id, payload in updates:
+            assignments = []
+            params: List[Any] = []
+            for key, value in payload.items():
+                assignments.append(f"{key}=?")
+                params.append(value)
+            params.append(int(product_id))
+            cur.execute(
+                f"UPDATE products SET {', '.join(assignments)} WHERE id=?",
+                params,
+            )
+        if began_tx:
+            conn.commit()
+    except Exception:
+        if began_tx and conn.in_transaction:
+            conn.rollback()
+        raise
+
+
+def _collect_products_needing_ai(
+    conn: sqlite3.Connection, product_ids: Optional[Sequence[int]]
+) -> tuple[List[int], int, int]:
+    cur = conn.cursor()
+    inspected = 0
+    if product_ids:
+        unique: List[int] = []
+        seen: set[int] = set()
+        for pid in product_ids:
+            try:
+                num = int(pid)
+            except Exception:
+                continue
+            if num in seen:
+                continue
+            seen.add(num)
+            unique.append(num)
+        if not unique:
+            return [], 0, 0
+        placeholders = ",".join(["?"] * len(unique))
+        cur.execute(
+            f"SELECT id, desire, desire_magnitude, awareness_level, competition_level "
+            f"FROM products WHERE id IN ({placeholders}) ORDER BY id",
+            tuple(unique),
+        )
+    else:
+        cur.execute(
+            "SELECT id, desire, desire_magnitude, awareness_level, competition_level FROM products ORDER BY id"
+        )
+    rows = cur.fetchall()
+    missing: List[int] = []
+    sanitized_batches: List[tuple[int, Dict[str, Any]]] = []
+    sanitized_count = 0
+    for row in rows:
+        inspected += 1
+        updates, needs_fill = _prepare_ai_row_updates(row)
+        if updates:
+            sanitized_batches.append((int(row["id"]), updates))
+            sanitized_count += 1
+        if needs_fill:
+            missing.append(int(row["id"]))
+    if sanitized_batches:
+        _apply_ai_updates_local(conn, sanitized_batches)
+    return missing, sanitized_count, inspected
+
+
+def validate_and_fill_ai_columns(
+    db_conn: Optional[Any] = None,
+    product_ids: Optional[Sequence[int]] = None,
+    *,
+    microbatch: int = 32,
+    parallelism: Optional[int] = None,
+    status_cb: Optional[StatusCallback] = None,
+) -> Dict[str, Any]:
+    close_conn = False
+    conn: Optional[sqlite3.Connection]
+    if db_conn is None:
+        conn = _ensure_conn()
+        close_conn = True
+    elif hasattr(db_conn, "cursor"):
+        conn = db_conn  # type: ignore[assignment]
+    else:
+        conn = getattr(db_conn, "connection", None)
+        if conn is None:
+            conn = _ensure_conn()
+            close_conn = True
+
+    if conn is None:
+        raise RuntimeError("Database connection unavailable for AI validation")
+
+    try:
+        missing_ids: List[int]
+        sanitized = 0
+        inspected = 0
+        missing_ids, sanitized, inspected = _collect_products_needing_ai(conn, product_ids)
+
+        requested_total = len(product_ids or [])
+        result: Dict[str, Any]
+        if not missing_ids:
+            if sanitized:
+                logger.info(
+                    "validate_and_fill_ai_columns: normalized=%d inspected=%d pending=0",
+                    sanitized,
+                    inspected,
+                )
+            result = {
+                "counts": {
+                    "queued": 0,
+                    "ok": 0,
+                    "cached": 0,
+                    "ko": 0,
+                    "retried": 0,
+                    "cost_spent_usd": 0.0,
+                },
+                "pending_ids": [],
+                "error": None,
+                "total_requested": requested_total,
+                "inspected": inspected,
+                "ran_job": False,
+            }
+        else:
+            logger.info(
+                "validate_and_fill_ai_columns: pending=%d normalized=%d inspected=%d",
+                len(missing_ids),
+                sanitized,
+                inspected,
+            )
+            result = run_ai_fill_job(
+                0,
+                missing_ids,
+                microbatch=microbatch,
+                parallelism=parallelism,
+                status_cb=status_cb,
+            )
+            result.setdefault("pending_ids", [])
+            result.setdefault("counts", {})
+            result.setdefault("error", None)
+            result.setdefault("total_requested", requested_total)
+            result.setdefault("inspected", inspected)
+            result["ran_job"] = True
+
+        if sanitized:
+            result["sanitized"] = sanitized
+
+        return result
+    finally:
+        if close_conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def _parse_score(val: Any) -> Optional[float]:

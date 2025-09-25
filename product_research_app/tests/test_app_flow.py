@@ -4,6 +4,7 @@ import logging
 import sqlite3
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import List
 from urllib.parse import urlparse
@@ -13,6 +14,7 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 from product_research_app import web_app, database, config, routes_export_minimal
 from product_research_app.routes_export_minimal import COLUMNS as EXPORT_COLUMNS
 from product_research_app.services import winner_score
+from product_research_app.services import ai_columns
 from product_research_app.services import config as cfg_service
 from product_research_app.utils.db import row_to_dict
 from openpyxl.utils import get_column_letter
@@ -62,6 +64,28 @@ def test_app_startup(tmp_path, monkeypatch):
     cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='scores'")
     assert cur.fetchone() is not None
 
+
+def test_ensure_db_runs_startup_validation(tmp_path, monkeypatch):
+    calls: List[List[int]] = []
+
+    def fake_validate(db_conn=None, product_ids=None, **kwargs):
+        calls.append(list(product_ids or []))
+        assert isinstance(db_conn, sqlite3.Connection)
+        return {
+            "counts": {},
+            "pending_ids": [],
+            "error": None,
+            "ran_job": False,
+            "total_requested": len(product_ids or []),
+            "inspected": len(product_ids or []),
+        }
+
+    monkeypatch.setattr(ai_columns, "validate_and_fill_ai_columns", fake_validate)
+    conn = setup_env(tmp_path, monkeypatch)
+    assert isinstance(conn, sqlite3.Connection)
+    assert calls, "startup validation was not invoked"
+
+
 def test_import_generates_scores(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)
     monkeypatch.setattr(config, "is_auto_fill_ia_on_import_enabled", lambda: False)
@@ -88,6 +112,142 @@ def test_import_generates_scores(tmp_path, monkeypatch):
     assert len(products) == 2
     for p in products:
         assert 0 <= p.get("winner_score", 0) <= 100
+
+
+def test_validate_and_fill_ai_columns_handles_missing_fields(tmp_path, monkeypatch):
+    db_path = tmp_path / "data.sqlite3"
+    conn = database.get_connection(db_path)
+    database.initialize_database(conn)
+    now_iso = datetime.utcnow().isoformat()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO products (name, import_date, desire, desire_magnitude, awareness_level, competition_level, extra)
+        VALUES (?, ?, ?, ?, ?, ?, json(?))
+        """,
+        ("Complete", now_iso, "Valid desire", "Medium", "Product-Aware", "Low", "{}"),
+    )
+    cur.execute(
+        """
+        INSERT INTO products (name, import_date, desire, desire_magnitude, awareness_level, competition_level, extra)
+        VALUES (?, ?, ?, ?, ?, ?, json(?))
+        """,
+        ("Needs AI", now_iso, "  ", "medio", "product aware", "alto", "{}"),
+    )
+    conn.commit()
+
+    invoked: List[int] = []
+
+    def fake_run(job_id, product_ids, **kwargs):
+        invoked.extend(int(pid) for pid in product_ids)
+        for pid in product_ids:
+            database.update_product(
+                conn,
+                pid,
+                desire="AI Desire",
+                desire_magnitude="High",
+                awareness_level="Most Aware",
+                competition_level="Medium",
+            )
+        return {
+            "counts": {
+                "queued": len(product_ids),
+                "ok": len(product_ids),
+                "cached": 0,
+                "ko": 0,
+                "retried": 0,
+                "cost_spent_usd": 0.0,
+            },
+            "pending_ids": [],
+            "error": None,
+            "total_requested": len(product_ids),
+            "inspected": len(product_ids),
+        }
+
+    monkeypatch.setattr(ai_columns, "run_ai_fill_job", fake_run)
+    result = ai_columns.validate_and_fill_ai_columns(db_conn=conn)
+    assert invoked == [2]
+    assert result["ran_job"] is True
+    updated = database.get_product(conn, 2)
+    assert updated["desire"] == "AI Desire"
+    assert updated["desire_magnitude"] == "High"
+    assert updated["awareness_level"] == "Most Aware"
+    assert updated["competition_level"] == "Medium"
+    unchanged = database.get_product(conn, 1)
+    assert unchanged["desire_magnitude"] == "Medium"
+
+
+def test_schedule_post_import_tasks_runs_validation(tmp_path, monkeypatch):
+    calls: List[List[int]] = []
+
+    def fake_validate(db_conn=None, product_ids=None, **kwargs):
+        calls.append(list(product_ids or []))
+        return {
+            "counts": {
+                "queued": len(product_ids or []),
+                "ok": len(product_ids or []),
+                "cached": 0,
+                "ko": 0,
+                "retried": 0,
+                "cost_spent_usd": 0.0,
+            },
+            "pending_ids": [],
+            "error": None,
+            "ran_job": bool(product_ids),
+            "total_requested": len(product_ids or []),
+            "inspected": len(product_ids or []),
+        }
+
+    def fake_run(job_id, product_ids, **kwargs):
+        return {
+            "counts": {
+                "queued": len(product_ids),
+                "sent": len(product_ids),
+                "ok": len(product_ids),
+                "ko": 0,
+                "cached": 0,
+                "retried": 0,
+                "cost_spent_usd": 0.0,
+            },
+            "pending_ids": [],
+            "error": None,
+        }
+
+    class ImmediateThread:
+        def __init__(self, target, args=(), kwargs=None, daemon=None):
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+
+        def start(self):
+            self._target(*self._args, **self._kwargs)
+
+    monkeypatch.setattr(ai_columns, "validate_and_fill_ai_columns", fake_validate)
+    monkeypatch.setattr(ai_columns, "run_ai_fill_job", fake_run)
+    monkeypatch.setattr(
+        winner_score,
+        "generate_winner_scores",
+        lambda conn, product_ids=None: {"updated": len(product_ids or [])},
+    )
+    monkeypatch.setattr(web_app.threading, "Thread", ImmediateThread)
+
+    conn = setup_env(tmp_path, monkeypatch)
+    pid = database.insert_product(
+        conn,
+        name="PostImport",
+        description="",
+        category="",
+        price=None,
+        currency=None,
+        image_url="",
+        source="import",
+        extra={},
+    )
+    job_id = database.create_import_job(conn, "tmp")
+
+    web_app._schedule_post_import_tasks(job_id, [pid], 1, "task")
+    assert calls[-1] == [pid]
+
 
 def test_scoring_v2_generate_cases(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)

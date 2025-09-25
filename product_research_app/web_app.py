@@ -184,6 +184,25 @@ def _parse_date(s: str):
             continue
     return None
 
+
+def _run_startup_validations(conn: sqlite3.Connection) -> None:
+    try:
+        result = ai_columns.validate_and_fill_ai_columns(db_conn=conn)
+    except Exception:
+        logger.exception("Startup AI column validation failed")
+        return
+    pending = result.get("pending_ids") or []
+    error = result.get("error")
+    if error:
+        logger.warning("Startup AI column validation error=%s pending=%d", error, len(pending))
+    elif pending:
+        logger.warning(
+            "Startup AI column validation pending=%d sample_ids=%s",
+            len(pending),
+            pending[:10],
+        )
+
+
 def ensure_db():
     global _DB_INIT, _DB_INIT_PATH
 
@@ -206,6 +225,10 @@ def ensure_db():
                 except Exception:
                     pass
                 logger.info("Database ready at %s", DB_PATH)
+                try:
+                    _run_startup_validations(conn)
+                except Exception:
+                    logger.exception("Startup validation execution failed")
                 _DB_INIT = True
                 _DB_INIT_PATH = target_path
     return conn
@@ -484,6 +507,46 @@ def _schedule_post_import_tasks(
                 database.set_import_job_ai_error(conn, job_id, str(exc))
                 database.set_import_job_ai_counts(conn, job_id, final_counts, pending_ids)
                 database.update_import_job_ai_progress(conn, job_id, 0)
+            validation_result: Dict[str, Any] | None = None
+            try:
+                if product_ids:
+                    validation_result = ai_columns.validate_and_fill_ai_columns(
+                        db_conn=conn,
+                        product_ids=product_ids,
+                    )
+            except Exception:
+                logger.exception("Post-import AI column validation failed job=%s", job_id)
+            if validation_result:
+                counts_override = validation_result.get("counts")
+                pending_override = validation_result.get("pending_ids")
+                if validation_result.get("ran_job") and counts_override:
+                    if not auto_ai or final_counts.get("queued", 0) == 0:
+                        final_counts = dict(counts_override)
+                    else:
+                        merged_counts = dict(final_counts)
+                        merged_counts.update(counts_override)
+                        final_counts = merged_counts
+                if pending_override is not None:
+                    pending_ids = list(pending_override)
+                validation_error = validation_result.get("error")
+                if validation_error:
+                    logger.warning(
+                        "Post-import AI validation reported error job=%s error=%s pending=%d",
+                        job_id,
+                        validation_error,
+                        len(pending_ids),
+                    )
+                    database.set_import_job_ai_error(conn, job_id, str(validation_error))
+                elif pending_ids:
+                    logger.warning(
+                        "Post-import AI validation still pending job=%s count=%d sample_ids=%s",
+                        job_id,
+                        len(pending_ids),
+                        pending_ids[:10],
+                    )
+                database.set_import_job_ai_counts(conn, job_id, final_counts, pending_ids)
+                done_progress = int(final_counts.get("ok", 0) + final_counts.get("cached", 0))
+                database.update_import_job_ai_progress(conn, job_id, done_progress)
             total_ai = int(final_counts.get("queued", 0) or 0)
             done_ai = int(final_counts.get("ok", 0) + final_counts.get("cached", 0))
             _update_import_status(
