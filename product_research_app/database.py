@@ -68,6 +68,8 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             source TEXT,
             import_date TEXT NOT NULL,
             desire TEXT,
+            desire_primary TEXT,
+            ai_desire_label TEXT,
             desire_magnitude TEXT,
             awareness_level TEXT,
             competition_level TEXT,
@@ -83,6 +85,10 @@ def initialize_database(conn: sqlite3.Connection) -> None:
     cols = [row[1] for row in cur.fetchall()]
     if "desire" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN desire TEXT")
+    if "desire_primary" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN desire_primary TEXT")
+    if "ai_desire_label" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN ai_desire_label TEXT")
     if "desire_magnitude" not in cols and "magnitud_deseo" in cols:
         cur.execute("ALTER TABLE products RENAME COLUMN magnitud_deseo TO desire_magnitude")
     elif "desire_magnitude" not in cols:
@@ -443,6 +449,8 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             sig_hash TEXT PRIMARY KEY,
             model TEXT,
             desire TEXT,
+            desire_primary TEXT,
+            ai_desire_label TEXT,
             desire_magnitude TEXT,
             awareness_level TEXT,
             competition_level TEXT,
@@ -453,6 +461,12 @@ def initialize_database(conn: sqlite3.Connection) -> None:
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_cache_model ON ai_cache(model)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_cache_updated ON ai_cache(updated_at)")
+    cur.execute("PRAGMA table_info(ai_cache)")
+    ai_cols = [row[1] for row in cur.fetchall()]
+    if "desire_primary" not in ai_cols:
+        cur.execute("ALTER TABLE ai_cache ADD COLUMN desire_primary TEXT")
+    if "ai_desire_label" not in ai_cols:
+        cur.execute("ALTER TABLE ai_cache ADD COLUMN ai_desire_label TEXT")
 
     # Batch metrics for observability
     cur.execute(
@@ -501,6 +515,8 @@ def insert_product(
     image_url: Optional[str] = None,
     source: Optional[str] = None,
     desire: Optional[str] = None,
+    desire_primary: Optional[str] = None,
+    ai_desire_label: Optional[str] = None,
     desire_magnitude: Optional[str] = None,
     awareness_level: Optional[str] = None,
     competition_level: Optional[str] = None,
@@ -547,14 +563,16 @@ def insert_product(
     }
     if awareness_level not in allowed_awareness:
         awareness_level = None
+    extra_json = json_dump(extra) if extra is not None else "{}"
+
     if product_id is not None:
         cur.execute(
             """
             INSERT INTO products (
                 id, name, description, category, price, currency, image_url, source,
-                import_date, desire, desire_magnitude, awareness_level,
+                import_date, desire, desire_primary, ai_desire_label, desire_magnitude, awareness_level,
                 competition_level, date_range, extra, sig_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?), ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 product_id,
@@ -567,11 +585,13 @@ def insert_product(
                 source,
                 import_date,
                 desire,
+                desire_primary,
+                ai_desire_label,
                 desire_magnitude,
                 awareness_level,
                 competition_level,
                 date_range,
-                json_dump(extra) if extra is not None else "{}",
+                extra_json,
                 sig_hash,
             ),
         )
@@ -580,9 +600,9 @@ def insert_product(
             """
             INSERT INTO products (
                 name, description, category, price, currency, image_url, source,
-                import_date, desire, desire_magnitude, awareness_level,
+                import_date, desire, desire_primary, ai_desire_label, desire_magnitude, awareness_level,
                 competition_level, date_range, extra, sig_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?), ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 name,
@@ -594,11 +614,13 @@ def insert_product(
                 source,
                 import_date,
                 desire,
+                desire_primary,
+                ai_desire_label,
                 desire_magnitude,
                 awareness_level,
                 competition_level,
                 date_range,
-                json_dump(extra) if extra is not None else "{}",
+                extra_json,
                 sig_hash,
             ),
         )
@@ -661,6 +683,8 @@ def update_product(
         "image_url",
         "source",
         "desire",
+        "desire_primary",
+        "ai_desire_label",
         "desire_magnitude",
         "awareness_level",
         "competition_level",
@@ -1503,7 +1527,7 @@ def get_ai_cache_entries(
     cur = conn.cursor()
     cur.execute(
         f"""
-        SELECT sig_hash, model, desire, desire_magnitude, awareness_level, competition_level, updated_at, version
+        SELECT sig_hash, model, desire, desire_primary, ai_desire_label, desire_magnitude, awareness_level, competition_level, updated_at, version
         FROM ai_cache
         WHERE sig_hash IN ({placeholders}) AND model=? AND version=?
         """,
@@ -1519,6 +1543,8 @@ def upsert_ai_cache_entry(
     model: str,
     version: int,
     desire: Optional[str],
+    desire_primary: Optional[str],
+    ai_desire_label: Optional[str],
     desire_magnitude: Optional[str],
     awareness_level: Optional[str],
     competition_level: Optional[str],
@@ -1529,11 +1555,13 @@ def upsert_ai_cache_entry(
     cur.execute(
         """
         INSERT INTO ai_cache (
-            sig_hash, model, desire, desire_magnitude, awareness_level, competition_level, updated_at, version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            sig_hash, model, desire, desire_primary, ai_desire_label, desire_magnitude, awareness_level, competition_level, updated_at, version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(sig_hash) DO UPDATE SET
             model=excluded.model,
             desire=excluded.desire,
+            desire_primary=excluded.desire_primary,
+            ai_desire_label=excluded.ai_desire_label,
             desire_magnitude=excluded.desire_magnitude,
             awareness_level=excluded.awareness_level,
             competition_level=excluded.competition_level,
@@ -1544,6 +1572,8 @@ def upsert_ai_cache_entry(
             sig_hash,
             model,
             desire,
+            desire_primary,
+            ai_desire_label,
             desire_magnitude,
             awareness_level,
             competition_level,

@@ -1239,6 +1239,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "price": price_val,
                     "image_url": rget(p, "image_url"),
                     "desire": desire_val,
+                    "desire_primary": rget(p, "desire_primary"),
+                    "ai_desire_label": rget(p, "ai_desire_label"),
                     "desire_magnitude": rget(p, "desire_magnitude"),
                     "awareness_level": rget(p, "awareness_level"),
                     "competition_level": rget(p, "competition_level"),
@@ -1376,6 +1378,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                         "price": p["price"],
                         "image_url": p["image_url"],
                         "desire": desire_val,
+                        "desire_primary": rget(p_dict, "desire_primary"),
+                        "ai_desire_label": rget(p_dict, "ai_desire_label"),
                         "desire_magnitude": rget(p_dict, "desire_magnitude"),
                         "extras": extra_dict,
                     }

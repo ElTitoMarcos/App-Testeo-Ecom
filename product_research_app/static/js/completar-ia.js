@@ -44,6 +44,31 @@ function applyUpdates(product, updates) {
     }
     applied[k] = nv;
   });
+  if ('desire_statement' in updates) {
+    product.desire_statement = updates.desire_statement;
+    if (!('desire' in applied) && typeof updates.desire_statement === 'string') {
+      product.desire = updates.desire_statement;
+    }
+  }
+  if ('desire_primary' in updates) {
+    product.desire_primary = updates.desire_primary;
+  }
+  if ('ai_desire_label' in updates) {
+    product.ai_desire_label = updates.ai_desire_label;
+  }
+  if (row) {
+    const nextText =
+      ('desire' in applied ? applied.desire : null) ??
+      (typeof updates.desire_statement === 'string' ? updates.desire_statement : null);
+    if (typeof nextText === 'string') {
+      const cell = row.querySelector('td.ec-col-desire');
+      if (cell) {
+        cell.title = nextText;
+        const wrap = cell.querySelector('.desire-wrap');
+        if (wrap) wrap.textContent = nextText;
+      }
+    }
+  }
   if (Object.keys(applied).length) {
     fetch(`/products/${product.id}`, {
       method: 'PUT',
