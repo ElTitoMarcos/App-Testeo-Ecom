@@ -35,6 +35,32 @@ def cleanse(text:str)->str:
     txt = re.sub(r"\s{2,}", " ", txt).strip(" ,;.-")
     return txt
 
+
+def dedupe_clauses(text: str) -> str:
+    if not text:
+        return ""
+    clauses = re.split(r"(?<=[.!?])\s+", str(text).strip())
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for clause in clauses:
+        norm = _norm(clause.strip())
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        ordered.append(clause.strip())
+    return " ".join(ordered)
+
+
+def _strip_repeated_spaces(text: str) -> str:
+    return re.sub(r"\s{2,}", " ", text).strip()
+
+
+def sanitize_desire_text(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = cleanse(text)
+    return _strip_repeated_spaces(cleaned)
+
 __all__ = [
     "COMMON_CATS",
     "UNITS",
@@ -42,4 +68,6 @@ __all__ = [
     "product_terms_from_title",
     "looks_like_product_desc",
     "cleanse",
+    "dedupe_clauses",
+    "sanitize_desire_text",
 ]
