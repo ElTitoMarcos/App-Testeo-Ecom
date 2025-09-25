@@ -90,6 +90,40 @@ async function processBatch(items) {
   return { ok, ko };
 }
 
+async function recalcDesireVisible(opts = {}) {
+  const rows = getAllFilteredRows();
+  if (!rows.length) {
+    if (!opts.silent) toast.info('No hay productos');
+    return;
+  }
+  const ids = rows.map(p => Number(p.id)).filter(id => Number.isInteger(id));
+  try {
+    const res = await fetch('/api/recalc-desire-all', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: 'filtered', ids })
+    });
+    if (!res.ok) {
+      let msg = res.statusText || 'Error';
+      try {
+        const err = await res.json();
+        if (err && err.error) msg = err.error;
+      } catch {}
+      throw new Error(msg);
+    }
+    const data = await res.json();
+    if (!opts.silent) {
+      const processed = Number(data.processed || 0);
+      toast.info(`Desire recalculado: ${processed} items`);
+    }
+    updateMasterState();
+  } catch (err) {
+    if (!opts.silent) toast.error(`Recalc Desire: ${err.message}`);
+  }
+}
+
+window.handleRecalcDesireVisible = recalcDesireVisible;
+
 window.handleCompletarIA = async function(opts = {}) {
   const ids = opts.ids;
   let all;

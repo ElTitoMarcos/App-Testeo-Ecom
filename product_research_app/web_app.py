@@ -37,7 +37,7 @@ import sqlite3
 import math
 import hashlib
 from datetime import date, datetime, timedelta
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from . import database
 from .db import get_db, get_last_performance_config
@@ -1760,6 +1760,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/api/ia/batch-columns":
             self.handle_ia_batch_columns()
             return
+        if path == "/api/recalc-desire-all":
+            self.handle_recalc_desire_all()
+            return
         if path == "/auto_weights":
             self.handle_auto_weights()
             return
@@ -2728,6 +2731,56 @@ class RequestHandler(BaseHTTPRequestHandler):
         except Exception:
             self._set_json(503)
             self.wfile.write(json.dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
+
+    def handle_recalc_desire_all(self):
+        length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(length).decode('utf-8') if length else ""
+        try:
+            payload = json.loads(body) if body else {}
+            if not isinstance(payload, dict):
+                raise ValueError
+        except Exception:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+            return
+
+        ids_payload = payload.get("ids")
+        ids: Optional[List[int]] = None
+        if isinstance(ids_payload, list):
+            ids = []
+            for raw in ids_payload:
+                try:
+                    ids.append(int(raw))
+                except Exception:
+                    continue
+            if not ids:
+                ids = None
+
+        try:
+            batch_size_int = int(payload.get("batch_size", 20))
+        except Exception:
+            batch_size_int = 20
+        try:
+            parallel_int = int(payload.get("parallel", 3))
+        except Exception:
+            parallel_int = 3
+
+        conn = ensure_db()
+        try:
+            processed = ai_columns.recalc_desire_for_all(
+                conn,
+                ids=ids,
+                batch_size=max(1, batch_size_int),
+                parallel=max(1, parallel_int),
+            )
+        except Exception:
+            logger.exception("recalc desire all failed")
+            self._set_json(500)
+            self.wfile.write(json.dumps({"error": "internal_error"}).encode('utf-8'))
+            return
+
+        self._set_json()
+        self.wfile.write(json.dumps({"ok": True, "processed": processed}).encode('utf-8'))
 
     def handle_auto_weights(self):
         """

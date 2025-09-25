@@ -1,40 +1,45 @@
 import re
+import unicodedata
 
-BAN_PHRASES = [
-  "resultados sin invertir tiempo extra ni crear desorden",
-  "sin esfuerzo",
-  "de forma premium",
+COMMON_CATS = [
+  "crema","champ[uú]","ser[úu]m","t[oó]nico","jab[oó]n",
+  "cepillo","plancha","secador","aspiradora","colch[oó]n",
+  "cuchillos?","maquin[ae]","parches?","figura","vinilo",
+  "litter","box","shampoo","conditioner","brush","knife","set","kit","pack"
 ]
+UNITS = ["ml","l","litros","w","kw","cm","mm","kg","lbs","oz","pulgadas"]
 
-BAN_PROD = r"(crema|serum|t[oó]nico|jab[oó]n|aspiradora|colch[oó]n|figura|vinilo|cuchillos?|cepillo|parches?|set|kit|pack|combo|x\d+)"
-BAN_UNITS = r"(ml|l|litros|w|kw|cm|mm|kg|lbs|oz|pulgadas|quarts?|cuartos?)"
+def _norm(s:str)->str:
+    s = unicodedata.normalize("NFKD", s).encode("ascii","ignore").decode("ascii")
+    return s.lower()
 
-def sanitize_desire_text(s: str) -> str:
-    s = re.sub(rf"\b{BAN_PROD}\b", "", s, flags=re.IGNORECASE)
-    s = re.sub(rf"\b{BAN_UNITS}\b", "", s, flags=re.IGNORECASE)
-    for p in BAN_PHRASES:
-        s = re.sub(re.escape(p), "", s, flags=re.IGNORECASE)
-    s = re.sub(r"\s{2,}", " ", s).strip(" ,;.-")
-    return s
+def product_terms_from_title(title:str)->set:
+    t = _norm(title or "")
+    tokens = re.findall(r"[a-z]{3,}", t)
+    base = set(tokens)
+    base.update(["set","kit","pack"])
+    return base
 
-def dedupe_clauses(s: str) -> str:
-    # corta repeticiones exactas de cláusulas/frases
-    parts = re.split(r"([.;])", s)  # conserva separadores
-    seen = set()
-    out = []
-    buf = ""
-    for i in range(0, len(parts), 2):
-        clause = parts[i].strip(" ,;.-")
-        sep = parts[i+1] if i+1 < len(parts) else ""
-        key = re.sub(r"\W+", "", clause.lower())
-        if clause and key not in seen:
-            seen.add(key)
-            out.append(clause + (sep if sep else ""))
-    buf = " ".join(out).strip()
-    # limpia separadores duplicados
-    buf = re.sub(r"\s*([.;])\s*", r"\1 ", buf).strip(" ;.")
-    return buf
+def looks_like_product_desc(text:str, title:str)->bool:
+    txt = _norm(text or "")
+    if any(u in txt.split() for u in UNITS): return True
+    if re.search(r"\b(" + "|".join(COMMON_CATS) + r")\b", txt): return True
+    # solapamiento con el título (marca/modelo/categoría)
+    overlap = product_terms_from_title(title).intersection(set(re.findall(r"[a-z]{3,}", txt)))
+    return len(overlap) >= 3  # umbral prudente
 
-def needs_regen(payload: dict, min_len=280) -> bool:
-    ds = (payload or {}).get("desire_statement") or ""
-    return len(ds.strip()) < min_len
+def cleanse(text:str)->str:
+    # quita unidades/packs y espacios sobrantes
+    txt = re.sub(r"\b(" + "|".join(UNITS) + r")\b", "", text or "", flags=re.IGNORECASE)
+    txt = re.sub(r"\b(set|kit|pack|x\d+)\b", "", txt, flags=re.IGNORECASE)
+    txt = re.sub(r"\s{2,}", " ", txt).strip(" ,;.-")
+    return txt
+
+__all__ = [
+    "COMMON_CATS",
+    "UNITS",
+    "_norm",
+    "product_terms_from_title",
+    "looks_like_product_desc",
+    "cleanse",
+]

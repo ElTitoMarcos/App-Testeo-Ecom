@@ -25,27 +25,26 @@ PROMPT_E = """TAREA E — Resumen ejecutivo para decisión\nObjetivo: condensar 
 
 PROMPT_E_AUTO = """TAREA E_auto — Decisión automática sobre lotes de productos\nObjetivo: clasificar cada elemento del lote y generar acciones siguientes.\n\nInstrucciones:\n1. Lee la matriz en "### DATA" (cada elemento con métricas agregadas).\n2. Para cada elemento, determina estado ("aprobado", "revisar", "descartar") según señales.\n3. Calcula un "score" 0-100 y asigna un "confidence" 0-100.\n4. Resume en una frase el motivo y propone el "next_step" (texto o null si no aplica).\n5. Añade "signals" como lista de palabras clave que respaldan la decisión.\n\nSalida obligatoria: objeto JSON con\n{\n  "prompt_version": "prompt-maestro-v3",\n  "items": [\n    {\n      "id": <string|number>,\n      "status": "aprobado"|"revisar"|"descartar",\n      "score": <0-100>,\n      "confidence": <0-100>,\n      "summary": <string>,\n      "reason": <string|null>,\n      "next_step": <string|null>,\n      "signals": [<string>, ...]\n    }, ...\n  ]\n}\n\nReglas:\n- Respeta exactamente los nombres de las claves.\n- Mantén "signals" como lista (puede ir vacía).\n- No añadas campos adicionales ni texto fuera del JSON.\n\nFallbacks específicos:\n- Si "### DATA" está vacío, devuelve items como lista vacía y reason="SIN DATOS" en cada registro generado."""
 
-PROMPT_DESIRE = """TAREA DESIRE — Mass-Desire Triad (v6.3 • único, 3–4 líneas, web-enabled)
-Objetivo: redactar el DESEO HUMANO subyacente (no la cosa). Usa ###CONTEXT_JSON/###DATA y, si hay navegador disponible, consulta hasta 5 fuentes (foros/reseñas/comentarios) para extraer señales. Sin navegador, continúa solo con el input.
+PROMPT_DESIRE = """TAREA DESIRE — JTBD Outcome (v6.4 • 3–4 líneas, anti-producto)
+Objetivo: redactar el DESEO HUMANO subyacente, no la cosa. Usa ###CONTEXT_JSON/###DATA y, si hay navegador, consulta hasta 5 fuentes (foros/reseñas/comentarios) para extraer señales; si no hay navegador, continúa solo con el input.
 
-Fundamento Evolve (compacto):
+Marco Evolve + JTBD (compacto):
 - instincts: health|sex|status|belonging|control|comfort   # elige 1
+- job-to-be-done: progreso deseado en situación concreta + emoción buscada + obstáculo eliminado
 - tech_problems (0–1): complexity|overwhelm|fragility|maintenance|incompatibility|obsolescence
-- forces (opc.): style_trends|mass_education
 - overall = round((scope+urgency+staying_power)/3)
 
-DESIRE STATEMENT — reglas duras (debe ser ÚNICO por item):
-- Longitud: 280–420 caracteres (≈3–4 líneas). 2–4 frases o cláusulas “;”.
-- Estructura: resultado funcional + beneficio emocional + micro-escena concreta + fricción neutralizada (p.ej., sin pasos extra/caos).
-- Voz centrada en la persona (“quien busca…/personas que desean…”). Inicia con un verbo de resultado (lograr, sentir, mantener, recuperar, organizar, simplificar, proteger…).
-- PROHIBIDO: marcas/modelos; nombres de producto/categoría (“crema”, “aspiradora”, “cuchillos”…); packs/cantidades; medidas (ml/W/cm); materiales; hype; claims médicos.
-- **No uses muletillas genéricas** como: “resultados sin invertir tiempo extra ni crear desorden”, “sin esfuerzo”, “premium”. Cada frase debe aportar una idea distinta; no repitas ni reformules lo mismo.
-- Si el borrador queda <280, **amplía con una escena o objeción distinta**, no con frases repetidas.
+DESIRE STATEMENT — reglas duras (único por item):
+- 280–420 caracteres (≈3–4 líneas), 2–4 frases o cláusulas “;”.
+- Empieza con un verbo de resultado (lograr, recuperar, sentir, mantener, simplificar, proteger…).
+- Incluye: resultado funcional + emoción + micro-escena (cuándo/dónde/para quién) + fricción neutralizada (tiempo, caos, dolor, vergüenza…).
+- PROHIBIDO: marcas o modelos; nombres de producto/categoría (crema, champú, aspiradora, cuchillos, cepillo, parches, figura, etc.); packs/cantidades; medidas (ml/W/cm); materiales; hype; claims médicos. Si aparecen, REESCRIBE hasta eliminarlos.
+- Evita muletillas genéricas (“sin esfuerzo”, “premium”, etc.) y la repetición de ideas.
 
 Estacionalidad:
-- seasonality_hint.window ∈ {jan,feb,mar_apr,may,jun,jul_aug,sep,oct,nov,dec}; elige la que mejor eleve el deseo.
+- seasonality_hint.window ∈ {jan,feb,mar_apr,may,jun,jul_aug,sep,oct,nov,dec} según el tipo de deseo.
 
-SALIDA JSON (estricta, sin texto extra):
+SALIDA JSON (estricta):
 {
   "prompt_version":"prompt-maestro-v4",
   "desire_primary":"<health|sex|status|belonging|control|comfort>",
@@ -54,12 +53,13 @@ SALIDA JSON (estricta, sin texto extra):
   "awareness_level":"<problem|solution|product|most>",
   "competition_level":"<low|mid|high>",
   "competition_reason":"<=140",
-  "seasonality_hint":{"window":"<jan|feb|mar_apr|may|jun|jul_aug|sep,oct,nov,dec>","confidence":0-100},
+  "seasonality_hint":{"window":"<jan|feb|mar_apr|may|jun|jul_aug,sep,oct,nov,dec>","confidence":0-100},
   "elevation_strategy":"<=140",
-  "signals":["t1","t2","t3"]   // 1–3 tokens (pains/beneficios/evidencia: p.ej., “reddit-skin”, “amz-reviews”)
+  "signals":["t1","t2","t3"]
 }
 
 Reglas finales:
+- Antes de imprimir, AUTOCHEQUEA: si tu texto contiene nombres de producto/categoría, medidas o marcas, reescribe el “desire_statement”.
 - No añadas campos ni comentarios."""
 
 _TASK_PROMPTS: Dict[str, str] = {

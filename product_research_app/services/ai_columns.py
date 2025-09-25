@@ -17,7 +17,7 @@ import httpx
 
 from .. import config, database, gpt
 from ..utils.signature import compute_sig_hash
-from .desire_utils import dedupe_clauses, needs_regen, sanitize_desire_text
+from .desire_utils import cleanse, looks_like_product_desc
 
 logger = logging.getLogger(__name__)
 
@@ -98,13 +98,6 @@ USER_INSTRUCTION = (
     "Analiza los siguientes productos y responde solo con un JSON cuyas claves sean los IDs. "
     "Cada entrada debe incluir desire, desire_magnitude, awareness_level y competition_level."
 )
-
-DESIRE_RETRY_EXTRA_USER = (
-    "El borrador quedó corto y genérico. Reescribe 'desire_statement' con 280–420 caracteres, "
-    "inicia con un verbo de resultado, usa una escena distinta y sin muletillas como "
-    "'resultados sin invertir tiempo extra ni crear desorden'."
-)
-
 
 def _truncate_text(value: Any, limit: int) -> str:
     if value is None:
@@ -631,29 +624,6 @@ async def _call_batch_with_retries(
                 if not isinstance(payload, dict):
                     raise gpt.InvalidJSONError("Respuesta IA no es JSON")
                 data_map = {str(k): v for k, v in payload.items()}
-                if any(isinstance(v, dict) and needs_regen(v) for v in data_map.values()):
-                    retry_messages = [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": request.user_text},
-                        {"role": "user", "content": DESIRE_RETRY_EXTRA_USER},
-                    ]
-                    retry_response = await client.post(
-                        "/v1/chat/completions",
-                        json={
-                            "model": model,
-                            "temperature": 0,
-                            "top_p": 1,
-                            "max_tokens": 380,
-                            "response_format": {"type": "json_object"},
-                            "messages": retry_messages,
-                        },
-                    )
-                    retry_response.raise_for_status()
-                    raw = retry_response.json()
-                    payload = _extract_response_payload(raw)
-                    if not isinstance(payload, dict):
-                        raise gpt.InvalidJSONError("Respuesta IA no es JSON")
-                    data_map = {str(k): v for k, v in payload.items()}
                 ok: Dict[str, Dict[str, Any]] = {}
                 ko: Dict[str, str] = {}
                 for cand in request.candidates:
@@ -662,23 +632,49 @@ async def _call_batch_with_retries(
                     if not isinstance(entry, dict):
                         ko[pid] = "missing"
                         continue
-                    desire_statement = entry.get("desire_statement") or entry.get("desire") or ""
-                    long_txt_raw = str(desire_statement).strip()
-                    long_txt = sanitize_desire_text(long_txt_raw)
-                    long_txt = dedupe_clauses(long_txt)
-                    if not long_txt:
-                        long_txt = long_txt_raw
-                    long_txt = long_txt.strip()
-                    desire_primary = entry.get("desire_primary")
-                    desire_magnitude_raw = entry.get("desire_magnitude")
+                    desire_payload = dict(entry)
+                    draft_raw = str(
+                        desire_payload.get("desire_statement")
+                        or desire_payload.get("desire")
+                        or ""
+                    ).strip()
+                    extra_title = (cand.extra or {}).get("title") if isinstance(cand.extra, dict) else None
+                    title = str(cand.payload.get("name") or extra_title or "")
+                    if len(draft_raw) < 280 or looks_like_product_desc(draft_raw, title):
+                        refined = await _refine_desire_statement(cand, draft_raw)
+                        if isinstance(refined, dict):
+                            merged = dict(desire_payload)
+                            merged.update(refined)
+                            desire_payload = merged
+                            draft_raw = str(
+                                desire_payload.get("desire_statement")
+                                or desire_payload.get("desire")
+                                or ""
+                            ).strip()
+                    if not draft_raw:
+                        draft_raw = str(entry.get("desire") or "")
+                    cleaned_txt = cleanse(draft_raw)
+                    if not cleaned_txt:
+                        cleaned_txt = draft_raw
+                    cleaned_txt = cleaned_txt.strip()
+                    desire_primary = desire_payload.get("desire_primary")
+                    if desire_primary is None:
+                        desire_primary = entry.get("desire_primary")
+                    desire_magnitude_raw = desire_payload.get("desire_magnitude")
+                    if desire_magnitude_raw is None:
+                        desire_magnitude_raw = entry.get("desire_magnitude")
                     if isinstance(desire_magnitude_raw, dict):
                         desire_magnitude_raw = desire_magnitude_raw.get("overall")
                     ok[pid] = {
-                        "desire": long_txt,
+                        "desire": cleaned_txt,
                         "desire_primary": desire_primary,
                         "desire_magnitude": gpt._norm_tri(desire_magnitude_raw),
-                        "awareness_level": gpt._norm_awareness(entry.get("awareness_level")),
-                        "competition_level": gpt._norm_tri(entry.get("competition_level")),
+                        "awareness_level": gpt._norm_awareness(
+                            desire_payload.get("awareness_level")
+                        ),
+                        "competition_level": gpt._norm_tri(
+                            desire_payload.get("competition_level")
+                        ),
                     }
                 duration = time.perf_counter() - start_ts
                 end_iso = datetime.utcnow().isoformat()
@@ -810,6 +806,73 @@ def _build_payload(row: Any, extra: Dict[str, Any]) -> Dict[str, Any]:
         "body": extra.get("body"),
         "long_description": extra.get("long_description"),
     }
+
+
+DESIRE_REFINE_EXTRA_USER = (
+    "El borrador parece una descripción de producto. Reescribe SOLO 'desire_statement' (280–420 chars) "
+    "centrado en el DESEO HUMANO (resultado+emoción+escena+fricción), sin marcas, sin categoría, sin medidas."
+)
+
+
+def _candidate_to_desire_context(candidate: Candidate) -> Dict[str, Any]:
+    payload = candidate.payload or {}
+    extra = candidate.extra or {}
+    product: Dict[str, Any] = {
+        "id": candidate.id,
+        "title": payload.get("name") or extra.get("title") or "",
+        "category": payload.get("category") or extra.get("category") or "",
+    }
+    for key in (
+        "price",
+        "rating",
+        "units_sold",
+        "revenue",
+        "conversion_rate",
+        "launch_date",
+        "date_range",
+    ):
+        value = payload.get(key)
+        if value in {None, ""}:
+            value = extra.get(key)
+        if value not in {None, ""}:
+            product[key] = value
+    for text_key in ("description", "bullets", "highlights", "body", "long_description"):
+        value = payload.get(text_key)
+        if not value:
+            value = extra.get(text_key)
+        if value:
+            product[text_key] = value
+    return {"product": product}
+
+
+async def _refine_desire_statement(
+    candidate: Candidate,
+    draft_text: str,
+) -> Optional[Dict[str, Any]]:
+    context = _candidate_to_desire_context(candidate)
+
+    def _call() -> Optional[Dict[str, Any]]:
+        try:
+            result = gpt.call_gpt(
+                "DESIRE",
+                context_json=context,
+                temperature=0,
+                extra_user=(
+                    f"Borrador previo:\n{draft_text.strip()}\n\n" + DESIRE_REFINE_EXTRA_USER
+                ),
+                mode="refine_no_product",
+                max_tokens=450,
+                stop=None,
+            )
+        except Exception:
+            logger.exception("desire refine call failed for id=%s", candidate.id)
+            return None
+        content = result.get("content") if isinstance(result, dict) else None
+        if isinstance(content, dict):
+            return content
+        return None
+
+    return await asyncio.to_thread(_call)
 
 
 def _emit_status(
@@ -1018,11 +1081,13 @@ def run_ai_fill_job(
                 remaining.append(cand)
                 continue
             cached_desire_raw = cache_row["desire"] if cache_row["desire"] is not None else ""
-            cached_desire = sanitize_desire_text(str(cached_desire_raw))
-            cached_desire = dedupe_clauses(cached_desire)
+            cached_title = str(cand.payload.get("name") or (cand.extra or {}).get("title") or "")
+            cached_desire = cleanse(str(cached_desire_raw or "").strip())
             if not cached_desire:
-                cached_desire = str(cached_desire_raw)
-            cached_desire = cached_desire.strip()
+                cached_desire = str(cached_desire_raw or "").strip()
+            if len(cached_desire) < 280 or looks_like_product_desc(cached_desire, cached_title):
+                remaining.append(cand)
+                continue
             update_payload = {
                 "desire": cached_desire,
                 "desire_magnitude": cache_row["desire_magnitude"],
@@ -1514,6 +1579,68 @@ def run_ai_fill_job(
         "skipped_existing": skipped_existing,
         "total_requested": len(requested_ids),
     }
+
+
+def recalc_desire_for_all(
+    db_conn: Optional[Any] = None,
+    ids: Optional[Sequence[int]] = None,
+    *,
+    batch_size: int = 20,
+    parallel: int = 3,
+) -> int:
+    """Rellena DESIRE para todos los items seleccionados."""
+
+    close_conn = False
+    conn = None
+    if db_conn is None:
+        conn = _ensure_conn()
+        close_conn = True
+    elif hasattr(db_conn, "cursor"):
+        conn = db_conn
+    else:
+        conn = getattr(db_conn, "connection", None)
+        if conn is None:
+            conn = _ensure_conn()
+            close_conn = True
+
+    try:
+        rows = [dict(row) for row in database.iter_products(conn, ids=ids)]
+    finally:
+        if close_conn and conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    pending: List[int] = []
+    for row in rows:
+        try:
+            pid = int(row.get("id"))
+        except Exception:
+            continue
+        title = str(row.get("name") or row.get("title") or "")
+        desire_text = str(row.get("desire") or "").strip()
+        if len(desire_text) < 280 or looks_like_product_desc(desire_text, title):
+            pending.append(pid)
+
+    if not pending:
+        return 0
+
+    processed = 0
+    for start in range(0, len(pending), batch_size):
+        chunk = pending[start : start + batch_size]
+        if not chunk:
+            continue
+        run_ai_fill_job(
+            job_id=None,
+            product_ids=chunk,
+            microbatch=batch_size,
+            parallelism=parallel,
+            status_cb=None,
+        )
+        processed += len(chunk)
+
+    return processed
 
 
 def fill_ai_columns(

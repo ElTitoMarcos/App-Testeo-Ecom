@@ -153,6 +153,9 @@ def build_messages(
     context_json: Optional[Dict[str, Any]] = None,
     aggregates: Optional[Dict[str, Any]] = None,
     data: Optional[Dict[str, Any]] = None,
+    *,
+    extra_user: Optional[str] = None,
+    mode: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Construye los mensajes para Prompt Maestro v3."""
 
@@ -172,6 +175,11 @@ def build_messages(
     elif canonical == "E_auto":
         sections.append("### DATA\n" + _dumps_payload(data))
 
+    if mode:
+        sections.append(f"### MODE\n{mode}")
+    if extra_user:
+        sections.append(extra_user.strip())
+
     user_content = "\n\n".join(sections).strip()
     return [
         {"role": "system", "content": system_prompt},
@@ -185,6 +193,11 @@ def call_gpt(
     aggregates: Optional[Dict[str, Any]] = None,
     data: Optional[Dict[str, Any]] = None,
     temperature: float = 0,
+    *,
+    extra_user: Optional[str] = None,
+    mode: Optional[str] = None,
+    max_tokens: Optional[int] = None,
+    stop: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Ejecuta una llamada estándar a Prompt Maestro v3."""
 
@@ -193,7 +206,14 @@ def call_gpt(
     except KeyError as exc:
         raise ValueError(f"Tarea desconocida: {task}") from exc
 
-    messages = build_messages(canonical, context_json, aggregates, data)
+    messages = build_messages(
+        canonical,
+        context_json,
+        aggregates,
+        data,
+        extra_user=extra_user,
+        mode=mode,
+    )
     api_key = config.get_api_key() or os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise OpenAIError("No hay API key configurada")
@@ -204,7 +224,8 @@ def call_gpt(
     if is_json_only(canonical) and schema:
         response_format = {"type": "json_schema", "json_schema": schema}
 
-    max_tokens = 320 if canonical == "DESIRE" else None
+    default_max_tokens = 450 if canonical == "DESIRE" else None
+    call_max_tokens = max_tokens if max_tokens is not None else default_max_tokens
 
     try:
         raw = call_openai_chat(
@@ -213,7 +234,8 @@ def call_gpt(
             messages,
             temperature=temperature,
             response_format=response_format,
-            max_tokens=max_tokens,
+            max_tokens=call_max_tokens,
+            stop=stop,
         )
     except OpenAIError as exc:
         if response_format and _looks_like_response_format_error(str(exc)):
@@ -222,7 +244,8 @@ def call_gpt(
                 model,
                 messages,
                 temperature=temperature,
-                max_tokens=max_tokens,
+                max_tokens=call_max_tokens,
+                stop=stop,
             )
         else:
             raise

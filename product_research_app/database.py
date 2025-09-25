@@ -616,6 +616,25 @@ def list_products(conn: sqlite3.Connection) -> List[sqlite3.Row]:
     return cur.fetchall()
 
 
+def iter_products(
+    conn: sqlite3.Connection,
+    ids: Optional[Sequence[int]] = None,
+):
+    """Yield products filtered by an optional list of IDs."""
+
+    cur = conn.cursor()
+    if ids:
+        placeholders = ",".join(["?"] * len(ids))
+        cur.execute(
+            f"SELECT * FROM products WHERE id IN ({placeholders}) ORDER BY id",
+            tuple(int(pid) for pid in ids),
+        )
+    else:
+        cur.execute("SELECT * FROM products ORDER BY id")
+    for row in cur:
+        yield row
+
+
 def get_product(conn: sqlite3.Connection, product_id: int) -> Optional[sqlite3.Row]:
     """Retrieve a product by its ID."""
     cur = conn.cursor()
