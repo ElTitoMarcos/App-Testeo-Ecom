@@ -140,11 +140,38 @@ def run_fill_for_ids(
     metrics = {"queued": len(normalized), "ok": 0, "ko": 0, "retried": 0}
     if not normalized:
         return metrics
+    rows = database.get_products_by_ids(conn, normalized)
+    only_desire_missing = False
+    desire_needed = False
+    if rows:
+        only_desire_missing = True
+        for row in rows:
+            data = _rowdict(row)
+            title = (data.get("name") or "").strip()
+            desire_text = (data.get("desire") or "").strip()
+            desire_missing = not desire_text or len(desire_text) < REQUIRED_FIELDS["desire"]["min_len"]
+            if not desire_missing and desire_text:
+                try:
+                    if looks_like_product_desc(desire_text, title):
+                        desire_missing = True
+                except Exception:
+                    desire_missing = True
+            if desire_missing:
+                desire_needed = True
+            if any(
+                _is_missing(data.get(field), REQUIRED_FIELDS[field]["kind"])
+                for field in ("desire_primary", "desire_magnitude", "awareness_level", "competition_level")
+            ):
+                only_desire_missing = False
+                break
+        if not desire_needed:
+            only_desire_missing = False
     result = ai_columns.run_ai_fill_job(
         0,
         normalized,
         status_cb=None,
         reason=reason,
+        desire_only=only_desire_missing,
         commit_each=True,
     )
     counts = result.get("counts", {}) or {}
@@ -152,6 +179,15 @@ def run_fill_for_ids(
     metrics["ok"] = int(counts.get("ok", 0) + counts.get("cached", 0))
     metrics["ko"] = int(counts.get("ko", 0))
     metrics["retried"] = int(counts.get("retried", 0))
+    missing_after = scan_ids(conn, normalized)
+    logger.info(
+        "ai_audit: ids=%s missing=%d ok=%d ko=%d retried=%d",
+        normalized,
+        len(missing_after),
+        metrics["ok"],
+        metrics["ko"],
+        metrics["retried"],
+    )
     return metrics
 
 

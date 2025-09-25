@@ -6,7 +6,7 @@ prompt_version = "prompt-maestro-v3".
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 PROMPT_VERSION = "prompt-maestro-v3"
 PROMPT_RELEASE_DATE = "2024-09-15"
@@ -60,7 +60,41 @@ SALIDA JSON (estricta):
 
 Reglas finales:
 - Antes de imprimir, AUTOCHEQUEA: si tu texto contiene nombres de producto/categoría, medidas o marcas, reescribe el “desire_statement”.
-- No añadas campos ni comentarios."""
+- No añadas campos ni comentarios.
+"""
+
+DESIRE_COMPACT_CONTRACT = """---
+OUTPUT CONTRACT (STRICTO, SOLO SI FALTA "desire"):
+Devuelve ÚNICAMENTE un JSON minimalista con dict por id (sin texto adicional):
+{
+  "<id>": {"s":"<deseo de 280–420 chars SIN saltos de línea crudos, usa \\n para cortes>"},
+  ...
+}
+Reglas:
+- No incluyas "id" dentro del objeto; la clave superior es el ID.
+- Sin trailing commas, sin comentarios, sin markdown.
+- El deseo NO debe sonar como ficha/ descripción del producto.
+---"""
+
+DESIRE_FULL_CONTRACT = """---
+OUTPUT CONTRACT (STRICTO):
+Devuelve ÚNICAMENTE un objeto JSON con esta forma:
+{
+  "items": [
+    {
+      "id": <ID del producto tal como se te pasó>,
+      "desire_statement": "<280–420 chars>",
+      "desire_primary": "<enum>",
+      "awareness_level": "<enum>",
+      "competition_level": "<enum>",
+      "desire_magnitude": {"scope":0..10,"urgency":0..10,"staying_power":0..10,"overall":0..10}
+    },
+    ...
+  ]
+}
+Las cadenas NO pueden contener saltos de línea crudos; usa \\n.
+Sin texto adicional, sin comentarios, sin markdown.
+---"""
 
 _TASK_PROMPTS: Dict[str, str] = {
     "A": PROMPT_A,
@@ -300,10 +334,17 @@ def get_system_prompt(task: str) -> str:
     return PROMPT_MASTER_V3_SYSTEM
 
 
-def get_task_prompt(task: str) -> str:
+def get_task_prompt(task: str, *, desire_only: Optional[bool] = None) -> str:
     """Return the user prompt template for the given task."""
+
     canonical = _normalize_task(task)
-    return _TASK_PROMPTS[canonical]
+    prompt = _TASK_PROMPTS[canonical]
+    if canonical == "DESIRE":
+        if desire_only:
+            prompt = "\n".join([prompt, DESIRE_COMPACT_CONTRACT])
+        else:
+            prompt = "\n".join([prompt, DESIRE_FULL_CONTRACT])
+    return prompt
 
 
 def normalize_task(task: str) -> str:

@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from . import database, config
+from . import database, config, metrics
 from .prompts.registry import (
     get_json_schema,
     get_system_prompt,
@@ -156,6 +156,7 @@ def build_messages(
     *,
     extra_user: Optional[str] = None,
     mode: Optional[str] = None,
+    desire_only: Optional[bool] = None,
 ) -> List[Dict[str, Any]]:
     """Construye los mensajes para Prompt Maestro v3."""
 
@@ -165,7 +166,7 @@ def build_messages(
         raise ValueError(f"Tarea desconocida: {task}") from exc
 
     system_prompt = get_system_prompt(canonical)
-    task_prompt = get_task_prompt(canonical)
+    task_prompt = get_task_prompt(canonical, desire_only=desire_only)
     sections = [task_prompt]
 
     if canonical in {"A", "C", "D", "E"}:
@@ -198,6 +199,8 @@ def call_gpt(
     mode: Optional[str] = None,
     max_tokens: Optional[int] = None,
     stop: Optional[Any] = None,
+    desire_only: Optional[bool] = None,
+    item_count: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Ejecuta una llamada estándar a Prompt Maestro v3."""
 
@@ -213,6 +216,7 @@ def call_gpt(
         data,
         extra_user=extra_user,
         mode=mode,
+        desire_only=desire_only,
     )
     api_key = config.get_api_key() or os.environ.get("OPENAI_API_KEY")
     if not api_key:
@@ -224,14 +228,49 @@ def call_gpt(
     if is_json_only(canonical) and schema:
         response_format = {"type": "json_schema", "json_schema": schema}
 
-    force_json_mode = canonical == "DESIRE"
-    if force_json_mode:
-        response_format = {"type": "json_object"}
+    force_json_mode = False
+    call_max_tokens: Optional[int] = max_tokens if max_tokens is not None else None
 
-    default_max_tokens = 450 if canonical == "DESIRE" else None
-    call_max_tokens = max_tokens if max_tokens is not None else default_max_tokens
-    if canonical == "DESIRE" and call_max_tokens is not None:
-        call_max_tokens = max(450, int(call_max_tokens))
+    if canonical == "DESIRE":
+        response_format = {"type": "json_object"}
+        stop = None
+
+        def _count_from_source(source: Any) -> Optional[int]:
+            if isinstance(source, dict):
+                items = source.get("items") if hasattr(source, "get") else None
+                if isinstance(items, list):
+                    return len(items)
+                return len(source) or None
+            if isinstance(source, list):
+                return len(source)
+            return None
+
+        if item_count is not None:
+            try:
+                inferred = int(item_count)
+            except Exception:
+                inferred = 1
+        else:
+            inferred = 0
+            for candidate_source in (data, context_json):
+                count = _count_from_source(candidate_source)
+                if count:
+                    inferred = count
+                    break
+            if inferred <= 0:
+                inferred = 1
+        inferred = max(1, inferred)
+        desire_only_flag = bool(desire_only)
+        base_tokens = 200 if desire_only_flag else 240
+        per_item_tokens = 120 if desire_only_flag else 200
+        computed_max = min(8192, base_tokens + per_item_tokens * inferred)
+        if max_tokens is not None:
+            try:
+                call_max_tokens = min(int(max_tokens), computed_max)
+            except Exception:
+                call_max_tokens = computed_max
+        else:
+            call_max_tokens = computed_max
 
     try:
         raw = call_openai_chat(
@@ -257,6 +296,20 @@ def call_gpt(
             )
         else:
             raise
+
+    usage_payload = raw.get("usage") if isinstance(raw, dict) else None
+    if isinstance(usage_payload, dict) and metrics is not None:
+        prompt_tokens = (
+            usage_payload.get("prompt_tokens")
+            or usage_payload.get("input_tokens")
+            or usage_payload.get("tokens_in")
+        )
+        completion_tokens = (
+            usage_payload.get("completion_tokens")
+            or usage_payload.get("output_tokens")
+            or usage_payload.get("tokens_out")
+        )
+        metrics.add_usage(prompt_tokens, completion_tokens)
 
     parsed_json, text_content = _parse_message_content(raw)
     if is_json_only(canonical):
