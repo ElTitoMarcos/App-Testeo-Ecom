@@ -152,6 +152,15 @@ def run_fill_for_ids(
     metrics["ok"] = int(counts.get("ok", 0) + counts.get("cached", 0))
     metrics["ko"] = int(counts.get("ko", 0))
     metrics["retried"] = int(counts.get("retried", 0))
+    missing_after = scan_ids(conn, normalized)
+    logger.info(
+        "ai_audit: ids=%s missing=%d ok=%d ko=%d retried=%d",
+        normalized,
+        len(missing_after),
+        metrics["ok"],
+        metrics["ko"],
+        metrics["retried"],
+    )
     return metrics
 
 
