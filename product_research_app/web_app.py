@@ -36,6 +36,7 @@ import time
 import sqlite3
 import math
 import hashlib
+import secrets
 from datetime import date, datetime, timedelta
 from typing import Dict, Any, List, Optional
 
@@ -43,6 +44,7 @@ from . import database
 from .db import get_db, get_last_performance_config
 from . import config
 from .services import ai_columns
+from .services import desire_backfill
 from .services import winner_score as winner_calc
 from .services import trends_service
 from .services.config import get_default_winner_weights
@@ -171,6 +173,10 @@ _IMPORT_STATUS_LOCK = threading.Lock()
 
 _ENRICH_WORKERS: Dict[int, threading.Thread] = {}
 _ENRICH_LOCK = threading.Lock()
+
+_DESIRE_STATUS: Dict[str, Dict[str, Any]] = {}
+_DESIRE_RESULTS: Dict[str, Dict[str, Any]] = {}
+_DESIRE_LOCK = threading.Lock()
 
 
 def _parse_date(s: str):
@@ -316,6 +322,40 @@ def _get_import_status(task_id: str) -> Dict[str, Any] | None:
     else:
         snapshot.setdefault("task_id", task_id)
     return snapshot
+
+
+def _update_desire_status(task_id: str, **updates: Any) -> Dict[str, Any]:
+    with _DESIRE_LOCK:
+        state = _DESIRE_STATUS.setdefault(task_id, {"task_id": task_id})
+        state.update(updates)
+        snapshot = dict(state)
+    return snapshot
+
+
+def _get_desire_status(task_id: str) -> Dict[str, Any] | None:
+    with _DESIRE_LOCK:
+        state = dict(_DESIRE_STATUS.get(task_id) or {})
+    if not state:
+        return None
+    state.setdefault("task_id", task_id)
+    return state
+
+
+def _set_desire_result(task_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    snapshot = dict(result or {})
+    snapshot.setdefault("task_id", task_id)
+    with _DESIRE_LOCK:
+        _DESIRE_RESULTS[task_id] = snapshot
+    return snapshot
+
+
+def _get_desire_result(task_id: str) -> Dict[str, Any] | None:
+    with _DESIRE_LOCK:
+        if task_id in _DESIRE_RESULTS:
+            snapshot = dict(_DESIRE_RESULTS[task_id])
+            snapshot.setdefault("task_id", task_id)
+            return snapshot
+    return None
 
 
 def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> str:
@@ -1056,6 +1096,30 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._set_json()
             self.wfile.write(json.dumps(resp).encode("utf-8"))
             return
+        if path == "/_desire_status":
+            params = parse_qs(parsed.query)
+            task_id = params.get("task_id", [""])[0]
+            if not task_id:
+                self.safe_write(lambda: self.send_json({"status": "unknown"}))
+                return
+            status = _get_desire_status(task_id)
+            if status is None:
+                self.safe_write(lambda: self.send_json({"status": "unknown"}))
+            else:
+                self.safe_write(lambda: self.send_json(status))
+            return
+        if path == "/_desire_results":
+            params = parse_qs(parsed.query)
+            task_id = params.get("task_id", [""])[0]
+            if not task_id:
+                self.safe_write(lambda: self.send_json({}))
+                return
+            result = _get_desire_result(task_id)
+            if result is None:
+                self.safe_write(lambda: self.send_json({}))
+            else:
+                self.safe_write(lambda: self.send_json(result))
+            return
         if path == "/api/config/winner-weights":
             cfg = config.load_config()
             changed = False
@@ -1762,6 +1826,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/recalc-desire-all":
             self.handle_recalc_desire_all()
+            return
+        if path == "/api/desire/backfill":
+            self.handle_desire_backfill()
             return
         if path == "/auto_weights":
             self.handle_auto_weights()
@@ -2781,6 +2848,171 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         self._set_json()
         self.wfile.write(json.dumps({"ok": True, "processed": processed}).encode('utf-8'))
+
+    def handle_desire_backfill(self):
+        length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(length).decode('utf-8') if length else ""
+        try:
+            data = json.loads(body or "{}")
+            if not isinstance(data, dict):
+                raise ValueError
+        except Exception:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "invalid_json"}).encode('utf-8'))
+            return
+
+        scope_raw = data.get("scope", "missing")
+        scope = str(scope_raw or "missing").lower()
+        if scope not in {"missing", "all", "ids"}:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"error": "invalid_scope"}).encode('utf-8'))
+            return
+
+        ids_field = data.get("ids")
+        target_ids: Optional[List[int]] = None
+        if scope == "ids":
+            if not isinstance(ids_field, list) or not ids_field:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"error": "ids_required"}).encode('utf-8'))
+                return
+            target_ids = ids_field
+        elif isinstance(ids_field, list) and ids_field:
+            target_ids = ids_field
+
+        try:
+            batch_size = int(data.get("batch_size", 32) or 32)
+        except Exception:
+            batch_size = 32
+        try:
+            parallel = int(data.get("parallel", 3) or 3)
+        except Exception:
+            parallel = 3
+        try:
+            max_retries_val = data.get("max_retries", 1)
+            max_retries = int(max_retries_val if max_retries_val is not None else 1)
+        except Exception:
+            max_retries = 1
+
+        batch_size = max(1, batch_size)
+        parallel = max(1, parallel)
+        max_retries = max(0, max_retries)
+
+        task_id = secrets.token_hex(8)
+        start_time = time.time()
+        ids_count = len(target_ids or []) if target_ids else 0
+        status_payload = {
+            "status": "running",
+            "queued": 0,
+            "processed": 0,
+            "failed": 0,
+            "done": 0,
+            "retried": 0,
+            "progress": 0.0,
+            "started_at": start_time,
+            "scope": scope,
+            "batch_size": batch_size,
+            "parallel": parallel,
+            "max_retries": max_retries,
+        }
+        if ids_count:
+            status_payload["ids_count"] = ids_count
+        _update_desire_status(task_id, **status_payload)
+
+        target_ids_seq = list(target_ids) if target_ids is not None else None
+
+        def progress_cb(payload: Dict[str, Any]) -> None:
+            queued = int(payload.get("queued", 0) or 0)
+            done = int(payload.get("done", 0) or 0)
+            failed = int(payload.get("failed", 0) or 0)
+            retried = int(payload.get("retried", 0) or 0)
+            processed = done + failed
+            progress_val = (processed / queued) if queued else 0.0
+            progress_val = max(0.0, min(1.0, progress_val))
+            elapsed = max(time.time() - start_time, 0.0)
+            eta = None
+            if queued and processed and processed < queued and elapsed > 0:
+                rate = processed / elapsed
+                if rate > 0:
+                    eta = max(0.0, (queued - processed) / rate)
+            status = {
+                "status": "running",
+                "queued": queued,
+                "processed": processed,
+                "failed": failed,
+                "done": done,
+                "retried": retried,
+                "progress": progress_val,
+                "updated_at": time.time(),
+            }
+            if eta is not None:
+                status["eta_seconds"] = eta
+            status["message"] = (
+                f"Procesados {processed}/{queued}" if queued else "Analizando productos"
+            )
+            _update_desire_status(task_id, **status)
+
+        def worker() -> None:
+            conn = ensure_db()
+            try:
+                result = desire_backfill.run_desire_backfill(
+                    conn,
+                    ids=target_ids_seq,
+                    batch_size=batch_size,
+                    parallel=parallel,
+                    max_retries=max_retries,
+                    logger=progress_cb,
+                )
+                queued = int(result.get("queued", 0) or 0)
+                done = int(result.get("done", 0) or 0)
+                failed = int(result.get("failed", 0) or 0)
+                retried = int(result.get("retried", 0) or 0)
+                processed = done + failed
+                if queued < processed:
+                    queued = processed
+                progress_val = 1.0 if queued == 0 else min(1.0, processed / max(queued, 1))
+                message = (
+                    f"Completado {processed}/{queued}" if queued else "Sin pendientes"
+                )
+                _set_desire_result(task_id, result)
+                _update_desire_status(
+                    task_id,
+                    status="done",
+                    queued=queued,
+                    processed=processed,
+                    failed=failed,
+                    done=done,
+                    retried=retried,
+                    progress=progress_val,
+                    finished_at=time.time(),
+                    message=message,
+                )
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logger.exception("desire backfill failed task=%s", task_id)
+                _update_desire_status(
+                    task_id,
+                    status="error",
+                    message=str(exc),
+                    finished_at=time.time(),
+                    progress=1.0,
+                )
+
+        logger.info(
+            "desire_backfill start task=%s scope=%s ids=%d batch=%d parallel=%d",
+            task_id,
+            scope,
+            ids_count,
+            batch_size,
+            parallel,
+        )
+
+        threading.Thread(
+            target=worker,
+            name=f"desire-backfill-{task_id}",
+            daemon=True,
+        ).start()
+
+        self._set_json(202)
+        self.wfile.write(json.dumps({"task_id": task_id}).encode('utf-8'))
 
     def handle_auto_weights(self):
         """
