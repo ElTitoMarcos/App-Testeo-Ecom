@@ -11,6 +11,19 @@ from .desire_utils import looks_like_product_desc
 logger = logging.getLogger(__name__)
 
 
+def _rowdict(row):
+    """Devuelve un dict normal a partir de sqlite3.Row o de un dict."""
+    if row is None:
+        return {}
+    if isinstance(row, dict):
+        return row
+    try:
+        return {k: row[k] for k in row.keys()}
+    except Exception:
+        # último recurso: convertir por iteración
+        return dict(row)
+
+
 REQUIRED_FIELDS: Dict[str, Dict[str, str]] = {
     "desire": {"via": "DESIRE", "kind": "text", "min_len": 280},
     "desire_primary": {"via": "DESIRE", "kind": "enum"},
@@ -142,46 +155,105 @@ def run_fill_for_ids(
     return metrics
 
 
-def _fill_ai_desire_labels(conn, ids: Optional[Iterable[int]]) -> int:
-    target_ids = _normalize_ids(list(ids) if ids is not None else None)
+def _first_words(text, n=8):
+    import re
+
+    if not text:
+        return ""
+    words = re.findall(r"\w[\w'-]*", str(text))
+    return " ".join(words[:n])
+
+
+def _fill_ai_desire_labels(conn, ids: Optional[Iterable[int]]):
+    """
+    Rellena ai_desire_label cuando está vacío.
+    Preferencia: desire_primary; si no existe, primeras 8 palabras de desire.
+    Emite SSE por cada actualización.
+    """
+
+    target_ids = None if ids is None else list(ids)
+    if target_ids is not None and not target_ids:
+        return {"updated": 0, "skipped": 0}
+
+    if target_ids is None:
+        query = (
+            "SELECT id, ai_desire_label, desire_primary, desire FROM products "
+            "WHERE ai_desire_label IS NULL OR TRIM(ai_desire_label) = ''"
+        )
+        params: Sequence[int] = ()
+    else:
+        placeholders = ",".join("?" for _ in target_ids)
+        query = (
+            f"SELECT id, ai_desire_label, desire_primary, desire FROM products "
+            f"WHERE id IN ({placeholders}) "
+            "AND (ai_desire_label IS NULL OR TRIM(ai_desire_label) = '')"
+        )
+        params = target_ids
+
+    rows = conn.execute(query, params).fetchall()
+
     updated = 0
-    for row in database.iter_products(conn, target_ids):
-        try:
-            pid = int(row["id"])
-        except Exception:
+    skipped = 0
+
+    for r in rows:
+        row = _rowdict(r)
+        pid = row["id"]
+        label = (row.get("ai_desire_label") or "").strip()
+        if label:
+            skipped += 1
             continue
-        label = row.get("ai_desire_label")
-        primary = row.get("desire_primary")
-        if not primary or not str(primary).strip():
+
+        candidate = (row.get("desire_primary") or "").strip()
+        if not candidate:
+            candidate = _first_words(row.get("desire") or "", 8)
+
+        candidate = candidate.strip()
+        if not candidate:
+            skipped += 1
             continue
-        if label and str(label).strip():
-            continue
-        value = str(primary).strip()
-        if not value:
-            continue
-        database.update_product(conn, pid, ai_desire_label=value)
+
+        conn.execute(
+            "UPDATE products SET ai_desire_label = ? WHERE id = ?",
+            (candidate, pid),
+        )
         try:
             conn.commit()
         except Exception:
             logger.exception("commit failed while setting ai_desire_label pid=%s", pid)
+            skipped += 1
             continue
-        ai_columns.emit_update(pid, {"ai_desire_label": value}, reason="audit")
         updated += 1
-    return updated
+
+        try:
+            from product_research_app.web_app import sse_broadcast
+
+            sse_broadcast("product_update", {"id": pid, "fields": {"ai_desire_label": candidate}})
+        except Exception:
+            pass
+
+        try:
+            ai_columns.emit_update(pid, {"ai_desire_label": candidate}, reason="audit")
+        except Exception:
+            pass
+
+    return {"updated": updated, "skipped": skipped}
 
 
 def run_audit(conn, ids: Optional[Sequence[int]] = None) -> Dict[str, int]:
     target_ids = _normalize_ids(ids)
-    label_updates = _fill_ai_desire_labels(conn, target_ids)
+    label_metrics = _fill_ai_desire_labels(conn, target_ids)
     missing = scan_ids(conn, target_ids)
     metrics = {"queued": len(missing), "ok": 0, "ko": 0, "retried": 0}
     if missing:
         metrics = run_fill_for_ids(conn, missing, reason="audit")
-        label_updates += _fill_ai_desire_labels(conn, missing)
+        extra_labels = _fill_ai_desire_labels(conn, missing)
+        label_metrics["updated"] += extra_labels.get("updated", 0)
+        label_metrics["skipped"] += extra_labels.get("skipped", 0)
     summary = {
         **metrics,
         "missing": len(missing),
-        "label_updates": label_updates,
+        "label_updates": label_metrics.get("updated", 0),
+        "label_skipped": label_metrics.get("skipped", 0),
     }
     logger.info(
         "ai_audit: ids=%s missing=%d ok=%d ko=%d retried=%d labels=%d",
