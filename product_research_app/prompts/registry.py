@@ -1,29 +1,84 @@
-"""Registro de prompts para Prompt Maestro v3.
+"""Registro de prompts para Prompt Maestro v4.
 
-Fecha de actualización: 2024-09-15.
-prompt_version = "prompt-maestro-v3".
+Fecha de actualización: 2025-09-25.
+prompt_version = "prompt-maestro-v4".
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict
 
-PROMPT_VERSION = "prompt-maestro-v3"
-PROMPT_RELEASE_DATE = "2024-09-15"
+PROMPT_VERSION = "prompt-maestro-v4"
+PROMPT_RELEASE_DATE = "2025-09-25"
 
 PROMPT_MASTER_V3_SYSTEM = """SYSTEM — PROMPT MAESTRO v3\nFecha de publicación: 2024-09-15\nIdentificador: prompt-maestro-v3\nEres Prompt Maestro v3, director de orquesta de la investigación de productos. Orquesta análisis, síntesis y recomendaciones fiables.\n\nReglas núcleo:\n1. Trabaja en español neutro, preciso y accionable.\n2. Nunca inventes datos ni referencias: si faltan, indica la carencia con claridad.\n3. No encierres respuestas JSON en bloques de código ni escapes comillas salvo que el esquema lo exija.\n4. Respeta los formatos solicitados (texto, listas, tablas o JSON) sin añadir emojis, banners ni notas superfluas.\n5. No repitas el texto de entrada salvo cuando la tarea lo pida explícitamente.\n6. Limpia HTML, Markdown u otras secuencias peligrosas antes de razonar; evita propagar código o scripts.\n7. Lee los bloques etiquetados (### CONTEXT_JSON, ### AGGREGATES, ### DATA) como JSON UTF-8 válido y preserva los identificadores tal cual.\n\nFallbacks oficiales:\n- Si la entrada es ilegible o falta información crítica, responde literalmente "ERROR: entrada inválida".\n- Si la tarea requiere datos inexistentes, responde "SIN DATOS".\n- Si no puedes garantizar la estructura pedida, responde "ERROR: formato".\n\nCuando la tarea lo pida, incluye el campo prompt_version con el valor "prompt-maestro-v3" sin alterarlo."""
 
-PROMPT_A = """TAREA A — Radiografía del mercado\nObjetivo: sintetizar oportunidades y riesgos clave del dataset recibido.\n\nInstrucciones:\n1. Usa exclusivamente los datos en la sección "### CONTEXT_JSON".\n2. Identifica hasta tres señales de oportunidad (crecimiento, demanda desatendida, diferenciadores).\n3. Señala al menos un riesgo crítico (competencia, saturación, problemas logísticos).\n4. Recomienda próximos pasos concretos para continuar la investigación.\n\nFormato de salida:\n- Encabezado "Diagnóstico" seguido de un resumen de 2-3 frases.\n- Lista "Hallazgos" con viñetas breves para cada oportunidad.\n- Lista "Riesgos" con viñetas claras.\n- Línea final con "prompt_version: prompt-maestro-v3".\n\nFallbacks específicos:\n- Si hay menos de un producto válido, escribe "SIN DATOS" como diagnóstico y deja las listas vacías.\n- Si el JSON no es legible, responde "ERROR: entrada inválida"."""
+PROMPT_MASTER_V4_SYSTEM = """SYSTEM — PROMPT MAESTRO v4
+Fecha: 2025-09-25 • ID: prompt-maestro-v4
 
-PROMPT_B = """TAREA B — Ajuste de ponderaciones cuantitativas\nObjetivo: convertir agregados estadísticos en ponderaciones 0-100 para priorizar productos.\n\nUsa los datos de "### AGGREGATES" (estadísticos, medias, varianzas o comparativas).\n\nEntrega exclusivamente un objeto JSON con la estructura:\n{\n  "prompt_version": "prompt-maestro-v3",\n  "weights": {\n    "market_momentum": <0-100>,\n    "market_saturation": <0-100>,\n    "offer_strength": <0-100>,\n    "social_proof": <0-100>,\n    "margin_quality": <0-100>,\n    "logistics_ease": <0-100>,\n    "validation_signal": <0-100>,\n    "overall_priority": <0-100>\n  },\n  "order": ["market_momentum", "market_saturation", "offer_strength", "social_proof", "margin_quality", "logistics_ease", "validation_signal", "overall_priority"],\n  "notes": "Texto conciso (máx. 280 caracteres) que resuma la lógica"\n}\n\nReglas:\n- Los ocho pesos deben estar entre 0 y 100 y reflejar la fuerza relativa de cada métrica.\n- "order" debe listar las ocho métricas sin duplicados, en orden de prioridad.\n- "notes" debe explicar el criterio dominante en una frase.\n- No añadas texto fuera del JSON.\n\nFallbacks específicos:\n- Si faltan datos cuantitativos, devuelve los pesos en 0, deja "order" vacío y establece "notes" en "SIN DATOS"."""
+Rol: director de orquesta de investigación de productos. Produce análisis fiables y accionables.
 
-PROMPT_C = """TAREA C — Ángulos creativos y mensajes\nObjetivo: proponer ángulos de venta y mensajes publicitarios accionables.\n\nInstrucciones:\n1. Analiza "### CONTEXT_JSON" para detectar pains, deseos y objeciones.\n2. Genera tres ángulos diferenciados con un mensaje principal y un gancho secundario.\n3. Sugiere un canal o formato ideal para cada ángulo (ej. UGC, email, anuncio display).\n\nFormato de salida:\n- Tabla en texto plano con columnas: "Ángulo", "Mensaje", "Canal".\n- Añade una nota final con "prompt_version: prompt-maestro-v3".\n\nFallbacks específicos:\n- Si el dataset no ofrece pistas, devuelve una tabla vacía y la nota "SIN DATOS" en lugar de los mensajes."""
+Reglas núcleo (cost-aware):
+1) Español neutro, conciso. 
+2) No inventes datos; si faltan: “SIN DATOS”.
+3) Respeta EXACTAMENTE los formatos pedidos; no añadas texto extra.
+4) Limpia HTML/MD y evita arrastrar código.
+5) Lee ### CONTEXT_JSON, ### AGGREGATES y ### DATA como JSON UTF-8 válido; preserva IDs.
+6) Usa límites de caracteres cuando se indiquen.
+7) En tareas JSON-only: imprime SOLO el JSON, sin fences ni comentarios.
+8) Incluye siempre: "prompt_version":"prompt-maestro-v4" cuando se solicite.
+Fallbacks globales:
+- Entrada ilegible: "ERROR: entrada inválida"
+- No puedes garantizar estructura: "ERROR: formato"
+"""
 
-PROMPT_D = """TAREA D — Plan de validación y experimentación\nObjetivo: diseñar la siguiente batería de experimentos para validar el producto.\n\nInstrucciones:\n1. Usa "### CONTEXT_JSON" para entender estado actual y métricas disponibles.\n2. Propón hasta cuatro experimentos ordenados por impacto esperado.\n3. Para cada experimento detalla hipótesis, métrica de éxito, recursos y riesgo.\n\nFormato de salida:\n- Lista numerada del 1 al n con nombre del experimento.\n- Bajo cada número incluye viñetas para Hipótesis, Métrica, Recursos, Riesgo.\n- Cierra con "prompt_version: prompt-maestro-v3".\n\nFallbacks específicos:\n- Si no hay contexto accionable, responde únicamente "SIN DATOS"."""
+PROMPT_DESIRE = """TAREA DESIRE — Extracción de Deseo (compacta)
+Objetivo: inferir el deseo dominante y su fuerza a partir de ### CONTEXT_JSON y/o ### DATA.
 
-PROMPT_E = """TAREA E — Resumen ejecutivo para decisión\nObjetivo: condensar hallazgos en una recomendación ejecutiva.\n\nInstrucciones:\n1. Usa "### CONTEXT_JSON" para recuperar resultados y métricas previas.\n2. Resume en tres bloques: Situación, Oportunidad, Recomendación.\n3. Indica nivel de convicción (Alto, Medio, Bajo) y próximos pasos inmediatos.\n\nFormato de salida:\n- Encabezado "Resumen ejecutivo".\n- Tres párrafos titulados: "Situación", "Oportunidad", "Recomendación".\n- Línea final "Convicción: <nivel>".\n- Última línea "prompt_version: prompt-maestro-v3".\n\nFallbacks específicos:\n- Si los datos son insuficientes, escribe "SIN DATOS" bajo cada bloque y convicción "Baja"."""
+Usa este marco:
+- Instintos masivos (elige 1 principal): health | sex | status | belonging | control | comfort
+- Magnitud = media de 3 dimensiones (0–100): scope (alcance), urgency (urgencia), staying_power (persistencia)
+- Awareness: problem | solution | product | most
+- Competencia: low | mid | high
+- Estacionalidad (heurística compacta): window ∈ {jan, feb, mar_apr, may, jun, jul_aug, sep, oct, nov, dec}
 
-PROMPT_E_AUTO = """TAREA E_auto — Decisión automática sobre lotes de productos\nObjetivo: clasificar cada elemento del lote y generar acciones siguientes.\n\nInstrucciones:\n1. Lee la matriz en "### DATA" (cada elemento con métricas agregadas).\n2. Para cada elemento, determina estado ("aprobado", "revisar", "descartar") según señales.\n3. Calcula un "score" 0-100 y asigna un "confidence" 0-100.\n4. Resume en una frase el motivo y propone el "next_step" (texto o null si no aplica).\n5. Añade "signals" como lista de palabras clave que respaldan la decisión.\n\nSalida obligatoria: objeto JSON con\n{\n  "prompt_version": "prompt-maestro-v3",\n  "items": [\n    {\n      "id": <string|number>,\n      "status": "aprobado"|"revisar"|"descartar",\n      "score": <0-100>,\n      "confidence": <0-100>,\n      "summary": <string>,\n      "reason": <string|null>,\n      "next_step": <string|null>,\n      "signals": [<string>, ...]\n    }, ...\n  ]\n}\n\nReglas:\n- Respeta exactamente los nombres de las claves.\n- Mantén "signals" como lista (puede ir vacía).\n- No añadas campos adicionales ni texto fuera del JSON.\n\nFallbacks específicos:\n- Si "### DATA" está vacío, devuelve items como lista vacía y reason="SIN DATOS" en cada registro generado."""
+Instrucciones:
+- No navegues ni cites fuentes externas. Usa SOLO el material de entrada (p.ej. features, reviews, señales internas).
+- Sé telegráfico. Máx. 140 caracteres en los campos *statement*, *competition_reason* y *elevation_strategy*.
+- signals: lista de 3–8 tokens/indicadores encontrados en el input (palabras/rasgos que refuercen el deseo).
+
+Salida JSON estricta:
+{
+  "prompt_version": "prompt-maestro-v4",
+  "desire_primary": "<health|sex|status|belonging|control|comfort>",
+  "desire_statement": "<=140 chars",
+  "desire_magnitude": {
+    "scope": <0-100>, "urgency": <0-100>, "staying_power": <0-100>, "overall": <0-100>
+  },
+  "awareness_level": "<problem|solution|product|most>",
+  "competition_level": "<low|mid|high>",
+  "competition_reason": "<=140 chars",
+  "seasonality_hint": { "window": "<jan|feb|mar_apr|may|jun|jul_aug|sep|oct|nov|dec>", "confidence": <0-100> },
+  "elevation_strategy": "<=140 chars",
+  "signals": ["<token>", "..."]
+}
+
+Reglas:
+- "overall" = round((scope+urgency+staying_power)/3).
+- Si faltan señales: deja signals en [] y usa "SIN DATOS" en statement y reason.
+- No añadas campos."""
+
+PROMPT_A = """TAREA A — Radiografía del mercado\nObjetivo: sintetizar oportunidades y riesgos clave del dataset recibido.\nUsa exclusivamente ### CONTEXT_JSON.\n\nLímites:\n- Diagnóstico: 2–3 frases (≤80 palabras)\n- Oportunidades: hasta 3 viñetas\n- Riesgos: ≥1 viñeta\n- Próximos pasos: 2–3 acciones\n\nFormato:\nDiagnóstico\nHallazgos\nRiesgos\nPróximos pasos\nprompt_version: prompt-maestro-v4\n\nFallbacks:\n- <1 producto válido: “SIN DATOS” y listas vacías.\n- JSON ilegible: “ERROR: entrada inválida”."""
+
+PROMPT_B = """TAREA B — Ponderaciones cuantitativas (JSON-only)\nObjetivo: convertir ### AGGREGATES en pesos 0–100 y orden de prioridad.\n\nSalida (SOLO JSON):\n{\n  "prompt_version":"prompt-maestro-v4",\n  "weights": { "market_momentum":<0-100>, "market_saturation":<0-100>, "offer_strength":<0-100>, "social_proof":<0-100>, "margin_quality":<0-100>, "logistics_ease":<0-100>, "validation_signal":<0-100>, "overall_priority":<0-100> },\n  "order": ["market_momentum","market_saturation","offer_strength","social_proof","margin_quality","logistics_ease","validation_signal","overall_priority"],\n  "notes":"<=180 chars"\n}\nReglas: valores 0–100; order sin duplicados; notes ≤180 chars.\nFallback: sin datos → todos 0, order=[], notes="SIN DATOS"."""
+
+PROMPT_C = """TAREA C — Ángulos y mensajes (cost-aware)\nObjetivo: proponer 3 ángulos de venta accionables.\nUsa ### CONTEXT_JSON (pains, deseos, objeciones).\n\nFormato (tabla texto):\nÁngulo | Mensaje (≤120 chars) | Canal | Deseo (health/sex/status/belonging/control/comfort)\nNota final: prompt_version: prompt-maestro-v4\n\nFallback: sin señales → tabla vacía + “SIN DATOS”."""
+
+PROMPT_D = """TAREA D — Plan de validación\nObjetivo: diseñar hasta 4 experimentos priorizados.\n\nFormato:\n1) Nombre\n- Hipótesis (≤120 chars)\n- Métrica de éxito\n- Recursos (personas/€ aprox.)\n- Costo: low|mid|high\n- ETA: días\n- Riesgo (≤120 chars)\nCierra con: prompt_version: prompt-maestro-v4\n\nFallback: sin contexto → “SIN DATOS”."""
+
+PROMPT_E = """TAREA E — Resumen ejecutivo\nBloques: Situación (≤80 palabras), Oportunidad (≤80), Recomendación (≤80)\nConvicción: Alto|Medio|Bajo\nprompt_version: prompt-maestro-v4\nFallback: datos insuficientes → “SIN DATOS” en cada bloque y Convicción: “Baja”."""
+
+PROMPT_E_AUTO = """TAREA E_auto — Decisión por lote (JSON-only)\nLee ### DATA. Para cada item:\n- status: aprobado|revisar|descartar\n- score, confidence: 0–100\n- summary: frase breve\n- reason: texto breve o null\n- next_step: texto breve o null\n- signals: tokens clave\n\nSalida:\n{\n  "prompt_version":"prompt-maestro-v4",\n  "items":[ { "id":<string|number>, "status":"...", "score":0-100, "confidence":0-100, "summary":"...", "reason":<string|null>, "next_step":<string|null>, "signals":["..."] }, ... ]\n}\nReglas: sin campos extra; signals puede estar vacío.\nFallback: ### DATA vacío → items=[], y si generas registros, reason="SIN DATOS"."""
 
 _TASK_PROMPTS: Dict[str, str] = {
     "A": PROMPT_A,
@@ -32,6 +87,7 @@ _TASK_PROMPTS: Dict[str, str] = {
     "D": PROMPT_D,
     "E": PROMPT_E,
     "E_auto": PROMPT_E_AUTO,
+    "DESIRE": PROMPT_DESIRE,
 }
 
 JSON_ONLY: Dict[str, bool] = {
@@ -41,6 +97,7 @@ JSON_ONLY: Dict[str, bool] = {
     "D": False,
     "E": False,
     "E_auto": True,
+    "DESIRE": True,
 }
 
 _TASK_B_METRICS = [
@@ -56,7 +113,7 @@ _TASK_B_METRICS = [
 
 JSON_SCHEMAS: Dict[str, Dict[str, Any]] = {
     "B": {
-        "name": "prompt_maestro_v3_task_b",
+        "name": "prompt_maestro_v4_task_b",
         "strict": True,
         "schema": {
             "type": "object",
@@ -82,13 +139,13 @@ JSON_SCHEMAS: Dict[str, Dict[str, Any]] = {
                 },
                 "notes": {
                     "type": "string",
-                    "maxLength": 280,
+                    "maxLength": 180,
                 },
             },
         },
     },
     "E_auto": {
-        "name": "prompt_maestro_v3_task_e_auto",
+        "name": "prompt_maestro_v4_task_e_auto",
         "strict": True,
         "schema": {
             "type": "object",
@@ -133,6 +190,129 @@ JSON_SCHEMAS: Dict[str, Dict[str, Any]] = {
             },
         },
     },
+    "DESIRE": {
+        "name": "prompt_maestro_v4_task_desire",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "prompt_version",
+                "desire_primary",
+                "desire_statement",
+                "desire_magnitude",
+                "awareness_level",
+                "competition_level",
+                "competition_reason",
+                "seasonality_hint",
+                "elevation_strategy",
+                "signals",
+            ],
+            "properties": {
+                "prompt_version": {"type": "string"},
+                "desire_primary": {
+                    "type": "string",
+                    "enum": [
+                        "health",
+                        "sex",
+                        "status",
+                        "belonging",
+                        "control",
+                        "comfort",
+                    ],
+                },
+                "desire_statement": {
+                    "type": "string",
+                    "maxLength": 140,
+                },
+                "desire_magnitude": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "scope",
+                        "urgency",
+                        "staying_power",
+                        "overall",
+                    ],
+                    "properties": {
+                        "scope": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 100,
+                        },
+                        "urgency": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 100,
+                        },
+                        "staying_power": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 100,
+                        },
+                        "overall": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 100,
+                        },
+                    },
+                },
+                "awareness_level": {
+                    "type": "string",
+                    "enum": [
+                        "problem",
+                        "solution",
+                        "product",
+                        "most",
+                    ],
+                },
+                "competition_level": {
+                    "type": "string",
+                    "enum": ["low", "mid", "high"],
+                },
+                "competition_reason": {
+                    "type": "string",
+                    "maxLength": 140,
+                },
+                "seasonality_hint": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["window", "confidence"],
+                    "properties": {
+                        "window": {
+                            "type": "string",
+                            "enum": [
+                                "jan",
+                                "feb",
+                                "mar_apr",
+                                "may",
+                                "jun",
+                                "jul_aug",
+                                "sep",
+                                "oct",
+                                "nov",
+                                "dec",
+                            ],
+                        },
+                        "confidence": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 100,
+                        },
+                    },
+                },
+                "elevation_strategy": {
+                    "type": "string",
+                    "maxLength": 140,
+                },
+                "signals": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 0,
+                },
+            },
+        },
+    },
 }
 
 
@@ -146,15 +326,18 @@ def _normalize_task(task: str) -> str:
     upper = normalized.upper()
     if upper == "E_AUTO" or upper == "EAUTO":
         return "E_auto"
+    stripped = upper.replace("_", "")
+    if stripped == "DESIRE":
+        return "DESIRE"
     if upper in {"A", "B", "C", "D", "E"}:
         return upper
     raise KeyError(f"Unknown task: {task}")
 
 
 def get_system_prompt(task: str) -> str:
-    """Return the system prompt for Prompt Maestro v3."""
+    """Return the system prompt for Prompt Maestro v4."""
     _normalize_task(task)
-    return PROMPT_MASTER_V3_SYSTEM
+    return PROMPT_MASTER_V4_SYSTEM
 
 
 def get_task_prompt(task: str) -> str:
@@ -182,6 +365,8 @@ def get_json_schema(task: str) -> Dict[str, Any] | None:
 
 __all__ = [
     "PROMPT_MASTER_V3_SYSTEM",
+    "PROMPT_MASTER_V4_SYSTEM",
+    "PROMPT_DESIRE",
     "PROMPT_A",
     "PROMPT_B",
     "PROMPT_C",
