@@ -612,6 +612,18 @@ const EC_LIMITS = {
   competition:    { min: 100, max: 160, pad: 20 },
 };
 
+const DESIRE_WIDTH_CH = 42;
+(function ensureDesireWidth(){
+  const bodyFont = getComputedStyle(document.body).font;
+  if (bodyFont) __ecMeasure.style.font = bodyFont;
+  __ecMeasure.textContent = '0'.repeat(10);
+  const sample = __ecMeasure.offsetWidth / 10 || parseFloat(getComputedStyle(document.body).fontSize) || 8;
+  const fixed = Math.round(sample * DESIRE_WIDTH_CH);
+  EC_LIMITS.desire.min = fixed;
+  EC_LIMITS.desire.max = fixed;
+  __ecMeasure.textContent = '';
+})();
+
 function ecClamp(n, a, b){ return Math.max(a, Math.min(b, n)); }
 
 function ecAutoFitColumns(gridRoot) {
@@ -971,6 +983,7 @@ function renderTable() {
       } else if (key === 'desire') {
         let current = value || '';
         const render = () => {
+          td.classList.remove('is-editing');
           td.innerHTML = '';
           td.title = current;
           const wrap = document.createElement('div');
@@ -979,15 +992,15 @@ function renderTable() {
           td.appendChild(wrap);
           wrap.addEventListener('click', () => {
             if (td.querySelector('textarea')) return;
+            td.classList.add('is-editing');
             const ta = document.createElement('textarea');
             ta.className = 'desire-editor';
-            ta.rows = 4;
+            ta.rows = 6;
             ta.value = current;
             td.innerHTML = '';
             td.appendChild(ta);
             ta.focus();
-            ta.addEventListener('blur', async () => {
-              const val = ta.value.trim() || null;
+            const persist = async (val) => {
               try {
                 await fetch(`/api/products/${item.id}`, {
                   method: 'PATCH',
@@ -995,6 +1008,16 @@ function renderTable() {
                   body: JSON.stringify({ desire: val })
                 });
               } catch (e) {}
+            };
+            ta.addEventListener('keydown', (ev) => {
+              if (ev.key === 'Escape') {
+                ta.value = current;
+                ta.blur();
+              }
+            });
+            ta.addEventListener('blur', async () => {
+              const val = ta.value.trim() || null;
+              await persist(val);
               item.desire = val;
               current = val || '';
               render();

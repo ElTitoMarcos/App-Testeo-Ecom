@@ -287,6 +287,7 @@ NUMERIC_FIELD_KEYS: Dict[str, Sequence[str]] = {
 }
 
 DESIRE_TEXT_KEYS: Sequence[str] = (
+    "desire_statement",
     "desire",
     "desires",
     "customer_desire",

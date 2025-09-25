@@ -652,7 +652,9 @@ async def _call_batch_with_retries(
                         if isinstance(desire_raw, str)
                         else None
                     )
-                    desire_value = desire_statement or desire_text or ""
+                    desire_value = desire_statement or ""
+                    if not desire_value and desire_text:
+                        desire_value = desire_text
                     if isinstance(desire_value, str):
                         desire_value = desire_value.strip()
                     if not desire_statement:

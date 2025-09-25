@@ -32,40 +32,39 @@ Fallbacks globales:
 - No puedes garantizar estructura: "ERROR: formato"
 """
 
-PROMPT_DESIRE = """TAREA DESIRE — Extracción de Deseo (v4.2-L)
-Objetivo: inferir el deseo dominante y su fuerza a partir de ### CONTEXT_JSON y/o ### DATA. Usa SOLO el material provisto.
+PROMPT_DESIRE = """TAREA DESIRE — Outcome-only (App v5)
+Usa SOLO ###CONTEXT_JSON/###DATA (features, beneficios, reseñas internas, títulos/viñetas). PROHIBIDO navegar.
 
-Instinto (elige 1): health | sex | status | belonging | control | comfort
-Magnitud: media de {scope, urgency, staying_power} (0–100)
-Awareness: problem | solution | product | most
-Competencia: low | mid | high
-Estacionalidad: window ∈ {jan, feb, mar_apr, may, jun, jul_aug, sep, oct, nov, dec}
+Marco Evolve (tokens cortos):
+- instincts: health|sex|status|belonging|control|comfort
+- tech_problems: complexity|overwhelm|fragility|maintenance|incompatibility|obsolescence
+- forces: style_trends|mass_education
 
-DESIRE STATEMENT — reglas:
-- EXTENSIÓN OBLIGATORIA: entre 220 y 360 caracteres. Si quedas corto, añade cláusulas concisas separadas por “;”.
-- Forma: 2–4 frases cortas que incluyan: resultado funcional + beneficio emocional + micro-escena de uso + diferenciador/objeción neutralizada.
-- Estilo telegráfico, sin hype, sin claims médicos/ilegales, sin marcas.
+DESIRE STATEMENT (reglas):
+- Longitud: 220–320 caracteres; 2–4 frases/claúsulas (“;” ok).
+- Contenido: resultado funcional + beneficio emocional + micro-escena de uso + fricción neutralizada (p.ej., sin desorden/tiempo extra).
+- Estilo atemporal: habla de la persona (“quien busca…/personas que…”).
+- Prohibido: marcas/modelos, packs/cantidades, medidas (ml/W/cm), materiales, claims médicos/ilegales, hype.
 
-signals: 3–8 tokens/rasgos del input que respalden el deseo.
-
-SALIDA JSON estricta:
+SALIDA JSON (estricta, sin texto extra):
 {
   "prompt_version": "prompt-maestro-v4",
   "desire_primary": "<health|sex|status|belonging|control|comfort>",
-  "desire_statement": "<=360 chars, >=220 chars",
-  "desire_magnitude": {
-    "scope": <0-100>, "urgency": <0-100>, "staying_power": <0-100>, "overall": <0-100>
-  },
+  "desire_statement": "<=320, >=220",
+  "desire_magnitude": { "scope":0-100, "urgency":0-100, "staying_power":0-100, "overall":0-100 },
   "awareness_level": "<problem|solution|product|most>",
   "competition_level": "<low|mid|high>",
-  "competition_reason": "<=140 chars",
-  "seasonality_hint": { "window": "<jan|feb|mar_apr|may|jun|jul_aug|sep|oct|nov|dec>", "confidence": <0-100> },
-  "elevation_strategy": "<=140 chars",
-  "signals": ["<token>", "..."]
+  "competition_reason": "<=140",
+  "seasonality_hint": { "window":"<jan|feb|mar_apr|may|jun|jul_aug|sep|oct|nov|dec>", "confidence":0-100 },
+  "elevation_strategy": "<=140",
+  "signals": ["token1","token2","token3"]   // 3–5 tokens, sin frases largas
 }
-Reglas:
-- "overall" = round((scope+urgency+staying_power)/3).
-- Sin señales → signals=[], y usa "SIN DATOS" en statement y reason.
+
+Cálculo:
+- overall = round((scope+urgency+staying_power)/3).
+
+Fallbacks:
+- Sin señales → signals=[], desire_statement="SIN DATOS", competition_reason="SIN DATOS".
 - No añadas campos ni comentarios."""
 
 PROMPT_A = """TAREA A — Radiografía del mercado\nObjetivo: sintetizar oportunidades y riesgos clave del dataset recibido.\nUsa exclusivamente ### CONTEXT_JSON.\n\nLímites:\n- Diagnóstico: 2–3 frases (≤80 palabras)\n- Oportunidades: hasta 3 viñetas\n- Riesgos: ≥1 viñeta\n- Próximos pasos: 2–3 acciones\n\nFormato:\nDiagnóstico\nHallazgos\nRiesgos\nPróximos pasos\nprompt_version: prompt-maestro-v4\n\nFallbacks:\n- <1 producto válido: “SIN DATOS” y listas vacías.\n- JSON ilegible: “ERROR: entrada inválida”."""
@@ -224,7 +223,7 @@ JSON_SCHEMAS: Dict[str, Dict[str, Any]] = {
                 "desire_statement": {
                     "type": "string",
                     "minLength": 220,
-                    "maxLength": 360,
+                    "maxLength": 320,
                 },
                 "desire_magnitude": {
                     "type": "object",
@@ -310,6 +309,7 @@ JSON_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "type": "array",
                     "items": {"type": "string"},
                     "minItems": 0,
+                    "maxItems": 5,
                 },
             },
         },

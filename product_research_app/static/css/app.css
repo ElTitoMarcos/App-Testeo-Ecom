@@ -401,6 +401,13 @@ body.dark .bottombar {
 
 #productTable {
   margin-bottom: 0;
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+}
+#productTable th,
+#productTable td {
+  word-break: break-word;
 }
 
 /* Modal base styles */
@@ -675,7 +682,7 @@ button.loading::after {
 }
 
 /* Anchura de columna controlada por variables CSS (las pone JS) */
-th.ec-col-desire,        td.ec-col-desire        { width: var(--ec-w-desire, 160px); }
+th.ec-col-desire,        td.ec-col-desire        { width: var(--ec-w-desire, 42ch); }
 th.ec-col-desire-mag,    td.ec-col-desire-mag    { width: var(--ec-w-desire-mag, 110px); }
 th.ec-col-awareness,     td.ec-col-awareness     { width: var(--ec-w-awareness, 160px); }
 th.ec-col-competition,   td.ec-col-competition   { width: var(--ec-w-competition, 110px); }
@@ -1040,26 +1047,39 @@ body.dark .weight-badge {
 }
 
 /* Cabecera y celdas de la columna Desire */
-th.col-desire, td.col-desire { width: 360px; max-width: 360px; }
-/* Contenido multi-línea sin corte */
-.desire-wrap {
-  white-space: normal;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  line-height: 1.25;
-}
+th.col-desire, td.col-desire { width: 42ch; max-width: 42ch; }
+/* Contenido multi-línea con clamp en vista */
 .desire-cell {
+  position: relative;
+  vertical-align: top;
+  white-space: normal;
+  overflow: hidden;
+}
+.desire-cell .desire-wrap {
   display: -webkit-box;
   -webkit-line-clamp: 4;
   -webkit-box-orient: vertical;
   overflow: hidden;
   white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.35;
+}
+.desire-cell.is-editing {
+  overflow: visible;
+}
+.desire-cell.is-editing .desire-wrap {
+  -webkit-line-clamp: initial;
+  display: block;
 }
 /* Editor multi-línea para Desire */
 .desire-editor {
   width: 100%;
-  min-height: 6.5rem;
+  min-height: 8rem;
   resize: vertical;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
 }
 
 

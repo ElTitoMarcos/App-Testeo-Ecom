@@ -62,6 +62,17 @@ def test_app_startup(tmp_path, monkeypatch):
     cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='scores'")
     assert cur.fetchone() is not None
 
+
+def test_desire_column_is_text(tmp_path, monkeypatch):
+    conn = setup_env(tmp_path, monkeypatch)
+    cur = conn.execute("PRAGMA table_info(products)")
+    product_cols = {row[1]: (row[2] or "").upper() for row in cur.fetchall()}
+    assert product_cols.get("desire") in {"", "TEXT"}
+    cur = conn.execute("PRAGMA table_info(ai_cache)")
+    cache_cols = {row[1]: (row[2] or "").upper() for row in cur.fetchall()}
+    assert cache_cols.get("desire") in {"", "TEXT"}
+    assert cache_cols.get("desire_statement") in {"", "TEXT"}
+
 def test_import_generates_scores(tmp_path, monkeypatch):
     conn = setup_env(tmp_path, monkeypatch)
     monkeypatch.setattr(config, "is_auto_fill_ia_on_import_enabled", lambda: False)

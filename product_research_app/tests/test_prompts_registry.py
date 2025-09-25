@@ -53,12 +53,14 @@ def test_json_schema_task_desire() -> None:
     assert schema is not None
     statement = schema["schema"]["properties"]["desire_statement"]
     assert statement["minLength"] == 220
-    assert statement["maxLength"] == 360
+    assert statement["maxLength"] == 320
     magnitude = schema["schema"]["properties"]["desire_magnitude"]
     for key in ["scope", "urgency", "staying_power", "overall"]:
         bounds = magnitude["properties"][key]
         assert bounds["minimum"] == 0
         assert bounds["maximum"] == 100
+    signals = schema["schema"]["properties"]["signals"]
+    assert signals["maxItems"] == 5
     seasonality = schema["schema"]["properties"]["seasonality_hint"]
     window_enum = seasonality["properties"]["window"]["enum"]
     assert set(window_enum) == {"jan", "feb", "mar_apr", "may", "jun", "jul_aug", "sep", "oct", "nov", "dec"}
