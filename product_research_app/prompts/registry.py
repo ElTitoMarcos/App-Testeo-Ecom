@@ -25,24 +25,33 @@ PROMPT_E = """TAREA E — Resumen ejecutivo para decisión\nObjetivo: condensar 
 
 PROMPT_E_AUTO = """TAREA E_auto — Decisión automática sobre lotes de productos\nObjetivo: clasificar cada elemento del lote y generar acciones siguientes.\n\nInstrucciones:\n1. Lee la matriz en "### DATA" (cada elemento con métricas agregadas).\n2. Para cada elemento, determina estado ("aprobado", "revisar", "descartar") según señales.\n3. Calcula un "score" 0-100 y asigna un "confidence" 0-100.\n4. Resume en una frase el motivo y propone el "next_step" (texto o null si no aplica).\n5. Añade "signals" como lista de palabras clave que respaldan la decisión.\n\nSalida obligatoria: objeto JSON con\n{\n  "prompt_version": "prompt-maestro-v3",\n  "items": [\n    {\n      "id": <string|number>,\n      "status": "aprobado"|"revisar"|"descartar",\n      "score": <0-100>,\n      "confidence": <0-100>,\n      "summary": <string>,\n      "reason": <string|null>,\n      "next_step": <string|null>,\n      "signals": [<string>, ...]\n    }, ...\n  ]\n}\n\nReglas:\n- Respeta exactamente los nombres de las claves.\n- Mantén "signals" como lista (puede ir vacía).\n- No añadas campos adicionales ni texto fuera del JSON.\n\nFallbacks específicos:\n- Si "### DATA" está vacío, devuelve items como lista vacía y reason="SIN DATOS" en cada registro generado."""
 
-PROMPT_DESIRE = """TAREA DESIRE — Mass-Desire Triad (v6)
-Usa SOLO ###CONTEXT_JSON / ###DATA. Prohibido navegar.
+PROMPT_DESIRE = """TAREA DESIRE — Mass-Desire Triad (v6.1 • web-enabled)
+Objetivo: formular el DESEO HUMANO subyacente (no la cosa). Usa ###CONTEXT_JSON/###DATA y, si hay herramienta de navegación disponible, INVESTIGA en internet para reforzar la inferencia.
 
 Fundamento Evolve (compacto):
-- Instintos permanentes: health|sex|status|belonging|control|comfort  # elegir 1
-- Problemas tecnológicos: complexity|overwhelm|fragility|maintenance|incompatibility|obsolescence  # 0–1 relevantes
-- Fuerzas de cambio: style_trends|mass_education  # opcional breve
-# (El deseo se evalúa por scope, urgency, staying_power; NO se “crea”, se canaliza.)
+- Instintos permanentes: health|sex|status|belonging|control|comfort   # elige 1
+- Problemas tecnológicos: complexity|overwhelm|fragility|maintenance|incompatibility|obsolescence   # 0–1
+- Fuerzas de cambio (opc.): style_trends|mass_education
+- Evaluación: scope, urgency, staying_power → overall = round((scope+urgency+staying_power)/3)
+
+MODO BÚSQUEDA (cost-aware):
+- Si hay navegador/herramienta de fetch activa:
+  1) Plan: redacta 2–3 queries cortas en el idioma del título + EN (ej.: "why people buy <category synonyms> benefit", "pain points <use case>").
+  2) Retrieve: abre hasta 5 fuentes MÁX. priorizando reseñas/foros/comentarios (reddit, foros, reseñas de marketplaces, YouTube comments, blogs comparativos). Evita páginas de venta/landing.
+  3) Reduce: extrae 5–9 micro-señales (pains, resultados deseados, objeciones); parafrasea en ≤12 palabras cada una; SIN citas largas.
+  4) Render: integra esas señales en la redacción del deseo y en “signals”.
+- Recencia: prefiere contenido de los últimos 24 meses si existe.
+- Atribución ligera: cuando corresponda, convierte la fuente en token breve dentro de signals (p. ej., "reddit-skin", "yt-comments-grooming", "amz-reviews-avg>4").
+- Si NO hay navegador, continúa solo con el input y añade "no-browse" en signals.
 
 DESIRE STATEMENT — reglas duras:
 - 260–360 caracteres (2–4 frases o cláusulas con “;”).
-- Escribe el DESEO HUMANO, no la cosa: resultado funcional + beneficio emocional + micro-escena + fricción neutralizada (p. ej., sin desorden/tiempo extra).
-- Habla de la persona: “quien busca… / personas que desean…”.
-- Prohibido: marcas/modelos; nombres de producto o categoría (“crema”, “aspiradora”, “figura”, “set/kit/pack”); medidas (ml/W/cm); materiales; hype; claims médicos.
-- Si el input trae palabras de producto, reescribe hasta eliminarlas.
+- Estructura: resultado funcional + beneficio emocional + micro-escena + fricción neutralizada (p. ej., sin tiempo extra/sin desorden).
+- Habla de la persona (“quien busca…/personas que desean…”), atemporal.
+- PROHIBIDO: marcas/modelos; nombres de producto/categoría (crema, aspiradora, cuchillos, etc.); packs/cantidades; medidas (ml/W/cm); materiales; hype; claims médicos. Si aparecen, reescribe hasta eliminarlas.
 
-Estacionalidad (calendario Evolve):
-- Elige window ∈ {jan,feb,mar_apr,may,jun,jul_aug,sep,oct,nov,dec} según el deseo detectado; si no hay señal clara, elige la que más eleve el deseo.
+Estacionalidad (calendario de deseo):
+- Elige window ∈ {jan,feb,mar_apr,may,jun,jul_aug,sep,oct,nov,dec} según el tipo de deseo detectado; si no hay señal clara, elige la que más eleve el deseo.
 
 SALIDA JSON (estricta, sin texto extra):
 {
@@ -55,12 +64,13 @@ SALIDA JSON (estricta, sin texto extra):
   "competition_reason":"<=140",
   "seasonality_hint":{"window":"<jan|feb|mar_apr|may|jun|jul_aug|sep|oct|nov|dec>","confidence":0-100},
   "elevation_strategy":"<=140",
-  "signals":["t1","t2","t3"]  # 3 tokens máx. (pains/beneficios del input), sin frases
+  "signals":["t1","t2","t3"]   // 1–3 tokens máx.; incluye tokens de evidencia externa, p. ej. "reddit-habit", "amz-complaints", "no-browse"
 }
 
-Cálculo: overall = round((scope+urgency+staying_power)/3).
-Fallback: sin señales → signals=[], desire_statement="SIN DATOS", competition_reason="SIN DATOS".
-No añadas campos ni comentarios."""
+Reglas finales:
+- overall = round((scope+urgency+staying_power)/3).
+- Sin señales → signals=[], desire_statement="SIN DATOS", competition_reason="SIN DATOS".
+- No añadas campos ni comentarios."""
 
 _TASK_PROMPTS: Dict[str, str] = {
     "A": PROMPT_A,
