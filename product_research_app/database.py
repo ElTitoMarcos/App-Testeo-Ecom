@@ -23,6 +23,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from . import db as db_core
+
 
 def get_connection(db_path: Path) -> sqlite3.Connection:
     """Return a SQLite connection to the specified database file.
@@ -1378,6 +1380,12 @@ def get_job_product_ids(conn: sqlite3.Connection, job_id: int) -> List[int]:
     return [int(row[0]) for row in cur.fetchall()]
 
 
+def filter_missing_ai_columns(conn: sqlite3.Connection, ids: Sequence[int]) -> List[int]:
+    """Delegate to the low-level helper to locate incomplete AI columns."""
+
+    return db_core.filter_missing_ai_columns(conn, ids)
+
+
 def mark_item_enriched(
     conn: sqlite3.Connection, item_id: int, result: Dict[str, Any], *, commit: bool = False
 ) -> None:
@@ -1676,8 +1684,26 @@ def get_enrichment_status(
     }
     return payload
 
-def merge_staging_into_products(conn: sqlite3.Connection, job_id: int) -> None:
+def merge_staging_into_products(conn: sqlite3.Connection, job_id: int) -> List[int]:
     cur = conn.cursor()
+    cur.execute(
+        "SELECT DISTINCT sig_hash FROM products_staging WHERE job_id=? AND sig_hash IS NOT NULL",
+        (job_id,),
+    )
+    sig_hashes = [row[0] for row in cur.fetchall() if row[0]]
+    existing: Dict[str, int] = {}
+    if sig_hashes:
+        placeholders = ",".join(["?"] * len(sig_hashes))
+        cur.execute(
+            f"SELECT sig_hash, id FROM products WHERE sig_hash IN ({placeholders})",
+            sig_hashes,
+        )
+        for row in cur.fetchall():
+            sig = row[0] if not isinstance(row, sqlite3.Row) else row["sig_hash"]
+            pid = row[1] if not isinstance(row, sqlite3.Row) else row["id"]
+            if sig:
+                existing[str(sig)] = int(pid)
+
     cur.execute(
         """
         INSERT INTO products (
@@ -1710,6 +1736,22 @@ def merge_staging_into_products(conn: sqlite3.Connection, job_id: int) -> None:
         """,
         (job_id,),
     )
+
+    if not sig_hashes:
+        return []
+
+    placeholders = ",".join(["?"] * len(sig_hashes))
+    cur.execute(
+        f"SELECT id, sig_hash FROM products WHERE sig_hash IN ({placeholders})",
+        sig_hashes,
+    )
+    new_ids: List[int] = []
+    for row in cur.fetchall():
+        sig_val = row[1] if not isinstance(row, sqlite3.Row) else row["sig_hash"]
+        pid_val = row[0] if not isinstance(row, sqlite3.Row) else row["id"]
+        if str(sig_val) not in existing:
+            new_ids.append(int(pid_val))
+    return sorted(set(new_ids))
 
 
 def clear_staging_for_job(conn: sqlite3.Connection, job_id: int, *, commit: bool = False) -> None:

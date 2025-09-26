@@ -37,7 +37,7 @@ import sqlite3
 import math
 import hashlib
 from datetime import date, datetime, timedelta
-from typing import Dict, Any, List, Optional
+from typing import Callable, Dict, Any, List, Optional, Sequence
 
 from . import database
 from .db import get_db, get_last_performance_config
@@ -422,18 +422,87 @@ def parse_xlsx(binary: bytes):
         return records
 
 
+
+
+def _run_ai_after_import(
+    ids: Sequence[int],
+    *,
+    job_id: Optional[int] = None,
+    status_cb: Optional[Callable[..., None]] = None,
+) -> Optional[Dict[str, Any]]:
+    try:
+        normalized: List[int] = []
+        for value in ids:
+            try:
+                normalized.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        if not normalized:
+            logging.info("auto_ai_on_import: no valid ids provided")
+            return None
+        conn = get_db(str(DB_PATH))
+        needed = database.filter_missing_ai_columns(conn, normalized)
+        if not needed:
+            logging.info("auto_ai_on_import: nothing to do")
+            return {
+                "counts": {
+                    "queued": 0,
+                    "sent": 0,
+                    "ok": 0,
+                    "ko": 0,
+                    "cached": 0,
+                    "retried": 0,
+                    "cost_spent_usd": 0.0,
+                },
+                "pending_ids": [],
+            }
+        logging.info(
+            "auto_ai_on_import: scheduling run_ai_fill_job job=%s ids=%d", job_id, len(needed)
+        )
+        result = ai_columns.run_ai_fill_job(
+            job_id=job_id,
+            product_ids=needed,
+            microbatch=getattr(config, "AI_MICROBATCH_DEFAULT", 8),
+            status_cb=status_cb,
+        )
+        counts = result.get("counts") or {}
+        try:
+            ok = int(counts.get("ok", 0) or 0)
+        except Exception:
+            ok = 0
+        try:
+            ko = int(counts.get("ko", 0) or 0)
+        except Exception:
+            ko = 0
+        logging.info(
+            "auto_ai_on_import: completed job=%s ok=%d ko=%d", job_id, ok, ko
+        )
+        return result
+    except Exception as exc:
+        logging.exception("auto_ai_on_import failed: %s", exc)
+    return None
+
+
+def _make_import_status_cb(job_id: int, task_key: str) -> Callable[..., None]:
+    def _callback(**payload: Any) -> None:
+        payload.setdefault("job_id", job_id)
+        payload.setdefault("task_id", task_key)
+        _update_import_status(task_key, **payload)
+
+    return _callback
+
+
 def _schedule_post_import_tasks(
     job_id: int,
     product_ids: List[int],
     rows_imported: int,
     task_key: str,
+    *,
+    ai_scheduled: bool = False,
+    status_cb: Optional[Callable[..., None]] = None,
 ) -> None:
-    auto_ai = config.is_auto_fill_ia_on_import_enabled()
-
-    def status_cb(**payload: Any) -> None:
-        payload.setdefault("job_id", job_id)
-        payload.setdefault("task_id", task_key)
-        _update_import_status(task_key, **payload)
+    auto_ai = config.is_auto_fill_ia_on_import_enabled() and not ai_scheduled
+    status_cb_local = status_cb or _make_import_status_cb(job_id, task_key)
 
     def worker() -> None:
         conn = database.get_connection(DB_PATH)
@@ -450,13 +519,16 @@ def _schedule_post_import_tasks(
             pending_ids: List[int] = list(product_ids)
             try:
                 if auto_ai and product_ids:
-                    result = ai_columns.run_ai_fill_job(job_id, product_ids, status_cb=status_cb)
-                    final_counts = result.get("counts", final_counts)
-                    pending_ids = result.get("pending_ids", pending_ids)
-                    error = result.get("error")
-                    if error:
-                        database.set_import_job_ai_error(conn, job_id, str(error))
-                else:
+                    result = _run_ai_after_import(
+                        product_ids, job_id=job_id, status_cb=status_cb_local
+                    )
+                    if isinstance(result, dict):
+                        final_counts = result.get("counts", final_counts)
+                        pending_ids = result.get("pending_ids", pending_ids)
+                        error = result.get("error")
+                        if error:
+                            database.set_import_job_ai_error(conn, job_id, str(error))
+                elif not ai_scheduled:
                     final_counts = {
                         "queued": 0,
                         "sent": 0,
@@ -813,7 +885,24 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             total=rows_imported,
             phase=next_phase,
         )
-        _schedule_post_import_tasks(job_id, inserted_ids, rows_imported, task_key)
+        status_cb = _make_import_status_cb(job_id, task_key)
+        ai_scheduled = False
+        if config.AUTO_AI_ON_IMPORT and inserted_ids:
+            threading.Thread(
+                target=_run_ai_after_import,
+                args=(inserted_ids,),
+                kwargs={"job_id": job_id, "status_cb": status_cb},
+                daemon=True,
+            ).start()
+            ai_scheduled = True
+        _schedule_post_import_tasks(
+            job_id,
+            inserted_ids,
+            rows_imported,
+            task_key,
+            ai_scheduled=ai_scheduled,
+            status_cb=status_cb,
+        )
     except Exception as exc:
         try:
             conn.rollback()
@@ -2291,19 +2380,20 @@ class RequestHandler(BaseHTTPRequestHandler):
                         else:
                             _update_import_status(task_id, **kwargs)
 
-                    imported_count = fast_import(
+                    summary = fast_import(
                         csv_bytes,
                         job_id=job_id,
                         status_cb=cb,
                         source=filename,
                     )
+                    imported_count = summary.unique_rows
+                    new_product_ids = summary.new_product_ids
                     job_row = database.get_import_job(conn, job_id)
                     snapshot = _job_payload_from_row(job_row) or {}
                     done_val = int(snapshot.get("processed") or imported_count or 0)
                     total_val = int(snapshot.get("total") or done_val)
                     imported_val = int(snapshot.get("rows_imported") or imported_count or done_val)
-                    inserted_ids = database.get_job_product_ids(conn, job_id)
-                    rows_imported = len(inserted_ids) or imported_val
+                    rows_imported = len(new_product_ids) or imported_val
                     next_phase = (
                         "enrich"
                         if rows_imported and config.is_auto_fill_ia_on_import_enabled()
@@ -2329,7 +2419,24 @@ class RequestHandler(BaseHTTPRequestHandler):
                         imported=rows_imported,
                         phase=next_phase,
                     )
-                    _schedule_post_import_tasks(job_id, inserted_ids, rows_imported, task_id)
+                    status_cb = _make_import_status_cb(job_id, task_id)
+                    ai_scheduled = False
+                    if config.AUTO_AI_ON_IMPORT and new_product_ids:
+                        threading.Thread(
+                            target=_run_ai_after_import,
+                            args=(new_product_ids,),
+                            kwargs={"job_id": job_id, "status_cb": status_cb},
+                            daemon=True,
+                        ).start()
+                        ai_scheduled = True
+                    _schedule_post_import_tasks(
+                        job_id,
+                        new_product_ids,
+                        rows_imported,
+                        task_id,
+                        ai_scheduled=ai_scheduled,
+                        status_cb=status_cb,
+                    )
                 except Exception as exc:
                     logger.exception("Fast CSV import failed: filename=%s", filename)
                     _update_import_status(
@@ -2434,19 +2541,20 @@ class RequestHandler(BaseHTTPRequestHandler):
                         else:
                             _update_import_status(task_id, **kwargs)
 
-                    imported_count = fast_import_records(
+                    summary = fast_import_records(
                         records,
                         job_id=job_id,
                         status_cb=cb,
                         source=filename,
                     )
+                    imported_count = summary.unique_rows
+                    new_product_ids = summary.new_product_ids
                     job_row = database.get_import_job(conn, job_id)
                     snapshot = _job_payload_from_row(job_row) or {}
                     done_val = int(snapshot.get("processed") or imported_count or total_records)
                     total_val = int(snapshot.get("total") or total_records or done_val)
                     imported_val = int(snapshot.get("rows_imported") or imported_count or done_val)
-                    inserted_ids = database.get_job_product_ids(conn, job_id)
-                    rows_imported = len(inserted_ids) or imported_val
+                    rows_imported = len(new_product_ids) or imported_val
                     next_phase = (
                         "enrich"
                         if rows_imported and config.is_auto_fill_ia_on_import_enabled()
@@ -2472,7 +2580,24 @@ class RequestHandler(BaseHTTPRequestHandler):
                         imported=rows_imported,
                         phase=next_phase,
                     )
-                    _schedule_post_import_tasks(job_id, inserted_ids, rows_imported, task_id)
+                    status_cb = _make_import_status_cb(job_id, task_id)
+                    ai_scheduled = False
+                    if config.AUTO_AI_ON_IMPORT and new_product_ids:
+                        threading.Thread(
+                            target=_run_ai_after_import,
+                            args=(new_product_ids,),
+                            kwargs={"job_id": job_id, "status_cb": status_cb},
+                            daemon=True,
+                        ).start()
+                        ai_scheduled = True
+                    _schedule_post_import_tasks(
+                        job_id,
+                        new_product_ids,
+                        rows_imported,
+                        task_id,
+                        ai_scheduled=ai_scheduled,
+                        status_cb=status_cb,
+                    )
                 except Exception as exc:
                     logger.exception("Fast JSON import failed: filename=%s", filename)
                     _update_import_status(

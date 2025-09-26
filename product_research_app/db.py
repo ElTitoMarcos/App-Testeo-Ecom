@@ -1,7 +1,6 @@
 import logging
 import sqlite3
 import threading
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Union
 
@@ -120,102 +119,71 @@ def close_db():
 
 
 def upsert_ai_columns(conn: sqlite3.Connection, rows: Iterable[Dict[str, Any]]) -> int:
-    """Insert or update AI columns for provided product rows.
+    """Actualizar exclusivamente las columnas IA para productos existentes."""
 
-    Args:
-        conn: SQLite connection.
-        rows: Iterable of dictionaries with at least ``product_id`` and
-            the AI-derived fields.
-
-    Returns:
-        Number of rows persisted.
-    """
-
-    rows = list(rows or [])
-    if not rows:
+    rows_list = list(rows or [])
+    if not rows_list:
         return 0
 
-    try:
-        col_rows = conn.execute("PRAGMA table_info(products)").fetchall()
-        available_cols = {str(row[1]) for row in col_rows}
-    except Exception:
-        available_cols = {"id"}
+    sql = """
+    UPDATE products
+       SET ai_desire_label = ?,
+           desire_magnitude = ?,
+           awareness_level = ?,
+           competition_level = ?
+     WHERE id = ?
+    """
+    data: list[tuple[Any, ...]] = []
+    for row in rows_list:
+        try:
+            pid = int(row["product_id"])
+        except Exception:
+            logger.info("upsert_ai_columns skip=invalid_id row=%s", row)
+            continue
+        label = str((row.get("ai_desire_label") or "").strip())
+        try:
+            mag = float(row.get("desire_magnitude") or 0.0)
+        except Exception:
+            mag = 0.0
+        mag = 0.0 if mag < 0 else (1.0 if mag > 1 else mag)
+        awareness = str((row.get("awareness_level") or "").strip())
+        competition = str((row.get("competition_level") or "").strip())
+        data.append((label, mag, awareness, competition, pid))
 
-    label_targets = []
-    if "ai_desire_label" in available_cols:
-        label_targets.append("ai_desire_label")
-    if "desire" in available_cols:
-        label_targets.append("desire")
+    if not data:
+        return 0
 
-    supported_fields = [
-        ("desire_magnitude", "desire_magnitude"),
-        ("awareness_level", "awareness_level"),
-        ("competition_level", "competition_level"),
-    ]
-
-    now_iso = datetime.utcnow().isoformat()
-    processed = 0
     cur = conn.cursor()
-    began_tx = False
     try:
-        if not conn.in_transaction:
-            conn.execute("BEGIN IMMEDIATE")
-            began_tx = True
-        for row in rows:
-            if not isinstance(row, dict):
-                logger.info("upsert_ai_columns skip=invalid_row row=%s", row)
-                continue
-            try:
-                product_id = int(row.get("product_id"))
-            except Exception:
-                logger.info("upsert_ai_columns skip=invalid_id row=%s", row)
-                continue
+        cur.executemany(sql, data)
+        conn.commit()
+    except Exception as exc:
+        logger.exception("upsert_ai_columns failed: %s", exc)
+        conn.rollback()
+    finally:
+        cur.close()
+    return len(data)
 
-            payload: Dict[str, Any] = {}
-            label_val = row.get("ai_desire_label")
-            if label_val in (None, ""):
-                label_val = row.get("desire")
-            if label_val not in (None, "") and label_targets:
-                for target in label_targets:
-                    payload[target] = label_val
 
-            for src_key, db_col in supported_fields:
-                if db_col not in available_cols:
-                    continue
-                value = row.get(src_key)
-                if value is not None:
-                    payload[db_col] = value
+def filter_missing_ai_columns(conn: sqlite3.Connection, ids: Iterable[int]) -> list[int]:
+    """Return ids whose IA columns are incomplete."""
 
-            if not payload:
-                logger.info(
-                    "upsert_ai_columns skip=missing_values product_id=%s", product_id
-                )
-                continue
-
-            if "ai_columns_completed_at" in available_cols:
-                payload["ai_columns_completed_at"] = now_iso
-
-            columns = ["id", *payload.keys()]
-            placeholders = ",".join(["?"] * len(columns))
-            assignments = ", ".join(f"{col}=excluded.{col}" for col in payload.keys())
-            values = [product_id, *[payload[col] for col in payload.keys()]]
-            cur.execute(
-                f"INSERT INTO products ({', '.join(columns)}) VALUES ({placeholders}) "
-                f"ON CONFLICT(id) DO UPDATE SET {assignments}",
-                values,
-            )
-            processed += 1
-            logger.info(
-                "upsert_ai_columns saved product_id=%s fields=%s",
-                product_id,
-                sorted(payload.keys()),
-            )
-
-        if began_tx:
-            conn.commit()
-    except Exception:
-        if began_tx and conn.in_transaction:
-            conn.rollback()
-        raise
-
-    return processed
+    id_list: list[int] = []
+    for value in ids:
+        try:
+            id_list.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    if not id_list:
+        return []
+    placeholders = ",".join(["?"] * len(id_list))
+    sql = f"""
+      SELECT id FROM products
+       WHERE id IN ({placeholders})
+         AND (ai_desire_label IS NULL
+          OR desire_magnitude IS NULL
+          OR awareness_level IS NULL
+          OR competition_level IS NULL)
+    """
+    cur = conn.execute(sql, id_list)
+    return [int(row[0]) for row in cur.fetchall()]

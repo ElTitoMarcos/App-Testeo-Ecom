@@ -6,6 +6,7 @@ import logging
 import math
 import os
 import random
+import re
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -25,8 +26,25 @@ APP_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = APP_DIR / "data.sqlite3"
 CALIBRATION_CACHE_FILE = APP_DIR / "ai_calibration_cache.json"
 
-AI_FIELDS = ("desire", "desire_magnitude", "awareness_level", "competition_level")
+AI_FIELDS = (
+    "ai_desire_label",
+    "desire_magnitude",
+    "awareness_level",
+    "competition_level",
+)
 StatusCallback = Callable[..., None]
+
+try:
+    _refine_concurrency = int(getattr(config, "AI_REFINE_CONCURRENCY", 2))
+except Exception:
+    _refine_concurrency = 2
+if _refine_concurrency <= 0:
+    _refine_concurrency = 1
+
+REFINE_CONCURRENCY = _refine_concurrency
+_refine_sem = asyncio.Semaphore(REFINE_CONCURRENCY)
+_REFINE_RETRY_RE = re.compile(r"try again in ([0-9.]+)s", re.IGNORECASE)
+_REFINE_MAX_RETRIES = 6
 
 
 @dataclass
@@ -771,7 +789,12 @@ def _apply_ai_updates(conn, updates: Dict[int, Dict[str, Any]]) -> None:
             logger.info("apply_ai_updates skip invalid_payload product_id=%s", pid)
             continue
         row_payload: Dict[str, Any] = {"product_id": pid}
-        for field in AI_FIELDS:
+        label_val = payload.get("ai_desire_label")
+        if label_val is None:
+            label_val = payload.get("desire")
+        if label_val is not None:
+            row_payload["ai_desire_label"] = label_val
+        for field in ("desire_magnitude", "awareness_level", "competition_level"):
             value = payload.get(field)
             if value is not None:
                 row_payload[field] = value
@@ -780,6 +803,9 @@ def _apply_ai_updates(conn, updates: Dict[int, Dict[str, Any]]) -> None:
             continue
         rows.append(row_payload)
     if rows:
+        logger.info(
+            "ai_columns.apply: rows=%d (UPDATE-only IA columns)", len(rows)
+        )
         db_core.upsert_ai_columns(conn, rows)
 
 
@@ -847,28 +873,50 @@ async def _refine_desire_statement(
 ) -> Optional[Dict[str, Any]]:
     context = _candidate_to_desire_context(candidate)
 
-    def _call() -> Optional[Dict[str, Any]]:
+    def _call() -> Dict[str, Any]:
+        return gpt.call_gpt(
+            "DESIRE",
+            context_json=context,
+            temperature=0,
+            extra_user=(
+                f"Borrador previo:\n{draft_text.strip()}\n\n" + DESIRE_REFINE_EXTRA_USER
+            ),
+            mode="refine_no_product",
+            max_tokens=450,
+            stop=None,
+        )
+
+    attempt = 0
+    while True:
         try:
-            result = gpt.call_gpt(
-                "DESIRE",
-                context_json=context,
-                temperature=0,
-                extra_user=(
-                    f"Borrador previo:\n{draft_text.strip()}\n\n" + DESIRE_REFINE_EXTRA_USER
-                ),
-                mode="refine_no_product",
-                max_tokens=450,
-                stop=None,
-            )
+            async with _refine_sem:
+                result = await asyncio.to_thread(_call)
+        except gpt.OpenAIError as exc:
+            status = getattr(exc, "status_code", None)
+            if status == 429 and attempt < _REFINE_MAX_RETRIES:
+                base_delay = getattr(exc, "retry_after", None)
+                if base_delay is None:
+                    match = _REFINE_RETRY_RE.search(str(exc))
+                    if match:
+                        try:
+                            base_delay = float(match.group(1))
+                        except Exception:
+                            base_delay = None
+                delay = base_delay if base_delay is not None else 2.0
+                delay = min(10.0, delay * (1.5 ** attempt)) + random.uniform(0.0, 0.3)
+                attempt += 1
+                await asyncio.sleep(delay)
+                continue
+            logger.exception("desire refine call failed for id=%s", candidate.id)
+            return None
         except Exception:
             logger.exception("desire refine call failed for id=%s", candidate.id)
             return None
+
         content = result.get("content") if isinstance(result, dict) else None
         if isinstance(content, dict):
             return content
         return None
-
-    return await asyncio.to_thread(_call)
 
 
 def _emit_status(
@@ -929,6 +977,18 @@ def run_ai_fill_job(
             continue
         seen_ids.add(num)
         requested_ids.append(num)
+
+    original_count = len(requested_ids)
+    filtered_ids = database.filter_missing_ai_columns(conn, requested_ids)
+    if not filtered_ids:
+        logger.info("run_ai_fill_job: nothing to update ids=%d", original_count)
+    elif len(filtered_ids) != original_count:
+        logger.info(
+            "run_ai_fill_job: filtered ids=%d/%d missing IA columns",
+            len(filtered_ids),
+            original_count,
+        )
+    requested_ids = filtered_ids
 
     rows = database.get_products_by_ids(conn, requested_ids)
     row_map = {int(row["id"]): dict(row) for row in rows}

@@ -162,6 +162,7 @@ class ImportSummary:
     batches: int
     total_ms: float
     throughput_rps: float
+    new_product_ids: list[int]
 
 
 class BulkImporter:
@@ -205,7 +206,7 @@ class BulkImporter:
     @property
     def summary(self) -> ImportSummary:
         if self._summary is None:
-            return ImportSummary(self.job_id, 0, 0, 0, 0.0, 0.0)
+            return ImportSummary(self.job_id, 0, 0, 0, 0.0, 0.0, [])
         return self._summary
 
     def run(self, rows: Iterator[Mapping[str, Any]]) -> ImportSummary:
@@ -225,7 +226,7 @@ class BulkImporter:
             if self.pending:
                 self._flush_pending()
             transition_job_items(self.write_conn, self.job_id, "raw", "pending_enrich")
-            merge_staging_into_products(self.write_conn, self.job_id)
+            new_product_ids = merge_staging_into_products(self.write_conn, self.job_id)
             unique_rows = len(self._unique_hashes)
             clear_staging_for_job(self.write_conn, self.job_id)
             self.write_conn.execute("COMMIT;")
@@ -242,6 +243,7 @@ class BulkImporter:
             self.batches,
             total_ms,
             throughput,
+            sorted(new_product_ids),
         )
         logger.info(
             "Import finished job=%s rows=%d unique=%d ms=%.2f batches=%d throughput=%.2f",
@@ -488,7 +490,7 @@ def fast_import(
     job_id: Optional[int] = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
     db_path: Optional[str] = None,
-) -> int:
+) -> ImportSummary:
     base_conn = get_db()
     resolved_path = db_path or _resolve_db_path(base_conn)
     pragmas = get_last_performance_config()
@@ -532,7 +534,7 @@ def fast_import(
                 "batch_size": batch_size,
             },
         )
-        return summary.unique_rows
+        return summary
     except Exception as exc:
         logger.exception("Fast import failed job=%s", job_id)
         update_import_job_progress(
@@ -557,7 +559,7 @@ def fast_import_records(
     job_id: Optional[int] = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
     db_path: Optional[str] = None,
-) -> int:
+) -> ImportSummary:
     base_conn = get_db()
     resolved_path = db_path or _resolve_db_path(base_conn)
     pragmas = get_last_performance_config()
@@ -601,7 +603,7 @@ def fast_import_records(
                 "batch_size": batch_size,
             },
         )
-        return summary.unique_rows
+        return summary
     except Exception as exc:
         logger.exception("Fast record import failed job=%s", job_id)
         update_import_job_progress(
@@ -640,13 +642,14 @@ def benchmark_bulk_import(
             }
 
     start = time.perf_counter()
-    unique_rows = fast_import_records(
+    result = fast_import_records(
         _records(),
         source="benchmark",
         batch_size=batch_size,
         db_path=db_path,
         status_cb=lambda **_: None,
     )
+    unique_rows = result.unique_rows
     elapsed_ms = (time.perf_counter() - start) * 1000
     throughput = row_count / ((elapsed_ms / 1000) or 1.0)
     logger.info(
@@ -656,4 +659,4 @@ def benchmark_bulk_import(
         elapsed_ms,
         throughput,
     )
-    return ImportSummary(0, row_count, unique_rows, 0, elapsed_ms, throughput)
+    return ImportSummary(0, row_count, unique_rows, 0, elapsed_ms, throughput, result.new_product_ids)

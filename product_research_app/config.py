@@ -13,9 +13,14 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 
-AI_MICROBATCH_DEFAULT = 8
+AUTO_AI_ON_IMPORT = True
+AI_MICROBATCH_DEFAULT = 8  # para ai_columns.run_ai_fill_job
 AI_MAX_OUTPUT_TOKENS = 3000
 AI_ENFORCE_JSON = True
+AI_REFINE_CONCURRENCY = 2  # límite de concurrencia en refine
+
+OPENAI_TPM_LIMIT = 30000
+OPENAI_SAFETY_TPM = 0.90   # usar ~90% del TPM
 
 
 DEFAULT_WINNER_ORDER = [
@@ -329,9 +334,10 @@ def get_ai_runtime_config() -> Dict[str, Any]:
 def is_auto_fill_ia_on_import_enabled() -> bool:
     cfg = load_config()
     try:
-        return bool(cfg.get("autoFillIAOnImport", True))
+        default = AUTO_AI_ON_IMPORT
+        return bool(cfg.get("autoFillIAOnImport", default))
     except Exception:
-        return True
+        return bool(AUTO_AI_ON_IMPORT)
 
 
 def include_image_in_ai() -> bool:

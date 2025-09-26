@@ -70,32 +70,6 @@ function normalizeIds(values = []) {
   return Array.from(unique).sort((a, b) => a - b);
 }
 
-window.handleCompletarIATodos = async () => {
-  toast.info('Preparando generación IA para TODOS los productos…');
-  try {
-    const { ids: rawIds = [] } = await net.json('/api/products/ids', { method: 'GET' });
-    const ids = normalizeIds(rawIds);
-    if (ids.length === 0) {
-      toast.info('No hay productos');
-      return { counts: { ok: 0, ko: 0 }, summary: 'IA columns updated: 0/0' };
-    }
-    const res = await net.json('/api/ia/run', {
-      method: 'POST',
-      body: { ids }
-    });
-    const total = ids.length;
-    const ok = res?.counts?.ok ?? 0;
-    const ko = res?.counts?.ko ?? 0;
-    toast.success(`Columnas IA actualizadas: ${ok}/${total} (fallidos: ${ko}).`);
-    if (typeof window.reloadProducts === 'function') window.reloadProducts();
-    if (typeof window.updateMasterState === 'function') window.updateMasterState();
-    return res;
-  } catch (err) {
-    console.error('handleCompletarIATodos failed', err);
-    throw err;
-  }
-};
-
 window.handleCompletarIA = async (opts = {}) => {
   const baseIds = Array.isArray(opts.ids) && opts.ids.length
     ? normalizeIds(opts.ids)
@@ -130,11 +104,3 @@ window.handleCompletarIA = async (opts = {}) => {
   }
 };
 
-const btnAll = document.getElementById('btnCompletarIATodos');
-if (btnAll) {
-  btnAll.addEventListener('click', () => {
-    window.handleCompletarIATodos().catch(err => {
-      console.error('IA (todos) button failed', err);
-    });
-  });
-}
