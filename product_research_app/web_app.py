@@ -162,6 +162,14 @@ def _sanitize_enabled_map(raw_enabled, keys: List[str]) -> Dict[str, bool]:
     return {k: bool(raw_enabled.get(k, True)) for k in keys}
 
 
+def _short_label_from_desire(text: str) -> str | None:
+    if not text:
+        return None
+    s = re.sub(r"\s+", " ", str(text)).strip()
+    s = re.split(r"[.!?\n]", s, maxsplit=1)[0]
+    return s[:60].strip() or None
+
+
 _DB_INIT = False
 _DB_INIT_PATH: str | None = None
 _DB_INIT_LOCK = threading.Lock()
@@ -428,7 +436,7 @@ def _schedule_post_import_tasks(
     rows_imported: int,
     task_key: str,
 ) -> None:
-    auto_ai = config.is_auto_fill_ia_on_import_enabled()
+    auto_ai = True
 
     def status_cb(**payload: Any) -> None:
         payload.setdefault("job_id", job_id)
@@ -792,7 +800,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                 total=total_valid or rows_imported,
             )
 
-        next_phase = "enrich" if inserted_ids and config.is_auto_fill_ia_on_import_enabled() else "winner"
+        next_phase = "enrich" if inserted_ids else "winner"
         database.update_import_job_progress(
             conn,
             job_id,
@@ -2722,6 +2730,30 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         try:
             ok, ko, usage, duration = gpt.generate_batch_columns(api_key, model, items)
+            conn = ensure_db()
+            for pid_str, p in (ok or {}).items():
+                try:
+                    pid = int(pid_str)
+                except Exception:
+                    continue
+                updates = {
+                    "desire": p.get("desire"),
+                    "desire_magnitude": p.get("desire_magnitude"),
+                    "awareness_level": p.get("awareness_level"),
+                    "competition_level": p.get("competition_level"),
+                }
+                label = (
+                    p.get("ai_desire_label")
+                    or p.get("desire_primary")
+                    or _short_label_from_desire(p.get("desire", ""))
+                )
+                if label:
+                    updates["ai_desire_label"] = label
+                database.update_product(
+                    conn,
+                    pid,
+                    **{k: v for k, v in updates.items() if v not in (None, "")},
+                )
             logger.info("/api/ia/batch-columns tokens=%s duration=%.2fs", usage.get('total_tokens'), duration)
             self._set_json()
             self.wfile.write(json.dumps({"ok": ok, "ko": ko}).encode('utf-8'))

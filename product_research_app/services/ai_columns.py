@@ -6,6 +6,7 @@ import logging
 import math
 import os
 import random
+import re
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -25,7 +26,13 @@ APP_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = APP_DIR / "data.sqlite3"
 CALIBRATION_CACHE_FILE = APP_DIR / "ai_calibration_cache.json"
 
-AI_FIELDS = ("desire", "desire_magnitude", "awareness_level", "competition_level")
+AI_FIELDS = (
+    "desire",
+    "ai_desire_label",
+    "desire_magnitude",
+    "awareness_level",
+    "competition_level",
+)
 StatusCallback = Callable[..., None]
 
 
@@ -735,6 +742,14 @@ async def _call_batch_with_retries(
                 }
 
 
+def _short_label_from_desire(text: str) -> str | None:
+    if not text:
+        return None
+    s = re.sub(r"\s+", " ", str(text)).strip()
+    s = re.split(r"[.!?\n]", s, maxsplit=1)[0]
+    return s[:60].strip() or None
+
+
 def _calculate_cost(usage: Dict[str, Any], price_in: float, price_out: float) -> float:
     prompt = usage.get("prompt_tokens")
     if prompt is None:
@@ -766,6 +781,13 @@ def _apply_ai_updates(conn, updates: Dict[int, Dict[str, Any]]) -> None:
             conn.execute("BEGIN IMMEDIATE")
             began_tx = True
         for product_id, payload in updates.items():
+            if "ai_desire_label" not in payload or not payload.get("ai_desire_label"):
+                label = payload.get("desire_primary") or _short_label_from_desire(
+                    payload.get("desire", "")
+                )
+                if label:
+                    payload["ai_desire_label"] = label
+
             assignments: List[str] = []
             params: List[Any] = []
             for field in AI_FIELDS:
@@ -983,10 +1005,10 @@ def run_ai_fill_job(
 
     runtime_cfg = config.get_ai_runtime_config()
     if parallelism is None:
-        parallelism = int(runtime_cfg.get("parallelism", 8) or 8)
+        parallelism = int(runtime_cfg.get("parallelism", 4) or 4)
     parallelism = max(1, parallelism)
 
-    microbatch_size = int(microbatch or runtime_cfg.get("microbatch", 12) or 12)
+    microbatch_size = int(microbatch or runtime_cfg.get("microbatch", 8) or 8)
     microbatch_size = max(1, microbatch_size)
 
     cache_enabled = bool(runtime_cfg.get("cache_enabled", True))
