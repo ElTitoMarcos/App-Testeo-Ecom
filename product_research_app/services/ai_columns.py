@@ -758,33 +758,16 @@ def _calculate_cost(usage: Dict[str, Any], price_in: float, price_out: float) ->
 def _apply_ai_updates(conn, updates: Dict[int, Dict[str, Any]]) -> None:
     if not updates:
         return
-    now_iso = datetime.utcnow().isoformat()
-    cur = conn.cursor()
-    began_tx = False
-    try:
-        if not conn.in_transaction:
-            conn.execute("BEGIN IMMEDIATE")
-            began_tx = True
-        for product_id, payload in updates.items():
-            assignments: List[str] = []
-            params: List[Any] = []
-            for field in AI_FIELDS:
-                if field in payload and payload[field] is not None:
-                    assignments.append(f"{field}=?")
-                    params.append(payload[field])
-            assignments.append("ai_columns_completed_at=?")
-            params.append(now_iso)
-            params.append(int(product_id))
-            cur.execute(
-                f"UPDATE products SET {', '.join(assignments)} WHERE id=?",
-                params,
-            )
-        if began_tx:
-            conn.commit()
-    except Exception:
-        if began_tx and conn.in_transaction:
-            conn.rollback()
-        raise
+    rows: List[Dict[str, Any]] = []
+    for product_id, payload in updates.items():
+        if not isinstance(payload, dict):
+            continue
+        row: Dict[str, Any] = {"product_id": int(product_id)}
+        for field in AI_FIELDS:
+            if field in payload and payload[field] is not None:
+                row[field] = payload[field]
+        rows.append(row)
+    database.upsert_ai_columns(conn, rows)
 
 
 def _build_payload(row: Any, extra: Dict[str, Any]) -> Dict[str, Any]:
@@ -904,18 +887,23 @@ def _emit_status(
 
 def run_ai_fill_job(
     job_id: int,
-    product_ids: Sequence[int],
+    ids: Optional[Sequence[int]] = None,
     *,
-    microbatch: int = 32,
+    microbatch: Optional[int] = None,
     parallelism: Optional[int] = None,
     status_cb: Optional[StatusCallback] = None,
+    product_ids: Optional[Sequence[int]] = None,
 ) -> Dict[str, Any]:
+    """Execute the AI enrichment pipeline for the provided product IDs."""
     start_ts = time.perf_counter()
     conn = _ensure_conn()
     job_updates_enabled = job_id is not None and int(job_id) > 0
+    source_ids = ids if ids is not None else product_ids
+    if source_ids is None:
+        source_ids = []
     requested_ids: List[int] = []
     seen_ids: set[int] = set()
-    for pid in product_ids:
+    for pid in source_ids:
         try:
             num = int(pid)
         except Exception:
@@ -986,7 +974,12 @@ def run_ai_fill_job(
         parallelism = int(runtime_cfg.get("parallelism", 8) or 8)
     parallelism = max(1, parallelism)
 
-    microbatch_size = int(microbatch or runtime_cfg.get("microbatch", 12) or 12)
+    if microbatch is None:
+        microbatch = runtime_cfg.get("microbatch", config.AI_MICROBATCH_DEFAULT) or config.AI_MICROBATCH_DEFAULT
+    try:
+        microbatch_size = int(microbatch)
+    except Exception:
+        microbatch_size = int(config.AI_MICROBATCH_DEFAULT)
     microbatch_size = max(1, microbatch_size)
 
     cache_enabled = bool(runtime_cfg.get("cache_enabled", True))

@@ -1,3 +1,4 @@
+// Tamaño de lote en cliente solo para orquestar llamadas HTTP (el backend re-microbateará).
 const EC_BATCH_SIZE = 10;
 const EC_MODEL = "gpt-4o-mini-2024-07-18";
 
@@ -61,33 +62,21 @@ function chunkArray(arr, size) {
   return out;
 }
 
-async function processBatch(items) {
+async function processBatchIds(ids) {
   const res = await fetch('/api/ia/batch-columns', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: EC_MODEL, items })
+    body: JSON.stringify({ ids })
   });
   if (!res.ok) {
     let msg = res.statusText;
-    try { const err = await res.json(); if (err.error) msg = err.error; } catch {}
-    throw new Error(msg);
+    try {
+      const err = await res.json();
+      if (err && err.error) msg = err.error;
+    } catch {}
+    throw new Error(msg || 'Error IA');
   }
-  const data = await res.json();
-  let ok = 0;
-  let ko = 0;
-  const okMap = data.ok || {};
-  const koMap = data.ko || {};
-  Object.keys(okMap).forEach(id => {
-    const product = (window.products || []).find(p => String(p.id) === String(id));
-    if (product) {
-      applyUpdates(product, okMap[id]);
-      ok++;
-    } else {
-      ko++;
-    }
-  });
-  ko += Object.keys(koMap).length;
-  return { ok, ko };
+  return res.json();
 }
 
 async function recalcDesireVisible(opts = {}) {
@@ -124,42 +113,51 @@ async function recalcDesireVisible(opts = {}) {
 
 window.handleRecalcDesireVisible = recalcDesireVisible;
 
+window.handleCompletarIATodos = async () => {
+  const r = await fetch('/api/products/ids', { method: 'GET' });
+  const { ids } = await r.json();
+  await window.handleCompletarIA({ ids });
+};
+
 window.handleCompletarIA = async function(opts = {}) {
-  const ids = opts.ids;
-  let all;
-  if (ids && Array.isArray(ids)) {
-    all = (Array.isArray(window.products) ? window.products : []).filter(p => ids.includes(p.id));
-  } else {
-    all = getAllFilteredRows();
-  }
-  if (all.length === 0) {
+  const sourceIds = Array.isArray(opts.ids) && opts.ids.length
+    ? [...new Set(opts.ids.map(Number))].filter(n => Number.isInteger(n))
+    : getAllFilteredRows().map(p => Number(p.id)).filter(n => Number.isInteger(n));
+
+  if (sourceIds.length === 0) {
     if (!opts.silent) toast.info('No hay productos');
     return;
   }
+  const chunks = chunkArray(sourceIds, EC_BATCH_SIZE);
+  let sentTotal = 0;
   let okTotal = 0;
-  const chunks = chunkArray(all, EC_BATCH_SIZE);
+  let koTotal = 0;
+
   for (const ch of chunks) {
-    const payload = ch.map(p => ({
-      id: p.id,
-      name: p.name,
-      category: p.category,
-      price: p.price,
-      rating: p.rating,
-      units_sold: p.units_sold,
-      revenue: p.revenue,
-      conversion_rate: p.conversion_rate,
-      launch_date: p.launch_date,
-      date_range: p.date_range,
-      image_url: p.image_url || null
-    }));
-      try {
-        const { ok, ko } = await processBatch(payload);
-        okTotal += ok;
-        if (!opts.silent) toast.info(`IA lote: +${ok} / ${payload.length} (fallos ${ko})`, { duration: 2000 });
-      } catch (e) {
-        if (!opts.silent) toast.error(`IA lote: ${e.message}`, { duration: 2000 });
+    try {
+      const data = await processBatchIds(ch);
+      sentTotal += ch.length;
+      const okMap = data.ok || {};
+      const koMap = data.ko || {};
+
+      Object.keys(okMap).forEach(id => {
+        const payload = okMap[id];
+        const product = (window.products || []).find(p => String(p.id) === String(id));
+        if (!product) return;
+        if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+          applyUpdates(product, payload);
+        }
+      });
+
+      okTotal += Object.keys(okMap).length;
+      koTotal += Object.keys(koMap).length;
+      if (!opts.silent) {
+        toast.info(`IA lote: enviados ${sentTotal}/${sourceIds.length} (ok ${okTotal}, ko ${koTotal})`, { duration: 2000 });
       }
+    } catch (e) {
+      if (!opts.silent) toast.error(`IA lote: ${e.message}`, { duration: 2000 });
+    }
   }
-  if (!opts.silent) toast.info(`IA: ${okTotal}/${all.length} completados`);
+  if (!opts.silent) toast.info(`IA: ${okTotal}/${sourceIds.length} completados (errores ${koTotal})`);
   updateMasterState();
 };

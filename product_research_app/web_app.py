@@ -1757,6 +1757,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/api/ba/insights":
             self.handle_ba_insights()
             return
+        if path == "/api/products/ids":
+            self.handle_products_ids()
+            return
         if path == "/api/ia/batch-columns":
             self.handle_ia_batch_columns()
             return
@@ -2702,35 +2705,71 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._set_json(503)
             self.wfile.write(json.dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
 
+    def handle_products_ids(self):
+        conn = ensure_db()
+        rows = database.list_all_products(conn)
+        ids = []
+        for row in rows:
+            try:
+                ids.append(int(row["id"]))
+            except Exception:
+                continue
+        self._set_json()
+        self.wfile.write(json.dumps({"ids": ids}).encode('utf-8'))
+
     def handle_ia_batch_columns(self):
         length = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(length).decode('utf-8')
+        body = self.rfile.read(length).decode('utf-8') if length else ""
         try:
-            payload = json.loads(body)
-            items = payload.get("items")
-            model = payload.get("model") or "gpt-4o-mini-2024-07-18"
-            if not isinstance(items, list):
+            payload = json.loads(body) if body else {}
+            if not isinstance(payload, dict):
                 raise ValueError
         except Exception:
             self._set_json(400)
-            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+            self.wfile.write(json.dumps({"ok": False, "error": "invalid_json"}).encode('utf-8'))
             return
+
+        raw_ids = payload.get("ids") or []
+        ids: List[int] = []
+        for value in raw_ids:
+            try:
+                ids.append(int(value))
+            except Exception:
+                continue
+        ids = sorted({pid for pid in ids if isinstance(pid, int)})
+        if not ids:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"ok": False, "error": "empty_ids"}).encode('utf-8'))
+            return
+
         api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
         if not api_key:
             self._set_json(503)
-            self.wfile.write(json.dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
+            self.wfile.write(json.dumps({"ok": False, "error": "missing_api_key"}).encode('utf-8'))
             return
+
+        conn = ensure_db()
+        job_id = None
+        if hasattr(database, "start_import_job"):
+            try:
+                job_id = database.start_import_job(conn, "ai_columns")
+            except Exception:
+                logger.debug("start_import_job not available", exc_info=True)
+
         try:
-            ok, ko, usage, duration = gpt.generate_batch_columns(api_key, model, items)
-            logger.info("/api/ia/batch-columns tokens=%s duration=%.2fs", usage.get('total_tokens'), duration)
-            self._set_json()
-            self.wfile.write(json.dumps({"ok": ok, "ko": ko}).encode('utf-8'))
-        except gpt.InvalidJSONError:
-            self._set_json(502)
-            self.wfile.write(json.dumps({"error": "Respuesta IA no es JSON"}).encode('utf-8'))
-        except Exception:
-            self._set_json(503)
-            self.wfile.write(json.dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
+            result = ai_columns.run_ai_fill_job(job_id=job_id, ids=ids, microbatch=config.AI_MICROBATCH_DEFAULT)
+        except Exception as exc:
+            logger.exception("AI batch columns failed")
+            self._set_json(500)
+            self.wfile.write(json.dumps({"ok": False, "error": str(exc)}).encode('utf-8'))
+            return
+
+        counts = result.get("counts", {})
+        ok_count = int(counts.get("ok", 0))
+        ko_count = int(counts.get("ko", 0))
+        logger.info("/api/ia/batch-columns ids=%d ok=%d ko=%d", len(ids), ok_count, ko_count)
+        self._set_json()
+        self.wfile.write(json.dumps(result).encode('utf-8'))
 
     def handle_recalc_desire_all(self):
         length = int(self.headers.get('Content-Length', 0))

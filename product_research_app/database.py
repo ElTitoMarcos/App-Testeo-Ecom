@@ -17,11 +17,15 @@ All date/time fields are stored as ISO 8601 strings for simplicity.
 """
 
 import json
+import logging
 import sqlite3
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+
+logger = logging.getLogger(__name__)
 
 
 def get_connection(db_path: Path) -> sqlite3.Connection:
@@ -616,6 +620,14 @@ def list_products(conn: sqlite3.Connection) -> List[sqlite3.Row]:
     return cur.fetchall()
 
 
+def list_all_products(conn: sqlite3.Connection) -> List[sqlite3.Row]:
+    """Return every product ID in ascending order."""
+
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM products ORDER BY id")
+    return cur.fetchall()
+
+
 def iter_products(
     conn: sqlite3.Connection,
     ids: Optional[Sequence[int]] = None,
@@ -720,6 +732,75 @@ def update_product(
         (*data.values(), product_id),
     )
     conn.commit()
+
+
+def upsert_ai_columns(conn: sqlite3.Connection, rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Upsert AI column values for the given products."""
+
+    if not rows:
+        return {"ok": 0, "ko": {}}
+
+    now_iso = datetime.utcnow().isoformat()
+    began_tx = False
+    cur = conn.cursor()
+    ok = 0
+    errors: Dict[str, str] = {}
+
+    def _normalize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+        mapping = {
+            "ai_desire_label": "desire",
+            "desire": "desire",
+            "desire_magnitude": "desire_magnitude",
+            "awareness_level": "awareness_level",
+            "competition_level": "competition_level",
+        }
+        clean: Dict[str, Any] = {}
+        for source, target in mapping.items():
+            if source in payload:
+                value = payload.get(source)
+                if value not in (None, ""):
+                    clean[target] = value
+        return clean
+
+    try:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+            began_tx = True
+        for entry in rows:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                pid = int(entry.get("product_id"))
+            except Exception:
+                errors[str(entry.get("product_id"))] = "invalid_id"
+                continue
+            updates = _normalize_payload(entry)
+            if not updates:
+                errors[str(pid)] = "empty_payload"
+                logger.debug("upsert_ai_columns skipped id=%s reason=empty_payload", pid)
+                continue
+            assignments = ", ".join(f"{key}=?" for key in updates.keys())
+            params = list(updates.values())
+            assignments = f"{assignments}, ai_columns_completed_at=?"
+            params.append(now_iso)
+            params.append(pid)
+            cur.execute(
+                f"UPDATE products SET {assignments} WHERE id=?",
+                params,
+            )
+            if cur.rowcount == 0:
+                errors[str(pid)] = "not_found"
+                logger.debug("upsert_ai_columns skipped id=%s reason=not_found", pid)
+                continue
+            ok += 1
+        if began_tx:
+            conn.commit()
+    except Exception:
+        if began_tx and conn.in_transaction:
+            conn.rollback()
+        raise
+
+    return {"ok": ok, "ko": errors}
 
 
 def insert_score(
