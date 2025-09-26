@@ -23,7 +23,9 @@ import json
 import logging
 import os
 import time
+import random
 import re
+import threading
 import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -79,6 +81,64 @@ class OpenAIError(Exception):
 class InvalidJSONError(OpenAIError):
     """Raised when the model response is not valid JSON."""
     pass
+
+
+_tpm_lock = threading.Lock()
+_tpm_window_start = 0.0
+_tpm_used = 0
+
+
+def _estimate_tokens(payload: Dict[str, Any]) -> int:
+    messages = payload.get("messages") or []
+    total_chars = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            total_chars += len(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    text_val = part.get("text") or part.get("content")
+                    if isinstance(text_val, str):
+                        total_chars += len(text_val)
+        elif isinstance(content, dict):
+            text_val = content.get("text")
+            if isinstance(text_val, str):
+                total_chars += len(text_val)
+    prompt_tokens = max(1, int(total_chars / 4) + 10) if total_chars else 20
+    max_tokens = 0
+    if payload.get("max_tokens") is not None:
+        try:
+            max_tokens = int(payload.get("max_tokens") or 0)
+        except Exception:
+            max_tokens = 0
+    return max(1, prompt_tokens + max(0, max_tokens))
+
+
+def _tpm_admit_or_sleep(need_tokens: int) -> None:
+    global _tpm_window_start, _tpm_used
+    limit_val = getattr(config, "OPENAI_TPM_LIMIT", 30000)
+    safety = getattr(config, "OPENAI_SAFETY_TPM", 0.9)
+    try:
+        limit = int(limit_val * safety)
+    except Exception:
+        limit = 27000
+    limit = max(1, limit)
+
+    while True:
+        now = time.time()
+        with _tpm_lock:
+            if now - _tpm_window_start >= 60.0:
+                _tpm_window_start = now
+                _tpm_used = 0
+            if _tpm_used + need_tokens <= limit:
+                _tpm_used += need_tokens
+                return
+            remaining = 60.0 - (now - _tpm_window_start)
+        sleep_s = max(0.5, min(10.0, remaining))
+        time.sleep(sleep_s)
 
 
 def _dumps_payload(payload: Any | None) -> str:
@@ -412,27 +472,16 @@ def call_openai_chat(
     response_format: Optional[Dict[str, Any]] = None,
     max_tokens: Optional[int] = None,
     stop: Optional[Any] = None,
+    max_retries: int = 6,
 ) -> Dict[str, Any]:
-    """Send a chat completion request to the OpenAI API.
+    """Send a chat completion request to the OpenAI API with retry logic."""
 
-    Args:
-        api_key: The user's OpenAI API key.
-        model: The identifier of the model to call, e.g. ``gpt-4o`` or ``gpt-3.5-turbo``.
-        messages: A list of message dicts, each containing ``role`` and ``content`` fields.
-        temperature: The sampling temperature; lower values produce more deterministic output.
-
-    Returns:
-        The parsed JSON response from OpenAI.
-
-    Raises:
-        OpenAIError: If the API responds with an error or unexpected content.
-    """
     url = "https://api.openai.com/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    payload = {
+    payload: Dict[str, Any] = {
         "model": model,
         "messages": messages,
         "temperature": temperature,
@@ -443,21 +492,63 @@ def call_openai_chat(
         payload["stop"] = stop
     if response_format is not None:
         payload["response_format"] = response_format
-    try:
-        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
-    except requests.RequestException as exc:
-        raise OpenAIError(f"Failed to connect to OpenAI API: {exc}") from exc
-    if response.status_code != 200:
+
+    need_tokens = _estimate_tokens(payload)
+    attempt = 0
+    admitted = False
+
+    while True:
+        if not admitted:
+            _tpm_admit_or_sleep(need_tokens)
+            admitted = True
         try:
-            err = response.json()
-            msg = err.get("error", {}).get("message", response.text)
+            response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
+        except requests.RequestException as exc:
+            if attempt < max_retries:
+                sleep_s = 1.0 + attempt * 0.5
+                time.sleep(sleep_s)
+                attempt += 1
+                continue
+            raise OpenAIError(f"Failed to connect to OpenAI API: {exc}") from exc
+
+        if response.status_code == 200:
+            try:
+                return response.json()
+            except Exception as exc:
+                raise OpenAIError(f"Invalid JSON response from OpenAI: {exc}") from exc
+
+        if response.status_code == 429:
+            retry_after = response.headers.get("Retry-After")
+            delay = 2.0
+            if retry_after:
+                try:
+                    delay = float(retry_after)
+                except Exception:
+                    delay = 2.0
+            else:
+                match = re.search(r"try again in ([0-9.]+)s", response.text or "")
+                if match:
+                    try:
+                        delay = float(match.group(1))
+                    except Exception:
+                        delay = 2.0
+            delay = min(10.0, delay * (1.5 ** attempt)) + random.uniform(0, 0.3)
+            time.sleep(delay)
+            attempt += 1
+            if attempt <= max_retries:
+                continue
+
+        if 500 <= response.status_code < 600 and attempt < max_retries:
+            time.sleep(1.0 + attempt * 0.5)
+            attempt += 1
+            continue
+
+        try:
+            err_payload = response.json()
+            message = err_payload.get("error", {}).get("message", response.text)
         except Exception:
-            msg = response.text
-        raise OpenAIError(f"OpenAI API returned status {response.status_code}: {msg}")
-    try:
-        return response.json()
-    except Exception as exc:
-        raise OpenAIError(f"Invalid JSON response from OpenAI: {exc}") from exc
+            message = response.text
+        raise OpenAIError(f"OpenAI API returned status {response.status_code}: {message}")
 
 
 def build_evaluation_prompt(product: Dict[str, Any]) -> str:

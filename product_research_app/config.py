@@ -13,6 +13,13 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 
+AUTO_AI_ON_IMPORT = True
+AI_MICROBATCH_DEFAULT = 8
+AI_REFINE_CONCURRENCY = 2
+OPENAI_TPM_LIMIT = 30000
+OPENAI_SAFETY_TPM = 0.90
+
+
 DEFAULT_WINNER_ORDER = [
     "awareness",
     "desire",
