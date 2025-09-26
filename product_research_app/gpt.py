@@ -22,8 +22,10 @@ from __future__ import annotations
 import json
 import logging
 import os
-import time
+import random
 import re
+import threading
+import time
 import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -71,14 +73,117 @@ STOPWORDS = {
 }
 
 
+_RETRY_AGAIN_RE = re.compile(r"try again in ([0-9.]+)s", re.IGNORECASE)
+_TPM_LIMIT = int(getattr(config, "OPENAI_TPM_LIMIT", 0) or 0)
+_TPM_SAFETY = float(getattr(config, "OPENAI_SAFETY_TPM", 1.0) or 1.0)
+_TPM_EFFECTIVE = int(_TPM_LIMIT * _TPM_SAFETY)
+_TPM_LOCK = threading.Lock()
+_TPM_STATE = {"window_start": 0.0, "tokens_used": 0.0}
+
+
 class OpenAIError(Exception):
     """Custom exception for OpenAI API errors."""
-    pass
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: Optional[int] = None,
+        retry_after: Optional[float] = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after = retry_after
+
 
 
 class InvalidJSONError(OpenAIError):
     """Raised when the model response is not valid JSON."""
     pass
+
+
+def _estimate_tokens_for_messages(
+    messages: List[Dict[str, Any]], max_tokens: Optional[int]
+) -> int:
+    total_chars = 0
+    for message in messages or []:
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, str):
+            total_chars += len(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    text = part.get("text")
+                    if isinstance(text, str):
+                        total_chars += len(text)
+                elif isinstance(part, str):
+                    total_chars += len(part)
+        elif content is not None:
+            total_chars += len(str(content))
+    approx = max(0, total_chars // 4 + len(messages) * 4)
+    if max_tokens:
+        try:
+            approx += int(max_tokens)
+        except Exception:
+            approx += 0
+    return approx
+
+
+def _reserve_tpm_tokens(tokens: int) -> None:
+    if _TPM_EFFECTIVE <= 0 or tokens <= 0:
+        return
+    wait_time = 0.0
+    while True:
+        with _TPM_LOCK:
+            now = time.monotonic()
+            window_start = _TPM_STATE["window_start"]
+            if not window_start or now - window_start >= 60.0:
+                _TPM_STATE["window_start"] = now
+                _TPM_STATE["tokens_used"] = 0.0
+            available = _TPM_EFFECTIVE - _TPM_STATE["tokens_used"]
+            if tokens <= available:
+                _TPM_STATE["tokens_used"] += tokens
+                return
+            wait_time = max(0.0, 60.0 - (now - _TPM_STATE["window_start"]))
+        time.sleep(min(wait_time, 5.0) if wait_time else 1.0)
+
+
+def _parse_retry_after_header(value: Optional[str]) -> Optional[float]:
+    if not value:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_retry_after_text(text: str) -> Optional[float]:
+    match = _RETRY_AGAIN_RE.search(text or "")
+    if match:
+        try:
+            return float(match.group(1))
+        except Exception:
+            return None
+    return None
+
+
+def _compute_retry_delay(attempt: int, base_delay: Optional[float]) -> float:
+    delay = base_delay if base_delay is not None else 2.0
+    delay = min(10.0, delay * (1.5 ** attempt))
+    return delay + random.uniform(0.0, 0.3)
+
+
+def _extract_error_message(response: requests.Response) -> str:
+    try:
+        data = response.json()
+        error = data.get("error") if isinstance(data, dict) else None
+        if isinstance(error, dict):
+            message = error.get("message")
+            if message:
+                return str(message)
+    except Exception:
+        pass
+    return response.text
 
 
 def _dumps_payload(payload: Any | None) -> str:
@@ -412,6 +517,7 @@ def call_openai_chat(
     response_format: Optional[Dict[str, Any]] = None,
     max_tokens: Optional[int] = None,
     stop: Optional[Any] = None,
+    max_retries: int = 6,
 ) -> Dict[str, Any]:
     """Send a chat completion request to the OpenAI API.
 
@@ -443,21 +549,51 @@ def call_openai_chat(
         payload["stop"] = stop
     if response_format is not None:
         payload["response_format"] = response_format
-    try:
-        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
-    except requests.RequestException as exc:
-        raise OpenAIError(f"Failed to connect to OpenAI API: {exc}") from exc
-    if response.status_code != 200:
+
+    estimated_tokens = _estimate_tokens_for_messages(messages, max_tokens)
+    attempt = 0
+    while True:
+        _reserve_tpm_tokens(estimated_tokens)
         try:
-            err = response.json()
-            msg = err.get("error", {}).get("message", response.text)
-        except Exception:
-            msg = response.text
-        raise OpenAIError(f"OpenAI API returned status {response.status_code}: {msg}")
-    try:
-        return response.json()
-    except Exception as exc:
-        raise OpenAIError(f"Invalid JSON response from OpenAI: {exc}") from exc
+            response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
+        except requests.RequestException as exc:
+            attempt += 1
+            if attempt > max_retries:
+                raise OpenAIError(f"Failed to connect to OpenAI API: {exc}") from exc
+            time.sleep(min(10.0, 1.0 + attempt * 0.5))
+            continue
+
+        if response.status_code == 200:
+            try:
+                return response.json()
+            except Exception as exc:
+                raise OpenAIError(f"Invalid JSON response from OpenAI: {exc}") from exc
+
+        if response.status_code == 429:
+            retry_hint = _parse_retry_after_header(response.headers.get("Retry-After"))
+            if retry_hint is None:
+                retry_hint = _parse_retry_after_text(response.text)
+            delay = _compute_retry_delay(attempt, retry_hint)
+            attempt += 1
+            if attempt <= max_retries:
+                time.sleep(delay)
+                continue
+            raise OpenAIError(
+                f"OpenAI API returned status 429: {_extract_error_message(response)}",
+                status_code=429,
+                retry_after=retry_hint,
+            )
+
+        if 500 <= response.status_code < 600:
+            attempt += 1
+            if attempt <= max_retries:
+                time.sleep(1.0 + attempt * 0.5)
+                continue
+
+        raise OpenAIError(
+            f"OpenAI API returned status {response.status_code}: {_extract_error_message(response)}",
+            status_code=response.status_code,
+        )
 
 
 def build_evaluation_prompt(product: Dict[str, Any]) -> str:
