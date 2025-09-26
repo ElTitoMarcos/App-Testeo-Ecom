@@ -139,6 +139,12 @@ def load_config() -> Dict[str, Any]:
     return data
 
 
+def get_config() -> Dict[str, Any]:
+    """Public accessor returning the current configuration."""
+
+    return load_config()
+
+
 def save_config(config: Dict[str, Any]) -> None:
     """Persist configuration to disk atomically."""
 

@@ -645,7 +645,11 @@ async def _call_batch_with_retries(
                     extra_title = (cand.extra or {}).get("title") if isinstance(cand.extra, dict) else None
                     title = str(cand.payload.get("name") or extra_title or "")
                     if len(draft_raw) < 280 or looks_like_product_desc(draft_raw, title):
-                        refined = await _refine_with_limit(cand, draft_raw)
+                        try:
+                            refined = await _refine_with_limit(cand, draft_raw)
+                        except Exception:
+                            logger.warning("desire refine failed for id=%s; using draft", cand.id)
+                            refined = None
                         if isinstance(refined, dict):
                             merged = dict(desire_payload)
                             merged.update(refined)
@@ -762,7 +766,9 @@ def _calculate_cost(usage: Dict[str, Any], price_in: float, price_out: float) ->
 
 def _payload_to_ai_row(product_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
     return {
+        "id": int(product_id),
         "product_id": int(product_id),
+        "desire": payload.get("desire"),
         "ai_desire_label": payload.get("ai_desire_label")
         or payload.get("desire")
         or "",
@@ -789,7 +795,7 @@ def _apply_ai_updates(conn, updates: Dict[int, Dict[str, Any]]) -> None:
         return
 
     updated = db.upsert_ai_columns(conn, rows)
-    logger.info("ai_columns.apply: rows=%d (UPDATE-only IA columns)", updated)
+    logger.info("AI columns applied: %d rows", updated)
 
     if not product_ids:
         return

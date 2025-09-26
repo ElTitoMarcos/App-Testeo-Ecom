@@ -513,7 +513,10 @@ def _schedule_post_import_tasks(
     rows_imported: int,
     task_key: str,
 ) -> None:
-    auto_ai = getattr(config, "AUTO_AI_ON_IMPORT", True) and config.is_auto_fill_ia_on_import_enabled()
+    cfg = config.get_config()
+    auto_ai = bool(cfg.get("autoFillIAOnImport", True)) and getattr(
+        config, "AUTO_AI_ON_IMPORT", True
+    )
 
     def status_cb(**payload: Any) -> None:
         payload.setdefault("job_id", job_id)

@@ -132,59 +132,32 @@ def upsert_ai_columns(conn: sqlite3.Connection, rows: list[dict[str, object]]) -
     if not rows:
         return 0
 
-    sql = (
-        "\n    UPDATE products\n       SET ai_desire_label = ?,\n           desire_magnitude = ?,\n           awareness_level = ?,\n           competition_level = ?\n     WHERE id = ?\n    "
-    )
+    payload = []
+    for r in rows:
+        pid = int(r.get("id"))
+        desire = r.get("desire")
+        ai_label = r.get("ai_desire_label") or r.get("desire")
+        mag = r.get("desire_magnitude")
+        aware = r.get("awareness_level")
+        comp = r.get("competition_level")
+        payload.append((desire, ai_label, mag, aware, comp, pid))
 
-    data: list[tuple[object, ...]] = []
-    for row in rows:
-        try:
-            pid = int(row["product_id"])
-        except Exception:
-            continue
-
-        label_raw = row.get("ai_desire_label") if isinstance(row, dict) else None
-        label = ""
-        if label_raw is not None:
-            label = str(label_raw).strip()
-
-        magnitude_raw = row.get("desire_magnitude") if isinstance(row, dict) else None
-        magnitude: object
-        if isinstance(magnitude_raw, (int, float)):
-            # Clamp numeric magnitudes to [0, 1].
-            mag_val = float(magnitude_raw)
-            if mag_val < 0:
-                mag_val = 0.0
-            elif mag_val > 1:
-                mag_val = 1.0
-            magnitude = mag_val
-        elif magnitude_raw is None:
-            magnitude = None
-        else:
-            magnitude = str(magnitude_raw).strip() or None
-
-        awareness_raw = row.get("awareness_level") if isinstance(row, dict) else None
-        awareness = None if awareness_raw is None else str(awareness_raw).strip()
-
-        competition_raw = row.get("competition_level") if isinstance(row, dict) else None
-        competition = None if competition_raw is None else str(competition_raw).strip()
-
-        data.append((label, magnitude, awareness, competition, pid))
-
-    if not data:
-        return 0
-
+    sql = """
+    UPDATE products
+       SET
+         desire              = COALESCE(?, desire),
+         ai_desire_label     = COALESCE(?, ai_desire_label),
+         desire_magnitude    = COALESCE(?, desire_magnitude),
+         awareness_level     = COALESCE(?, awareness_level),
+         competition_level   = COALESCE(?, competition_level)
+     WHERE id = ?
+    """
     cur = conn.cursor()
-    try:
-        cur.executemany(sql, data)
-        conn.commit()
-        return len(data)
-    except Exception as exc:  # pragma: no cover - defensive logging
-        logger.exception("upsert_ai_columns failed: %s", exc)
-        conn.rollback()
-        return 0
-    finally:
-        cur.close()
+    cur.executemany(sql, payload)
+    conn.commit()
+    rowcount = cur.rowcount
+    cur.close()
+    return rowcount
 
 
 def filter_missing_ai_columns(conn: sqlite3.Connection, ids: list[int]) -> list[int]:
