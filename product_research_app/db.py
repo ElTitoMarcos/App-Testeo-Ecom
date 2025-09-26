@@ -117,7 +117,6 @@ def close_db():
         _DB = None
         _DB_PATH = None
 
-
 def upsert_ai_columns(conn: sqlite3.Connection, rows: Iterable[Dict[str, Any]]) -> int:
     """Actualizar exclusivamente las columnas IA para productos existentes."""
 

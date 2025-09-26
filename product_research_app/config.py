@@ -22,6 +22,9 @@ AI_REFINE_CONCURRENCY = 2  # límite de concurrencia en refine
 OPENAI_TPM_LIMIT = 30000
 OPENAI_SAFETY_TPM = 0.90   # usar ~90% del TPM
 
+OPENAI_TPM_LIMIT = 30000
+OPENAI_SAFETY_TPM = 0.9
+
 
 DEFAULT_WINNER_ORDER = [
     "awareness",
