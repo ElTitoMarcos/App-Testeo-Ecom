@@ -169,7 +169,6 @@ def _short_label_from_desire(text: str) -> str | None:
     s = re.split(r"[.!?\n]", s, maxsplit=1)[0]
     return s[:60].strip() or None
 
-
 _DB_INIT_PATH: str | None = None
 _DB_INIT_LOCK = threading.Lock()
 
