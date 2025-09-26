@@ -83,6 +83,8 @@ def initialize_database(conn: sqlite3.Connection) -> None:
     cols = [row[1] for row in cur.fetchall()]
     if "desire" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN desire TEXT")
+    if "ai_desire_label" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN ai_desire_label TEXT")
     if "desire_magnitude" not in cols and "magnitud_deseo" in cols:
         cur.execute("ALTER TABLE products RENAME COLUMN magnitud_deseo TO desire_magnitude")
     elif "desire_magnitude" not in cols:
@@ -1663,8 +1665,13 @@ def get_enrichment_status(
     }
     return payload
 
-def merge_staging_into_products(conn: sqlite3.Connection, job_id: int) -> None:
+def merge_staging_into_products(conn: sqlite3.Connection, job_id: int) -> list[int]:
     cur = conn.cursor()
+    cur.execute(
+        "SELECT sig_hash, id FROM products WHERE sig_hash IN (SELECT sig_hash FROM products_staging WHERE job_id=?)",
+        (job_id,),
+    )
+    existing: dict[str, int] = {str(row[0]): int(row[1]) for row in cur.fetchall() if row[0]}
     cur.execute(
         """
         INSERT INTO products (
@@ -1697,6 +1704,18 @@ def merge_staging_into_products(conn: sqlite3.Connection, job_id: int) -> None:
         """,
         (job_id,),
     )
+    cur.execute(
+        """
+        SELECT id, sig_hash FROM products
+         WHERE sig_hash IN (
+             SELECT sig_hash FROM products_staging WHERE job_id=?
+         )
+        """,
+        (job_id,),
+    )
+    rows = cur.fetchall()
+    new_ids = [int(row[0]) for row in rows if str(row[1]) not in existing]
+    return new_ids
 
 
 def clear_staging_for_job(conn: sqlite3.Connection, job_id: int, *, commit: bool = False) -> None:

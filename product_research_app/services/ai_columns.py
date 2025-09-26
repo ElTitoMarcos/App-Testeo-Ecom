@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import httpx
 
-from .. import config, database, gpt
+from .. import config, database, db, gpt
 from ..utils.signature import compute_sig_hash
 from .desire_utils import cleanse, looks_like_product_desc
 
@@ -25,8 +25,12 @@ APP_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = APP_DIR / "data.sqlite3"
 CALIBRATION_CACHE_FILE = APP_DIR / "ai_calibration_cache.json"
 
-AI_FIELDS = ("desire", "desire_magnitude", "awareness_level", "competition_level")
+AI_FIELDS = ("ai_desire_label", "desire_magnitude", "awareness_level", "competition_level")
 StatusCallback = Callable[..., None]
+
+
+_REFINE_CONCURRENCY = max(1, int(getattr(config, "AI_REFINE_CONCURRENCY", 2) or 2))
+_refine_sem = asyncio.Semaphore(_REFINE_CONCURRENCY)
 
 
 @dataclass
@@ -641,7 +645,7 @@ async def _call_batch_with_retries(
                     extra_title = (cand.extra or {}).get("title") if isinstance(cand.extra, dict) else None
                     title = str(cand.payload.get("name") or extra_title or "")
                     if len(draft_raw) < 280 or looks_like_product_desc(draft_raw, title):
-                        refined = await _refine_desire_statement(cand, draft_raw)
+                        refined = await _refine_with_limit(cand, draft_raw)
                         if isinstance(refined, dict):
                             merged = dict(desire_payload)
                             merged.update(refined)
@@ -667,6 +671,7 @@ async def _call_batch_with_retries(
                         desire_magnitude_raw = desire_magnitude_raw.get("overall")
                     ok[pid] = {
                         "desire": cleaned_txt,
+                        "ai_desire_label": cleaned_txt,
                         "desire_primary": desire_primary,
                         "desire_magnitude": gpt._norm_tri(desire_magnitude_raw),
                         "awareness_level": gpt._norm_awareness(
@@ -755,36 +760,46 @@ def _calculate_cost(usage: Dict[str, Any], price_in: float, price_out: float) ->
     return (prompt_val / 1_000_000.0) * price_in + (completion_val / 1_000_000.0) * price_out
 
 
+def _payload_to_ai_row(product_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "product_id": int(product_id),
+        "ai_desire_label": payload.get("ai_desire_label")
+        or payload.get("desire")
+        or "",
+        "desire_magnitude": payload.get("desire_magnitude"),
+        "awareness_level": payload.get("awareness_level"),
+        "competition_level": payload.get("competition_level"),
+    }
+
+
 def _apply_ai_updates(conn, updates: Dict[int, Dict[str, Any]]) -> None:
     if not updates:
         return
+
+    rows: List[Dict[str, Any]] = []
+    product_ids: List[int] = []
+    for product_id, payload in updates.items():
+        if not isinstance(payload, dict):
+            continue
+        pid = int(product_id)
+        rows.append(_payload_to_ai_row(pid, payload))
+        product_ids.append(pid)
+
+    if not rows:
+        return
+
+    updated = db.upsert_ai_columns(conn, rows)
+    logger.info("ai_columns.apply: rows=%d (UPDATE-only IA columns)", updated)
+
+    if not product_ids:
+        return
+
     now_iso = datetime.utcnow().isoformat()
-    cur = conn.cursor()
-    began_tx = False
-    try:
-        if not conn.in_transaction:
-            conn.execute("BEGIN IMMEDIATE")
-            began_tx = True
-        for product_id, payload in updates.items():
-            assignments: List[str] = []
-            params: List[Any] = []
-            for field in AI_FIELDS:
-                if field in payload and payload[field] is not None:
-                    assignments.append(f"{field}=?")
-                    params.append(payload[field])
-            assignments.append("ai_columns_completed_at=?")
-            params.append(now_iso)
-            params.append(int(product_id))
-            cur.execute(
-                f"UPDATE products SET {', '.join(assignments)} WHERE id=?",
-                params,
-            )
-        if began_tx:
-            conn.commit()
-    except Exception:
-        if began_tx and conn.in_transaction:
-            conn.rollback()
-        raise
+    conn.executemany(
+        "UPDATE products SET ai_columns_completed_at=? WHERE id=?",
+        [(now_iso, pid) for pid in product_ids],
+    )
+    conn.commit()
 
 
 def _build_payload(row: Any, extra: Dict[str, Any]) -> Dict[str, Any]:
@@ -875,6 +890,11 @@ async def _refine_desire_statement(
     return await asyncio.to_thread(_call)
 
 
+async def _refine_with_limit(candidate: Candidate, draft_text: str) -> Optional[Dict[str, Any]]:
+    async with _refine_sem:
+        return await _refine_desire_statement(candidate, draft_text)
+
+
 def _emit_status(
     callback: Optional[StatusCallback],
     *,
@@ -906,7 +926,7 @@ def run_ai_fill_job(
     job_id: int,
     product_ids: Sequence[int],
     *,
-    microbatch: int = 32,
+    microbatch: Optional[int] = None,
     parallelism: Optional[int] = None,
     status_cb: Optional[StatusCallback] = None,
 ) -> Dict[str, Any]:
@@ -986,7 +1006,16 @@ def run_ai_fill_job(
         parallelism = int(runtime_cfg.get("parallelism", 8) or 8)
     parallelism = max(1, parallelism)
 
-    microbatch_size = int(microbatch or runtime_cfg.get("microbatch", 12) or 12)
+    default_microbatch = int(getattr(config, "AI_MICROBATCH_DEFAULT", 8) or 8)
+    microbatch_value: Any = microbatch
+    if microbatch_value is None:
+        microbatch_value = runtime_cfg.get("microbatch")
+        if microbatch_value in (None, ""):
+            microbatch_value = default_microbatch
+    try:
+        microbatch_size = int(microbatch_value)
+    except Exception:
+        microbatch_size = default_microbatch
     microbatch_size = max(1, microbatch_size)
 
     cache_enabled = bool(runtime_cfg.get("cache_enabled", True))
@@ -1090,6 +1119,7 @@ def run_ai_fill_job(
                 continue
             update_payload = {
                 "desire": cached_desire,
+                "ai_desire_label": cached_desire,
                 "desire_magnitude": cache_row["desire_magnitude"],
                 "awareness_level": cache_row["awareness_level"],
                 "competition_level": cache_row["competition_level"],
@@ -1366,55 +1396,44 @@ def run_ai_fill_job(
         }
 
         if cached_entry is None:
-            began_tx = False
-            try:
-                if not conn.in_transaction:
-                    conn.execute("BEGIN IMMEDIATE")
-                    began_tx = True
-                if desire_scores:
-                    labels, dist_desire, desire_info = _classify_scores(
-                        desire_scores,
-                        winsorize_pct=wins,
-                        min_low_pct=min_low,
-                        min_medium_pct=min_med,
-                        min_high_pct=min_high,
-                    )
-                    for pid_str, label in labels.items():
-                        pid = int(pid_str)
-                        rec = success_records.get(pid)
-                        if rec and rec["updates"].get("desire_magnitude") != label:
-                            conn.execute(
-                                "UPDATE products SET desire_magnitude=? WHERE id=?",
-                                (label, pid),
-                            )
-                            rec["updates"]["desire_magnitude"] = label
-                            if pid in applied_outputs:
-                                applied_outputs[pid]["desire_magnitude"] = label
-                if comp_scores:
-                    labels, dist_comp, comp_info = _classify_scores(
-                        comp_scores,
-                        winsorize_pct=wins,
-                        min_low_pct=min_low,
-                        min_medium_pct=min_med,
-                        min_high_pct=min_high,
-                    )
-                    for pid_str, label in labels.items():
-                        pid = int(pid_str)
-                        rec = success_records.get(pid)
-                        if rec and rec["updates"].get("competition_level") != label:
-                            conn.execute(
-                                "UPDATE products SET competition_level=? WHERE id=?",
-                                (label, pid),
-                            )
-                            rec["updates"]["competition_level"] = label
-                            if pid in applied_outputs:
-                                applied_outputs[pid]["competition_level"] = label
-                if began_tx:
-                    conn.commit()
-            except Exception:
-                if began_tx and conn.in_transaction:
-                    conn.rollback()
-                raise
+            desire_rows: List[Dict[str, Any]] = []
+            comp_rows: List[Dict[str, Any]] = []
+            if desire_scores:
+                labels, dist_desire, desire_info = _classify_scores(
+                    desire_scores,
+                    winsorize_pct=wins,
+                    min_low_pct=min_low,
+                    min_medium_pct=min_med,
+                    min_high_pct=min_high,
+                )
+                for pid_str, label in labels.items():
+                    pid = int(pid_str)
+                    rec = success_records.get(pid)
+                    if rec and rec["updates"].get("desire_magnitude") != label:
+                        rec["updates"]["desire_magnitude"] = label
+                        if pid in applied_outputs:
+                            applied_outputs[pid]["desire_magnitude"] = label
+                        desire_rows.append(_payload_to_ai_row(pid, rec["updates"]))
+            if comp_scores:
+                labels, dist_comp, comp_info = _classify_scores(
+                    comp_scores,
+                    winsorize_pct=wins,
+                    min_low_pct=min_low,
+                    min_medium_pct=min_med,
+                    min_high_pct=min_high,
+                )
+                for pid_str, label in labels.items():
+                    pid = int(pid_str)
+                    rec = success_records.get(pid)
+                    if rec and rec["updates"].get("competition_level") != label:
+                        rec["updates"]["competition_level"] = label
+                        if pid in applied_outputs:
+                            applied_outputs[pid]["competition_level"] = label
+                        comp_rows.append(_payload_to_ai_row(pid, rec["updates"]))
+            if desire_rows:
+                db.upsert_ai_columns(conn, desire_rows)
+            if comp_rows:
+                db.upsert_ai_columns(conn, comp_rows)
 
             cache_payload = {
                 "created_at": datetime.utcnow().isoformat(),
@@ -1472,39 +1491,28 @@ def run_ai_fill_job(
                     min_high_pct=min_high,
                 )
             if desire_labels or comp_labels:
-                began_tx = False
-                try:
-                    if not conn.in_transaction:
-                        conn.execute("BEGIN IMMEDIATE")
-                        began_tx = True
-                    for pid_str, label in desire_labels.items():
-                        pid = int(pid_str)
-                        rec = success_records.get(pid)
-                        if rec and rec["updates"].get("desire_magnitude") != label:
-                            conn.execute(
-                                "UPDATE products SET desire_magnitude=? WHERE id=?",
-                                (label, pid),
-                            )
-                            rec["updates"]["desire_magnitude"] = label
-                            if pid in applied_outputs:
-                                applied_outputs[pid]["desire_magnitude"] = label
-                    for pid_str, label in comp_labels.items():
-                        pid = int(pid_str)
-                        rec = success_records.get(pid)
-                        if rec and rec["updates"].get("competition_level") != label:
-                            conn.execute(
-                                "UPDATE products SET competition_level=? WHERE id=?",
-                                (label, pid),
-                            )
-                            rec["updates"]["competition_level"] = label
-                            if pid in applied_outputs:
-                                applied_outputs[pid]["competition_level"] = label
-                    if began_tx:
-                        conn.commit()
-                except Exception:
-                    if began_tx and conn.in_transaction:
-                        conn.rollback()
-                    raise
+                desire_rows: List[Dict[str, Any]] = []
+                comp_rows: List[Dict[str, Any]] = []
+                for pid_str, label in desire_labels.items():
+                    pid = int(pid_str)
+                    rec = success_records.get(pid)
+                    if rec and rec["updates"].get("desire_magnitude") != label:
+                        rec["updates"]["desire_magnitude"] = label
+                        if pid in applied_outputs:
+                            applied_outputs[pid]["desire_magnitude"] = label
+                        desire_rows.append(_payload_to_ai_row(pid, rec["updates"]))
+                for pid_str, label in comp_labels.items():
+                    pid = int(pid_str)
+                    rec = success_records.get(pid)
+                    if rec and rec["updates"].get("competition_level") != label:
+                        rec["updates"]["competition_level"] = label
+                        if pid in applied_outputs:
+                            applied_outputs[pid]["competition_level"] = label
+                        comp_rows.append(_payload_to_ai_row(pid, rec["updates"]))
+                if desire_rows:
+                    db.upsert_ai_columns(conn, desire_rows)
+                if comp_rows:
+                    db.upsert_ai_columns(conn, comp_rows)
 
         logger.info(
             "ai_calibration_desire: dist=%s info=%s",

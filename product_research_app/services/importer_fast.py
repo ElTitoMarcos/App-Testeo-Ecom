@@ -6,7 +6,7 @@ import logging
 import re
 import sqlite3
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Iterable, Iterator, Mapping, Optional, Sequence
 
@@ -162,6 +162,7 @@ class ImportSummary:
     batches: int
     total_ms: float
     throughput_rps: float
+    new_product_ids: list[int] = field(default_factory=list)
 
 
 class BulkImporter:
@@ -187,6 +188,7 @@ class BulkImporter:
         self._unique_hashes: set[str] = set()
         self._summary: Optional[ImportSummary] = None
         self._start = 0.0
+        self._new_product_ids: list[int] = []
 
     def _open_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, check_same_thread=False, isolation_level=None)
@@ -205,7 +207,7 @@ class BulkImporter:
     @property
     def summary(self) -> ImportSummary:
         if self._summary is None:
-            return ImportSummary(self.job_id, 0, 0, 0, 0.0, 0.0)
+            return ImportSummary(self.job_id, 0, 0, 0, 0.0, 0.0, [])
         return self._summary
 
     def run(self, rows: Iterator[Mapping[str, Any]]) -> ImportSummary:
@@ -213,6 +215,7 @@ class BulkImporter:
         self._update_status(phase="parse", status="running", processed=0, total=0)
         self.status_cb(stage="prepare", done=0, total=0)
         self.write_conn.execute("BEGIN IMMEDIATE;")
+        self._new_product_ids: list[int] = []
         try:
             for record in rows:
                 prepared = self._prepare_record(record)
@@ -225,7 +228,8 @@ class BulkImporter:
             if self.pending:
                 self._flush_pending()
             transition_job_items(self.write_conn, self.job_id, "raw", "pending_enrich")
-            merge_staging_into_products(self.write_conn, self.job_id)
+            new_ids = merge_staging_into_products(self.write_conn, self.job_id)
+            self._new_product_ids = list(new_ids)
             unique_rows = len(self._unique_hashes)
             clear_staging_for_job(self.write_conn, self.job_id)
             self.write_conn.execute("COMMIT;")
@@ -242,6 +246,7 @@ class BulkImporter:
             self.batches,
             total_ms,
             throughput,
+            list(self._new_product_ids),
         )
         logger.info(
             "Import finished job=%s rows=%d unique=%d ms=%.2f batches=%d throughput=%.2f",
@@ -532,7 +537,7 @@ def fast_import(
                 "batch_size": batch_size,
             },
         )
-        return summary.unique_rows
+        return summary
     except Exception as exc:
         logger.exception("Fast import failed job=%s", job_id)
         update_import_job_progress(
@@ -601,7 +606,7 @@ def fast_import_records(
                 "batch_size": batch_size,
             },
         )
-        return summary.unique_rows
+        return summary
     except Exception as exc:
         logger.exception("Fast record import failed job=%s", job_id)
         update_import_job_progress(
@@ -656,4 +661,4 @@ def benchmark_bulk_import(
         elapsed_ms,
         throughput,
     )
-    return ImportSummary(0, row_count, unique_rows, 0, elapsed_ms, throughput)
+    return ImportSummary(0, row_count, unique_rows, 0, elapsed_ms, throughput, [])

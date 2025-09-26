@@ -37,10 +37,11 @@ import sqlite3
 import math
 import hashlib
 from datetime import date, datetime, timedelta
-from typing import Dict, Any, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from . import database
 from .db import get_db, get_last_performance_config
+from . import db as db_module
 from . import config
 from .services import ai_columns
 from .services import winner_score as winner_calc
@@ -318,6 +319,90 @@ def _get_import_status(task_id: str) -> Dict[str, Any] | None:
     return snapshot
 
 
+def _run_ai_after_import(
+    ids: Sequence[int],
+    *,
+    job_id: Optional[int],
+    status_cb: Optional[Callable[..., None]] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Dict[str, Any]:
+    base_conn = conn
+    close_conn = False
+    if base_conn is None:
+        base_conn = database.get_connection(DB_PATH)
+        close_conn = True
+    try:
+        product_ids: List[int] = []
+        for pid in ids:
+            try:
+                product_ids.append(int(pid))
+            except Exception:
+                continue
+        if not product_ids:
+            logger.info("auto_ai_on_import: imported=0 need_ai=0")
+            counts = {
+                "queued": 0,
+                "sent": 0,
+                "ok": 0,
+                "ko": 0,
+                "cached": 0,
+                "retried": 0,
+                "cost_spent_usd": 0.0,
+            }
+            if job_id is not None:
+                database.set_import_job_ai_counts(base_conn, int(job_id), counts, [])
+                database.update_import_job_ai_progress(base_conn, int(job_id), 0)
+            return {"counts": counts, "pending_ids": []}
+        need = db_module.filter_missing_ai_columns(base_conn, product_ids)
+        logger.info("auto_ai_on_import: imported=%d need_ai=%d", len(product_ids), len(need))
+        if not need:
+            logger.info("auto_ai_on_import: nothing to do")
+            counts = {
+                "queued": 0,
+                "sent": 0,
+                "ok": 0,
+                "ko": 0,
+                "cached": 0,
+                "retried": 0,
+                "cost_spent_usd": 0.0,
+            }
+            if job_id is not None:
+                database.set_import_job_ai_counts(base_conn, int(job_id), counts, [])
+                database.update_import_job_ai_progress(base_conn, int(job_id), 0)
+            return {"counts": counts, "pending_ids": []}
+        job_label = job_id if job_id is not None else "None"
+        logger.info("auto_ai_on_import: run_ai_fill_job start job=%s", job_label)
+        result = ai_columns.run_ai_fill_job(
+            job_id,
+            need,
+            microbatch=getattr(config, "AI_MICROBATCH_DEFAULT", 8),
+            status_cb=status_cb,
+        )
+        logger.info("auto_ai_on_import: run_ai_fill_job done job=%s", job_label)
+        return result
+    except Exception as exc:
+        logger.exception("auto_ai_on_import failed: %s", exc)
+        return {
+            "counts": {
+                "queued": len(product_ids) or len(ids),
+                "sent": 0,
+                "ok": 0,
+                "ko": len(product_ids) or len(ids),
+                "cached": 0,
+                "retried": 0,
+                "cost_spent_usd": 0.0,
+            },
+            "pending_ids": product_ids or list(ids),
+            "error": str(exc),
+        }
+    finally:
+        if close_conn and base_conn is not None:
+            try:
+                base_conn.close()
+            except Exception:
+                pass
+
+
 def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> str:
     """Return desire value from known sources.
 
@@ -428,7 +513,7 @@ def _schedule_post_import_tasks(
     rows_imported: int,
     task_key: str,
 ) -> None:
-    auto_ai = config.is_auto_fill_ia_on_import_enabled()
+    auto_ai = getattr(config, "AUTO_AI_ON_IMPORT", True) and config.is_auto_fill_ia_on_import_enabled()
 
     def status_cb(**payload: Any) -> None:
         payload.setdefault("job_id", job_id)
@@ -450,12 +535,18 @@ def _schedule_post_import_tasks(
             pending_ids: List[int] = list(product_ids)
             try:
                 if auto_ai and product_ids:
-                    result = ai_columns.run_ai_fill_job(job_id, product_ids, status_cb=status_cb)
-                    final_counts = result.get("counts", final_counts)
-                    pending_ids = result.get("pending_ids", pending_ids)
-                    error = result.get("error")
-                    if error:
-                        database.set_import_job_ai_error(conn, job_id, str(error))
+                    result = _run_ai_after_import(
+                        product_ids,
+                        job_id=job_id,
+                        status_cb=status_cb,
+                        conn=conn,
+                    )
+                    if isinstance(result, dict):
+                        final_counts = result.get("counts", final_counts)
+                        pending_ids = result.get("pending_ids", pending_ids)
+                        error = result.get("error")
+                        if error:
+                            database.set_import_job_ai_error(conn, job_id, str(error))
                 else:
                     final_counts = {
                         "queued": 0,
@@ -2285,22 +2376,25 @@ class RequestHandler(BaseHTTPRequestHandler):
                         else:
                             _update_import_status(task_id, **kwargs)
 
-                    imported_count = fast_import(
+                    summary = fast_import(
                         csv_bytes,
                         job_id=job_id,
                         status_cb=cb,
                         source=filename,
                     )
+                    imported_count = summary.unique_rows
+                    new_product_ids = list(summary.new_product_ids)
                     job_row = database.get_import_job(conn, job_id)
                     snapshot = _job_payload_from_row(job_row) or {}
-                    done_val = int(snapshot.get("processed") or imported_count or 0)
+                    done_val = int(snapshot.get("processed") or summary.total_rows or 0)
                     total_val = int(snapshot.get("total") or done_val)
                     imported_val = int(snapshot.get("rows_imported") or imported_count or done_val)
-                    inserted_ids = database.get_job_product_ids(conn, job_id)
+                    inserted_ids = new_product_ids or database.get_job_product_ids(conn, job_id)
                     rows_imported = len(inserted_ids) or imported_val
+                    auto_ai_enabled = getattr(config, "AUTO_AI_ON_IMPORT", True) and config.is_auto_fill_ia_on_import_enabled()
                     next_phase = (
                         "enrich"
-                        if rows_imported and config.is_auto_fill_ia_on_import_enabled()
+                        if rows_imported and auto_ai_enabled
                         else "winner"
                     )
                     database.update_import_job_progress(
@@ -2428,22 +2522,25 @@ class RequestHandler(BaseHTTPRequestHandler):
                         else:
                             _update_import_status(task_id, **kwargs)
 
-                    imported_count = fast_import_records(
+                    summary = fast_import_records(
                         records,
                         job_id=job_id,
                         status_cb=cb,
                         source=filename,
                     )
+                    imported_count = summary.unique_rows
+                    new_product_ids = list(summary.new_product_ids)
                     job_row = database.get_import_job(conn, job_id)
                     snapshot = _job_payload_from_row(job_row) or {}
-                    done_val = int(snapshot.get("processed") or imported_count or total_records)
+                    done_val = int(snapshot.get("processed") or summary.total_rows or total_records)
                     total_val = int(snapshot.get("total") or total_records or done_val)
                     imported_val = int(snapshot.get("rows_imported") or imported_count or done_val)
-                    inserted_ids = database.get_job_product_ids(conn, job_id)
+                    inserted_ids = new_product_ids or database.get_job_product_ids(conn, job_id)
                     rows_imported = len(inserted_ids) or imported_val
+                    auto_ai_enabled = getattr(config, "AUTO_AI_ON_IMPORT", True) and config.is_auto_fill_ia_on_import_enabled()
                     next_phase = (
                         "enrich"
-                        if rows_imported and config.is_auto_fill_ia_on_import_enabled()
+                        if rows_imported and auto_ai_enabled
                         else "winner"
                     )
                     database.update_import_job_progress(
