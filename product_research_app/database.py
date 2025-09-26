@@ -68,6 +68,7 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             source TEXT,
             import_date TEXT NOT NULL,
             desire TEXT,
+            ai_desire_label TEXT,
             desire_magnitude TEXT,
             awareness_level TEXT,
             competition_level TEXT,
@@ -83,6 +84,8 @@ def initialize_database(conn: sqlite3.Connection) -> None:
     cols = [row[1] for row in cur.fetchall()]
     if "desire" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN desire TEXT")
+    if "ai_desire_label" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN ai_desire_label TEXT")
     if "desire_magnitude" not in cols and "magnitud_deseo" in cols:
         cur.execute("ALTER TABLE products RENAME COLUMN magnitud_deseo TO desire_magnitude")
     elif "desire_magnitude" not in cols:
@@ -680,6 +683,7 @@ def update_product(
         "image_url",
         "source",
         "desire",
+        "ai_desire_label",
         "desire_magnitude",
         "awareness_level",
         "competition_level",

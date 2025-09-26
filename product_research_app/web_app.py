@@ -169,8 +169,6 @@ def _short_label_from_desire(text: str) -> str | None:
     s = re.split(r"[.!?\n]", s, maxsplit=1)[0]
     return s[:60].strip() or None
 
-
-_DB_INIT = False
 _DB_INIT_PATH: str | None = None
 _DB_INIT_LOCK = threading.Lock()
 
@@ -193,29 +191,27 @@ def _parse_date(s: str):
     return None
 
 def ensure_db():
-    global _DB_INIT, _DB_INIT_PATH
+    global _DB_INIT_PATH
 
     target_path = str(DB_PATH)
     conn = get_db(target_path)
-    if not _DB_INIT or _DB_INIT_PATH != target_path:
-        with _DB_INIT_LOCK:
-            if not _DB_INIT or _DB_INIT_PATH != target_path:
-                try:
-                    database.initialize_database(conn)
-                except Exception:
-                    logger.exception("Database initialization failed")
-                    raise
-                try:
-                    cur = conn.cursor()
-                    cur.execute(
-                        "DELETE FROM products WHERE id IN (1,2,3) OR lower(name) LIKE '%test%' OR lower(name) LIKE '%prueba%'"
-                    )
-                    conn.commit()
-                except Exception:
-                    pass
-                logger.info("Database ready at %s", DB_PATH)
-                _DB_INIT = True
-                _DB_INIT_PATH = target_path
+    with _DB_INIT_LOCK:
+        try:
+            database.initialize_database(conn)
+        except Exception:
+            logger.exception("Database initialization failed")
+            raise
+        if _DB_INIT_PATH != target_path:
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "DELETE FROM products WHERE id IN (1,2,3) OR lower(name) LIKE '%test%' OR lower(name) LIKE '%prueba%'"
+                )
+                conn.commit()
+            except Exception:
+                pass
+            logger.info("Database ready at %s", DB_PATH)
+            _DB_INIT_PATH = target_path
     return conn
 
 
@@ -821,6 +817,11 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             total=rows_imported,
             phase=next_phase,
         )
+        if inserted_ids:
+            try:
+                ai_columns.run_ai_fill_job(job_id=None, product_ids=inserted_ids)
+            except Exception:
+                logger.exception("Automatic AI column fill failed job=%s", job_id)
         _schedule_post_import_tasks(job_id, inserted_ids, rows_imported, task_key)
     except Exception as exc:
         try:
@@ -2741,6 +2742,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "desire_magnitude": p.get("desire_magnitude"),
                     "awareness_level": p.get("awareness_level"),
                     "competition_level": p.get("competition_level"),
+                    "date_range": p.get("date_range"),
                 }
                 label = (
                     p.get("ai_desire_label")

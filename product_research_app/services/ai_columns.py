@@ -27,11 +27,12 @@ DB_PATH = APP_DIR / "data.sqlite3"
 CALIBRATION_CACHE_FILE = APP_DIR / "ai_calibration_cache.json"
 
 AI_FIELDS = (
-    "desire",
     "ai_desire_label",
+    "desire",
     "desire_magnitude",
     "awareness_level",
     "competition_level",
+    "date_range",
 )
 StatusCallback = Callable[..., None]
 
@@ -97,13 +98,17 @@ class _AsyncRateLimiter:
 
 SYSTEM_PROMPT = (
     "Eres un analista de marketing. Devuelve únicamente un JSON con claves de producto. "
-    "Cada valor debe incluir desire (string corta), desire_magnitude (Low|Medium|High), "
-    "awareness_level (Unaware|Problem-Aware|Solution-Aware|Product-Aware|Most Aware) y "
-    "competition_level (Low|Medium|High)."
+    "Cada valor debe ser un objeto con las claves: desire_statement (280-420 caracteres), "
+    "desire_primary (frase breve), ai_desire_label (frase corta), desire (resumen breve), "
+    "desire_magnitude (Low|Medium|High), awareness_level (Unaware|Problem-Aware|Solution-Aware|Product-Aware|Most Aware), "
+    "competition_level (Low|Medium|High) y date_range (texto corto). Si no puedes inferir "
+    "un valor devuelve null. No incluyas texto adicional ni comentarios."
 )
 USER_INSTRUCTION = (
     "Analiza los siguientes productos y responde solo con un JSON cuyas claves sean los IDs. "
-    "Cada entrada debe incluir desire, desire_magnitude, awareness_level y competition_level."
+    "Cada entrada debe incluir todas las claves solicitadas (desire_statement, desire_primary, "
+    "ai_desire_label, desire, desire_magnitude, awareness_level, competition_level, date_range) "
+    "con null cuando no aplique."
 )
 
 def _truncate_text(value: Any, limit: int) -> str:
@@ -131,6 +136,13 @@ def _join_bullets(value: Any, limit: int) -> str:
         text = str(value).strip()
     text = text.replace("\n", " ").replace("\r", " ")
     return _truncate_text(text, limit)
+
+
+def _normalize_text_field(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _estimate_tokens_from_text(*texts: str) -> int:
@@ -672,16 +684,41 @@ async def _call_batch_with_retries(
                         desire_magnitude_raw = entry.get("desire_magnitude")
                     if isinstance(desire_magnitude_raw, dict):
                         desire_magnitude_raw = desire_magnitude_raw.get("overall")
+                    normalized_payload: Dict[str, Any] = {
+                        field: None for field in AI_FIELDS
+                    }
+                    desire_text = cleaned_txt or _normalize_text_field(
+                        entry.get("desire")
+                    )
+                    if desire_text:
+                        normalized_payload["desire"] = desire_text
+                    normalized_payload["desire_magnitude"] = gpt._norm_tri(
+                        desire_magnitude_raw
+                    )
+                    normalized_payload["awareness_level"] = gpt._norm_awareness(
+                        desire_payload.get("awareness_level")
+                    )
+                    normalized_payload["competition_level"] = gpt._norm_tri(
+                        desire_payload.get("competition_level")
+                    )
+                    date_range_val = _normalize_text_field(
+                        desire_payload.get("date_range") or entry.get("date_range")
+                    )
+                    if date_range_val:
+                        normalized_payload["date_range"] = date_range_val
+                    label_val = _normalize_text_field(
+                        desire_payload.get("ai_desire_label")
+                        or entry.get("ai_desire_label")
+                        or entry.get("desire_label")
+                    )
+                    if not label_val:
+                        label_val = _short_label_from_desire(desire_text or "")
+                    if label_val:
+                        normalized_payload["ai_desire_label"] = label_val
                     ok[pid] = {
-                        "desire": cleaned_txt,
-                        "desire_primary": desire_primary,
-                        "desire_magnitude": gpt._norm_tri(desire_magnitude_raw),
-                        "awareness_level": gpt._norm_awareness(
-                            desire_payload.get("awareness_level")
-                        ),
-                        "competition_level": gpt._norm_tri(
-                            desire_payload.get("competition_level")
-                        ),
+                        **normalized_payload,
+                        "desire_primary": _normalize_text_field(desire_primary),
+                        "desire_statement": desire_text,
                     }
                 duration = time.perf_counter() - start_ts
                 end_iso = datetime.utcnow().isoformat()
@@ -770,11 +807,25 @@ def _calculate_cost(usage: Dict[str, Any], price_in: float, price_out: float) ->
     return (prompt_val / 1_000_000.0) * price_in + (completion_val / 1_000_000.0) * price_out
 
 
+def _get_product_columns(conn) -> set[str]:
+    try:
+        cur = conn.execute("PRAGMA table_info(products)")
+        return {row[1] for row in cur.fetchall()}
+    except Exception:
+        logger.debug("failed to introspect product columns", exc_info=True)
+        return set()
+
+
 def _apply_ai_updates(conn, updates: Dict[int, Dict[str, Any]]) -> None:
     if not updates:
         return
     now_iso = datetime.utcnow().isoformat()
     cur = conn.cursor()
+    present_cols = _get_product_columns(conn)
+    available_fields = [field for field in AI_FIELDS if field in present_cols]
+    has_completed_at = "ai_columns_completed_at" in present_cols
+    if not available_fields and not has_completed_at:
+        return
     began_tx = False
     try:
         if not conn.in_transaction:
@@ -790,12 +841,15 @@ def _apply_ai_updates(conn, updates: Dict[int, Dict[str, Any]]) -> None:
 
             assignments: List[str] = []
             params: List[Any] = []
-            for field in AI_FIELDS:
+            for field in available_fields:
                 if field in payload and payload[field] is not None:
                     assignments.append(f"{field}=?")
                     params.append(payload[field])
-            assignments.append("ai_columns_completed_at=?")
-            params.append(now_iso)
+            if not assignments and not has_completed_at:
+                continue
+            if has_completed_at:
+                assignments.append("ai_columns_completed_at=?")
+                params.append(now_iso)
             params.append(int(product_id))
             cur.execute(
                 f"UPDATE products SET {', '.join(assignments)} WHERE id=?",
@@ -934,6 +988,8 @@ def run_ai_fill_job(
 ) -> Dict[str, Any]:
     start_ts = time.perf_counter()
     conn = _ensure_conn()
+    present_cols = _get_product_columns(conn)
+    tracked_fields = [field for field in AI_FIELDS if field in present_cols]
     job_updates_enabled = job_id is not None and int(job_id) > 0
     requested_ids: List[int] = []
     seen_ids: set[int] = set()
@@ -966,8 +1022,8 @@ def run_ai_fill_job(
             except Exception:
                 extra = {}
         already_done = row.get("ai_columns_completed_at")
-        existing = {field: row.get(field) for field in AI_FIELDS}
-        if already_done and all(existing.get(field) for field in AI_FIELDS):
+        existing = {field: row.get(field) for field in tracked_fields}
+        if already_done and all(existing.get(field) is not None for field in tracked_fields):
             skipped_existing += 1
             continue
         name = row["name"]
