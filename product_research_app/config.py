@@ -13,6 +13,11 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 
+AI_MICROBATCH_DEFAULT = 8
+AI_MAX_OUTPUT_TOKENS = 3000
+AI_ENFORCE_JSON = True
+
+
 DEFAULT_WINNER_ORDER = [
     "awareness",
     "desire",
@@ -54,7 +59,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "ai": {
         "parallelism": 8,
-        "microbatch": 12,
+        "microbatch": AI_MICROBATCH_DEFAULT,
         "cache_enabled": True,
         "version": 1,
         "tpm_limit": None,

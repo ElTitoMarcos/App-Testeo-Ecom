@@ -659,6 +659,19 @@ def get_products_by_ids(
     return cur.fetchall()
 
 
+def list_all_product_ids(conn: sqlite3.Connection) -> List[int]:
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM products ORDER BY id")
+    rows = cur.fetchall()
+    ids: List[int] = []
+    for row in rows:
+        try:
+            ids.append(int(row["id"]))
+        except Exception:
+            continue
+    return ids
+
+
 def update_product(
     conn: sqlite3.Connection,
     product_id: int,
