@@ -92,12 +92,28 @@ SYSTEM_PROMPT = (
     "Eres un analista de marketing. Devuelve únicamente un JSON con claves de producto. "
     "Cada valor debe incluir desire (string corta), desire_magnitude (Low|Medium|High), "
     "awareness_level (Unaware|Problem-Aware|Solution-Aware|Product-Aware|Most Aware) y "
-    "competition_level (Low|Medium|High)."
+    "competition_level (Low|Medium|High). "
+    "Si no se proporciona ningún producto, responde exclusivamente con {}."
 )
 USER_INSTRUCTION = (
     "Analiza los siguientes productos y responde solo con un JSON cuyas claves sean los IDs. "
-    "Cada entrada debe incluir desire, desire_magnitude, awareness_level y competition_level."
+    "Cada entrada debe incluir desire, desire_magnitude, awareness_level y competition_level.\n\n"
+    "# === REGLA PARA BATCH VACÍO ===\n"
+    "Si NO hay ninguna línea de producto en la sección de DATOS, devuelve EXACTAMENTE {} "
+    "(objeto JSON vacío) y nada más."
 )
+
+
+def parse_ai_columns(content: str) -> Dict[str, Dict[str, Any]]:
+    """Parse raw JSON content returned by the AI columns model."""
+
+    text = (content or "").strip()
+    if text == "{}":
+        return {}
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("Expected top-level object")
+    return data
 
 def _truncate_text(value: Any, limit: int) -> str:
     if value is None:
@@ -222,9 +238,11 @@ def _extract_response_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
     if not content_text:
         raise gpt.InvalidJSONError("La respuesta IA no es JSON")
     try:
-        obj = json.loads(content_text)
+        obj = parse_ai_columns(content_text)
     except json.JSONDecodeError:
         obj, _ = gpt._extract_first_json_block(content_text)
+        if isinstance(obj, str):
+            obj = parse_ai_columns(obj)
     if not isinstance(obj, dict):
         raise gpt.InvalidJSONError("La respuesta IA no es JSON")
     return obj
@@ -553,6 +571,19 @@ async def _call_batch_with_retries(
     semaphore: asyncio.Semaphore,
     stop_event: asyncio.Event,
 ) -> Dict[str, Any]:
+    if not request.candidates:
+        logger.info("ai_columns: empty batch → returning {} without API call")
+        return {
+            "req_id": request.req_id,
+            "candidates": request.candidates,
+            "ok": {},
+            "ko": {},
+            "usage": {},
+            "duration": 0.0,
+            "retries": 0,
+            "prompt_tokens_est": request.prompt_tokens_est,
+            "skipped": True,
+        }
     if stop_event.is_set():
         now_iso = datetime.utcnow().isoformat()
         logger.info(
