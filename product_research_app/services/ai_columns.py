@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import httpx
 
-from .. import config, database, gpt
+from .. import config, database, db as db_core, gpt
 from ..utils.signature import compute_sig_hash
 from .desire_utils import cleanse, looks_like_product_desc
 
@@ -604,19 +604,21 @@ async def _call_batch_with_retries(
             status = "ok"
             error_message: Optional[str] = None
             try:
+                request_payload = {
+                    "model": model,
+                    "temperature": 0,
+                    "top_p": 1,
+                    "max_tokens": getattr(config, "AI_MAX_OUTPUT_TOKENS", 3000),
+                    "messages": [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": request.user_text},
+                    ],
+                }
+                if getattr(config, "AI_ENFORCE_JSON", True):
+                    request_payload["response_format"] = {"type": "json_object"}
                 response = await client.post(
                     "/v1/chat/completions",
-                    json={
-                        "model": model,
-                        "temperature": 0,
-                        "top_p": 1,
-                        "max_tokens": 380,
-                        "response_format": {"type": "json_object"},
-                        "messages": [
-                            {"role": "system", "content": SYSTEM_PROMPT},
-                            {"role": "user", "content": request.user_text},
-                        ],
-                    },
+                    json=request_payload,
                 )
                 response.raise_for_status()
                 raw = response.json()
@@ -758,33 +760,27 @@ def _calculate_cost(usage: Dict[str, Any], price_in: float, price_out: float) ->
 def _apply_ai_updates(conn, updates: Dict[int, Dict[str, Any]]) -> None:
     if not updates:
         return
-    now_iso = datetime.utcnow().isoformat()
-    cur = conn.cursor()
-    began_tx = False
-    try:
-        if not conn.in_transaction:
-            conn.execute("BEGIN IMMEDIATE")
-            began_tx = True
-        for product_id, payload in updates.items():
-            assignments: List[str] = []
-            params: List[Any] = []
-            for field in AI_FIELDS:
-                if field in payload and payload[field] is not None:
-                    assignments.append(f"{field}=?")
-                    params.append(payload[field])
-            assignments.append("ai_columns_completed_at=?")
-            params.append(now_iso)
-            params.append(int(product_id))
-            cur.execute(
-                f"UPDATE products SET {', '.join(assignments)} WHERE id=?",
-                params,
-            )
-        if began_tx:
-            conn.commit()
-    except Exception:
-        if began_tx and conn.in_transaction:
-            conn.rollback()
-        raise
+    rows: List[Dict[str, Any]] = []
+    for product_id, payload in updates.items():
+        try:
+            pid = int(product_id)
+        except Exception:
+            logger.info("apply_ai_updates skip invalid_id=%s", product_id)
+            continue
+        if not isinstance(payload, dict):
+            logger.info("apply_ai_updates skip invalid_payload product_id=%s", pid)
+            continue
+        row_payload: Dict[str, Any] = {"product_id": pid}
+        for field in AI_FIELDS:
+            value = payload.get(field)
+            if value is not None:
+                row_payload[field] = value
+        if len(row_payload) == 1:
+            logger.info("apply_ai_updates skip empty_fields product_id=%s", pid)
+            continue
+        rows.append(row_payload)
+    if rows:
+        db_core.upsert_ai_columns(conn, rows)
 
 
 def _build_payload(row: Any, extra: Dict[str, Any]) -> Dict[str, Any]:
@@ -906,10 +902,19 @@ def run_ai_fill_job(
     job_id: int,
     product_ids: Sequence[int],
     *,
-    microbatch: int = 32,
+    microbatch: int = config.AI_MICROBATCH_DEFAULT,
     parallelism: Optional[int] = None,
     status_cb: Optional[StatusCallback] = None,
 ) -> Dict[str, Any]:
+    """Fill AI columns for the specified products.
+
+    Builds request payloads from the database, splits them into micro-batches,
+    enforces JSON responses, parses partial results, retries recursively by
+    splitting batches until size one, performs per-item upserts, and reports the
+    same contract as the stable implementation (``ok``, ``ko``, ``counts``,
+    ``pending_ids``, ``error``). Logs information per batch including saved
+    items, missing items, and duration.
+    """
     start_ts = time.perf_counter()
     conn = _ensure_conn()
     job_updates_enabled = job_id is not None and int(job_id) > 0

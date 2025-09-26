@@ -1757,8 +1757,14 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/api/ba/insights":
             self.handle_ba_insights()
             return
+        if path == "/api/products/ids":
+            self.handle_products_ids()
+            return
         if path == "/api/ia/batch-columns":
             self.handle_ia_batch_columns()
+            return
+        if path == "/api/ia/run":
+            self.handle_ia_run()
             return
         if path == "/api/recalc-desire-all":
             self.handle_recalc_desire_all()
@@ -2702,6 +2708,19 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._set_json(503)
             self.wfile.write(json.dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
 
+    def handle_products_ids(self):
+        conn = ensure_db()
+        try:
+            ids = database.list_all_product_ids(conn)
+        except Exception:
+            logger.exception("/api/products/ids failed")
+            self._set_json(500)
+            self.wfile.write(json.dumps({"error": "internal_error"}).encode('utf-8'))
+            return
+        logger.info("/api/products/ids count=%d", len(ids))
+        self._set_json()
+        self.wfile.write(json.dumps({"ids": ids}).encode('utf-8'))
+
     def handle_ia_batch_columns(self):
         length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(length).decode('utf-8')
@@ -2731,6 +2750,103 @@ class RequestHandler(BaseHTTPRequestHandler):
         except Exception:
             self._set_json(503)
             self.wfile.write(json.dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
+
+    def handle_ia_run(self):
+        length = int(self.headers.get('Content-Length', 0))
+        raw_body = self.rfile.read(length).decode('utf-8') if length else ""
+        try:
+            payload = json.loads(raw_body or "{}")
+        except Exception:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"ok": False, "error": "invalid_json"}).encode('utf-8'))
+            return
+        if not isinstance(payload, dict):
+            self._set_json(400)
+            self.wfile.write(json.dumps({"ok": False, "error": "invalid_payload"}).encode('utf-8'))
+            return
+
+        ids_raw = payload.get("ids")
+        if not isinstance(ids_raw, list) or not ids_raw:
+            self._set_json(400)
+            self.wfile.write(json.dumps({"ok": False, "error": "invalid_ids"}).encode('utf-8'))
+            return
+
+        ids: list[int] = []
+        seen: set[int] = set()
+        for raw in ids_raw:
+            try:
+                pid = int(raw)
+            except (TypeError, ValueError):
+                self._set_json(400)
+                self.wfile.write(json.dumps({"ok": False, "error": "invalid_ids"}).encode('utf-8'))
+                return
+            if pid in seen:
+                self._set_json(400)
+                self.wfile.write(json.dumps({"ok": False, "error": "duplicate_ids"}).encode('utf-8'))
+                return
+            seen.add(pid)
+            ids.append(pid)
+
+        if ids != sorted(ids):
+            self._set_json(400)
+            self.wfile.write(json.dumps({"ok": False, "error": "unsorted_ids"}).encode('utf-8'))
+            return
+
+        api_key = config.get_api_key() or os.environ.get('OPENAI_API_KEY')
+        if not api_key:
+            self._set_json(503)
+            self.wfile.write(json.dumps({"ok": False, "error": "missing_api_key"}).encode('utf-8'))
+            return
+
+        total = len(ids)
+        start_ts = time.perf_counter()
+        logger.info("/api/ia/run start total=%d", total)
+        try:
+            result = ai_columns.run_ai_fill_job(
+                job_id=None,
+                product_ids=ids,
+                microbatch=getattr(config, "AI_MICROBATCH_DEFAULT", 8),
+            )
+        except Exception:
+            logger.exception("/api/ia/run failed total=%d", total)
+            self._set_json(500)
+            self.wfile.write(json.dumps({"ok": False, "error": "internal_error"}).encode('utf-8'))
+            return
+
+        counts_detail_raw = result.get("counts") or {}
+        counts_detail = dict(counts_detail_raw) if isinstance(counts_detail_raw, dict) else {}
+        try:
+            ok_count = int(counts_detail.get("ok", 0) or 0)
+        except Exception:
+            ok_count = 0
+        try:
+            ko_count = int(counts_detail.get("ko", 0) or 0)
+        except Exception:
+            ko_count = 0
+        summary = f"IA columns updated: {ok_count}/{total}"
+
+        payload_out = dict(result)
+        payload_out["counts_detail"] = counts_detail
+        payload_out["counts"] = {"ok": ok_count, "ko": ko_count}
+        pending_ids_list = []
+        for raw_pid in result.get("pending_ids") or []:
+            try:
+                pending_ids_list.append(int(raw_pid))
+            except Exception:
+                continue
+        payload_out["pending_ids"] = pending_ids_list
+        payload_out.setdefault("ok", result.get("ok") or {})
+        payload_out.setdefault("ko", result.get("ko") or {})
+        payload_out.setdefault("error", result.get("error"))
+        payload_out["summary"] = summary
+
+        duration = time.perf_counter() - start_ts
+        logger.info(
+            "/api/ia/run done total=%d ok=%d ko=%d duration=%.2fs", total, ok_count, ko_count, duration
+        )
+
+        self._set_json()
+        self.wfile.write(json.dumps(payload_out).encode('utf-8'))
 
     def handle_recalc_desire_all(self):
         length = int(self.headers.get('Content-Length', 0))
