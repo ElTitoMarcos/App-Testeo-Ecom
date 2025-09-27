@@ -10,28 +10,31 @@
   mo.observe(document.documentElement, { childList: true, subtree: true });
 })();
 
-// ==== E2E progress (solo frontend) ====
+// ==== E2E progress (frontend-only) =========================================
 const E2E_CFG = {
-  importWeight: 0.80,        // hasta ~80% con import
-  iaWeight: 0.20,            // 20% final con IA
-  idleMs: 1600,              // considera terminado IA si no hay POSTs en este intervalo
+  importWeight: 0.80,     // tramo visual hasta ~80% para import
+  iaWeight: 0.20,         // 20% final para IA
+  iaPollMs: 4500,         // sondeo suave para estimar IA
+  iaPollTimeoutMs: 12 * 60 * 1000, // tope de espera
+  iaStableHits: 2,        // confirmación de "todo completo" 2 veces seguidas
 };
 
 const E2E = {
+  enabled: true,
   // import
-  importPct: 0,              // 0..1 (alimentado por la barra existente de import)
-  // ia
-  iaTotal: 0,
-  iaDone: 0,
-  inFlightPost: 0,
-  lastPostTs: 0,
-  enabled: true,             // se puede desactivar si no hay import
+  importFrac: 0,          // 0..1 (alimentado por la barra ya existente)
+  // IA observada
+  iaFracObserved: 0,      // 0..1 (estimado por /products)
+  iaWatcher: null,
+  iaWatchStart: 0,
+  iaStableCount: 0,
+  // animación suave
+  uiFrac: 0,              // 0..1
+  targetFrac: 0,          // 0..1
+  raf: 0,
+  // metadata UI
   title: 'Proceso',
   stage: 'Procesando…',
-  // animación suave
-  uiPct: 0,                  // 0..1
-  targetPct: 0,              // 0..1
-  raf: 0,
 };
 
 function clamp01(v) {
@@ -40,116 +43,52 @@ function clamp01(v) {
   return Math.max(0, Math.min(1, num));
 }
 
-function resetE2EState({ enabled = false } = {}) {
+function __resetE2EState({ enabled = false } = {}) {
   if (E2E.raf) {
     cancelAnimationFrame(E2E.raf);
     E2E.raf = 0;
   }
-  E2E.importPct = 0;
-  E2E.iaTotal = 0;
-  E2E.iaDone = 0;
-  E2E.inFlightPost = 0;
-  E2E.lastPostTs = 0;
-  E2E.uiPct = 0;
-  E2E.targetPct = 0;
+  if (E2E.iaWatcher) {
+    clearInterval(E2E.iaWatcher);
+    E2E.iaWatcher = null;
+  }
+  E2E.importFrac = 0;
+  E2E.iaFracObserved = 0;
+  E2E.iaWatchStart = 0;
+  E2E.iaStableCount = 0;
+  E2E.uiFrac = 0;
+  E2E.targetFrac = 0;
+  E2E.enabled = enabled;
   E2E.title = 'Proceso';
   E2E.stage = 'Procesando…';
-  E2E.enabled = enabled;
 }
 
-function prepareE2EForImport() {
-  resetE2EState({ enabled: true });
-  E2E.lastPostTs = Date.now();
+function __prepareE2EForImport(title) {
+  __resetE2EState({ enabled: true });
+  if (title) {
+    E2E.title = title;
+  }
+  E2E.stage = 'Iniciando…';
+  __animateTowards(0, false);
 }
 
+// ==== skip helpers =========================================================
 function shouldSkipByUrlAndMethod(url, method) {
   const m = (method || 'GET').toUpperCase();
-  if (m === 'GET') return true; // no contamos GETs en el progreso
+  if (m === 'GET') return true; // GET no suma progreso
   const u = String(url || '');
-  if (/\b\/_import_status\b/i.test(u)) return true; // no sumes el poll de estado
+  if (/\b\/_import_status\b/i.test(u)) return true; // tampoco el poll de estado
   return false;
 }
 
-function setImportFractionSmooth(frac) {
-  if (!E2E.enabled) return;
-  const f = clamp01(frac || 0);
-  E2E.importPct = f;
-  if (f >= 1) {
-    E2E.lastPostTs = Date.now();
-  }
-  bumpTargetPct();
+function __setImportFracForE2E(frac) {
+  const f = Math.max(0, Math.min(1, Number(frac) || 0));
+  E2E.importFrac = f;
+  __bumpTarget();
+  __startIaWatcherIfNeeded();
 }
 
-function computeTarget() {
-  if (!E2E.enabled) {
-    return { pct: E2E.uiPct || 0, done: false };
-  }
-
-  const a = (E2E.importPct || 0) * E2E_CFG.importWeight;
-
-  let iaFrac = 0;
-  if (E2E.iaTotal > 0) {
-    iaFrac = E2E.iaDone / Math.max(E2E.iaTotal, 1);
-  } else {
-    iaFrac = 0;
-  }
-  const b = iaFrac * E2E_CFG.iaWeight;
-
-  const idle = (Date.now() - (E2E.lastPostTs || 0)) > E2E_CFG.idleMs && E2E.inFlightPost === 0;
-  const done = (E2E.importPct >= 1 && (E2E.iaTotal === 0 ? idle : (E2E.iaDone >= E2E.iaTotal && idle)));
-
-  return { pct: done ? 1 : Math.min(0.995, a + b), done };
-}
-
-function bumpTargetPct() {
-  if (!E2E.enabled) return;
-  const { pct, done } = computeTarget();
-  E2E.targetPct = Math.max(E2E.targetPct, pct);
-  animateE2E(done);
-}
-
-function animateE2E(doneFlag) {
-  if (!E2E.enabled) return;
-  if (E2E.raf) cancelAnimationFrame(E2E.raf);
-  let finalizing = !!doneFlag;
-  const step = () => {
-    const { pct, done } = computeTarget();
-    if (pct > E2E.targetPct) {
-      E2E.targetPct = pct;
-    }
-    if (done) {
-      finalizing = true;
-    }
-
-    const delta = E2E.targetPct - E2E.uiPct;
-    if (Math.abs(delta) < 0.0025) {
-      E2E.uiPct = E2E.targetPct;
-    } else {
-      const inc = Math.max(0.003, Math.min(0.012, Math.abs(delta) * 0.12));
-      E2E.uiPct += Math.sign(delta) * inc;
-    }
-
-    try {
-      if (finalizing) {
-        E2E.stage = 'Completado';
-      }
-      LoadingHelpers.peek(E2E.uiPct, finalizing ? 'Completado' : undefined);
-    } catch (_e) {
-      // ignore
-    }
-
-    if (finalizing && Math.abs(1 - E2E.uiPct) < 0.0025) {
-      try { LoadingHelpers.finish?.(); } catch (_e) {}
-      E2E.enabled = false;
-      E2E.raf = 0;
-      return;
-    }
-    E2E.raf = requestAnimationFrame(step);
-  };
-  E2E.raf = requestAnimationFrame(step);
-}
-
-resetE2EState({ enabled: false });
+__resetE2EState({ enabled: false });
 
 // ===== ProgressRail: una barra por "host" (slot). host = elemento contenedor (header, modal, etc.)
 function createRailInHost(host) {
@@ -261,9 +200,7 @@ function startTaskInHost({ title = 'Procesando…', hostEl = null } = {}) {
   const id = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
   const isImport = typeof title === 'string' && /importando\s+cat[aá]logo/i.test(title);
   if (isImport) {
-    prepareE2EForImport();
-    E2E.title = title || 'Proceso';
-    E2E.stage = 'Iniciando…';
+    __prepareE2EForImport(title || 'Proceso');
   }
   s.tasks.set(id, { progress: 0, title, stage: 'Iniciando…', isImport });
   refreshHost(host);
@@ -280,7 +217,7 @@ function startTaskInHost({ title = 'Procesando…', hostEl = null } = {}) {
         } else {
           E2E.stage = t.stage;
         }
-        setImportFractionSmooth(frac);
+        __setImportFracForE2E(frac);
       }
     },
     setStage(stage) {
@@ -293,6 +230,9 @@ function startTaskInHost({ title = 'Procesando…', hostEl = null } = {}) {
     done() {
       s.tasks.delete(id);
       refreshHost(host);
+      if (isImport) {
+        __startIaWatcherIfNeeded();
+      }
     }
   };
 }
@@ -351,27 +291,12 @@ export const LoadingHelpers = {
     }
     method = (method || 'GET').toString().toUpperCase();
     const skipCounting = shouldSkipByUrlAndMethod(url, method);
-
-    let counted = false;
-    if (!skipCounting && /^(POST|PUT|PATCH)$/.test(method)) {
-      counted = true;
-      E2E.inFlightPost++;
-      E2E.iaTotal++;
-      E2E.lastPostTs = Date.now();
-    }
-
     const host = initObj.__hostEl || null;
-    const t = startTaskInHost({ title: 'Cargando datos', hostEl: host });
+    const t = skipCounting ? null : startTaskInHost({ title: 'Cargando datos', hostEl: host });
     try {
       return await origFetch(input, initObj);
     } finally {
-      t.done();
-      if (counted) {
-        E2E.inFlightPost = Math.max(0, E2E.inFlightPost - 1);
-        E2E.iaDone = Math.min(E2E.iaTotal, E2E.iaDone + 1);
-        E2E.lastPostTs = Date.now();
-        bumpTargetPct();
-      }
+      t?.done();
     }
   };
 
@@ -388,26 +313,13 @@ export const LoadingHelpers = {
     const method = (this.__method || 'GET').toString();
     const url = this.__url;
     const skipCounting = shouldSkipByUrlAndMethod(url, method);
-    let counted = false;
-    if (!skipCounting && /^(POST|PUT|PATCH)$/i.test(method)) {
-      counted = true;
-      E2E.inFlightPost++;
-      E2E.iaTotal++;
-      E2E.lastPostTs = Date.now();
-    }
     const host = this.__hostEl || null;
-    const t = startTaskInHost({ title: 'Comunicando…', hostEl: host });
+    const t = skipCounting ? null : startTaskInHost({ title: 'Comunicando…', hostEl: host });
     let settled = false;
     const end = () => {
       if (settled) return;
       settled = true;
-      t.done();
-      if (counted) {
-        E2E.inFlightPost = Math.max(0, E2E.inFlightPost - 1);
-        E2E.iaDone = Math.min(E2E.iaTotal, E2E.iaDone + 1);
-        E2E.lastPostTs = Date.now();
-        bumpTargetPct();
-      }
+      t?.done();
     };
     this.addEventListener('loadend', end);
     this.addEventListener('error', end);
@@ -416,3 +328,109 @@ export const LoadingHelpers = {
     catch (e) { end(); throw e; }
   };
 })();
+
+async function __fetchProductsLight() {
+  // GET con __skipLoadingHook para no generar tareas ni mover la barra
+  const res = await fetch('/products', { method:'GET', __skipLoadingHook: true });
+  if (!res.ok) throw new Error('products fetch failed');
+  return res.json();
+}
+
+// Define qué significa "IA completa" (ajusta campos si tu app usa otros)
+const __IA_MAG = new Set(['Low','Medium','High']);
+const __IA_AWARE = new Set(['Unaware','Problem-Aware','Solution-Aware','Product-Aware','Most Aware']);
+const __IA_COMP = new Set(['Low','Medium','High']);
+function __aiFieldsMissing(p) {
+  const desire = (p && (p.desire ?? '')).toString().trim();
+  const mag    = p && p.desire_magnitude;
+  const aware  = p && p.awareness_level;
+  const comp   = p && p.competition_level;
+  const okDes  = desire.length > 0;
+  const okMag  = __IA_MAG.has(mag);
+  const okAw   = __IA_AWARE.has(aware);
+  const okComp = __IA_COMP.has(comp);
+  return !(okDes && okMag && okAw && okComp);
+}
+
+function __mapToGlobalFrac(importFrac, iaFracObserved) {
+  // Import ocupa importWeight, IA el resto
+  const a = (importFrac || 0) * E2E_CFG.importWeight;
+  const b = (iaFracObserved || 0) * E2E_CFG.iaWeight;
+  // nunca pasamos de 99.5% sin confirmación final
+  return Math.min(0.995, a + b);
+}
+
+function __animateTowards(target, doneFlag) {
+  if (E2E.raf) cancelAnimationFrame(E2E.raf);
+  const step = () => {
+    const delta = target - E2E.uiFrac;
+    if (Math.abs(delta) < 0.0025) {
+      E2E.uiFrac = target;
+    } else {
+      const inc = Math.max(0.003, Math.min(0.012, Math.abs(delta) * 0.12));
+      E2E.uiFrac += Math.sign(delta) * inc;
+    }
+    try { LoadingHelpers.peek?.(E2E.uiFrac, doneFlag ? 'Completado' : undefined); } catch (_) {}
+    if (doneFlag && Math.abs(1 - E2E.uiFrac) < 0.003) {
+      try { LoadingHelpers.finish?.(); } catch (_) {}
+      E2E.enabled = false;
+      E2E.raf = 0;
+      return;
+    }
+    E2E.raf = requestAnimationFrame(step);
+  };
+  E2E.raf = requestAnimationFrame(step);
+}
+
+function __bumpTarget() {
+  // Calcula el objetivo en base a import + IA observada
+  const target = __mapToGlobalFrac(E2E.importFrac, E2E.iaFracObserved);
+  E2E.targetFrac = Math.max(E2E.targetFrac, target);
+  __animateTowards(E2E.targetFrac, false);
+}
+
+async function __runIaWatcherOnce() {
+  try {
+    const data = await __fetchProductsLight();
+    const total = Array.isArray(data) ? data.length : 0;
+    if (!total) return; // sin datos, no movemos nada
+    let missing = 0;
+    for (const p of data) { if (__aiFieldsMissing(p)) missing++; }
+    const done = total - missing;
+    const fracLocal = done / total;         // 0..1 (solo IA)
+    // Suaviza subidas y “acumula” el mejor valor observado
+    E2E.iaFracObserved = Math.max(E2E.iaFracObserved, fracLocal);
+    __bumpTarget();
+
+    if (missing === 0) {
+      E2E.iaStableCount++;
+    } else {
+      E2E.iaStableCount = 0;
+    }
+  } catch (_e) {
+    // ignora errores de red puntuales
+  }
+}
+
+function __startIaWatcherIfNeeded() {
+  // Arranca cuando import llega a 100% (o casi)
+  if (E2E.iaWatcher || !E2E.enabled) return;
+  if (E2E.importFrac < 0.999) return;
+  E2E.iaWatchStart = Date.now();
+  E2E.iaWatcher = setInterval(async () => {
+    const elapsed = Date.now() - E2E.iaWatchStart;
+    if (elapsed > E2E_CFG.iaPollTimeoutMs) {
+      // damos por terminado visualmente (pero sin “victoria falsa” antes de tiempo)
+      __animateTowards(0.999, false);
+      clearInterval(E2E.iaWatcher); E2E.iaWatcher = null;
+      return;
+    }
+    await __runIaWatcherOnce();
+    // Confirmación: dos ticks seguidos con 0 pendientes
+    if (E2E.iaStableCount >= E2E_CFG.iaStableHits) {
+      clearInterval(E2E.iaWatcher); E2E.iaWatcher = null;
+      // Empuje a 100% y cierre
+      __animateTowards(1, true);
+    }
+  }, E2E_CFG.iaPollMs);
+}
