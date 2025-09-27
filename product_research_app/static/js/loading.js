@@ -10,6 +10,147 @@
   mo.observe(document.documentElement, { childList: true, subtree: true });
 })();
 
+// ==== E2E progress (solo frontend) ====
+const E2E_CFG = {
+  importWeight: 0.80,        // hasta ~80% con import
+  iaWeight: 0.20,            // 20% final con IA
+  idleMs: 1600,              // considera terminado IA si no hay POSTs en este intervalo
+};
+
+const E2E = {
+  // import
+  importPct: 0,              // 0..1 (alimentado por la barra existente de import)
+  // ia
+  iaTotal: 0,
+  iaDone: 0,
+  inFlightPost: 0,
+  lastPostTs: 0,
+  enabled: true,             // se puede desactivar si no hay import
+  title: 'Proceso',
+  stage: 'Procesando…',
+  // animación suave
+  uiPct: 0,                  // 0..1
+  targetPct: 0,              // 0..1
+  raf: 0,
+};
+
+function clamp01(v) {
+  const num = Number(v);
+  if (!Number.isFinite(num)) return 0;
+  return Math.max(0, Math.min(1, num));
+}
+
+function resetE2EState({ enabled = false } = {}) {
+  if (E2E.raf) {
+    cancelAnimationFrame(E2E.raf);
+    E2E.raf = 0;
+  }
+  E2E.importPct = 0;
+  E2E.iaTotal = 0;
+  E2E.iaDone = 0;
+  E2E.inFlightPost = 0;
+  E2E.lastPostTs = 0;
+  E2E.uiPct = 0;
+  E2E.targetPct = 0;
+  E2E.title = 'Proceso';
+  E2E.stage = 'Procesando…';
+  E2E.enabled = enabled;
+}
+
+function prepareE2EForImport() {
+  resetE2EState({ enabled: true });
+  E2E.lastPostTs = Date.now();
+}
+
+function shouldSkipByUrlAndMethod(url, method) {
+  const m = (method || 'GET').toUpperCase();
+  if (m === 'GET') return true; // no contamos GETs en el progreso
+  const u = String(url || '');
+  if (/\b\/_import_status\b/i.test(u)) return true; // no sumes el poll de estado
+  return false;
+}
+
+function setImportFractionSmooth(frac) {
+  if (!E2E.enabled) return;
+  const f = clamp01(frac || 0);
+  E2E.importPct = f;
+  if (f >= 1) {
+    E2E.lastPostTs = Date.now();
+  }
+  bumpTargetPct();
+}
+
+function computeTarget() {
+  if (!E2E.enabled) {
+    return { pct: E2E.uiPct || 0, done: false };
+  }
+
+  const a = (E2E.importPct || 0) * E2E_CFG.importWeight;
+
+  let iaFrac = 0;
+  if (E2E.iaTotal > 0) {
+    iaFrac = E2E.iaDone / Math.max(E2E.iaTotal, 1);
+  } else {
+    iaFrac = 0;
+  }
+  const b = iaFrac * E2E_CFG.iaWeight;
+
+  const idle = (Date.now() - (E2E.lastPostTs || 0)) > E2E_CFG.idleMs && E2E.inFlightPost === 0;
+  const done = (E2E.importPct >= 1 && (E2E.iaTotal === 0 ? idle : (E2E.iaDone >= E2E.iaTotal && idle)));
+
+  return { pct: done ? 1 : Math.min(0.995, a + b), done };
+}
+
+function bumpTargetPct() {
+  if (!E2E.enabled) return;
+  const { pct, done } = computeTarget();
+  E2E.targetPct = Math.max(E2E.targetPct, pct);
+  animateE2E(done);
+}
+
+function animateE2E(doneFlag) {
+  if (!E2E.enabled) return;
+  if (E2E.raf) cancelAnimationFrame(E2E.raf);
+  let finalizing = !!doneFlag;
+  const step = () => {
+    const { pct, done } = computeTarget();
+    if (pct > E2E.targetPct) {
+      E2E.targetPct = pct;
+    }
+    if (done) {
+      finalizing = true;
+    }
+
+    const delta = E2E.targetPct - E2E.uiPct;
+    if (Math.abs(delta) < 0.0025) {
+      E2E.uiPct = E2E.targetPct;
+    } else {
+      const inc = Math.max(0.003, Math.min(0.012, Math.abs(delta) * 0.12));
+      E2E.uiPct += Math.sign(delta) * inc;
+    }
+
+    try {
+      if (finalizing) {
+        E2E.stage = 'Completado';
+      }
+      LoadingHelpers.peek(E2E.uiPct, finalizing ? 'Completado' : undefined);
+    } catch (_e) {
+      // ignore
+    }
+
+    if (finalizing && Math.abs(1 - E2E.uiPct) < 0.0025) {
+      try { LoadingHelpers.finish?.(); } catch (_e) {}
+      E2E.enabled = false;
+      E2E.raf = 0;
+      return;
+    }
+    E2E.raf = requestAnimationFrame(step);
+  };
+  E2E.raf = requestAnimationFrame(step);
+}
+
+resetE2EState({ enabled: false });
+
 // ===== ProgressRail: una barra por "host" (slot). host = elemento contenedor (header, modal, etc.)
 function createRailInHost(host) {
   if (!host) return null;
@@ -56,7 +197,16 @@ function getRailState(host) {
   const pctEl = rail.querySelector('.progress-percent');
   const titleEl = rail.querySelector('.progress-title');
   const stageEl = rail.querySelector('.progress-stage');
-  state = { rail, fill, pctEl, titleEl, stageEl, tasks: new Map(), hideTimer: null };
+  state = {
+    rail,
+    fill,
+    pctEl,
+    titleEl,
+    stageEl,
+    tasks: new Map(),
+    hideTimer: null,
+    e2e: { active: false, progress: 0, title: 'Proceso', stage: 'Procesando…' }
+  };
   Rails.set(host, state);
   return state;
 }
@@ -64,6 +214,19 @@ function getRailState(host) {
 function refreshHost(host) {
   const s = getRailState(host); if (!s) return;
   const tasks = s.tasks;
+  const e2eActive = !!(s.e2e && s.e2e.active && E2E.enabled);
+  if (e2eActive) {
+    const frac = clamp01(s.e2e.progress || 0);
+    const pct = Math.round(frac * 100);
+    s.fill.style.width = pct + '%';
+    s.pctEl.textContent = pct + '%';
+    host.classList.add('active');
+    if (s.e2e.title) s.titleEl.textContent = s.e2e.title;
+    if (s.e2e.stage) s.stageEl.textContent = s.e2e.stage;
+    clearTimeout(s.hideTimer);
+    s.hideTimer = null;
+    return;
+  }
   if (tasks.size === 0) {
     // completar al 100% brevemente y colapsar el slot
     s.fill.style.width = '100%';
@@ -96,7 +259,13 @@ function startTaskInHost({ title = 'Procesando…', hostEl = null } = {}) {
   if (!s) return { step(){}, setStage(){}, done(){} };
 
   const id = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
-  s.tasks.set(id, { progress: 0, title, stage: 'Iniciando…' });
+  const isImport = typeof title === 'string' && /importando\s+cat[aá]logo/i.test(title);
+  if (isImport) {
+    prepareE2EForImport();
+    E2E.title = title || 'Proceso';
+    E2E.stage = 'Iniciando…';
+  }
+  s.tasks.set(id, { progress: 0, title, stage: 'Iniciando…', isImport });
   refreshHost(host);
 
   return {
@@ -105,10 +274,21 @@ function startTaskInHost({ title = 'Procesando…', hostEl = null } = {}) {
       t.progress = Math.max(0, Math.min(1, frac));
       if (stage) t.stage = stage;
       refreshHost(host);
+      if (t.isImport) {
+        if (stage) {
+          E2E.stage = stage;
+        } else {
+          E2E.stage = t.stage;
+        }
+        setImportFractionSmooth(frac);
+      }
     },
     setStage(stage) {
       const t = s.tasks.get(id); if (!t) return;
       t.stage = stage; refreshHost(host);
+      if (t.isImport && stage) {
+        E2E.stage = stage;
+      }
     },
     done() {
       s.tasks.delete(id);
@@ -121,20 +301,78 @@ function startTaskInHost({ title = 'Procesando…', hostEl = null } = {}) {
 export const LoadingHelpers = {
   start(title, opts = {}) {
     return startTaskInHost({ title, hostEl: opts.host || null });
+  },
+  peek(fraction, stage) {
+    if (!E2E.enabled) return;
+    const host = ensureSlot(null);
+    const s = getRailState(host);
+    if (!s) return;
+    const frac = clamp01(fraction || 0);
+    s.e2e.active = true;
+    s.e2e.progress = frac;
+    const stageText = stage || E2E.stage || s.e2e.stage;
+    if (stageText) s.e2e.stage = stageText;
+    s.e2e.title = E2E.title || s.e2e.title || 'Proceso';
+    refreshHost(host);
+  },
+  finish(stage) {
+    const host = ensureSlot(null);
+    const s = getRailState(host);
+    if (!s) return;
+    const stageText = stage || E2E.stage;
+    if (stageText) {
+      s.stageEl.textContent = stageText;
+      E2E.stage = stageText;
+    }
+    if (s.e2e) {
+      s.e2e.active = false;
+      s.e2e.progress = 1;
+    }
+    refreshHost(host);
   }
 };
 
 // ===== Hooks de red: si se pasa init.__hostEl, el progreso aparece en ese host; si no, en el global =====
 (() => {
-  const _fetch = window.fetch;
+  const origFetch = window.fetch.bind(window);
   window.fetch = async function(input, init = {}) {
-    if (init && init.__skipLoadingHook) {
-      return _fetch.call(this, input, init);
+    const initObj = init || {};
+    if (initObj && initObj.__skipLoadingHook) {
+      return origFetch(input, initObj);
     }
-    const host = init.__hostEl || null;
+
+    let method = initObj.method;
+    let url = input;
+    if (!method && typeof input === 'object' && input) {
+      method = input.method;
+    }
+    if (typeof input === 'object' && input && input.url) {
+      url = input.url;
+    }
+    method = (method || 'GET').toString().toUpperCase();
+    const skipCounting = shouldSkipByUrlAndMethod(url, method);
+
+    let counted = false;
+    if (!skipCounting && /^(POST|PUT|PATCH)$/.test(method)) {
+      counted = true;
+      E2E.inFlightPost++;
+      E2E.iaTotal++;
+      E2E.lastPostTs = Date.now();
+    }
+
+    const host = initObj.__hostEl || null;
     const t = startTaskInHost({ title: 'Cargando datos', hostEl: host });
-    try { return await _fetch(input, init); }
-    finally { t.done(); }
+    try {
+      return await origFetch(input, initObj);
+    } finally {
+      t.done();
+      if (counted) {
+        E2E.inFlightPost = Math.max(0, E2E.inFlightPost - 1);
+        E2E.iaDone = Math.min(E2E.iaTotal, E2E.iaDone + 1);
+        E2E.lastPostTs = Date.now();
+        bumpTargetPct();
+      }
+    }
   };
 
   const _open = XMLHttpRequest.prototype.open;
@@ -147,9 +385,30 @@ export const LoadingHelpers = {
     if (this.__skipLoadingHook) {
       return _send.apply(this, arguments);
     }
+    const method = (this.__method || 'GET').toString();
+    const url = this.__url;
+    const skipCounting = shouldSkipByUrlAndMethod(url, method);
+    let counted = false;
+    if (!skipCounting && /^(POST|PUT|PATCH)$/i.test(method)) {
+      counted = true;
+      E2E.inFlightPost++;
+      E2E.iaTotal++;
+      E2E.lastPostTs = Date.now();
+    }
     const host = this.__hostEl || null;
     const t = startTaskInHost({ title: 'Comunicando…', hostEl: host });
-    const end = () => t.done();
+    let settled = false;
+    const end = () => {
+      if (settled) return;
+      settled = true;
+      t.done();
+      if (counted) {
+        E2E.inFlightPost = Math.max(0, E2E.inFlightPost - 1);
+        E2E.iaDone = Math.min(E2E.iaTotal, E2E.iaDone + 1);
+        E2E.lastPostTs = Date.now();
+        bumpTargetPct();
+      }
+    };
     this.addEventListener('loadend', end);
     this.addEventListener('error', end);
     this.addEventListener('abort', end);
