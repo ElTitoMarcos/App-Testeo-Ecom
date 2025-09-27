@@ -373,11 +373,76 @@ const saveIfDirty = window.saveIfDirty;
 window.fetchJson = fetchJson;
 window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
-const IMPORT_UPLOAD_FRAC = 0.30;
-const IMPORT_POLL_MAX_FRAC = 0.99;
+const IMPORT_UPLOAD_FRAC = 0.25;
+const IMPORT_POLL_MAX_FRAC = 0.70;
 const IMPORT_SERVER_SPAN = IMPORT_POLL_MAX_FRAC - IMPORT_UPLOAD_FRAC;
 const IMPORT_STATUS_URL = '/_import_status';
 const IMPORT_START_URL = '/upload';
+
+// Nuevo: Control de fase IA
+const AI_PHASE_START = 0.70;
+const AI_PHASE_END = 1.00;
+const AI_POLL_EVERY_MS = 800;
+const AI_MAX_WAIT_MS = 20 * 60 * 1000;
+
+const AI_VALID_MAG = new Set(['Low', 'Medium', 'High']);
+const AI_VALID_AWR = new Set(['Unaware', 'Problem-Aware', 'Solution-Aware', 'Product-Aware', 'Most Aware']);
+const AI_VALID_COM = new Set(['Low', 'Medium', 'High']);
+
+function aiIsComplete(p) {
+  const desireOk = !!(p && typeof p.desire === 'string' && p.desire.trim());
+  const magOk = AI_VALID_MAG.has(p?.desire_magnitude || '');
+  const awrOk = AI_VALID_AWR.has(p?.awareness_level || '');
+  const comOk = AI_VALID_COM.has(p?.competition_level || '');
+  return desireOk && magOk && awrOk && comOk;
+}
+
+async function fetchAllProductsLite() {
+  return await fetchJson('/products', { __skipLoadingHook: true });
+}
+
+async function trackAIColumnsCompletion(newIds, tracker) {
+  const idSet = new Set(newIds.map(x => String(x)));
+  if (!idSet.size) return;
+
+  const t0 = Date.now();
+  let lastFrac = AI_PHASE_START;
+
+  while (true) {
+    const products = await fetchAllProductsLite();
+    let total = 0, done = 0;
+
+    for (const p of products) {
+      const pid = String(p?.id ?? '');
+      if (!idSet.has(pid)) continue;
+      total += 1;
+      if (aiIsComplete(p)) done += 1;
+    }
+
+    if (total > 0) {
+      const f = done / total;
+      const frac = AI_PHASE_START + (AI_PHASE_END - AI_PHASE_START) * f;
+      const smooth = Math.max(lastFrac, Math.min(frac, AI_PHASE_END));
+      lastFrac = smooth;
+
+      const stageMsg = done < total
+        ? `Generando columnas con IA… (${done}/${total})`
+        : 'Columnas IA completadas';
+
+      tracker.step(smooth, stageMsg);
+
+      if (done >= total) {
+        break;
+      }
+    }
+
+    if (Date.now() - t0 > AI_MAX_WAIT_MS) {
+      tracker.step(AI_PHASE_END, 'Tiempo máximo alcanzado (completando)');
+      break;
+    }
+    await new Promise(r => setTimeout(r, AI_POLL_EVERY_MS));
+  }
+}
 let savedApiKeyHash = null;
 let savedApiKeyLength = 0;
 
@@ -462,6 +527,9 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
   const host = getGlobalProgressHost();
   const tracker = LoadingHelpers.start('Importando catálogo', { host });
   tracker.setStage('Subiendo archivo…');
+
+  const preImportIds = new Set((Array.isArray(allProducts) ? allProducts : []).map(p => String(p.id)));
+
   let lastResult = null;
   try {
     const fd = new FormData();
@@ -500,8 +568,19 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     });
 
     if (startResult.kind === 'sync') {
-      tracker.step(1, 'Completado');
+      tracker.step(IMPORT_POLL_MAX_FRAC, 'Importación completada');
       await reloadTable({ skipProgress: true });
+
+      const nowIds = new Set((Array.isArray(allProducts) ? allProducts : []).map(p => String(p.id)));
+      const newIds = [];
+      nowIds.forEach(id => { if (!preImportIds.has(id)) newIds.push(id); });
+
+      if (newIds.length) {
+        await trackAIColumnsCompletion(newIds, tracker);
+      }
+
+      tracker.step(1, 'Completado');
+      tracker.done();
       const importedCount = startResult.data?.imported ?? startResult.data?.rows_imported;
       if (Number.isFinite(importedCount) && importedCount > 0) {
         toast.success(`Importados ${importedCount}`);
@@ -516,18 +595,29 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
 
     lastResult = await followImportTask(idStr, tracker, { statusUrl, host });
 
+    await reloadTable({ skipProgress: true });
+    const nowIds = new Set((Array.isArray(allProducts) ? allProducts : []).map(p => String(p.id)));
+    const newIds = [];
+    nowIds.forEach(id => { if (!preImportIds.has(id)) newIds.push(id); });
+
+    if (newIds.length) {
+      await trackAIColumnsCompletion(newIds, tracker);
+    }
+
     const importedCount = lastResult?.imported ?? lastResult?.rows_imported;
     if (Number.isFinite(importedCount) && importedCount > 0) {
       toast.success(`Importados ${importedCount}`);
     }
+
     tracker.step(1, 'Completado');
+    tracker.done();
     return lastResult;
   } catch (err) {
     tracker.step(1, 'Error');
+    tracker.done();
     toast.error(err?.message || 'Error al importar catálogo');
     throw err;
   } finally {
-    tracker.done();
     localStorage.removeItem(IMPORT_TASK_LS_KEY);
     hideImportBanner();
   }
@@ -1147,19 +1237,30 @@ window.onload = async () => {
     const host = getGlobalProgressHost();
     const tracker = LoadingHelpers.start('Importando catálogo', { host });
     tracker.step(IMPORT_UPLOAD_FRAC, 'Reanudando…');
+    const preImportIds = new Set((Array.isArray(allProducts) ? allProducts : []).map(p => String(p.id)));
     try {
       const result = await followImportTask(tid, tracker, { host });
+      await reloadTable({ skipProgress: true });
+      const nowIds = new Set((Array.isArray(allProducts) ? allProducts : []).map(p => String(p.id)));
+      const newIds = [];
+      nowIds.forEach(id => { if (!preImportIds.has(id)) newIds.push(id); });
+
+      if (newIds.length) {
+        await trackAIColumnsCompletion(newIds, tracker);
+      }
+
       const importedCount = result?.imported ?? result?.rows_imported;
       if (Number.isFinite(importedCount) && importedCount > 0) {
         toast.success(`Importados ${importedCount}`);
       }
       tracker.step(1, 'Completado');
+      tracker.done();
     } catch (err) {
       tracker.step(1, 'Error');
+      tracker.done();
       toast.error(err?.message || 'Error en importación');
     } finally {
       localStorage.removeItem(IMPORT_TASK_LS_KEY);
-      tracker.done();
       hideImportBanner();
     }
   }
