@@ -1239,27 +1239,42 @@ async def _refine_desire_statement(
     context = _candidate_to_desire_context(candidate)
 
     def _call() -> Optional[Dict[str, Any]]:
-        try:
-            result = gpt.call_gpt(
-                "DESIRE",
-                context_json=context,
-                temperature=0,
-                extra_user=(
-                    f"Borrador previo:\n{draft_text.strip()}\n\n" + DESIRE_REFINE_EXTRA_USER
-                ),
-                mode="refine_no_product",
-                max_tokens=450,
-                stop=None,
-            )
-        except Exception:
-            logger.exception("desire refine call failed for id=%s", candidate.id)
-            return None
+        result = gpt.call_gpt(
+            "DESIRE",
+            context_json=context,
+            temperature=0,
+            extra_user=(
+                f"Borrador previo:\n{draft_text.strip()}\n\n" + DESIRE_REFINE_EXTRA_USER
+            ),
+            mode="refine_no_product",
+            max_tokens=450,
+            stop=None,
+        )
         content = result.get("content") if isinstance(result, dict) else None
         if isinstance(content, dict):
             return content
         return None
 
-    return await asyncio.to_thread(_call)
+    try:
+        return await asyncio.to_thread(_call)
+    except gpt.OpenAIError as exc:
+        message = str(exc).lower()
+        if "status 429" in message:
+            logger.warning(
+                "ai_columns.refine.retry_exhausted id=%s err=%s",
+                candidate.id,
+                exc,
+            )
+        else:
+            logger.error(
+                "ai_columns.refine.failed id=%s",
+                candidate.id,
+                exc_info=True,
+            )
+        return None
+    except Exception:
+        logger.exception("desire refine call failed for id=%s", candidate.id)
+        return None
 
 
 def _emit_status(

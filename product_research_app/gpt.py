@@ -22,15 +22,17 @@ from __future__ import annotations
 import json
 import logging
 import os
-import time
 import re
+import time
 import unicodedata
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
 from . import database, config
+from .ratelimit import decorrelated_jitter_sleep, reserve
 from .prompts.registry import (
     get_json_schema,
     get_system_prompt,
@@ -41,6 +43,7 @@ from .prompts.registry import (
 from .services import winner_score as winner_calc
 
 logger = logging.getLogger(__name__)
+log = logger
 
 APP_DIR = Path(__file__).resolve().parent
 DB_PATH = APP_DIR / "data.sqlite3"
@@ -187,6 +190,49 @@ def build_messages(
     ]
 
 
+MAX_429 = int(os.getenv("PRAPP_OPENAI_MAX_RETRIES_429", "6"))
+BACKOFF_CAP = float(os.getenv("PRAPP_OPENAI_BACKOFF_CAP_S", "8"))
+
+
+def _estimate_tokens(text: str) -> int:
+    return max(1, int(len(text) / 4))
+
+
+def _extract_retry_after_seconds(msg: str) -> float | None:
+    match = re.search(r"in\s+([0-9]+(?:\.[0-9]+)?)\s*s", msg, re.I)
+    if match:
+        try:
+            return float(match.group(1))
+        except Exception:
+            return None
+    match = re.search(r"in\s+([0-9]+)\s*ms", msg, re.I)
+    if match:
+        try:
+            return float(match.group(1)) / 1000.0
+        except Exception:
+            return None
+    return None
+
+
+def _message_text(messages: List[Dict[str, Any]]) -> str:
+    parts: List[str] = []
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict):
+                    text = item.get("text") or item.get("content")
+                    if text:
+                        parts.append(str(text))
+        elif isinstance(content, dict):
+            text = content.get("text")
+            if text:
+                parts.append(str(text))
+    return "\n".join(parts)
+
+
 def call_gpt(
     task: str,
     context_json: Optional[Dict[str, Any]] = None,
@@ -227,28 +273,66 @@ def call_gpt(
     default_max_tokens = 450 if canonical == "DESIRE" else None
     call_max_tokens = max_tokens if max_tokens is not None else default_max_tokens
 
-    try:
-        raw = call_openai_chat(
-            api_key,
-            model,
-            messages,
-            temperature=temperature,
-            response_format=response_format,
-            max_tokens=call_max_tokens,
-            stop=stop,
-        )
-    except OpenAIError as exc:
-        if response_format and _looks_like_response_format_error(str(exc)):
-            raw = call_openai_chat(
-                api_key,
-                model,
-                messages,
-                temperature=temperature,
-                max_tokens=call_max_tokens,
-                stop=stop,
+    prompt_text = _message_text(messages)
+    prompt_tokens_est = _estimate_tokens(prompt_text)
+    if call_max_tokens:
+        try:
+            prompt_tokens_est += int(call_max_tokens)
+        except Exception:
+            prompt_tokens_est += 0
+
+    attempt = 0
+    sleep_prev = 0.0
+    response_format_enabled = response_format is not None
+
+    while True:
+        attempt += 1
+        try:
+            with reserve(prompt_tokens_est):
+                raw = call_openai_chat(
+                    api_key,
+                    model,
+                    messages,
+                    temperature=temperature,
+                    response_format=response_format if response_format_enabled else None,
+                    max_tokens=call_max_tokens,
+                    stop=stop,
+                )
+        except OpenAIError as exc:
+            message = str(exc)
+            lowered = message.lower()
+            if (
+                response_format_enabled
+                and response_format
+                and _looks_like_response_format_error(message)
+                and "status 429" not in lowered
+            ):
+                response_format_enabled = False
+                attempt -= 1
+                continue
+            if "status 429" not in lowered:
+                raise
+            if attempt >= MAX_429:
+                log.error("gpt.call_gpt.gave_up_429 attempts=%s", attempt)
+                raise
+            retry_after = getattr(exc, "retry_after", None)
+            wait_s: float | None = None
+            if isinstance(retry_after, (int, float)):
+                wait_s = float(retry_after)
+            if wait_s is None:
+                wait_s = _extract_retry_after_seconds(message)
+            if wait_s is None:
+                wait_s = sleep_prev
+            sleep_prev = decorrelated_jitter_sleep(wait_s or sleep_prev, BACKOFF_CAP)
+            log.warning(
+                "gpt.call_gpt.retry_429 attempt=%s sleep=%.2fs",
+                attempt,
+                sleep_prev,
             )
-        else:
-            raise
+            continue
+        if attempt > 1:
+            log.info("gpt.call_gpt.recovered status=OK_RECOVERED attempts=%s", attempt)
+        break
 
     parsed_json, text_content = _parse_message_content(raw)
     if is_json_only(canonical):
@@ -453,7 +537,28 @@ def call_openai_chat(
             msg = err.get("error", {}).get("message", response.text)
         except Exception:
             msg = response.text
-        raise OpenAIError(f"OpenAI API returned status {response.status_code}: {msg}")
+        error = OpenAIError(f"OpenAI API returned status {response.status_code}: {msg}")
+        if response.status_code == 429:
+            retry_after_header = response.headers.get("Retry-After")
+            retry_after_seconds: Optional[float] = None
+            if retry_after_header:
+                try:
+                    retry_after_seconds = float(retry_after_header)
+                except ValueError:
+                    try:
+                        from email.utils import parsedate_to_datetime
+
+                        parsed = parsedate_to_datetime(retry_after_header)
+                        if parsed is not None:
+                            retry_after_seconds = max(
+                                0.0,
+                                (parsed - datetime.utcnow()).total_seconds(),
+                            )
+                    except Exception:
+                        retry_after_seconds = None
+            if retry_after_seconds is not None:
+                setattr(error, "retry_after", retry_after_seconds)
+        raise error
     try:
         return response.json()
     except Exception as exc:
