@@ -90,6 +90,14 @@ function refreshHost(host) {
   }
 }
 
+function shouldSkipByUrl(url, method) {
+  if (!url) return false;
+  const u = String(url);
+  if (method && method.toUpperCase() === 'GET') return true;
+  if (/\/(products|status|progress|health)(\?|$)/i.test(u)) return true;
+  return false;
+}
+
 function startTaskInHost({ title = 'Procesando…', hostEl = null } = {}) {
   const host = ensureSlot(hostEl);
   const s = getRailState(host);
@@ -128,10 +136,14 @@ export const LoadingHelpers = {
 (() => {
   const _fetch = window.fetch;
   window.fetch = async function(input, init = {}) {
-    if (init && init.__skipLoadingHook) {
+    const requestInit = init || {};
+    const methodFromInit = requestInit.method || (input && typeof input === 'object' && typeof input.method === 'string' ? input.method : 'GET');
+    const method = (methodFromInit || 'GET').toUpperCase();
+    const url = input && typeof input === 'object' && typeof input.url === 'string' ? input.url : input;
+    if ((requestInit && requestInit.__skipLoadingHook) || shouldSkipByUrl(url, method)) {
       return _fetch.call(this, input, init);
     }
-    const host = init.__hostEl || null;
+    const host = requestInit.__hostEl || null;
     const t = startTaskInHost({ title: 'Cargando datos', hostEl: host });
     try { return await _fetch(input, init); }
     finally { t.done(); }
@@ -144,7 +156,8 @@ export const LoadingHelpers = {
     return _open.apply(this, arguments);
   };
   XMLHttpRequest.prototype.send = function(body) {
-    if (this.__skipLoadingHook) {
+    const method = (this.__method || 'GET').toString().toUpperCase();
+    if (this.__skipLoadingHook || method === 'GET' || shouldSkipByUrl(this.__url, method)) {
       return _send.apply(this, arguments);
     }
     const host = this.__hostEl || null;
