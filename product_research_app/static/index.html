@@ -374,10 +374,13 @@ window.fetchJson = fetchJson;
 window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
 const IMPORT_UPLOAD_FRAC = 0.30;
-const IMPORT_POLL_MAX_FRAC = 0.99;
+const IMPORT_POLL_MAX_FRAC = 0.80;
 const IMPORT_SERVER_SPAN = IMPORT_POLL_MAX_FRAC - IMPORT_UPLOAD_FRAC;
 const IMPORT_STATUS_URL = '/_import_status';
 const IMPORT_START_URL = '/upload';
+const ENRICH_STATUS_URL = '/enrich/status';
+const ENRICH_START_FRAC = 0.80;
+const ENRICH_MAX_FRAC = 0.999;
 let savedApiKeyHash = null;
 let savedApiKeyLength = 0;
 
@@ -418,6 +421,92 @@ function mapServerFraction(serverPct) {
   return Math.min(IMPORT_POLL_MAX_FRAC, frac);
 }
 
+function mapAiFraction(done, total) {
+  const d = Math.max(0, Number(done) || 0);
+  const t = Math.max(1, Number(total) || 1);
+  const p = Math.max(0, Math.min(1, d / t));
+  return ENRICH_START_FRAC + p * (ENRICH_MAX_FRAC - ENRICH_START_FRAC);
+}
+
+async function followEnrich(jobId, tracker, { host = getGlobalProgressHost() } = {}) {
+  const jobStr = jobId != null ? String(jobId).trim() : '';
+  if (!jobStr) return null;
+
+  let current = ENRICH_START_FRAC;
+  tracker?.step(current, 'Generando columnas IA…');
+
+  const num = (value) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : undefined;
+  };
+
+  while (true) {
+    let data;
+    try {
+      const resp = await fetch(`${ENRICH_STATUS_URL}?job_id=${encodeURIComponent(jobStr)}&t=${Date.now()}`,
+        { __skipLoadingHook: true, __hostEl: host, cache: 'no-store' }
+      );
+      if (!resp.ok) throw new Error('Estado IA no disponible');
+      data = await resp.json();
+    } catch (err) {
+      tracker?.step(current, 'Generando columnas IA… (reintentando)');
+      await sleep(600);
+      continue;
+    }
+
+    let done = num(data.done) ?? num(data.completed) ?? num(data.ok) ?? 0;
+    let total = num(data.total) ?? num(data.expected_total) ?? num(data.items);
+    const pending = num(data.pending) ?? num(data.todo) ?? num(data.remaining);
+    const failed = num(data.ko) ?? num(data.failed) ?? num(data.errors);
+    if (!Number.isFinite(total) || total <= 0) {
+      let derived = 0;
+      if (Number.isFinite(done)) derived += done;
+      if (Number.isFinite(pending)) derived += pending;
+      if (Number.isFinite(failed)) derived += failed;
+      if (derived > 0) total = derived;
+    }
+    if (!Number.isFinite(done) || done < 0) done = 0;
+    if (!Number.isFinite(total) || total <= 0) total = Math.max(done, 1);
+
+    const statusVal = String(data.status || data.state || data.stage || '').toLowerCase();
+    const baseStage = (data.message || data.stage || data.status_text || data.state || '').toString().trim();
+    const doneDisplay = Math.max(0, Math.round(done));
+    const totalDisplay = Math.max(doneDisplay, Math.max(1, Math.round(total)));
+    const stageText = `${baseStage ? baseStage : 'Generando columnas IA…'} (${doneDisplay}/${totalDisplay})`;
+    const target = mapAiFraction(done, total);
+
+    if (statusVal === 'error' || data.error) {
+      tracker?.step(current, `${stageText} — ${data.error || 'Error generando columnas IA'}`);
+      throw new Error(data.error || 'Error generando columnas IA');
+    }
+
+    if (target > current) {
+      let next = current;
+      while ((target - next) > 1e-4) {
+        const step = Math.max(0.005, (target - next) / 4);
+        next = Math.min(target, next + step);
+        current = next;
+        tracker?.step(current, stageText);
+        await sleep(120);
+      }
+      if (current < target) {
+        current = target;
+        tracker?.step(current, stageText);
+      }
+    } else {
+      current = Math.max(current, target);
+      tracker?.step(current, stageText);
+    }
+
+    if (statusVal === 'completed' || statusVal === 'done' || statusVal === 'finished' || done >= total) {
+      tracker?.step(1, 'Completado columnas IA');
+      return data;
+    }
+
+    await sleep(600);
+  }
+}
+
 async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL, host = getGlobalProgressHost() } = {}) {
   const id = typeof taskId === 'string' ? taskId : String(taskId || '');
   if (!id) return null;
@@ -449,6 +538,10 @@ async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL
       throw new Error('Estado de importación desconocido');
     }
     if (serverPct >= 100 || statusVal === 'done' || statusVal === 'completed' || statusVal === 'finished') {
+      const jobId = data.job_id ?? data.jobId ?? data.id ?? (/^\d+$/.test(id) ? Number(id) : undefined);
+      if (jobId !== undefined && jobId !== null && String(jobId).trim() !== '') {
+        await followEnrich(jobId, tracker, { host });
+      }
       await reloadTable({ skipProgress: true });
       hideImportBanner();
       return data;
