@@ -7,7 +7,7 @@ import logging
 import sqlite3
 import unicodedata
 from datetime import datetime, date
-from typing import Dict, Any, Iterable, Optional, Callable
+from typing import Dict, Any, Iterable, Optional, Callable, List
 
 from ..utils.db import rget
 from .. import database
@@ -18,8 +18,10 @@ from .config import (
     DB_PATH as CONFIG_DB_PATH,
 )
 from ..config import load_config, save_config, DEFAULT_WINNER_ORDER
+from ..logging_setup import get_logger, get_log_dir
+from ..obs import Stage, ReasonCode, log_ko, dump_artifact
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def load_settings() -> Dict[str, Any]:
@@ -781,43 +783,57 @@ def generate_winner_scores(
             if new_score != old_score:
                 updated_int += 1
 
-        if not present:
-            logger.warning(
-                "Winner Score: product=%s score_int=%s score_raw=%.3f weights_all=%s weights_eff=%s present=%s missing=%s disabled=%s "
-                "effective_weights=%s order=%s weights_effective_int=%s oldness_dir=%s oldness_intensity=%.3f oldness_ui=%.1f no_features_present",
-                pid,
-                new_score,
-                score_raw_0_100,
-                weights_hash_all,
-                eff_hash,
-                present,
-                missing,
-                disabled,
-                eff_w,
-                ord_list,
-                eff_w_int,
-                dir_old_label,
-                w_old_intensity,
-                oldness_ui,
+        status_tag = "missing_fields" if missing else "ok"
+        log_fn = logger.warning if missing else logger.info
+        log_fn(
+            "Winner Score: product=%s score_int=%s score_raw=%.3f weights_all=%s weights_eff=%s present=%s missing=%s disabled=%s "
+            "effective_weights=%s order=%s weights_effective_int=%s oldness_dir=%s oldness_intensity=%.3f oldness_ui=%.1f status=%s",
+            pid,
+            new_score,
+            score_raw_0_100,
+            weights_hash_all,
+            eff_hash,
+            present,
+            missing,
+            disabled,
+            eff_w,
+            ord_list,
+            eff_w_int,
+            dir_old_label,
+            w_old_intensity,
+            oldness_ui,
+            status_tag,
+        )
+        if missing:
+            artifact_list: List[str] = []
+            gap_payload = {
+                "product_id": pid,
+                "missing": sorted(missing),
+                "present": sorted(present),
+                "effective_weights": eff_w,
+            }
+            gap_path = dump_artifact(
+                get_log_dir() / "ko" / "winner_score" / "recompute" / str(pid) / "feature_gaps.json",
+                gap_payload,
             )
-        else:
-            logger.info(
-                "Winner Score: product=%s score_int=%s score_raw=%.3f weights_all=%s weights_eff=%s present=%s missing=%s disabled=%s "
-                "effective_weights=%s order=%s weights_effective_int=%s oldness_dir=%s oldness_intensity=%.3f oldness_ui=%.1f",
-                pid,
-                new_score,
-                score_raw_0_100,
-                weights_hash_all,
-                eff_hash,
-                present,
-                missing,
-                disabled,
-                eff_w,
-                ord_list,
-                eff_w_int,
-                dir_old_label,
-                w_old_intensity,
-                oldness_ui,
+            if gap_path:
+                artifact_list.append(gap_path)
+            detail = ", ".join(sorted(missing)) or "missing_fields"
+            log_ko(
+                logger,
+                stage=Stage.RECOMPUTE_SCORES,
+                job_id="winner_score",
+                req_id="recompute",
+                product_id=str(pid),
+                duration_ms=0.0,
+                retries=0,
+                model=None,
+                prompt_tokens=None,
+                response_tokens=None,
+                reason_code=ReasonCode.MISSING_REQUIRED_KEYS,
+                reason_detail=detail,
+                http_status=None,
+                artifacts=artifact_list,
             )
         processed += 1
 

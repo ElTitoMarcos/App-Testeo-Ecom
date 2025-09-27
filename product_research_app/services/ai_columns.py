@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import math
 import os
 import random
 import time
-from collections import deque
-from dataclasses import dataclass
+import sqlite3
+from collections import Counter, deque
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -16,10 +16,20 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import httpx
 
 from .. import config, database, gpt
+from ..logging_setup import get_logger, get_log_dir
 from ..utils.signature import compute_sig_hash
 from .desire_utils import cleanse, looks_like_product_desc
+from ..obs import (
+    Stage,
+    ReasonCode,
+    log_ok,
+    log_ko,
+    ensure_dirs,
+    dump_artifact,
+    artifacts_enabled,
+)
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 APP_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = APP_DIR / "data.sqlite3"
@@ -43,6 +53,194 @@ class BatchRequest:
     candidates: List[Candidate]
     user_text: str
     prompt_tokens_est: int
+
+
+@dataclass
+class ProductTrace:
+    product_id: int
+    job_id: str
+    artifacts: List[str] = field(default_factory=list)
+    req_id: Optional[str] = None
+    retries: int = 0
+    model: Optional[str] = None
+    prompt_tokens: Optional[int] = None
+    response_tokens: Optional[int] = None
+    http_status: Optional[int] = None
+    durations: Dict[str, float] = field(default_factory=dict)
+
+    def add_artifact(self, path: Optional[str]) -> None:
+        if path and path not in self.artifacts:
+            self.artifacts.append(path)
+
+
+def _job_label(job_id: Optional[int]) -> str:
+    if job_id in {None, 0}:
+        return "adhoc"
+    return str(job_id)
+
+
+def _artifacts_root(job_id: Optional[int]) -> Path:
+    base = get_log_dir()
+    return base / "ko" / _job_label(job_id)
+
+
+def _artifact_path(job_id: Optional[int], req_id: str, product_id: int, filename: str) -> Path:
+    root = _artifacts_root(job_id)
+    return root / req_id / str(product_id) / filename
+
+
+def _format_prompt(system_prompt: str, user_text: str) -> str:
+    return f"SYSTEM:\n{system_prompt.strip()}\n\nUSER:\n{user_text.strip()}"
+
+
+def _validation_report(payload: Dict[str, Any]) -> Dict[str, Any]:
+    required = ["desire", "desire_magnitude", "awareness_level", "competition_level"]
+    missing = [field for field in required if not payload.get(field)]
+    present = [field for field in required if payload.get(field)]
+    return {"required": required, "missing": missing, "present": present}
+
+
+def _record_artifact(trace: ProductTrace, path: Path, data: Any) -> Optional[str]:
+    artifact = dump_artifact(path, data)
+    trace.add_artifact(artifact)
+    return artifact
+
+
+def _persist_request_inputs(
+    job_id: Optional[int], request: BatchRequest, traces: Dict[int, ProductTrace]
+) -> None:
+    if not artifacts_enabled():
+        return
+    prompt_text = _format_prompt(SYSTEM_PROMPT, request.user_text)
+    for cand in request.candidates:
+        trace = traces.get(cand.id)
+        if trace is None:
+            continue
+        req_id = trace.req_id or request.req_id
+        trace.req_id = req_id
+        prompt_path = _artifact_path(job_id, req_id, cand.id, "prompt.txt")
+        payload_path = _artifact_path(job_id, req_id, cand.id, "payload.json")
+        _record_artifact(trace, prompt_path, prompt_text)
+        _record_artifact(trace, payload_path, cand.payload)
+
+
+def _persist_response_artifacts(
+    job_id: Optional[int],
+    request: BatchRequest,
+    traces: Dict[int, ProductTrace],
+    *,
+    raw_json: Optional[Dict[str, Any]] = None,
+    response_text: Optional[str] = None,
+) -> None:
+    if not artifacts_enabled():
+        return
+    for cand in request.candidates:
+        trace = traces.get(cand.id)
+        if trace is None:
+            continue
+        req_id = trace.req_id or request.req_id
+        if raw_json is not None:
+            raw_path = _artifact_path(job_id, req_id, cand.id, "raw_response.json")
+            _record_artifact(trace, raw_path, raw_json)
+        if response_text:
+            resp_path = _artifact_path(job_id, req_id, cand.id, "response_text.txt")
+            _record_artifact(trace, resp_path, response_text)
+
+
+def _persist_validation_artifacts(
+    job_id: Optional[int],
+    product_id: int,
+    trace: ProductTrace,
+    payload: Dict[str, Any],
+) -> List[str]:
+    artifacts: List[str] = []
+    if not artifacts_enabled():
+        return artifacts
+    req_id = trace.req_id or "validation"
+    report_path = _artifact_path(job_id, req_id, product_id, "validation_report.json")
+    normalized_path = _artifact_path(job_id, req_id, product_id, "normalized_output.json")
+    report = _validation_report(payload)
+    rep_art = _record_artifact(trace, report_path, report)
+    norm_art = _record_artifact(trace, normalized_path, payload)
+    if rep_art:
+        artifacts.append(rep_art)
+    if norm_art:
+        artifacts.append(norm_art)
+    return artifacts
+
+
+def _persist_db_failure_artifacts(
+    job_id: Optional[int],
+    product_id: int,
+    trace: ProductTrace,
+    payload: Dict[str, Any],
+    exc: BaseException,
+) -> List[str]:
+    artifacts: List[str] = []
+    if not artifacts_enabled():
+        return artifacts
+    req_id = trace.req_id or "write_db"
+    payload_path = _artifact_path(job_id, req_id, product_id, "db_payload.json")
+    exc_path = _artifact_path(job_id, req_id, product_id, "db_exception.txt")
+    pay_art = _record_artifact(trace, payload_path, payload)
+    exc_art = _record_artifact(trace, exc_path, f"{exc.__class__.__name__}: {exc}")
+    if pay_art:
+        artifacts.append(pay_art)
+    if exc_art:
+        artifacts.append(exc_art)
+    return artifacts
+
+
+def _reason_from_exception(exc: BaseException) -> ReasonCode:
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code if exc.response is not None else None
+        if status == 429:
+            return ReasonCode.OPENAI_RATE_LIMITED
+        if status in {408, 504, 524}:
+            return ReasonCode.OPENAI_TIMEOUT
+        return ReasonCode.OPENAI_HTTP_ERROR
+    if isinstance(exc, httpx.TimeoutException):
+        return ReasonCode.OPENAI_TIMEOUT
+    if isinstance(exc, (json.JSONDecodeError, gpt.InvalidJSONError)):
+        return ReasonCode.OPENAI_BAD_JSON
+    if isinstance(exc, httpx.HTTPError):
+        return ReasonCode.OPENAI_HTTP_ERROR
+    return ReasonCode.UNKNOWN
+
+
+def _http_status_from_exception(exc: BaseException) -> Optional[int]:
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+        return exc.response.status_code
+    if isinstance(exc, httpx.HTTPError) and getattr(exc, "response", None) is not None:
+        return exc.response.status_code  # type: ignore[attr-defined]
+    return None
+
+
+def _reason_from_string(reason: str) -> ReasonCode:
+    mapping = {
+        "missing": ReasonCode.MISSING_REQUIRED_KEYS,
+        "validation_error": ReasonCode.VALIDATION_ERROR,
+        "cost_cap_reached": ReasonCode.UNKNOWN,
+    }
+    return mapping.get(reason or "", ReasonCode.UNKNOWN)
+
+
+def _extract_usage_tokens(usage: Dict[str, Any]) -> Tuple[Optional[int], Optional[int]]:
+    prompt = usage.get("prompt_tokens")
+    if prompt is None:
+        prompt = usage.get("input_tokens") or usage.get("tokens_in")
+    completion = usage.get("completion_tokens")
+    if completion is None:
+        completion = usage.get("output_tokens") or usage.get("tokens_out")
+    def _to_int(value: Any) -> Optional[int]:
+        try:
+            if value is None:
+                return None
+            return int(float(value))
+        except Exception:
+            return None
+
+    return _to_int(prompt), _to_int(completion)
 
 
 class _AsyncRateLimiter:
@@ -552,6 +750,9 @@ async def _call_batch_with_retries(
     rate_limiter: _AsyncRateLimiter,
     semaphore: asyncio.Semaphore,
     stop_event: asyncio.Event,
+    job_id: Optional[int],
+    product_traces: Dict[int, ProductTrace],
+    ko_reason_counts: Counter[str],
 ) -> Dict[str, Any]:
     if stop_event.is_set():
         now_iso = datetime.utcnow().isoformat()
@@ -596,6 +797,14 @@ async def _call_batch_with_retries(
                 "prompt_tokens_est": request.prompt_tokens_est,
             }
 
+        _persist_request_inputs(job_id, request, product_traces)
+        for cand in request.candidates:
+            trace = product_traces.get(cand.id)
+            if trace:
+                trace.model = model
+                if trace.prompt_tokens is None:
+                    trace.prompt_tokens = request.prompt_tokens_est
+
         attempt = 0
         while True:
             await rate_limiter.acquire(request.prompt_tokens_est)
@@ -603,6 +812,9 @@ async def _call_batch_with_retries(
             start_iso = datetime.utcnow().isoformat()
             status = "ok"
             error_message: Optional[str] = None
+            response_text: Optional[str] = None
+            raw: Optional[Dict[str, Any]] = None
+            http_status: Optional[int] = None
             try:
                 response = await client.post(
                     "/v1/chat/completions",
@@ -618,8 +830,11 @@ async def _call_batch_with_retries(
                         ],
                     },
                 )
+                response_text = response.text
+                http_status = response.status_code
                 response.raise_for_status()
                 raw = response.json()
+                _persist_response_artifacts(job_id, request, product_traces, raw_json=raw)
                 payload = _extract_response_payload(raw)
                 if not isinstance(payload, dict):
                     raise gpt.InvalidJSONError("Respuesta IA no es JSON")
@@ -679,8 +894,21 @@ async def _call_batch_with_retries(
                 duration = time.perf_counter() - start_ts
                 end_iso = datetime.utcnow().isoformat()
                 usage = raw.get("usage", {}) or {}
+                prompt_tokens_val, completion_tokens_val = _extract_usage_tokens(usage)
+                for cand in request.candidates:
+                    trace = product_traces.get(cand.id)
+                    if trace:
+                        trace.retries = attempt
+                        trace.http_status = http_status
+                        trace.durations[Stage.CALL_OPENAI.value] = duration
+                        if prompt_tokens_val is not None:
+                            trace.prompt_tokens = prompt_tokens_val
+                        elif trace.prompt_tokens is None:
+                            trace.prompt_tokens = request.prompt_tokens_est
+                        if completion_tokens_val is not None:
+                            trace.response_tokens = completion_tokens_val
                 logger.info(
-                    "ai_columns.request: req_id=%s items=%d prompt_tokens_est=%d start=%s end=%s duration=%.2fs status=%s retries=%d",
+                    "ai_columns.request: req_id=%s items=%d prompt_tokens_est=%d start=%s end=%s duration=%.2fs status=%s retries=%d http_status=%s model=%s prompt_tokens=%s response_tokens=%s",
                     request.req_id,
                     len(request.candidates),
                     request.prompt_tokens_est,
@@ -689,6 +917,10 @@ async def _call_batch_with_retries(
                     duration,
                     status,
                     attempt,
+                    http_status,
+                    model,
+                    prompt_tokens_val if prompt_tokens_val is not None else request.prompt_tokens_est,
+                    completion_tokens_val,
                 )
                 return {
                     "req_id": request.req_id,
@@ -702,11 +934,19 @@ async def _call_batch_with_retries(
                 }
             except (httpx.HTTPError, json.JSONDecodeError, gpt.InvalidJSONError) as exc:
                 error_message = str(exc)
-                status = "retry" if attempt < max_retries else "error"
+                status = "retry" if attempt < max_retries and not stop_event.is_set() else "error"
                 duration = time.perf_counter() - start_ts
                 end_iso = datetime.utcnow().isoformat()
+                http_status = _http_status_from_exception(exc) or http_status
+                _persist_response_artifacts(
+                    job_id,
+                    request,
+                    product_traces,
+                    raw_json=raw if isinstance(raw, dict) else None,
+                    response_text=response_text or error_message,
+                )
                 logger.info(
-                    "ai_columns.request: req_id=%s items=%d prompt_tokens_est=%d start=%s end=%s duration=%.2fs status=%s retries=%d error=%s",
+                    "ai_columns.request: req_id=%s items=%d prompt_tokens_est=%d start=%s end=%s duration=%.2fs status=%s retries=%d error=%s http_status=%s model=%s",
                     request.req_id,
                     len(request.candidates),
                     request.prompt_tokens_est,
@@ -716,12 +956,43 @@ async def _call_batch_with_retries(
                     status,
                     attempt,
                     error_message,
+                    http_status,
+                    model,
                 )
                 if attempt < max_retries and not stop_event.is_set():
                     attempt += 1
                     sleep_for = min(10.0, 0.5 * (2**(attempt - 1))) + random.uniform(0.05, 0.25)
                     await asyncio.sleep(sleep_for)
                     continue
+                reason_code = _reason_from_exception(exc)
+                stage = Stage.PARSE_RESPONSE if reason_code == ReasonCode.OPENAI_BAD_JSON else Stage.CALL_OPENAI
+                for cand in request.candidates:
+                    trace = product_traces.get(cand.id)
+                    if trace:
+                        trace.retries = attempt
+                        trace.http_status = http_status
+                        trace.durations[stage.value] = duration
+                        if trace.prompt_tokens is None:
+                            trace.prompt_tokens = request.prompt_tokens_est
+                        artifacts = list(trace.artifacts)
+                        log_ko(
+                            logger,
+                            stage=stage,
+                            job_id=job_id,
+                            req_id=trace.req_id or request.req_id,
+                            product_id=str(cand.id),
+                            duration_ms=duration * 1000.0,
+                            retries=attempt,
+                            model=trace.model or model,
+                            prompt_tokens=trace.prompt_tokens,
+                            response_tokens=trace.response_tokens,
+                            reason_code=reason_code,
+                            reason_detail=error_message,
+                            exception=exc,
+                            http_status=http_status,
+                            artifacts=artifacts,
+                        )
+                        ko_reason_counts[reason_code.value] += 1
                 return {
                     "req_id": request.req_id,
                     "candidates": request.candidates,
@@ -911,6 +1182,12 @@ def run_ai_fill_job(
     status_cb: Optional[StatusCallback] = None,
 ) -> Dict[str, Any]:
     start_ts = time.perf_counter()
+    job_label = _job_label(job_id)
+    ko_reason_counts: Counter[str] = Counter()
+    job_artifacts_dir = _artifacts_root(job_id)
+    artifacts_on = artifacts_enabled()
+    if artifacts_on:
+        ensure_dirs(job_artifacts_dir)
     conn = _ensure_conn()
     job_updates_enabled = job_id is not None and int(job_id) > 0
     requested_ids: List[int] = []
@@ -960,6 +1237,11 @@ def run_ai_fill_job(
             sig_updates.append((sig_hash, pid))
         payload = _build_payload(row, extra)
         candidates.append(Candidate(id=pid, sig_hash=sig_hash, payload=payload, extra=extra))
+
+    product_traces: Dict[int, ProductTrace] = {
+        cand.id: ProductTrace(product_id=cand.id, job_id=job_label)
+        for cand in candidates
+    }
 
     if sig_updates:
         cur = conn.cursor()
@@ -1178,6 +1460,11 @@ def run_ai_fill_job(
                     )
                 batches.append(batch)
                 req_counter += 1
+                for cand in chunk:
+                    trace = product_traces.get(cand.id)
+                    if trace:
+                        trace.req_id = batch.req_id
+                        trace.prompt_tokens = batch.prompt_tokens_est
                 index += size
                 break
             else:
@@ -1217,6 +1504,7 @@ def run_ai_fill_job(
         ko_map: Dict[str, str] = result.get("ko", {}) or {}
 
         success_updates: Dict[int, Dict[str, Any]] = {}
+        validation_artifacts: Dict[int, List[str]] = {}
         for pid_str, payload in ok_map.items():
             try:
                 pid = int(pid_str)
@@ -1225,6 +1513,7 @@ def run_ai_fill_job(
             success_updates[pid] = payload
             pending_set.discard(pid)
 
+        ko_entries: List[Tuple[int, str]] = []
         for pid_str, reason in ko_map.items():
             try:
                 pid = int(pid_str)
@@ -1232,9 +1521,108 @@ def run_ai_fill_job(
                 continue
             pending_set.add(pid)
             fail_reasons[pid] = reason or "error"
+            ko_entries.append((pid, reason or "error"))
+
+        if ko_entries and not result.get("error"):
+            for pid, reason in ko_entries:
+                trace = product_traces.get(pid)
+                reason_code = _reason_from_string(reason)
+                detail = "Respuesta IA sin entrada para el producto" if reason == "missing" else reason
+                if trace:
+                    trace.durations[Stage.PARSE_RESPONSE.value] = duration
+                    log_ko(
+                        logger,
+                        stage=Stage.PARSE_RESPONSE,
+                        job_id=job_id,
+                        req_id=trace.req_id or result.get("req_id"),
+                        product_id=str(pid),
+                        duration_ms=duration * 1000.0,
+                        retries=trace.retries,
+                        model=trace.model or model,
+                        prompt_tokens=trace.prompt_tokens,
+                        response_tokens=trace.response_tokens,
+                        reason_code=reason_code,
+                        reason_detail=detail,
+                        http_status=trace.http_status,
+                        artifacts=list(trace.artifacts),
+                    )
+                else:
+                    log_ko(
+                        logger,
+                        stage=Stage.PARSE_RESPONSE,
+                        job_id=job_id,
+                        req_id=result.get("req_id"),
+                        product_id=str(pid),
+                        duration_ms=duration * 1000.0,
+                        retries=retries,
+                        model=model,
+                        prompt_tokens=None,
+                        response_tokens=None,
+                        reason_code=reason_code,
+                        reason_detail=detail,
+                        http_status=None,
+                        artifacts=[],
+                    )
+                ko_reason_counts[reason_code.value] += 1
 
         if success_updates:
-            _apply_ai_updates(conn, success_updates)
+            for pid, payload in success_updates.items():
+                trace = product_traces.get(pid)
+                if trace:
+                    trace.durations[Stage.VALIDATE_OUTPUT.value] = duration
+                    validation_artifacts[pid] = _persist_validation_artifacts(job_id, pid, trace, payload)
+                    log_ok(
+                        logger,
+                        stage=Stage.VALIDATE_OUTPUT,
+                        job_id=job_id,
+                        req_id=trace.req_id or result.get("req_id"),
+                        product_id=str(pid),
+                        duration_ms=duration * 1000.0,
+                        retries=trace.retries,
+                        model=trace.model or model,
+                        prompt_tokens=trace.prompt_tokens,
+                        response_tokens=trace.response_tokens,
+                        http_status=trace.http_status,
+                        artifacts=validation_artifacts.get(pid, []),
+                    )
+                else:
+                    validation_artifacts[pid] = []
+
+            db_start = time.perf_counter()
+            try:
+                _apply_ai_updates(conn, success_updates)
+            except Exception as exc:
+                db_duration_ms = (time.perf_counter() - db_start) * 1000.0
+                reason_code = (
+                    ReasonCode.DB_CONSTRAINT_VIOLATION
+                    if isinstance(exc, sqlite3.IntegrityError)
+                    else ReasonCode.DB_WRITE_ERROR
+                )
+                for pid, payload in success_updates.items():
+                    trace = product_traces.get(pid)
+                    artifacts = _persist_db_failure_artifacts(job_id, pid, trace, payload, exc) if trace else []
+                    log_ko(
+                        logger,
+                        stage=Stage.WRITE_DB,
+                        job_id=job_id,
+                        req_id=(trace.req_id if trace else result.get("req_id")),
+                        product_id=str(pid),
+                        duration_ms=db_duration_ms,
+                        retries=trace.retries if trace else retries,
+                        model=(trace.model if trace else model),
+                        prompt_tokens=trace.prompt_tokens if trace else None,
+                        response_tokens=trace.response_tokens if trace else None,
+                        reason_code=reason_code,
+                        reason_detail=str(exc),
+                        exception=exc,
+                        http_status=trace.http_status if trace else None,
+                        artifacts=artifacts,
+                    )
+                    ko_reason_counts[reason_code.value] += 1
+                raise
+
+            db_duration_ms = (time.perf_counter() - db_start) * 1000.0
+            per_item_duration = db_duration_ms / max(1, len(success_updates))
             for pid, payload in success_updates.items():
                 candidate = candidate_map.get(pid)
                 sig_hash = candidate.sig_hash if candidate else ""
@@ -1251,6 +1639,25 @@ def run_ai_fill_job(
                     comp_scores.append((str(pid), parsed_comp))
                     success_records[pid]["_competition_score"] = parsed_comp
                 applied_outputs[pid] = {k: v for k, v in payload.items() if v is not None}
+                trace = product_traces.get(pid)
+                artifacts = validation_artifacts.get(pid, [])
+                if trace:
+                    trace.durations[Stage.WRITE_DB.value] = per_item_duration / 1000.0
+                    write_artifacts = [a for a in artifacts if a.endswith("normalized_output.json")]
+                    log_ok(
+                        logger,
+                        stage=Stage.WRITE_DB,
+                        job_id=job_id,
+                        req_id=trace.req_id or result.get("req_id"),
+                        product_id=str(pid),
+                        duration_ms=per_item_duration,
+                        retries=trace.retries,
+                        model=trace.model or model,
+                        prompt_tokens=trace.prompt_tokens,
+                        response_tokens=trace.response_tokens,
+                        http_status=trace.http_status,
+                        artifacts=write_artifacts or artifacts,
+                    )
 
         counts["ok"] += len(success_updates)
         counts["ko"] += len(ko_map)
@@ -1310,6 +1717,9 @@ def run_ai_fill_job(
                             rate_limiter=rate_limiter,
                             semaphore=semaphore,
                             stop_event=stop_event,
+                            job_id=job_id,
+                            product_traces=product_traces,
+                            ko_reason_counts=ko_reason_counts,
                         )
                     )
                     for batch in batches
@@ -1553,8 +1963,13 @@ def run_ai_fill_job(
     latency_p50 = _percentile(request_latencies, 0.5) if request_latencies else 0.0
     latency_p95 = _percentile(request_latencies, 0.95) if request_latencies else 0.0
 
+    try:
+        job_artifacts_rel = str(job_artifacts_dir.relative_to(get_log_dir().parent))
+    except Exception:
+        job_artifacts_rel = str(job_artifacts_dir)
+
     logger.info(
-        "run_ai_fill_job: job=%s total=%d ok=%d cached=%d ko=%d cost=%.4f pending=%d error=%s duration=%.2fs latency_p50=%.2fs latency_p95=%.2fs requests=%d",
+        "run_ai_fill_job: job=%s total=%d ok=%d cached=%d ko=%d cost=%.4f pending=%d error=%s duration=%.2fs latency_p50=%.2fs latency_p95=%.2fs requests=%d job_artifacts_dir=%s",
         job_id,
         total_items,
         counts["ok"],
@@ -1567,6 +1982,13 @@ def run_ai_fill_job(
         latency_p50,
         latency_p95,
         len(request_latencies),
+        job_artifacts_rel,
+    )
+    logger.info(
+        "run_ai_fill_job.breakdown: job=%s ko_breakdown=%s job_artifacts_dir=%s",
+        job_id,
+        dict(ko_reason_counts),
+        job_artifacts_rel,
     )
 
     conn.close()

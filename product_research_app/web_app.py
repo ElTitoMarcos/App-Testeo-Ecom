@@ -54,6 +54,7 @@ from . import product_enrichment
 from .sse import publish_progress
 from .utils import sanitize_product_name
 from .utils.db import row_to_dict, rget
+from .logging_setup import setup_logging, get_logger
 
 WINNER_SCORE_FIELDS = list(winner_calc.FEATURE_MAP.keys())
 
@@ -64,15 +65,8 @@ ROOT_DIR = APP_DIR.parent
 LOG_DIR = ROOT_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 LOG_PATH = LOG_DIR / "app.log"
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_PATH, encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
-)
-logger = logging.getLogger(__name__)
+setup_logging()
+logger = get_logger(__name__)
 
 DEBUG = bool(os.environ.get("DEBUG"))
 
