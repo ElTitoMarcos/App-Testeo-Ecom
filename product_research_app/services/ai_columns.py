@@ -16,8 +16,11 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 import httpx
 
 from .. import config, database, gpt
+from ..ai.strict_jsonl import parse_jsonl_and_validate
+from ..obs import log_partial_ko, log_recovered
 from ..utils.signature import compute_sig_hash
 from .desire_utils import cleanse, looks_like_product_desc
+from .prompt_templates import MISSING_ONLY_JSONL_PROMPT, STRICT_JSONL_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +29,9 @@ DB_PATH = APP_DIR / "data.sqlite3"
 CALIBRATION_CACHE_FILE = APP_DIR / "ai_calibration_cache.json"
 
 AI_FIELDS = ("desire", "desire_magnitude", "awareness_level", "competition_level")
+DEFAULT_BATCH_SIZE = int(os.getenv("PRAPP_AI_BATCH_SIZE", "8"))
+MIN_BATCH_SIZE = 4
+MAX_RETRIES_MISSING = int(os.getenv("PRAPP_AI_RETRIES_MISSING", "2"))
 StatusCallback = Callable[..., None]
 
 
@@ -43,6 +49,7 @@ class BatchRequest:
     candidates: List[Candidate]
     user_text: str
     prompt_tokens_est: int
+    product_map: Dict[int, str]
 
 
 def _format_job_id(job_id: Optional[int]) -> str:
@@ -326,14 +333,12 @@ class _AsyncRateLimiter:
 
 
 SYSTEM_PROMPT = (
-    "Eres un analista de marketing. Devuelve únicamente un JSON con claves de producto. "
-    "Cada valor debe incluir desire (string corta), desire_magnitude (Low|Medium|High), "
-    "awareness_level (Unaware|Problem-Aware|Solution-Aware|Product-Aware|Most Aware) y "
-    "competition_level (Low|Medium|High)."
+    "Eres un analista de marketing. Devuelve exclusivamente JSONL válido, una línea JSON por producto solicitado. "
+    "Cada registro debe incluir desire (string corta), desire_magnitude (0-1 o etiqueta), "
+    "awareness_level (problem|solution|product|most) y competition_level (low|mid|high), sin texto adicional."
 )
 USER_INSTRUCTION = (
-    "Analiza los siguientes productos y responde solo con un JSON cuyas claves sean los IDs. "
-    "Cada entrada debe incluir desire, desire_magnitude, awareness_level y competition_level."
+    "Analiza los siguientes productos y responde solo con JSONL. El conjunto de product_id debe coincidir exactamente con los solicitados."
 )
 
 def _truncate_text(value: Any, limit: int) -> str:
@@ -436,35 +441,138 @@ def _build_batch_request(
     trunc_desc: int,
 ) -> BatchRequest:
     product_lines: List[str] = []
+    product_map: Dict[int, str] = {}
     for cand in candidates:
         product_payload = _build_product_payload(cand, trunc_title, trunc_desc)
-        product_lines.append(
-            json.dumps(product_payload, ensure_ascii=False, separators=(",", ":"))
-        )
-    user_text = USER_INSTRUCTION + "\n" + "\n".join(product_lines)
+        line = json.dumps(product_payload, ensure_ascii=False, separators=(",", ":"))
+        product_lines.append(line)
+        product_map[cand.id] = line
+    ids = [cand.id for cand in candidates]
+    instruction = STRICT_JSONL_PROMPT(ids, AI_FIELDS)
+    user_parts = [instruction, USER_INSTRUCTION, "### PRODUCTOS", *product_lines]
+    user_text = "\n".join(part for part in user_parts if part)
     prompt_tokens_est = _estimate_tokens_from_text(SYSTEM_PROMPT, user_text) + len(candidates) * 8
     return BatchRequest(
         req_id=req_id,
         candidates=candidates,
         user_text=user_text,
         prompt_tokens_est=prompt_tokens_est,
+        product_map=product_map,
     )
 
 
-def _extract_response_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
+def _extract_jsonl_payload(raw: Dict[str, Any]) -> str:
     parsed_json, text_content = gpt._parse_message_content(raw)
     if isinstance(parsed_json, dict):
-        return parsed_json
-    content_text = text_content.strip() if isinstance(text_content, str) else ""
-    if not content_text:
-        raise gpt.InvalidJSONError("La respuesta IA no es JSON")
-    try:
-        obj = json.loads(content_text)
-    except json.JSONDecodeError:
-        obj, _ = gpt._extract_first_json_block(content_text)
-    if not isinstance(obj, dict):
-        raise gpt.InvalidJSONError("La respuesta IA no es JSON")
-    return obj
+        records: List[Dict[str, Any]] = []
+        if isinstance(parsed_json.get("results"), list):
+            for item in parsed_json.get("results", []):
+                if isinstance(item, dict):
+                    records.append(item)
+        else:
+            for key, value in parsed_json.items():
+                if not isinstance(value, dict):
+                    continue
+                item = dict(value)
+                try:
+                    pid = int(key)
+                except Exception:
+                    pid = value.get("product_id")
+                if pid is not None and "product_id" not in item:
+                    item["product_id"] = pid
+                records.append(item)
+        if records:
+            return "\n".join(
+                json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+                for record in records
+            )
+    if isinstance(parsed_json, list):
+        records = [
+            json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+            for item in parsed_json
+            if isinstance(item, dict)
+        ]
+        if records:
+            return "\n".join(records)
+    if isinstance(text_content, str) and text_content.strip():
+        return text_content.strip()
+    raise gpt.InvalidJSONError("Respuesta IA no es JSONL")
+
+
+def _parse_jsonl_loose(text: str) -> Dict[int, Dict[str, Any]]:
+    result: Dict[int, Dict[str, Any]] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        pid = obj.get("product_id")
+        if isinstance(pid, int):
+            result[pid] = obj
+    return result
+
+
+def _build_missing_prompt(batch: BatchRequest, missing_ids: List[int]) -> str:
+    prompt = MISSING_ONLY_JSONL_PROMPT(missing_ids, AI_FIELDS)
+    product_lines = [batch.product_map.get(pid, "") for pid in missing_ids]
+    body = "\n".join(line for line in product_lines if line)
+    return "\n".join(part for part in (prompt, "### PRODUCTOS", body) if part)
+
+
+async def _recover_missing_async(
+    client: httpx.AsyncClient,
+    batch: BatchRequest,
+    model: str,
+    missing_ids: List[int],
+    rate_limiter: "_AsyncRateLimiter",
+) -> Tuple[Dict[int, Dict[str, Any]], int]:
+    retries_used = 0
+    recovered: Dict[int, Dict[str, Any]] = {}
+    warning_prefix = ""
+    to_fill = list(missing_ids)
+    while to_fill and retries_used < MAX_RETRIES_MISSING:
+        prompt_text = _build_missing_prompt(batch, to_fill)
+        if warning_prefix:
+            prompt_text = f"{warning_prefix}\n\n{prompt_text}"
+        est_tokens = max(200, int(batch.prompt_tokens_est * len(to_fill) / max(1, len(batch.candidates))))
+        await rate_limiter.acquire(est_tokens)
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": model,
+                "temperature": 0.2,
+                "top_p": 0.9,
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt_text},
+                ],
+            },
+        )
+        response.raise_for_status()
+        raw = response.json()
+        try:
+            text = _extract_jsonl_payload(raw)
+            parsed = parse_jsonl_and_validate(text, to_fill)
+        except (gpt.InvalidJSONError, ValueError):
+            if warning_prefix:
+                break
+            warning_prefix = "Tu respuesta no cumplió JSONL. Repite solo JSONL."
+            retries_used += 1
+            continue
+        recovered.update(parsed)
+        to_fill = [pid for pid in missing_ids if pid not in recovered]
+        retries_used += 1
+    return recovered, retries_used
+
+
+def _build_missing_prompt(batch: BatchRequest, missing_ids: List[int]) -> str:
+    prompt = MISSING_ONLY_JSONL_PROMPT(missing_ids, AI_FIELDS)
+    product_lines = [batch.product_map.get(pid, "") for pid in missing_ids]
+    body = "\n".join(line for line in product_lines if line)
+    return "\n".join(part for part in (prompt, "### PRODUCTOS", body) if part)
 
 
 def _percentile(values: List[float], pct: float) -> float:
@@ -845,10 +953,8 @@ async def _call_batch_with_retries(
                     "/v1/chat/completions",
                     json={
                         "model": model,
-                        "temperature": 0,
-                        "top_p": 1,
-                        "max_tokens": 380,
-                        "response_format": {"type": "json_object"},
+                        "temperature": 0.2,
+                        "top_p": 0.9,
                         "messages": [
                             {"role": "system", "content": SYSTEM_PROMPT},
                             {"role": "user", "content": request.user_text},
@@ -857,17 +963,61 @@ async def _call_batch_with_retries(
                 )
                 response.raise_for_status()
                 raw = response.json()
-                payload = _extract_response_payload(raw)
-                if not isinstance(payload, dict):
-                    raise gpt.InvalidJSONError("Respuesta IA no es JSON")
-                data_map = {str(k): v for k, v in payload.items()}
+                jsonl_payload = _extract_jsonl_payload(raw)
+                expected_ids = [cand.id for cand in request.candidates]
+                strict_map: Dict[int, Dict[str, Any]] = {}
+                retries_missing_used = 0
+                recovered_payload: Dict[int, Dict[str, Any]] = {}
+                try:
+                    strict_map = parse_jsonl_and_validate(jsonl_payload, expected_ids)
+                except ValueError as exc:
+                    partial_map = _parse_jsonl_loose(jsonl_payload)
+                    returned_ids = list(partial_map.keys())
+                    missing_ids = [pid for pid in expected_ids if pid not in partial_map]
+                    log_partial_ko(
+                        "call_openai",
+                        expected_ids,
+                        returned_ids,
+                        len(request.candidates),
+                        model,
+                        note=str(exc),
+                    )
+
+                    if missing_ids:
+                        recovered_payload, retries_missing_used = await _recover_missing_async(
+                            client,
+                            request,
+                            model,
+                            missing_ids,
+                            rate_limiter,
+                        )
+                    combined = {**partial_map, **recovered_payload}
+                    pending_after = [pid for pid in expected_ids if pid not in combined]
+                    if not pending_after:
+                        strict_map = combined
+                        if recovered_payload:
+                            log_recovered(
+                                "call_openai",
+                                retries_missing_used,
+                                len(request.candidates),
+                                sorted(recovered_payload.keys()),
+                            )
+                    else:
+                        strict_map = combined
                 ok: Dict[str, Dict[str, Any]] = {}
                 ko: Dict[str, str] = {}
+                data_map = {str(pid): payload for pid, payload in strict_map.items()}
+                remaining_missing = [
+                    cand.id for cand in request.candidates if str(cand.id) not in data_map
+                ]
+                for missing_id in remaining_missing:
+                    ko[str(missing_id)] = "missing"
                 for cand in request.candidates:
                     pid = str(cand.id)
                     entry = data_map.get(pid)
                     if not isinstance(entry, dict):
-                        ko[pid] = "missing"
+                        if pid not in ko:
+                            ko[pid] = "missing"
                         continue
                     desire_payload = dict(entry)
                     draft_raw = str(
@@ -934,7 +1084,7 @@ async def _call_batch_with_retries(
                     "ko": ko,
                     "usage": usage,
                     "duration": duration,
-                    "retries": attempt,
+                    "retries": attempt + retries_missing_used,
                     "prompt_tokens_est": request.prompt_tokens_est,
                 }
             except (httpx.HTTPError, json.JSONDecodeError, gpt.InvalidJSONError) as exc:
@@ -1223,8 +1373,11 @@ def run_ai_fill_job(
         parallelism = int(runtime_cfg.get("parallelism", 8) or 8)
     parallelism = max(1, parallelism)
 
-    microbatch_size = int(microbatch or runtime_cfg.get("microbatch", 12) or 12)
-    microbatch_size = max(1, microbatch_size)
+    if microbatch:
+        microbatch_size = int(microbatch)
+    else:
+        microbatch_size = int(runtime_cfg.get("microbatch", DEFAULT_BATCH_SIZE) or DEFAULT_BATCH_SIZE)
+    microbatch_size = max(MIN_BATCH_SIZE, microbatch_size)
 
     cache_enabled = bool(runtime_cfg.get("cache_enabled", True))
     cache_version = int(runtime_cfg.get("version", 1) or 1)
@@ -1954,3 +2107,74 @@ def fill_ai_columns(
         "ui_cost_message": None,
         "error": result.get("error"),
     }
+
+
+def _call_model_sync(model_client: Any, prompt: str) -> str:
+    response = model_client.complete(prompt=prompt, temperature=0.2, top_p=0.9)
+    text = getattr(response, "text", "")
+    if not isinstance(text, str):
+        raise ValueError("Modelo no devolvió texto JSONL")
+    return text
+
+
+def _retry_missing_sync(model_client: Any, missing_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+    prompt = MISSING_ONLY_JSONL_PROMPT(missing_ids, AI_FIELDS)
+    text = _call_model_sync(model_client, prompt)
+    return parse_jsonl_and_validate(text, missing_ids)
+
+
+def fill_ai_columns_with_recovery(model_client: Any, product_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+    batch_size = max(MIN_BATCH_SIZE, min(DEFAULT_BATCH_SIZE, len(product_ids) or MIN_BATCH_SIZE))
+    out: Dict[int, Dict[str, Any]] = {}
+    consecutive_partial = 0
+    index = 0
+    ids = list(dict.fromkeys(int(pid) for pid in product_ids))
+    while index < len(ids):
+        batch_ids = ids[index : index + batch_size]
+        instruction = STRICT_JSONL_PROMPT(batch_ids, AI_FIELDS)
+        try:
+            text = _call_model_sync(model_client, instruction)
+            parsed = parse_jsonl_and_validate(text, batch_ids)
+            out.update(parsed)
+            consecutive_partial = 0
+            index += batch_size
+        except ValueError as exc:
+            parsed_loose = _parse_jsonl_loose(text if 'text' in locals() else "")
+            if parsed_loose:
+                out.update(parsed_loose)
+            returned = list(parsed_loose.keys())
+            missing = [pid for pid in batch_ids if pid not in parsed_loose]
+            log_partial_ko(
+                "sync_call",
+                batch_ids,
+                returned,
+                batch_size,
+                getattr(model_client, "model", "unknown"),
+                note=str(exc),
+            )
+            retries_used = 0
+            if missing:
+                try:
+                    recovered = _retry_missing_sync(model_client, missing)
+                except Exception:
+                    recovered = {}
+                else:
+                    out.update(recovered)
+                    retries_used = 1
+            remaining = [pid for pid in batch_ids if pid not in out]
+            if not remaining:
+                log_recovered(
+                    "sync_call",
+                    retries_used,
+                    batch_size,
+                    batch_ids,
+                )
+                consecutive_partial = 0
+                index += batch_size
+            else:
+                consecutive_partial += 1
+                if batch_size > MIN_BATCH_SIZE and consecutive_partial >= 2:
+                    batch_size = max(MIN_BATCH_SIZE, batch_size // 2)
+                else:
+                    index += batch_size
+    return out
