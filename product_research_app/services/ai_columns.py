@@ -11,7 +11,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import httpx
 
@@ -43,6 +43,243 @@ class BatchRequest:
     candidates: List[Candidate]
     user_text: str
     prompt_tokens_est: int
+
+
+def _format_job_id(job_id: Optional[int]) -> str:
+    """Return a stable string label for job identifiers."""
+
+    try:
+        numeric = int(job_id) if job_id is not None else 0
+    except Exception:
+        return str(job_id)
+    if numeric <= 0:
+        return "adhoc"
+    return str(numeric)
+
+
+def _sanitize_reason(reason: Optional[str], *, limit: int = 160) -> str:
+    """Normalize KO reason text for safe logging."""
+
+    if reason is None:
+        return ""
+    text = str(reason).strip().replace("\n", " ").replace("\r", " ")
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _classify_ko_reason(reason: Optional[str]) -> Dict[str, Any]:
+    """Map raw KO reason strings to structured diagnostics."""
+
+    text = str(reason or "").strip()
+    lowered = text.lower()
+
+    def _payload(code: str, message: str, *, retryable: bool, remediation: str) -> Dict[str, Any]:
+        return {
+            "code": code,
+            "message": message,
+            "retryable": retryable,
+            "remediation": remediation,
+        }
+
+    if not text:
+        return _payload(
+            "ko.unknown",
+            "No failure reason was provided by the upstream component.",
+            retryable=True,
+            remediation="Inspect upstream service logs and retry the job to reproduce the issue.",
+        )
+
+    if "missing_api_key" in lowered or "api key" in lowered:
+        return _payload(
+            "auth.missing_api_key",
+            "AI request failed because no API credentials were configured.",
+            retryable=False,
+            remediation="Provide a valid API key in the environment or settings and restart the job.",
+        )
+
+    if "cost_cap" in lowered or "cost cap" in lowered or "budget" in lowered:
+        return _payload(
+            "quota.cost_cap_reached",
+            "AI job halted after hitting the configured cost cap.",
+            retryable=False,
+            remediation="Increase the AI cost cap or resume once the budget window resets.",
+        )
+
+    if "rate limit" in lowered or "429" in lowered or "too many requests" in lowered:
+        return _payload(
+            "remote.rate_limited",
+            "OpenAI rejected the request due to rate limiting.",
+            retryable=True,
+            remediation="Reduce concurrency or request smaller batches, then retry once the rate limit window clears.",
+        )
+
+    if "timeout" in lowered or "timed out" in lowered:
+        return _payload(
+            "remote.timeout",
+            "The request to the AI provider timed out before completion.",
+            retryable=True,
+            remediation="Retry the job or increase the timeout in the AI runtime configuration.",
+        )
+
+    if any(keyword in lowered for keyword in ("connection", "network", "ssl", "handshake", "dns")):
+        return _payload(
+            "remote.network_error",
+            "A network or TLS problem prevented the AI response.",
+            retryable=True,
+            remediation="Check network connectivity to the AI provider and retry once connectivity is restored.",
+        )
+
+    if "invalid" in lowered and "json" in lowered:
+        return _payload(
+            "response.invalid_json",
+            "AI provider returned an invalid or unparsable JSON payload.",
+            retryable=True,
+            remediation="Inspect the AI response format; adjust the prompt or enable retries with smaller batches.",
+        )
+
+    if "unauthorized" in lowered or "401" in lowered:
+        return _payload(
+            "auth.unauthorized",
+            "The AI provider rejected the credentials for this request.",
+            retryable=False,
+            remediation="Verify the configured API key has access to the requested model.",
+        )
+
+    if "forbidden" in lowered or "403" in lowered:
+        return _payload(
+            "auth.forbidden",
+            "The AI provider blocked the request due to insufficient permissions.",
+            retryable=False,
+            remediation="Confirm the account is permitted to use the selected model or endpoint.",
+        )
+
+    if "not found" in lowered or "404" in lowered:
+        return _payload(
+            "remote.not_found",
+            "The AI endpoint or resource referenced in the request was not found.",
+            retryable=False,
+            remediation="Verify the model identifier and endpoint URL in the configuration.",
+        )
+
+    if "missing" in lowered:
+        return _payload(
+            "data.missing_ai_output",
+            "The AI response omitted one or more requested product entries.",
+            retryable=True,
+            remediation="Retry the batch; if the issue persists, review the prompt and source data for the affected IDs.",
+        )
+
+    if any(keyword in lowered for keyword in ("500", "502", "503", "504", "server error", "bad gateway")):
+        return _payload(
+            "remote.server_error",
+            "The AI provider returned an internal server error.",
+            retryable=True,
+            remediation="Retry the request after a short delay; contact the provider if errors persist.",
+        )
+
+    return _payload(
+        "ko.unclassified",
+        "The KO reason did not match known failure categories.",
+        retryable=True,
+        remediation="Review upstream logs and input payloads to determine the unexpected failure pattern.",
+    )
+
+
+def _build_ko_diagnostics(
+    reasons: Mapping[str, Any],
+    *,
+    candidate_lookup: Optional[Mapping[int, Candidate]] = None,
+    req_id: Optional[str] = None,
+    max_samples: int = 5,
+) -> Tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
+    """Aggregate KO reasons into structured summaries for logging."""
+
+    summary: Dict[str, Dict[str, Any]] = {}
+    detail_samples: List[Dict[str, Any]] = []
+    candidate_lookup = candidate_lookup or {}
+
+    for index, (pid_key, raw_reason) in enumerate(reasons.items()):
+        full_reason = str(raw_reason or "")
+        diag = _classify_ko_reason(full_reason)
+        sanitized = _sanitize_reason(full_reason)
+        entry = summary.setdefault(
+            diag["code"],
+            {
+                "count": 0,
+                "message": diag["message"],
+                "retryable": diag["retryable"],
+                "remediation": diag["remediation"],
+                "sample_product_ids": [],
+            },
+        )
+        entry["count"] += 1
+
+        try:
+            pid = int(pid_key)
+        except Exception:
+            pid = None
+
+        if pid is not None and len(entry["sample_product_ids"]) < max_samples:
+            entry["sample_product_ids"].append(pid)
+
+        if index < max_samples:
+            detail: Dict[str, Any] = {
+                "code": diag["code"],
+                "diagnostic": diag["message"],
+                "raw_reason": sanitized,
+                "retryable": diag["retryable"],
+                "remediation": diag["remediation"],
+                "req_id": req_id,
+            }
+            if pid is not None:
+                detail["product_id"] = pid
+                detail["data_path"] = f"{DB_PATH}#table=products&id={pid}"
+                candidate = candidate_lookup.get(pid)
+                detail["sig_hash_present"] = bool(candidate and candidate.sig_hash)
+            else:
+                detail["product_id"] = pid_key
+                detail["data_path"] = str(DB_PATH)
+                detail["sig_hash_present"] = False
+            detail_samples.append(detail)
+
+    return summary, detail_samples
+
+
+def _log_ko_event(
+    event: str,
+    reasons: Mapping[str, Any],
+    *,
+    job_id: Optional[int],
+    candidate_lookup: Optional[Mapping[int, Candidate]] = None,
+    req_id: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    if not reasons:
+        return
+
+    normalized: Dict[str, Any] = {str(key): value for key, value in reasons.items()}
+    summary, samples = _build_ko_diagnostics(
+        normalized,
+        candidate_lookup=candidate_lookup,
+        req_id=req_id,
+    )
+    if not summary and not samples:
+        return
+
+    payload: Dict[str, Any] = {
+        "job_id": _format_job_id(job_id),
+        "ko_total": sum(item["count"] for item in summary.values()),
+        "data_path": str(DB_PATH),
+        "source_table": "products",
+        "summary": summary,
+        "samples": samples,
+    }
+    if req_id:
+        payload.setdefault("req_id", req_id)
+    if extra:
+        payload.update(extra)
+    logger.warning("ai_columns.%s: %s", event, payload)
 
 
 class _AsyncRateLimiter:
@@ -1140,6 +1377,18 @@ def run_ai_fill_job(
             database.set_import_job_ai_counts(conn, int(job_id), counts_with_cost, sorted(pending_set))
             database.set_import_job_ai_error(conn, int(job_id), result_error)
         _emit_status(status_cb, phase="enrich", counts=counts_with_cost, total=total_items, done=counts["cached"], message="IA pendiente")
+        if fail_reasons:
+            _log_ko_event(
+                "job_ko_summary",
+                {str(pid): reason for pid, reason in fail_reasons.items()},
+                job_id=job_id,
+                candidate_lookup=candidate_map,
+                extra={
+                    "result_error": result_error,
+                    "pending_total": len(pending_set),
+                    "sample_pending_ids": sorted(pending_set)[:5],
+                },
+            )
         conn.close()
         return {
             "counts": counts_with_cost,
@@ -1254,6 +1503,21 @@ def run_ai_fill_job(
 
         counts["ok"] += len(success_updates)
         counts["ko"] += len(ko_map)
+
+        if ko_map:
+            _log_ko_event(
+                "ko_diagnostics",
+                ko_map,
+                job_id=job_id,
+                candidate_lookup=candidate_map,
+                req_id=result.get("req_id"),
+                extra={
+                    "pending_after_batch": len(pending_set),
+                    "retry_count": retries,
+                    "batch_duration_s": duration,
+                    "batch_size": len(candidates_list),
+                },
+            )
 
         throughput = (len(candidates_list) / duration) if duration > 0 else 0.0
         if job_updates_enabled:
@@ -1568,6 +1832,21 @@ def run_ai_fill_job(
         latency_p95,
         len(request_latencies),
     )
+
+    if fail_reasons:
+        _log_ko_event(
+            "job_ko_summary",
+            {str(pid): reason for pid, reason in fail_reasons.items()},
+            job_id=job_id,
+            candidate_lookup=candidate_map,
+            extra={
+                "result_error": result_error,
+                "pending_total": len(pending_ids),
+                "sample_pending_ids": pending_ids[:5],
+                "processed_total": counts["ok"] + counts["cached"],
+                "cost_spent_usd": cost_spent,
+            },
+        )
 
     conn.close()
     return {
