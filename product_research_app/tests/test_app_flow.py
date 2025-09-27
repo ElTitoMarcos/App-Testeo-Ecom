@@ -302,6 +302,7 @@ def test_desire_serialization_and_logging(tmp_path, monkeypatch):
                 return False
 
     handler = Dummy("/products")
+    web_app.ENABLE_DESIRE_LOG = True
     web_app.RequestHandler.do_GET(handler)
     resp = json.loads(handler.wfile.getvalue().decode("utf-8"))
     p1 = next(p for p in resp if p["id"] == pid1)

@@ -21,6 +21,7 @@ from ..obs import log_partial_ko, log_recovered
 from ..utils.signature import compute_sig_hash
 from .desire_utils import cleanse, looks_like_product_desc
 from .prompt_templates import MISSING_ONLY_JSONL_PROMPT, STRICT_JSONL_PROMPT
+from ..progress import registry
 
 logger = logging.getLogger(__name__)
 
@@ -1311,6 +1312,7 @@ def run_ai_fill_job(
     microbatch: int = 32,
     parallelism: Optional[int] = None,
     status_cb: Optional[StatusCallback] = None,
+    progress_job_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     start_ts = time.perf_counter()
     conn = _ensure_conn()
@@ -1333,6 +1335,7 @@ def run_ai_fill_job(
     candidates: List[Candidate] = []
     sig_updates: List[tuple[str, int]] = []
     skipped_existing = 0
+    missing_cells_left: Dict[int, set[str]] = {}
 
     for pid in requested_ids:
         row = row_map.get(pid)
@@ -1347,6 +1350,7 @@ def run_ai_fill_job(
                 extra = {}
         already_done = row.get("ai_columns_completed_at")
         existing = {field: row.get(field) for field in AI_FIELDS}
+        missing_cells_left[pid] = {field for field, value in existing.items() if value in (None, "", [])}
         if already_done and all(existing.get(field) for field in AI_FIELDS):
             skipped_existing += 1
             continue
@@ -1382,6 +1386,33 @@ def run_ai_fill_job(
             )
 
     total_items = len(candidates)
+
+    def _notify_ai_cells(updates: Mapping[int, Mapping[str, Any]]) -> None:
+        if not progress_job_id or not updates:
+            return
+        newly_filled = 0
+        for raw_pid, payload in updates.items():
+            try:
+                pid_int = int(raw_pid)
+            except Exception:
+                pid_int = raw_pid
+            missing = missing_cells_left.get(pid_int)
+            if not missing:
+                continue
+            for field in AI_FIELDS:
+                value = payload.get(field)
+                if value in (None, "", []):
+                    continue
+                if field in missing:
+                    missing.discard(field)
+                    newly_filled += 1
+        if newly_filled:
+            registry.inc_ai_done_cells(progress_job_id, newly_filled)
+
+    def _update_ai_message(done_val: int, total: int) -> None:
+        if not progress_job_id:
+            return
+        registry.set_message(progress_job_id, f"Rellenando columnas IA… {done_val}/{total}")
 
     runtime_cfg = config.get_ai_runtime_config()
     if parallelism is None:
@@ -1454,6 +1485,8 @@ def run_ai_fill_job(
             database.set_import_job_ai_counts(conn, int(job_id), counts_with_cost, [])
         _emit_status(status_cb, phase="enrich", counts=counts_with_cost, total=total_items, done=0)
         conn.close()
+        if progress_job_id:
+            registry.set_finished(progress_job_id, None, "Completado")
         return {
             "counts": counts_with_cost,
             "pending_ids": [],
@@ -1519,6 +1552,7 @@ def run_ai_fill_job(
             counts["cached"] += 1
         if cached_updates:
             _apply_ai_updates(conn, cached_updates)
+            _notify_ai_cells(cached_updates)
         candidates = remaining
         counts_with_cost = {**counts, "cost_spent_usd": cost_spent}
         done_val = counts["ok"] + counts["cached"]
@@ -1533,6 +1567,7 @@ def run_ai_fill_job(
             done=done_val,
             message=f"IA columnas {done_val}/{total_items}",
         )
+        _update_ai_message(done_val, total_items)
     else:
         remaining = candidates
 
@@ -1545,6 +1580,9 @@ def run_ai_fill_job(
             database.set_import_job_ai_counts(conn, int(job_id), counts_with_cost, sorted(pending_set))
             database.set_import_job_ai_error(conn, int(job_id), result_error)
         _emit_status(status_cb, phase="enrich", counts=counts_with_cost, total=total_items, done=counts["cached"], message="IA pendiente")
+        _update_ai_message(counts["cached"], total_items)
+        if progress_job_id:
+            registry.set_finished(progress_job_id, result_error, "Error en IA")
         if fail_reasons:
             _log_ko_event(
                 "job_ko_summary",
@@ -1652,6 +1690,7 @@ def run_ai_fill_job(
 
         if success_updates:
             _apply_ai_updates(conn, success_updates)
+            _notify_ai_cells(success_updates)
             for pid, payload in success_updates.items():
                 candidate = candidate_map.get(pid)
                 sig_hash = candidate.sig_hash if candidate else ""
@@ -1803,6 +1842,8 @@ def run_ai_fill_job(
                 if not conn.in_transaction:
                     conn.execute("BEGIN IMMEDIATE")
                     began_tx = True
+                mag_updates: Dict[int, Dict[str, Any]] = {}
+                comp_updates: Dict[int, Dict[str, Any]] = {}
                 if desire_scores:
                     labels, dist_desire, desire_info = _classify_scores(
                         desire_scores,
@@ -1822,6 +1863,7 @@ def run_ai_fill_job(
                             rec["updates"]["desire_magnitude"] = label
                             if pid in applied_outputs:
                                 applied_outputs[pid]["desire_magnitude"] = label
+                            mag_updates[pid] = {"desire_magnitude": label}
                 if comp_scores:
                     labels, dist_comp, comp_info = _classify_scores(
                         comp_scores,
@@ -1841,8 +1883,13 @@ def run_ai_fill_job(
                             rec["updates"]["competition_level"] = label
                             if pid in applied_outputs:
                                 applied_outputs[pid]["competition_level"] = label
+                            comp_updates[pid] = {"competition_level": label}
                 if began_tx:
                     conn.commit()
+                combined_updates: Dict[int, Dict[str, Any]] = {}
+                for pid, payload in {**mag_updates, **comp_updates}.items():
+                    combined_updates.setdefault(pid, {}).update(payload)
+                _notify_ai_cells(combined_updates)
             except Exception:
                 if began_tx and conn.in_transaction:
                     conn.rollback()
@@ -1909,6 +1956,8 @@ def run_ai_fill_job(
                     if not conn.in_transaction:
                         conn.execute("BEGIN IMMEDIATE")
                         began_tx = True
+                    mag_updates: Dict[int, Dict[str, Any]] = {}
+                    comp_updates: Dict[int, Dict[str, Any]] = {}
                     for pid_str, label in desire_labels.items():
                         pid = int(pid_str)
                         rec = success_records.get(pid)
@@ -1920,6 +1969,7 @@ def run_ai_fill_job(
                             rec["updates"]["desire_magnitude"] = label
                             if pid in applied_outputs:
                                 applied_outputs[pid]["desire_magnitude"] = label
+                            mag_updates[pid] = {"desire_magnitude": label}
                     for pid_str, label in comp_labels.items():
                         pid = int(pid_str)
                         rec = success_records.get(pid)
@@ -1931,8 +1981,13 @@ def run_ai_fill_job(
                             rec["updates"]["competition_level"] = label
                             if pid in applied_outputs:
                                 applied_outputs[pid]["competition_level"] = label
+                            comp_updates[pid] = {"competition_level": label}
                     if began_tx:
                         conn.commit()
+                    combined_updates: Dict[int, Dict[str, Any]] = {}
+                    for pid, payload in {**mag_updates, **comp_updates}.items():
+                        combined_updates.setdefault(pid, {}).update(payload)
+                    _notify_ai_cells(combined_updates)
                 except Exception:
                     if began_tx and conn.in_transaction:
                         conn.rollback()
@@ -1981,6 +2036,7 @@ def run_ai_fill_job(
         done=done_val,
         message=f"IA columnas {done_val}/{total_items}",
     )
+    _update_ai_message(done_val, total_items)
 
     latency_p50 = _percentile(request_latencies, 0.5) if request_latencies else 0.0
     latency_p95 = _percentile(request_latencies, 0.95) if request_latencies else 0.0
@@ -2017,6 +2073,11 @@ def run_ai_fill_job(
         )
 
     conn.close()
+    if progress_job_id:
+        if result_error:
+            registry.set_finished(progress_job_id, result_error, "Error en IA")
+        else:
+            registry.set_finished(progress_job_id, None, "Completado")
     return {
         "counts": counts_with_cost,
         "pending_ids": pending_ids,

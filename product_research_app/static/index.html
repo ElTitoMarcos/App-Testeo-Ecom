@@ -373,13 +373,14 @@ const saveIfDirty = window.saveIfDirty;
 window.fetchJson = fetchJson;
 window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
-const IMPORT_UPLOAD_FRAC = 0.30;
-const IMPORT_POLL_MAX_FRAC = 0.99;
-const IMPORT_SERVER_SPAN = IMPORT_POLL_MAX_FRAC - IMPORT_UPLOAD_FRAC;
 const IMPORT_STATUS_URL = '/_import_status';
 const IMPORT_START_URL = '/upload';
 let savedApiKeyHash = null;
 let savedApiKeyLength = 0;
+let uiPct = 0;
+let latestTargetPct = 0;
+let animationHandle = null;
+let statusMsg = '';
 
 const getGlobalProgressHost = () => document.querySelector('#progress-slot-global');
 const getActionHost = () => document.querySelector('#bottomBar') || getGlobalProgressHost();
@@ -412,56 +413,93 @@ async function sha256(str) {
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-function mapServerFraction(serverPct) {
-  const clamped = Math.max(0, Math.min(100, Number(serverPct) || 0));
-  const frac = IMPORT_UPLOAD_FRAC + (clamped / 100) * IMPORT_SERVER_SPAN;
-  return Math.min(IMPORT_POLL_MAX_FRAC, frac);
+function resetUnifiedProgress(tracker) {
+  uiPct = 0;
+  latestTargetPct = 0;
+  statusMsg = '';
+  if (animationHandle !== null) {
+    cancelAnimationFrame(animationHandle);
+    animationHandle = null;
+  }
+  if (tracker) tracker.step(0, '');
 }
 
-async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL, host = getGlobalProgressHost() } = {}) {
+function animateTowards(targetPct, tracker) {
+  latestTargetPct = Math.max(0, Math.min(100, Number(targetPct) || 0));
+  if (!tracker) return;
+  if (animationHandle !== null) return;
+  const step = () => {
+    const delta = latestTargetPct - uiPct;
+    if (Math.abs(delta) < 0.5) {
+      uiPct = latestTargetPct;
+      tracker.step(uiPct / 100, statusMsg);
+      animationHandle = null;
+      return;
+    }
+    const stepSize = Math.max(0.5, Math.min(2, Math.abs(delta) * 0.2));
+    uiPct += Math.sign(delta) * stepSize;
+    tracker.step(uiPct / 100, statusMsg);
+    animationHandle = requestAnimationFrame(step);
+  };
+  animationHandle = requestAnimationFrame(step);
+}
+
+async function followUnifiedStatus(taskId, tracker, { statusUrl = IMPORT_STATUS_URL, host = getGlobalProgressHost() } = {}) {
   const id = typeof taskId === 'string' ? taskId : String(taskId || '');
   if (!id) return null;
+  const pollMs = 800;
   while (true) {
     let data;
     try {
-      const resp = await fetch(`${statusUrl}?task_id=${encodeURIComponent(id)}&t=${Date.now()}`,
-        { __skipLoadingHook: true, __hostEl: host, cache: 'no-store' }
-      );
-      if (!resp.ok) throw new Error('Estado no disponible');
-      data = await resp.json();
+      data = await fetchJson(`${statusUrl}?task_id=${encodeURIComponent(id)}&t=${Date.now()}`, { __skipLoadingHook: true, __hostEl: host, cache: 'no-store' });
     } catch (err) {
-      await sleep(900);
+      await sleep(pollMs);
+      continue;
+    }
+    if (!data) {
+      await sleep(pollMs);
       continue;
     }
     if (data.ui_cost_message) showImportBanner(data.ui_cost_message);
-    const raw = data.pct ?? data.percent ?? data.percentage ?? data.progress ?? (data.done ? 100 : undefined);
+    const raw = data.percent ?? data.pct ?? data.progress ?? data.percentage ?? (data.done ? 100 : undefined);
     let serverPct = Number(raw);
     if (!Number.isFinite(serverPct)) serverPct = 0;
     serverPct = Math.max(0, Math.min(100, serverPct));
-    const stage = (data.message || data.stage || data.state || '').toString() || 'Procesando…';
-    tracker?.step(mapServerFraction(serverPct), stage);
+    statusMsg = (data.message || data.stage || data.state || '').toString() || '';
+    animateTowards(serverPct, tracker);
 
-    const statusVal = String(data.state || data.status || '').toLowerCase();
+    const statusVal = String(data.status || data.state || '').toLowerCase();
     if (statusVal === 'error' || data.error) {
+      statusMsg = 'Error';
+      animateTowards(100, tracker);
+      tracker.step(1, 'Error');
+      tracker.done();
       throw new Error(data.error || 'Error en importación');
     }
-    if (statusVal === 'unknown' || !statusVal) {
-      throw new Error('Estado de importación desconocido');
+    if (!statusVal || statusVal === 'unknown') {
+      await sleep(pollMs);
+      continue;
     }
     if (serverPct >= 100 || statusVal === 'done' || statusVal === 'completed' || statusVal === 'finished') {
+      statusMsg = 'Completado';
+      animateTowards(100, tracker);
+      tracker.step(1, 'Completado');
+      tracker.done();
       await reloadTable({ skipProgress: true });
       hideImportBanner();
       return data;
     }
-    await sleep(450);
+    await sleep(pollMs);
   }
 }
 
 async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IMPORT_STATUS_URL } = {}) {
   if (!file) throw new Error('Archivo no válido');
   const host = getGlobalProgressHost();
-  const tracker = LoadingHelpers.start('Importando catálogo', { host });
+  const tracker = LoadingHelpers.start('Importando + IA…', { host });
+  resetUnifiedProgress(tracker);
   tracker.setStage('Subiendo archivo…');
+  statusMsg = 'Subiendo archivo…';
   let lastResult = null;
   try {
     const fd = new FormData();
@@ -474,8 +512,7 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
       xhr.open('POST', startUrl, true);
       xhr.upload.onprogress = (event) => {
         if (!event.lengthComputable) return;
-        const frac = Math.min(IMPORT_UPLOAD_FRAC, (event.loaded / event.total) * IMPORT_UPLOAD_FRAC);
-        tracker.step(frac, 'Subiendo archivo…');
+        tracker.step(0, 'Subiendo archivo…');
       };
       xhr.onerror = () => reject(new Error('Error de red subiendo archivo'));
       xhr.onload = () => {
@@ -500,6 +537,8 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     });
 
     if (startResult.kind === 'sync') {
+      statusMsg = 'Completado';
+      animateTowards(100, tracker);
       tracker.step(1, 'Completado');
       await reloadTable({ skipProgress: true });
       const importedCount = startResult.data?.imported ?? startResult.data?.rows_imported;
@@ -511,18 +550,20 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
 
     const taskId = startResult.taskId;
     const idStr = typeof taskId === 'string' ? taskId : String(taskId);
-    tracker.step(IMPORT_UPLOAD_FRAC, 'Archivo subido');
+    statusMsg = 'Archivo subido';
+    animateTowards(0, tracker);
     localStorage.setItem(IMPORT_TASK_LS_KEY, idStr);
 
-    lastResult = await followImportTask(idStr, tracker, { statusUrl, host });
+    lastResult = await followUnifiedStatus(idStr, tracker, { statusUrl, host });
 
     const importedCount = lastResult?.imported ?? lastResult?.rows_imported;
     if (Number.isFinite(importedCount) && importedCount > 0) {
       toast.success(`Importados ${importedCount}`);
     }
-    tracker.step(1, 'Completado');
     return lastResult;
   } catch (err) {
+    statusMsg = 'Error';
+    animateTowards(100, tracker);
     tracker.step(1, 'Error');
     toast.error(err?.message || 'Error al importar catálogo');
     throw err;
@@ -1145,16 +1186,19 @@ window.onload = async () => {
   if (tid) {
     toast.info('Reanudando importación previa…');
     const host = getGlobalProgressHost();
-    const tracker = LoadingHelpers.start('Importando catálogo', { host });
-    tracker.step(IMPORT_UPLOAD_FRAC, 'Reanudando…');
+    const tracker = LoadingHelpers.start('Importando + IA…', { host });
+    resetUnifiedProgress(tracker);
+    statusMsg = 'Reanudando…';
+    animateTowards(0, tracker);
     try {
-      const result = await followImportTask(tid, tracker, { host });
+      const result = await followUnifiedStatus(tid, tracker, { host });
       const importedCount = result?.imported ?? result?.rows_imported;
       if (Number.isFinite(importedCount) && importedCount > 0) {
         toast.success(`Importados ${importedCount}`);
       }
-      tracker.step(1, 'Completado');
     } catch (err) {
+      statusMsg = 'Error';
+      animateTowards(100, tracker);
       tracker.step(1, 'Error');
       toast.error(err?.message || 'Error en importación');
     } finally {
