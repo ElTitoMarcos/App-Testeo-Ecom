@@ -20,6 +20,7 @@ Then open http://host:port in a browser.
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 import io
@@ -54,6 +55,7 @@ from . import product_enrichment
 from .sse import publish_progress
 from .utils import sanitize_product_name
 from .utils.db import row_to_dict, rget
+from .progress import registry, default_phases
 
 WINNER_SCORE_FIELDS = list(winner_calc.FEATURE_MAP.keys())
 
@@ -117,6 +119,21 @@ def _normalize_order_list(order, available: Dict[str, Any]) -> List[str]:
             out.append(key)
             seen.add(key)
     return out
+
+
+def _estimate_csv_records(csv_bytes: bytes) -> int:
+    text: Optional[str] = None
+    for encoding in ("utf-8-sig", "utf-8", "latin-1"):
+        try:
+            text = csv_bytes.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        text = csv_bytes.decode("utf-8", errors="ignore")
+    reader = csv.reader(io.StringIO(text))
+    count = sum(1 for _ in reader)
+    return max(0, count - 1)
 
 def _apply_weights_reset(existing: Dict[str, Any] | None = None) -> Dict[str, Any]:
     cfg = dict(existing or config.load_config())
@@ -290,12 +307,36 @@ def _job_payload_from_row(row):
 def _get_import_status(task_id: str) -> Dict[str, Any] | None:
     with _IMPORT_STATUS_LOCK:
         snapshot = dict(IMPORT_STATUS.get(task_id) or {})
+
+    task_key = str(task_id)
+
+    def _merge_progress(payload: Dict[str, Any]) -> Dict[str, Any]:
+        progress_key = str(payload.get("task_id") or task_key)
+        jp = registry.get(progress_key) or (registry.get(task_key) if progress_key != task_key else None)
+        if not jp:
+            return payload
+        pct = jp.percent()
+        status = "done" if (jp.finished and pct >= 100 and not jp.error) else ("error" if jp.error else "running")
+        payload["percent"] = pct
+        payload["pct"] = pct
+        payload["status"] = status
+        payload["state"] = payload.get("state") or status
+        payload["message"] = jp.message
+        payload["error"] = jp.error
+        payload["phases"] = {
+            name: {"done": ph.done, "total": ph.total, "weight": ph.weight}
+            for name, ph in jp.phases.items()
+        }
+        return payload
+
     job_id = snapshot.get("job_id")
-    if job_id is None:
+    if job_id is None and task_key.isdigit():
         try:
-            job_id = int(task_id)
+            job_id = int(task_key)
         except Exception:
             job_id = None
+
+    base_payload: Optional[Dict[str, Any]] = None
     if job_id is not None:
         try:
             conn = ensure_db()
@@ -306,16 +347,24 @@ def _get_import_status(task_id: str) -> Dict[str, Any] | None:
         if payload is not None:
             payload.update(snapshot)
             payload["job_id"] = payload.get("job_id") or job_id
-            payload["task_id"] = payload.get("task_id") or (str(job_id) if job_id is not None else task_id)
-            return payload
-    if not snapshot:
+            payload["task_id"] = payload.get("task_id") or str(job_id)
+            base_payload = payload
+
+    if base_payload is None:
+        if snapshot:
+            base_payload = dict(snapshot)
+        else:
+            base_payload = {"task_id": task_key}
+        if job_id is not None:
+            base_payload.setdefault("job_id", job_id)
+            base_payload.setdefault("task_id", str(job_id))
+        else:
+            base_payload.setdefault("task_id", task_key)
+
+    merged = _merge_progress(base_payload)
+    if not snapshot and "phases" not in merged:
         return None
-    if job_id is not None:
-        snapshot.setdefault("job_id", job_id)
-        snapshot.setdefault("task_id", str(job_id))
-    else:
-        snapshot.setdefault("task_id", task_id)
-    return snapshot
+    return merged
 
 
 def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> str:
@@ -448,15 +497,35 @@ def _schedule_post_import_tasks(
                 "cost_spent_usd": 0.0,
             }
             pending_ids: List[int] = list(product_ids)
+            progress_error: Optional[str] = None
             try:
                 if auto_ai and product_ids:
-                    result = ai_columns.run_ai_fill_job(job_id, product_ids, status_cb=status_cb)
+                    registry.update_phase(
+                        task_key,
+                        "ai_fill",
+                        total=len(product_ids),
+                        message="Rellenando columnas con IA…",
+                    )
+                    result = ai_columns.run_ai_fill_job(
+                        job_id,
+                        product_ids,
+                        status_cb=status_cb,
+                        progress_job_id=task_key,
+                    )
                     final_counts = result.get("counts", final_counts)
                     pending_ids = result.get("pending_ids", pending_ids)
                     error = result.get("error")
                     if error:
                         database.set_import_job_ai_error(conn, job_id, str(error))
                 else:
+                    registry.update_phase(
+                        task_key,
+                        "ai_fill",
+                        total=len(product_ids),
+                        message="IA desactivada",
+                    )
+                    if product_ids:
+                        registry.update_phase(task_key, "ai_fill", done_delta=len(product_ids))
                     final_counts = {
                         "queued": 0,
                         "sent": 0,
@@ -484,6 +553,8 @@ def _schedule_post_import_tasks(
                 database.set_import_job_ai_error(conn, job_id, str(exc))
                 database.set_import_job_ai_counts(conn, job_id, final_counts, pending_ids)
                 database.update_import_job_ai_progress(conn, job_id, 0)
+                registry.update_phase(task_key, "ai_fill", message=f"Error IA: {exc}")
+                progress_error = str(exc)
             total_ai = int(final_counts.get("queued", 0) or 0)
             done_ai = int(final_counts.get("ok", 0) + final_counts.get("cached", 0))
             _update_import_status(
@@ -517,6 +588,13 @@ def _schedule_post_import_tasks(
                 ai_done=done_ai,
                 ai_pending=pending_ids,
             )
+            if not auto_ai or not product_ids:
+                registry.update_phase(task_key, "post", total=1, done_delta=1, message="Completado")
+            registry.set_finished(
+                task_key,
+                error=progress_error,
+                message="Listo" if not progress_error else f"Error IA: {progress_error}",
+            )
         finally:
             try:
                 conn.close()
@@ -532,6 +610,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
     rows_imported = 0
     inserted_ids: List[int] = []
     task_key = str(job_id)
+    progress_done = 0
     try:
         _set_import_progress(
             task_key,
@@ -542,11 +621,13 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             started_at=time.time(),
             filename=filename,
         )
+        registry.update_phase(task_key, "import", message="Inicializando importación")
         data = tmp_path.read_bytes()
         records = parse_xlsx(data)
         total_records = len(records)
         if total_records:
             _set_import_progress(task_key, pct=5, message="Analizando archivo", total=total_records)
+            registry.update_phase(task_key, "import", total=total_records, message="Analizando archivo…")
 
         used_cols: set[str] = set()
 
@@ -752,6 +833,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                     done=0,
                     total=total_valid,
                 )
+                registry.update_phase(task_key, "import", total=total_valid, message="Preparando inserción…")
             for idx, (name, description, category, price, currency, image_url, date_range, extra_cols, metrics) in enumerate(rows_validas, start=1):
                 row_id = base_id + idx
                 database.insert_product(
@@ -772,6 +854,8 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                     database.update_product(conn, row_id, **metrics)
                 rows_imported += 1
                 inserted_ids.append(row_id)
+                registry.update_phase(task_key, "import", done_delta=1, message=f"Insertando registros {idx}/{total_valid or rows_imported}")
+                progress_done += 1
                 if total_valid:
                     if idx == total_valid or idx % 50 == 0:
                         frac = idx / max(total_valid, 1)
@@ -791,6 +875,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
                 done=rows_imported,
                 total=total_valid or rows_imported,
             )
+            registry.update_phase(task_key, "import", message="Guardando cambios…")
 
         next_phase = "enrich" if inserted_ids and config.is_auto_fill_ia_on_import_enabled() else "winner"
         database.update_import_job_progress(
@@ -813,6 +898,12 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             total=rows_imported,
             phase=next_phase,
         )
+        registry.update_phase(task_key, "import", total=rows_imported, message="Importación completada")
+        if rows_imported:
+            remaining = max(0, rows_imported - progress_done)
+            if remaining:
+                registry.update_phase(task_key, "import", done_delta=remaining)
+                progress_done += remaining
         _schedule_post_import_tasks(job_id, inserted_ids, rows_imported, task_key)
     except Exception as exc:
         try:
@@ -829,6 +920,7 @@ def _process_import_job(job_id: int, tmp_path: Path, filename: str) -> None:
             error=str(exc),
             finished_at=time.time(),
         )
+        registry.set_finished(task_key, error=str(exc), message=f"Error: {exc}")
     finally:
         try:
             tmp_path.unlink()
@@ -2207,6 +2299,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                 f.write(data)
             conn = ensure_db()
             job_id = database.create_import_job(conn, str(tmp_path))
+            task_id = str(job_id)
+            registry.create(task_id, default_phases())
+            registry.update_phase(task_id, "import", message="En cola…")
             threading.Thread(target=_process_import_job, args=(job_id, tmp_path, filename), daemon=True).start()
             self.safe_write(lambda: self.send_json({"task_id": job_id}, status=202))
             return
@@ -2223,6 +2318,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 config=job_config,
             )
             task_id = str(job_id)
+            registry.create(task_id, default_phases())
+            registry.update_phase(task_id, "import", message="En cola…")
             _update_import_status(
                 task_id,
                 job_id=job_id,
@@ -2236,6 +2333,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             )
             _set_import_progress(task_id, pct=0, message="En cola", state="queued")
             csv_bytes = data
+            total_records = _estimate_csv_records(csv_bytes)
+            if total_records:
+                registry.update_phase(task_id, "import", total=total_records, message="Importando productos…")
+            else:
+                registry.update_phase(task_id, "import", message="Importando productos…")
+            progress_tracker = {"done": 0}
 
             def run_csv():
                 _update_import_status(
@@ -2261,6 +2364,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                                 total=total,
                                 **extra,
                             )
+                            registry.update_phase(task_id, "import", message="Analizando archivo…")
                         elif stage == "insert":
                             frac = done / max(total, 1) if total else 0.0
                             pct = 20 + min(60, int(round(60 * frac)))
@@ -2273,6 +2377,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                                 total=total,
                                 **extra,
                             )
+                            if total_records:
+                                registry.update_phase(task_id, "import", total=total_records)
+                            delta = done - progress_tracker["done"]
+                            if delta > 0:
+                                registry.update_phase(task_id, "import", done_delta=delta, message=msg)
+                                progress_tracker["done"] = done
                         elif stage == "commit":
                             _set_import_progress(
                                 task_id,
@@ -2282,6 +2392,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                                 total=total,
                                 **extra,
                             )
+                            registry.update_phase(task_id, "import", message="Guardando cambios…")
                         else:
                             _update_import_status(task_id, **kwargs)
 
@@ -2298,6 +2409,16 @@ class RequestHandler(BaseHTTPRequestHandler):
                     imported_val = int(snapshot.get("rows_imported") or imported_count or done_val)
                     inserted_ids = database.get_job_product_ids(conn, job_id)
                     rows_imported = len(inserted_ids) or imported_val
+                    final_total = rows_imported or total_val
+                    if total_records and final_total:
+                        registry.update_phase(task_id, "import", total=total_records)
+                    if final_total:
+                        registry.update_phase(task_id, "import", total=final_total)
+                        remaining = max(0, final_total - progress_tracker["done"])
+                        if remaining:
+                            registry.update_phase(task_id, "import", done_delta=remaining)
+                            progress_tracker["done"] += remaining
+                    registry.update_phase(task_id, "import", message="Importación completada")
                     next_phase = (
                         "enrich"
                         if rows_imported and config.is_auto_fill_ia_on_import_enabled()
@@ -2312,6 +2433,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                         total=total_val,
                         rows_imported=rows_imported,
                     )
+                    if rows_imported:
+                        registry.update_phase(task_id, "import", total=rows_imported)
+                    remaining = max(0, rows_imported - progress_tracker["done"])
+                    if remaining:
+                        registry.update_phase(task_id, "import", done_delta=remaining)
+                        progress_tracker["done"] += remaining
+                    registry.update_phase(task_id, "import", message="Importación completada")
                     _set_import_progress(
                         task_id,
                         pct=90,
@@ -2323,6 +2451,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         imported=rows_imported,
                         phase=next_phase,
                     )
+                    registry.update_phase(task_id, "ai_fill", total=rows_imported, message="Rellenando columnas con IA…")
                     _schedule_post_import_tasks(job_id, inserted_ids, rows_imported, task_id)
                 except Exception as exc:
                     logger.exception("Fast CSV import failed: filename=%s", filename)
@@ -2336,6 +2465,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         pct=100,
                         message=f"Error: {exc}",
                     )
+                    registry.set_finished(task_id, error=str(exc), message=f"Error: {exc}")
 
             threading.Thread(target=run_csv, daemon=True).start()
             self.safe_write(lambda: self.send_json({"task_id": task_id, "job_id": job_id}, status=202))
@@ -2367,6 +2497,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 config=job_config,
             )
             task_id = str(job_id)
+            registry.create(task_id, default_phases())
+            registry.update_phase(task_id, "import", total=total_records, message="Importando productos…")
             _update_import_status(
                 task_id,
                 job_id=job_id,
@@ -2379,6 +2511,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 filename=filename,
             )
             _set_import_progress(task_id, pct=0, message="En cola", state="queued")
+            progress_tracker = {"done": 0}
 
             def run_json():
                 _update_import_status(
@@ -2404,6 +2537,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                                 total=total,
                                 **extra,
                             )
+                            registry.update_phase(task_id, "import", message="Analizando archivo…")
                         elif stage == "insert":
                             frac = done / max(total, 1) if total else 0.0
                             pct = 20 + min(60, 60 * frac)
@@ -2416,6 +2550,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                                 total=total,
                                 **extra,
                             )
+                            registry.update_phase(task_id, "import", total=total_records)
+                            delta = done - progress_tracker["done"]
+                            if delta > 0:
+                                registry.update_phase(task_id, "import", done_delta=delta, message=msg)
+                                progress_tracker["done"] = done
                         elif stage == "commit":
                             _set_import_progress(
                                 task_id,
@@ -2425,6 +2564,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                                 total=total,
                                 **extra,
                             )
+                            registry.update_phase(task_id, "import", message="Guardando cambios…")
                         else:
                             _update_import_status(task_id, **kwargs)
 
@@ -2466,6 +2606,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         imported=rows_imported,
                         phase=next_phase,
                     )
+                    registry.update_phase(task_id, "ai_fill", total=rows_imported, message="Rellenando columnas con IA…")
                     _schedule_post_import_tasks(job_id, inserted_ids, rows_imported, task_id)
                 except Exception as exc:
                     logger.exception("Fast JSON import failed: filename=%s", filename)
@@ -2479,6 +2620,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         pct=100,
                         message=f"Error: {exc}",
                     )
+                    registry.set_finished(task_id, error=str(exc), message=f"Error: {exc}")
 
             threading.Thread(target=run_json, daemon=True).start()
             self.safe_write(lambda: self.send_json({"task_id": task_id, "job_id": job_id}, status=202))

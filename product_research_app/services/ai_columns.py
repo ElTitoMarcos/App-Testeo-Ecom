@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 import httpx
 
 from .. import config, database, gpt
+from ..progress import registry
 from ..ai.strict_jsonl import parse_jsonl_and_validate
 from ..obs import log_partial_ko, log_recovered
 from ..utils.signature import compute_sig_hash
@@ -1311,6 +1312,7 @@ def run_ai_fill_job(
     microbatch: int = 32,
     parallelism: Optional[int] = None,
     status_cb: Optional[StatusCallback] = None,
+    progress_job_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     start_ts = time.perf_counter()
     conn = _ensure_conn()
@@ -1382,6 +1384,8 @@ def run_ai_fill_job(
             )
 
     total_items = len(candidates)
+    if progress_job_id:
+        registry.update_phase(progress_job_id, "ai_fill", total=total_items)
 
     runtime_cfg = config.get_ai_runtime_config()
     if parallelism is None:
@@ -1437,6 +1441,19 @@ def run_ai_fill_job(
         "cached": 0,
         "retried": 0,
     }
+    last_reported_done = 0
+
+    def _bump_progress(message: Optional[str] = None) -> None:
+        nonlocal last_reported_done
+        if not progress_job_id:
+            return
+        current = counts["ok"] + counts["cached"]
+        delta = current - last_reported_done
+        if delta > 0:
+            registry.update_phase(progress_job_id, "ai_fill", done_delta=delta, message=message)
+            last_reported_done = current
+        elif message:
+            registry.update_phase(progress_job_id, "ai_fill", message=message)
     cost_spent = 0.0
     pending_set: set[int] = {cand.id for cand in candidates}
     counts_with_cost: Dict[str, Any] = {**counts, "cost_spent_usd": cost_spent}
@@ -1454,6 +1471,8 @@ def run_ai_fill_job(
             database.set_import_job_ai_counts(conn, int(job_id), counts_with_cost, [])
         _emit_status(status_cb, phase="enrich", counts=counts_with_cost, total=total_items, done=0)
         conn.close()
+        if progress_job_id:
+            registry.update_phase(progress_job_id, "post", total=1, done_delta=1, message="Completado")
         return {
             "counts": counts_with_cost,
             "pending_ids": [],
@@ -1525,6 +1544,7 @@ def run_ai_fill_job(
         if job_updates_enabled:
             database.update_import_job_ai_progress(conn, int(job_id), done_val)
             database.set_import_job_ai_counts(conn, int(job_id), counts_with_cost, sorted(pending_set))
+        _bump_progress(f"IA columnas {done_val}/{total_items}")
         _emit_status(
             status_cb,
             phase="enrich",
@@ -1545,6 +1565,7 @@ def run_ai_fill_job(
             database.set_import_job_ai_counts(conn, int(job_id), counts_with_cost, sorted(pending_set))
             database.set_import_job_ai_error(conn, int(job_id), result_error)
         _emit_status(status_cb, phase="enrich", counts=counts_with_cost, total=total_items, done=counts["cached"], message="IA pendiente")
+        _bump_progress(f"IA columnas {counts['ok'] + counts['cached']}/{total_items}")
         if fail_reasons:
             _log_ko_event(
                 "job_ko_summary",
@@ -1558,6 +1579,8 @@ def run_ai_fill_job(
                 },
             )
         conn.close()
+        if progress_job_id:
+            registry.update_phase(progress_job_id, "post", total=1, done_delta=1, message="Completado")
         return {
             "counts": counts_with_cost,
             "pending_ids": sorted(pending_set),
@@ -1704,6 +1727,7 @@ def run_ai_fill_job(
         if job_updates_enabled:
             database.update_import_job_ai_progress(conn, int(job_id), done_val)
             database.set_import_job_ai_counts(conn, int(job_id), counts_with_cost, sorted(pending_set))
+        _bump_progress(f"IA columnas {done_val}/{total_items}")
         _emit_status(
             status_cb,
             phase="enrich",
@@ -2017,6 +2041,9 @@ def run_ai_fill_job(
         )
 
     conn.close()
+    _bump_progress(f"IA columnas {counts['ok'] + counts['cached']}/{total_items}")
+    if progress_job_id:
+        registry.update_phase(progress_job_id, "post", total=1, done_delta=1, message="Completado")
     return {
         "counts": counts_with_cost,
         "pending_ids": pending_ids,
