@@ -676,12 +676,7 @@ def call_openai_chat(
             base = min(10.0, 0.5 * (2 ** (attempt - 1)))
         jitter = random.uniform(-0.2, 0.2)
         delay = max(0.25, min(10.0, (base or 0.0)) + jitter)
-        logger.warning(
-            "gpt.429 retry_in=%.2fs attempt=%d detail=%s",
-            delay,
-            attempt,
-            msg,
-        )
+        logger.warning("gpt.429 retry_in=%.2fs attempt=%d", delay, attempt)
         time.sleep(delay)
         if attempt >= 2:
             error = RateLimitWouldDegrade(message)

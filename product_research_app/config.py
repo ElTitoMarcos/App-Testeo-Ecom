@@ -399,5 +399,6 @@ def get_weights_version() -> int:
 AI_MAX_PRODUCTS_PER_CALL = int(os.getenv("PRAPP_AI_MAX_PRODUCTS_PER_CALL", "30"))
 AI_MIN_PRODUCTS_PER_CALL = int(os.getenv("PRAPP_AI_MIN_PRODUCTS_PER_CALL", "8"))
 AI_DEGRADE_FACTOR = float(os.getenv("PRAPP_AI_DEGRADE_FACTOR", "0.66"))
-AI_MAX_OUTPUT_TOKENS = int(os.getenv("PRAPP_AI_MAX_OUTPUT_TOKENS", "700"))
+# Límite superior de tokens de salida por request (tope blando; puede sobrescribirse dinámicamente)
+AI_MAX_OUTPUT_TOKENS = int(os.getenv("PRAPP_AI_MAX_OUTPUT_TOKENS", "2200"))
 
