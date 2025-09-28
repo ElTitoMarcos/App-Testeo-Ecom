@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import itertools
 
 from product_research_app.gpt import call_gpt
@@ -10,6 +9,11 @@ try:
 except Exception:  # pragma: no cover
     class OpenAIError(Exception): ...
 
+# Para tipado del except en esta prueba
+try:
+    from product_research_app.gpt import OpenAIError  # type: ignore
+except Exception:  # pragma: no cover
+    class OpenAIError(Exception): ...
 
 class Stub:
     """Simula 429 X veces y luego OK."""
@@ -27,21 +31,18 @@ class Stub:
 
 def call_gpt_stubbed(fails: int = 3):
     """Variante de prueba para simular reintentos 429."""
-
     stub = Stub(fails=fails)
     messages = [
         {"role": "system", "content": "You are a test."},
         {"role": "user", "content": "Hello"},
     ]
     from product_research_app import gpt as _g
-
     orig = getattr(_g, "call_openai_chat")
     try:
         setattr(_g, "call_openai_chat", lambda **_: stub.run())
         return call_gpt(messages=messages)
     finally:
         setattr(_g, "call_openai_chat", orig)
-
 
 class _ResponseStub:
     def __init__(self, status: int):
@@ -83,8 +84,7 @@ def call_gpt_stubbed_5xx(fails: int = 2):
         return call_gpt(messages=messages)
     finally:
         setattr(_g, "call_openai_chat", orig)
-
-
+        
 if __name__ == "__main__":
     print("simulate")
     res = call_gpt_stubbed(fails=3)

@@ -399,7 +399,6 @@ def call_gpt(*, messages: List[Dict[str, Any]], **kwargs) -> Dict[str, Any]:
 
                 raise
 
-
 def _message_text(messages: List[Dict[str, Any]]) -> str:
     parts: List[str] = []
     for message in messages:
