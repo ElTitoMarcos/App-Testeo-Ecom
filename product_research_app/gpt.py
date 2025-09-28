@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import re
 import time
 import unicodedata
@@ -32,7 +33,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from . import database, config
-from .ratelimit import decorrelated_jitter_sleep, reserve
+from .ratelimit import decorrelated_jitter_sleep, reserve, snapshot as rl_snapshot
 from .prompts.registry import (
     get_json_schema,
     get_system_prompt,
@@ -82,6 +83,54 @@ class OpenAIError(Exception):
 class InvalidJSONError(OpenAIError):
     """Raised when the model response is not valid JSON."""
     pass
+
+
+class RateLimitWouldDegrade(OpenAIError):
+    """Raised when batch size should be degraded after repeated 429s."""
+
+
+def _parse_retry_after_seconds(response: Optional[requests.Response], message: str) -> Optional[float]:
+    retry_after_header: Optional[str] = None
+    if response is not None:
+        retry_after_header = response.headers.get("Retry-After")
+    retry_after_seconds: Optional[float] = None
+    if retry_after_header:
+        try:
+            retry_after_seconds = float(retry_after_header)
+        except ValueError:
+            try:
+                from email.utils import parsedate_to_datetime
+
+                parsed = parsedate_to_datetime(retry_after_header)
+                if parsed is not None:
+                    retry_after_seconds = max(
+                        0.0,
+                        (parsed - datetime.utcnow()).total_seconds(),
+                    )
+            except Exception:
+                retry_after_seconds = None
+    if retry_after_seconds is not None:
+        return max(0.0, retry_after_seconds)
+
+    patterns = [
+        r"try again in\s*([0-9]+(?:\.[0-9]+)?)\s*s",
+        r"in\s*([0-9]+(?:\.[0-9]+)?)\s*seconds",
+        r"in\s*([0-9]+(?:\.[0-9]+)?)\s*sec",
+        r"in\s*([0-9]+)\s*ms",
+    ]
+    lowered = message or ""
+    for pattern in patterns:
+        match = re.search(pattern, lowered, re.I)
+        if not match:
+            continue
+        try:
+            value = float(match.group(1))
+            if pattern.endswith("ms"):
+                return max(0.0, value / 1000.0)
+            return max(0.0, value)
+        except Exception:
+            continue
+    return None
 
 
 def _dumps_payload(payload: Any | None) -> str:
@@ -297,6 +346,7 @@ def call_gpt(
                     response_format=response_format if response_format_enabled else None,
                     max_tokens=call_max_tokens,
                     stop=stop,
+                    tokens_estimate=prompt_tokens_est,
                 )
         except OpenAIError as exc:
             message = str(exc)
@@ -496,6 +546,7 @@ def call_openai_chat(
     response_format: Optional[Dict[str, Any]] = None,
     max_tokens: Optional[int] = None,
     stop: Optional[Any] = None,
+    tokens_estimate: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Send a chat completion request to the OpenAI API.
 
@@ -527,42 +578,78 @@ def call_openai_chat(
         payload["stop"] = stop
     if response_format is not None:
         payload["response_format"] = response_format
-    try:
-        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
-    except requests.RequestException as exc:
-        raise OpenAIError(f"Failed to connect to OpenAI API: {exc}") from exc
-    if response.status_code != 200:
+    est_tokens = int(tokens_estimate or 0)
+    rl = rl_snapshot()
+    logger.info(
+        "gpt.pre model=%s est_tokens=%d eff_tpm=%d eff_rpm=%d headroom=%.2f conc=%d",
+        model,
+        est_tokens,
+        rl.get("eff_tpm", 0),
+        rl.get("eff_rpm", 0),
+        float(rl.get("headroom", 0.0)),
+        int(rl.get("max_conc", 0)),
+    )
+    attempt = 0
+    while True:
+        attempt += 1
+        t0 = time.perf_counter()
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                data=json.dumps(payload),
+                timeout=60,
+            )
+        except requests.RequestException as exc:
+            raise OpenAIError(f"Failed to connect to OpenAI API: {exc}") from exc
+        latency_ms = int(round((time.perf_counter() - t0) * 1000))
+        if response.status_code == 200:
+            try:
+                data = response.json()
+            except Exception as exc:
+                raise OpenAIError(f"Invalid JSON response from OpenAI: {exc}") from exc
+            usage = data.get("usage") if isinstance(data, dict) else None
+            if isinstance(usage, dict) and usage:
+                prompt_tokens = int(usage.get("prompt_tokens") or 0)
+                completion_tokens = int(usage.get("completion_tokens") or 0)
+                total_tokens = int(usage.get("total_tokens") or prompt_tokens + completion_tokens)
+                logger.info(
+                    "gpt.post model=%s prompt_tokens=%d completion_tokens=%d total_tokens=%d latency_ms=%d",
+                    model,
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                    latency_ms,
+                )
+            return data
+
         try:
             err = response.json()
             msg = err.get("error", {}).get("message", response.text)
         except Exception:
             msg = response.text
-        error = OpenAIError(f"OpenAI API returned status {response.status_code}: {msg}")
-        if response.status_code == 429:
-            retry_after_header = response.headers.get("Retry-After")
-            retry_after_seconds: Optional[float] = None
-            if retry_after_header:
-                try:
-                    retry_after_seconds = float(retry_after_header)
-                except ValueError:
-                    try:
-                        from email.utils import parsedate_to_datetime
+        message = f"OpenAI API returned status {response.status_code}: {msg}"
+        if response.status_code != 429:
+            raise OpenAIError(message)
 
-                        parsed = parsedate_to_datetime(retry_after_header)
-                        if parsed is not None:
-                            retry_after_seconds = max(
-                                0.0,
-                                (parsed - datetime.utcnow()).total_seconds(),
-                            )
-                    except Exception:
-                        retry_after_seconds = None
-            if retry_after_seconds is not None:
-                setattr(error, "retry_after", retry_after_seconds)
-        raise error
-    try:
-        return response.json()
-    except Exception as exc:
-        raise OpenAIError(f"Invalid JSON response from OpenAI: {exc}") from exc
+        retry_hint = _parse_retry_after_seconds(response, msg)
+        base = retry_hint
+        if base is None:
+            base = min(10.0, 0.5 * (2 ** (attempt - 1)))
+        jitter = random.uniform(-0.2, 0.2)
+        delay = max(0.25, min(10.0, (base or 0.0)) + jitter)
+        logger.warning(
+            "gpt.429 retry_in=%.2fs attempt=%d detail=%s",
+            delay,
+            attempt,
+            msg,
+        )
+        time.sleep(delay)
+        if attempt >= 2:
+            error = RateLimitWouldDegrade(message)
+            if retry_hint is not None:
+                setattr(error, "retry_after", retry_hint)
+            raise error
 
 
 def build_evaluation_prompt(product: Dict[str, Any]) -> str:
