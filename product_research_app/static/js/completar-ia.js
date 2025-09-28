@@ -51,6 +51,9 @@ function applyUpdates(product, updates) {
       body: JSON.stringify(applied)
     }).catch(() => {});
     if (window.ecAutoFitColumns && window.gridRoot) ecAutoFitColumns(gridRoot);
+    if (window._progress) {
+      window._progress.noteAiRowCompleted(product.id);
+    }
   }
   return applied;
 }
@@ -135,6 +138,12 @@ window.handleCompletarIA = async function(opts = {}) {
   if (all.length === 0) {
     if (!opts.silent) toast.info('No hay productos');
     return;
+  }
+  if (window._progress) {
+    window._progress.reset();
+    window._progress.setUploadProgress(1);
+    window._progress.setImportPercent(100);
+    window._progress.setAiTotal(all.length);
   }
   let okTotal = 0;
   const chunks = chunkArray(all, EC_BATCH_SIZE);

@@ -1,5 +1,171 @@
 // loading.js — barra en flujo con soporte multi-host (header y modal) y limpieza de legados
 
+// ==== [PROGRESS ORCHESTRATOR] - SOLO FRONT, SIN TOCAR BACKEND ====
+
+// Segmentos de la barra
+const PROGRESS_SEG = {
+  UPLOAD: [0.00, 0.25],
+  IMPORT: [0.25, 0.75],
+  AI:     [0.75, 0.995],
+  DONE:   1.0,
+};
+
+function clamp01(x){ return Math.max(0, Math.min(1, x)); }
+function mapToSegment(f, seg){ return seg[0] + (seg[1]-seg[0]) * clamp01(f); }
+
+class ProgressOrchestrator {
+  constructor({barEl, textEl, containerEl}) {
+    this.barEl = barEl;
+    this.textEl = textEl;
+    this.containerEl = containerEl || (barEl?.closest('[data-progress-shell]') || null);
+
+    this.target = 0;         // progreso lógico
+    this.display = 0;        // progreso mostrado (animado)
+    this.maxTick = 0.02;     // velocidad máx por frame (~2%)
+    this.ai = { total: 0, done: 0, seen: new Set() };
+
+    this._raf = null;
+    this._animate = this._animate.bind(this);
+    this._ensureLoop();
+  }
+
+  _ensureLoop(){
+    if (this._raf == null) this._raf = requestAnimationFrame(this._animate);
+  }
+
+  _animate(){
+    // easing suave hacia this.target
+    if (this.display < this.target) {
+      const gap = this.target - this.display;
+      const step = Math.min(this.maxTick, Math.max(0.002, gap * 0.12));
+      this.display = Math.min(this.target, this.display + step);
+      this._paint();
+    }
+    this._raf = requestAnimationFrame(this._animate);
+  }
+
+  _activate(){
+    document.documentElement.classList.remove('progress-done');
+    if (this.containerEl) this.containerEl.classList.add('is-visible');
+  }
+
+  _resetAi(){
+    this.ai.total = 0;
+    this.ai.done = 0;
+    this.ai.seen.clear();
+  }
+
+  reset(){
+    this.target = 0;
+    this.display = 0;
+    this._resetAi();
+    if (this.barEl) this.barEl.style.width = '0%';
+    if (this.textEl) this.textEl.textContent = '0%';
+    if (this.containerEl) this.containerEl.classList.remove('is-visible');
+    document.documentElement.classList.remove('progress-done');
+  }
+
+  _paint(){
+    const pct = Math.round(this.display * 100);
+    if (this.barEl)  this.barEl.style.width = pct + '%';
+    if (this.textEl) this.textEl.textContent = pct + '%';
+    if (this.display < 1) document.documentElement.classList.remove('progress-done');
+  }
+
+  // --- Fases ---
+  setUploadProgress(f0to1){
+    if (f0to1 <= 0) {
+      this.reset();
+    }
+    this._activate();
+    const p = mapToSegment(f0to1, PROGRESS_SEG.UPLOAD);
+    this.target = Math.max(this.target, p);
+  }
+  setImportPercent(pct0to100){
+    this._activate();
+    const p = mapToSegment(pct0to100/100, PROGRESS_SEG.IMPORT);
+    this.target = Math.max(this.target, p);
+  }
+
+  // IA: total y avances incrementales
+  setAiTotal(total){
+    if (!Number.isFinite(total) || total <= 0) return;
+    this._activate();
+    this.ai.total = total;
+    // si ya llevamos 'done', re-pinta destino AI
+    this._bumpAiTarget();
+  }
+  // Marca una fila/producto visto para no contar doble
+  noteAiRowCompleted(rowId){
+    if (rowId == null) return;
+    this._activate();
+    if (!this.ai.seen.has(rowId)) {
+      this.ai.seen.add(rowId);
+      this.ai.done = Math.min(this.ai.done + 1, this.ai.total || Infinity);
+      this._bumpAiTarget();
+    }
+  }
+  // Si backend emite completed/total, podemos fijar valores exactos
+  setAiProgress(completed, total){
+    if (Number.isFinite(total) && total > 0) {
+      this._activate();
+      this.ai.total = total;
+    }
+    if (Number.isFinite(completed)) {
+      this._activate();
+      this.ai.done = Math.max(this.ai.done, completed);
+    }
+    this._bumpAiTarget();
+  }
+  _bumpAiTarget(){
+    const f = (this.ai.total > 0) ? this.ai.done / this.ai.total : 0;
+    const p = mapToSegment(f, PROGRESS_SEG.AI);
+    this.target = Math.max(this.target, p);
+    if (this.ai.total > 0 && this.ai.done >= this.ai.total) this.finish();
+  }
+
+  // Cierre solo cuando IA termina
+  finish(){
+    this.target = PROGRESS_SEG.DONE;
+    this._activate();
+    // deja que la animación llegue visualmente al 100% y oculta
+    setTimeout(() => {
+      document.documentElement.classList.add('progress-done'); // usa esto en CSS si quieres ocultar
+      if (this.containerEl) this.containerEl.classList.remove('is-visible');
+    }, 500);
+  }
+}
+
+// Instancia única ligada al DOM actual
+window._progress = (() => {
+  let barEl = document.querySelector('[data-progress-bar]') || document.getElementById('progress-bar');
+  let textEl = document.querySelector('[data-progress-text]') || document.getElementById('progress-text');
+  let containerEl = barEl?.closest('[data-progress-shell]') || textEl?.closest('[data-progress-shell]') || null;
+
+  if (!barEl) {
+    const mount = document.querySelector('#global-progress-wrapper') || document.body;
+    let shell = mount.querySelector('[data-progress-shell]');
+    if (!shell) {
+      shell = document.createElement('div');
+      shell.setAttribute('data-progress-shell', '');
+      shell.className = 'progress-orchestrator-shell';
+      shell.innerHTML = `
+        <div class="progress-orchestrator-bar">
+          <div class="progress-orchestrator-fill" data-progress-bar></div>
+        </div>
+        <span class="progress-orchestrator-text" data-progress-text>0%</span>
+      `;
+      mount.appendChild(shell);
+    }
+    containerEl = shell;
+    barEl = shell.querySelector('[data-progress-bar]');
+    textEl = shell.querySelector('[data-progress-text]');
+  }
+
+  return new ProgressOrchestrator({ barEl, textEl, containerEl });
+})();
+
+
 // ===== Legacy killer: por si algún módulo viejo intenta crear su barra/overlay =====
 (function killLegacy() {
   const zap = () => {

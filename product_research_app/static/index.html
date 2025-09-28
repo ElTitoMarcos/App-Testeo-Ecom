@@ -418,6 +418,58 @@ function mapServerFraction(serverPct) {
   return Math.min(IMPORT_POLL_MAX_FRAC, frac);
 }
 
+function pickFiniteNumber(...values) {
+  for (const value of values) {
+    const num = Number(value);
+    if (Number.isFinite(num)) return num;
+  }
+  return null;
+}
+
+function extractAiProgress(payload = {}) {
+  if (!payload || typeof payload !== 'object') return { total: null, done: null };
+  const counts = (payload.ai_counts && typeof payload.ai_counts === 'object') ? payload.ai_counts : {};
+  const total = pickFiniteNumber(
+    payload.ai_total,
+    counts.total,
+    counts.total_items,
+    counts.total_rows,
+    counts.expected_total,
+    counts.target,
+    counts.total_requested,
+    counts.requested,
+    Number.isFinite(Number(counts.queued)) && (Number.isFinite(Number(counts.ok)) || Number.isFinite(Number(counts.cached)))
+      ? Number(counts.queued) + (Number.isFinite(Number(counts.ok)) ? Number(counts.ok) : 0) + (Number.isFinite(Number(counts.cached)) ? Number(counts.cached) : 0)
+      : null
+  );
+  let done = pickFiniteNumber(
+    payload.ai_done,
+    counts.done,
+    counts.completed,
+    counts.processed,
+    counts.rows_completed,
+    counts.finished,
+    counts.success,
+    counts.n_procesados
+  );
+  if (!Number.isFinite(done)) {
+    const ok = Number(counts.ok);
+    const cached = Number(counts.cached);
+    if (Number.isFinite(ok) || Number.isFinite(cached)) {
+      done = (Number.isFinite(ok) ? ok : 0) + (Number.isFinite(cached) ? cached : 0);
+    }
+  }
+  return { total, done };
+}
+
+function syncProgressFromStatus(payload) {
+  if (!window._progress) return { total: null, done: null };
+  const { total, done } = extractAiProgress(payload);
+  if (Number.isFinite(total) && total > 0) window._progress.setAiTotal(total);
+  if (Number.isFinite(done)) window._progress.setAiProgress(done, total);
+  return { total, done };
+}
+
 async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL, host = getGlobalProgressHost() } = {}) {
   const id = typeof taskId === 'string' ? taskId : String(taskId || '');
   if (!id) return null;
@@ -440,6 +492,10 @@ async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL
     serverPct = Math.max(0, Math.min(100, serverPct));
     const stage = (data.message || data.stage || data.state || '').toString() || 'Procesando…';
     tracker?.step(mapServerFraction(serverPct), stage);
+    if (window._progress) {
+      window._progress.setImportPercent(serverPct);
+    }
+    const aiSnapshot = syncProgressFromStatus(data);
 
     const statusVal = String(data.state || data.status || '').toLowerCase();
     if (statusVal === 'error' || data.error) {
@@ -451,6 +507,11 @@ async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL
     if (serverPct >= 100 || statusVal === 'done' || statusVal === 'completed' || statusVal === 'finished') {
       await reloadTable({ skipProgress: true });
       hideImportBanner();
+      const aiTotal = aiSnapshot.total;
+      const aiDone = aiSnapshot.done;
+      if (!Number.isFinite(aiTotal) || aiTotal <= 0 || (Number.isFinite(aiDone) && aiDone >= aiTotal)) {
+        window._progress?.finish();
+      }
       return data;
     }
     await sleep(450);
@@ -462,6 +523,8 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
   const host = getGlobalProgressHost();
   const tracker = LoadingHelpers.start('Importando catálogo', { host });
   tracker.setStage('Subiendo archivo…');
+  window._progress?.reset();
+  window._progress?.setUploadProgress(0);
   let lastResult = null;
   try {
     const fd = new FormData();
@@ -476,6 +539,9 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
         if (!event.lengthComputable) return;
         const frac = Math.min(IMPORT_UPLOAD_FRAC, (event.loaded / event.total) * IMPORT_UPLOAD_FRAC);
         tracker.step(frac, 'Subiendo archivo…');
+        if (window._progress) {
+          window._progress.setUploadProgress(event.total ? event.loaded / event.total : 0);
+        }
       };
       xhr.onerror = () => reject(new Error('Error de red subiendo archivo'));
       xhr.onload = () => {
@@ -501,6 +567,10 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
 
     if (startResult.kind === 'sync') {
       tracker.step(1, 'Completado');
+      window._progress?.setUploadProgress(1);
+      window._progress?.setImportPercent(100);
+      syncProgressFromStatus(startResult.data);
+      window._progress?.finish();
       await reloadTable({ skipProgress: true });
       const importedCount = startResult.data?.imported ?? startResult.data?.rows_imported;
       if (Number.isFinite(importedCount) && importedCount > 0) {
@@ -512,9 +582,14 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     const taskId = startResult.taskId;
     const idStr = typeof taskId === 'string' ? taskId : String(taskId);
     tracker.step(IMPORT_UPLOAD_FRAC, 'Archivo subido');
+    window._progress?.setUploadProgress(1);
     localStorage.setItem(IMPORT_TASK_LS_KEY, idStr);
 
     lastResult = await followImportTask(idStr, tracker, { statusUrl, host });
+    const finalSnapshot = syncProgressFromStatus(lastResult);
+    if (!Number.isFinite(finalSnapshot.total) || finalSnapshot.total <= 0 || (Number.isFinite(finalSnapshot.done) && finalSnapshot.done >= finalSnapshot.total)) {
+      window._progress?.finish();
+    }
 
     const importedCount = lastResult?.imported ?? lastResult?.rows_imported;
     if (Number.isFinite(importedCount) && importedCount > 0) {
@@ -524,6 +599,7 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     return lastResult;
   } catch (err) {
     tracker.step(1, 'Error');
+    window._progress?.reset();
     toast.error(err?.message || 'Error al importar catálogo');
     throw err;
   } finally {
@@ -1147,6 +1223,7 @@ window.onload = async () => {
     const host = getGlobalProgressHost();
     const tracker = LoadingHelpers.start('Importando catálogo', { host });
     tracker.step(IMPORT_UPLOAD_FRAC, 'Reanudando…');
+    window._progress?.reset();
     try {
       const result = await followImportTask(tid, tracker, { host });
       const importedCount = result?.imported ?? result?.rows_imported;
