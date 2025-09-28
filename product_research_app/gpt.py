@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from . import database, config
-from .ratelimit import decorrelated_jitter_sleep, reserve, snapshot as rl_snapshot
+from .ratelimit import decorrelated_jitter_sleep, reserve
 from .prompts.registry import (
     get_json_schema,
     get_system_prompt,
@@ -243,27 +243,161 @@ def build_messages(
 
 
 MAX_429 = int(os.getenv("PRAPP_OPENAI_MAX_RETRIES_429", "6"))
+MAX_5XX = int(os.getenv("PRAPP_OPENAI_MAX_RETRIES_5XX", "4"))
 BACKOFF_CAP = float(os.getenv("PRAPP_OPENAI_BACKOFF_CAP_S", "8"))
+
+# Si no existe en este módulo, definimos un fallback para tipar el except
+try:  # pragma: no cover - protección en tiempo de ejecución
+    OpenAIError  # type: ignore[name-defined]
+except NameError:  # pragma: no cover
+    class OpenAIError(Exception): ...
 
 
 def _estimate_tokens(text: str) -> int:
+    # heurística: 1 token ~ 4 chars aprox. (inglés/español corto)
     return max(1, int(len(text) / 4))
 
 
 def _extract_retry_after_seconds(msg: str) -> float | None:
-    match = re.search(r"in\s+([0-9]+(?:\.[0-9]+)?)\s*s", msg, re.I)
-    if match:
-        try:
-            return float(match.group(1))
-        except Exception:
-            return None
-    match = re.search(r"in\s+([0-9]+)\s*ms", msg, re.I)
-    if match:
-        try:
-            return float(match.group(1)) / 1000.0
-        except Exception:
-            return None
+    # soporta "Please try again in 1.55s" o "in 102ms"
+    m = re.search(r"in\s+([0-9]+(?:\.[0-9]+)?)\s*s", msg, re.I)
+    if m: return float(m.group(1))
+    m = re.search(r"in\s+([0-9]+)\s*ms", msg, re.I)
+    if m: return float(m.group(1)) / 1000.0
     return None
+
+
+def call_gpt(*, messages: List[Dict[str, Any]], **kwargs) -> Dict[str, Any]:
+    """
+    F U N E L  Ú N I C O:
+    - Concurrencia acotada + RPM/TPM por token bucket (reserve).
+    - Reintentos 429 con Retry-After / parseo del mensaje y backoff con jitter.
+    Mantiene la API pública existente.
+    """
+    # Estimación simple de tokens del prompt (si no hay otra función ya en uso)
+    try:
+        prompt_text = "\n".join(
+            m.get("content", "") for m in (messages or []) if isinstance(m, dict)
+        )
+    except Exception:
+        prompt_text = ""
+    tokens_est = _estimate_tokens(prompt_text)
+    extra_est = kwargs.get("tokens_estimate")
+    if extra_est is not None:
+        try:
+            tokens_est = max(tokens_est, int(extra_est))
+        except Exception:
+            pass
+
+    overall_attempt = 0
+    rate_attempts = 0
+    server_attempts = 0
+    sleep_prev_rate = 0.0
+    sleep_prev_server = 0.0
+
+    while True:
+        overall_attempt += 1
+        # Embudo global: RPM/TPM + concurrencia
+        with reserve(tokens_est):
+            try:
+                raw = call_openai_chat(messages=messages, **kwargs)
+                if overall_attempt > 1:
+                    log.info(
+                        "gpt.call_gpt.recovered status=OK_RECOVERED attempts=%s",
+                        overall_attempt,
+                    )
+                return raw
+            except OpenAIError as e:
+                msg = str(e)
+                low = msg.lower()
+                resp = getattr(e, "response", None)
+                status_code = None
+                if resp is not None:
+                    try:
+                        status_code = int(getattr(resp, "status_code", None) or 0) or None
+                    except Exception:
+                        status_code = None
+
+                is_rate_limit = (
+                    (status_code == 429)
+                    or ("status 429" in low)
+                    or ("rate limit" in low)
+                )
+
+                if is_rate_limit:
+                    rate_attempts += 1
+                    if rate_attempts > MAX_429:
+                        log.error(
+                            "gpt.call_gpt.gave_up_429 attempts=%s",
+                            rate_attempts,
+                        )
+                        raise
+
+                    retry_after = getattr(e, "retry_after", None)
+                    if retry_after is None:
+                        try:
+                            headers = getattr(resp, "headers", None) if resp is not None else None
+                            if headers:
+                                ra = headers.get("Retry-After") or headers.get("retry-after")
+                                if ra:
+                                    retry_after = float(ra)
+                        except Exception:
+                            retry_after = None
+
+                    wait_s = (
+                        retry_after
+                        if retry_after is not None
+                        else _extract_retry_after_seconds(msg) or sleep_prev_rate
+                    )
+                    sleep_prev_rate = decorrelated_jitter_sleep(wait_s, BACKOFF_CAP)
+                    log.warning(
+                        "gpt.call_gpt.retry_429 attempt=%s sleep=%.2fs",
+                        rate_attempts,
+                        sleep_prev_rate,
+                    )
+                    continue
+
+                transient_markers = (
+                    "failed to connect",
+                    "timeout",
+                    "timed out",
+                    "connection reset",
+                    "temporarily unavailable",
+                    "service unavailable",
+                    "upstream connect error",
+                )
+                is_server_error = False
+                if status_code is not None:
+                    if 500 <= status_code < 600:
+                        is_server_error = True
+                if not is_server_error:
+                    if any(marker in low for marker in transient_markers):
+                        is_server_error = True
+
+                if is_server_error:
+                    server_attempts += 1
+                    if server_attempts > MAX_5XX:
+                        log.error(
+                            "gpt.call_gpt.gave_up_5xx status=%s attempts=%s",
+                            status_code if status_code is not None else "n/a",
+                            server_attempts,
+                        )
+                        raise
+
+                    retry_after = getattr(e, "retry_after", None)
+                    wait_base = retry_after if retry_after is not None else (
+                        sleep_prev_server if sleep_prev_server > 0 else 0.5
+                    )
+                    sleep_prev_server = decorrelated_jitter_sleep(wait_base, BACKOFF_CAP)
+                    log.warning(
+                        "gpt.call_gpt.retry_5xx status=%s attempt=%s sleep=%.2fs",
+                        status_code if status_code is not None else "n/a",
+                        server_attempts,
+                        sleep_prev_server,
+                    )
+                    continue
+
+                raise
 
 
 def _message_text(messages: List[Dict[str, Any]]) -> str:
@@ -285,7 +419,7 @@ def _message_text(messages: List[Dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
-def call_gpt(
+def call_prompt_task(
     task: str,
     context_json: Optional[Dict[str, Any]] = None,
     aggregates: Optional[Dict[str, Any]] = None,
@@ -333,59 +467,16 @@ def call_gpt(
         except Exception:
             prompt_tokens_est += 0
 
-    attempt = 0
-    sleep_prev = 0.0
-    response_format_enabled = response_format is not None
-
-    while True:
-        attempt += 1
-        try:
-            with reserve(prompt_tokens_est):
-                raw = call_openai_chat(
-                    api_key,
-                    model,
-                    messages,
-                    temperature=temperature,
-                    response_format=response_format if response_format_enabled else None,
-                    max_tokens=call_max_tokens,
-                    stop=stop,
-                    tokens_estimate=prompt_tokens_est,
-                )
-        except OpenAIError as exc:
-            message = str(exc)
-            lowered = message.lower()
-            if (
-                response_format_enabled
-                and response_format
-                and _looks_like_response_format_error(message)
-                and "status 429" not in lowered
-            ):
-                response_format_enabled = False
-                attempt -= 1
-                continue
-            if "status 429" not in lowered:
-                raise
-            if attempt >= MAX_429:
-                log.error("gpt.call_gpt.gave_up_429 attempts=%s", attempt)
-                raise
-            retry_after = getattr(exc, "retry_after", None)
-            wait_s: float | None = None
-            if isinstance(retry_after, (int, float)):
-                wait_s = float(retry_after)
-            if wait_s is None:
-                wait_s = _extract_retry_after_seconds(message)
-            if wait_s is None:
-                wait_s = sleep_prev
-            sleep_prev = decorrelated_jitter_sleep(wait_s or sleep_prev, BACKOFF_CAP)
-            log.warning(
-                "gpt.call_gpt.retry_429 attempt=%s sleep=%.2fs",
-                attempt,
-                sleep_prev,
-            )
-            continue
-        if attempt > 1:
-            log.info("gpt.call_gpt.recovered status=OK_RECOVERED attempts=%s", attempt)
-        break
+    raw = call_gpt(
+        messages=messages,
+        api_key=api_key,
+        model=model,
+        temperature=temperature,
+        response_format=response_format,
+        max_tokens=call_max_tokens,
+        stop=stop,
+        tokens_estimate=prompt_tokens_est,
+    )
 
     parsed_json, text_content = _parse_message_content(raw)
     if is_json_only(canonical):
@@ -581,108 +672,60 @@ def call_openai_chat(
         payload["stop"] = stop
     if response_format is not None:
         payload["response_format"] = response_format
-    est_tokens = int(tokens_estimate or 0)
-
-    rl_info_cache: Optional[Dict[str, Any]] = None
-
-    def _get_rl_info(*, force: bool = False) -> Dict[str, Any]:
-        nonlocal rl_info_cache
-        if rl_info_cache is None and (force or AI_API_VERBOSE):
-            try:
-                rl_info_cache = rl_snapshot() or {}
-            except Exception:
-                rl_info_cache = {}
-        return rl_info_cache or {}
-
-    def _warn_if_limit_near(token_count: int) -> None:
-        if token_count <= 0 or LIMIT_NEAR_FRAC <= 0:
-            return
-        rl_info = _get_rl_info(force=True)
-        eff_tpm = int(rl_info.get("eff_tpm") or 0)
-        if eff_tpm <= 0:
-            return
-        frac_tpm = float(token_count) / max(1, eff_tpm)
-        if frac_tpm >= LIMIT_NEAR_FRAC:
-            logger.warning(
-                "gpt.limit.near tpm_frac=%.2f tokens=%d",
-                frac_tpm,
-                token_count,
-            )
 
     if AI_API_VERBOSE >= 2:
-        rl = _get_rl_info()
         logger.debug(
-            "gpt.pre model=%s est_tokens=%d eff_tpm=%d eff_rpm=%d headroom=%.2f conc=%d",
+            "gpt.pre model=%s est_tokens=%s",
             model,
-            est_tokens,
-            int(rl.get("eff_tpm", 0)),
-            int(rl.get("eff_rpm", 0)),
-            float(rl.get("headroom", 0.0)),
-            int(rl.get("max_conc", 0)),
+            str(tokens_estimate or ""),
         )
-    attempt = 0
-    while True:
-        attempt += 1
-        t0 = time.perf_counter()
+
+    try:
+        response = requests.post(
+            url,
+            headers=headers,
+            data=json.dumps(payload),
+            timeout=60,
+        )
+    except requests.RequestException as exc:
+        raise OpenAIError(f"Failed to connect to OpenAI API: {exc}") from exc
+
+    if response.status_code == 200:
         try:
-            response = requests.post(
-                url,
-                headers=headers,
-                data=json.dumps(payload),
-                timeout=60,
-            )
-        except requests.RequestException as exc:
-            raise OpenAIError(f"Failed to connect to OpenAI API: {exc}") from exc
-        latency_ms = int(round((time.perf_counter() - t0) * 1000))
-        if response.status_code == 200:
-            try:
-                data = response.json()
-            except Exception as exc:
-                raise OpenAIError(f"Invalid JSON response from OpenAI: {exc}") from exc
+            data = response.json()
+        except Exception as exc:
+            raise OpenAIError(f"Invalid JSON response from OpenAI: {exc}") from exc
+        if AI_API_VERBOSE >= 2:
             usage = data.get("usage") if isinstance(data, dict) else None
-            if isinstance(usage, dict) and usage:
-                prompt_tokens = int(usage.get("prompt_tokens") or 0)
-                completion_tokens = int(usage.get("completion_tokens") or 0)
-                total_tokens = int(usage.get("total_tokens") or prompt_tokens + completion_tokens)
-                if AI_API_VERBOSE >= 2:
-                    logger.debug(
-                        "gpt.post model=%s prompt_tokens=%d completion_tokens=%d total_tokens=%d latency_ms=%d",
-                        model,
-                        prompt_tokens,
-                        completion_tokens,
-                        total_tokens,
-                        latency_ms,
-                    )
-                observed_tokens = total_tokens or (prompt_tokens + completion_tokens)
-                if observed_tokens:
-                    _warn_if_limit_near(int(observed_tokens))
-            elif est_tokens:
-                _warn_if_limit_near(est_tokens)
-            return data
+            if isinstance(usage, dict):
+                logger.debug(
+                    "gpt.post model=%s prompt_tokens=%s completion_tokens=%s total_tokens=%s",
+                    model,
+                    usage.get("prompt_tokens"),
+                    usage.get("completion_tokens"),
+                    usage.get("total_tokens"),
+                )
+        return data
 
-        try:
-            err = response.json()
-            msg = err.get("error", {}).get("message", response.text)
-        except Exception:
-            msg = response.text
-        message = f"OpenAI API returned status {response.status_code}: {msg}"
-        if response.status_code != 429:
-            logger.error("gpt.error status=%s detail=%s", response.status_code, msg)
-            raise OpenAIError(message)
-
-        retry_hint = _parse_retry_after_seconds(response, msg)
-        base = retry_hint
-        if base is None:
-            base = min(10.0, 0.5 * (2 ** (attempt - 1)))
-        jitter = random.uniform(-0.2, 0.2)
-        delay = max(0.25, min(10.0, (base or 0.0)) + jitter)
-        logger.warning("gpt.429 retry_in=%.2fs attempt=%d", delay, attempt)
-        time.sleep(delay)
-        if attempt >= 2:
-            error = RateLimitWouldDegrade(message)
-            if retry_hint is not None:
-                setattr(error, "retry_after", retry_hint)
-            raise error
+    try:
+        err = response.json()
+        msg = err.get("error", {}).get("message", response.text)
+    except Exception:
+        msg = response.text
+    status = int(response.status_code)
+    message = f"OpenAI API returned status {status}: {msg}"
+    error = OpenAIError(message)
+    setattr(error, "response", response)
+    retry_hint = _parse_retry_after_seconds(response, msg)
+    if retry_hint is not None:
+        setattr(error, "retry_after", retry_hint)
+    if status == 429:
+        pass
+    elif 500 <= status < 600:
+        logger.warning("gpt.http status=%s detail=%s", status, msg)
+    else:
+        logger.error("gpt.error status=%s detail=%s", status, msg)
+    raise error
 
 
 def build_evaluation_prompt(product: Dict[str, Any]) -> str:
@@ -787,7 +830,7 @@ def evaluate_product(
         {"role": "system", "content": "Eres un asistente inteligente que responde en español."},
         {"role": "user", "content": prompt},
     ]
-    resp_json = call_openai_chat(api_key, model, messages)
+    resp_json = call_gpt(messages=messages, api_key=api_key, model=model)
     try:
         content = resp_json["choices"][0]["message"]["content"].strip()
     except Exception as exc:
@@ -1032,10 +1075,10 @@ def generate_ba_insights(api_key: str, model: str, product: Dict[str, Any]) -> T
     ]
 
     start = time.time()
-    resp = call_openai_chat(
-        api_key,
-        model,
-        messages,
+    resp = call_gpt(
+        messages=messages,
+        api_key=api_key,
+        model=model,
         temperature=0.2,
         response_format={"type": "json_object"},
     )
@@ -1132,10 +1175,10 @@ def generate_batch_columns(api_key: str, model: str, items: List[Dict[str, Any]]
     ]
 
     start = time.time()
-    resp = call_openai_chat(
-        api_key,
-        model,
-        messages,
+    resp = call_gpt(
+        messages=messages,
+        api_key=api_key,
+        model=model,
         temperature=0.2,
         response_format={"type": "json_object"},
     )
@@ -1379,7 +1422,7 @@ def evaluate_winner_score(
         },
         {"role": "user", "content": user_content},
     ]
-    resp_json = call_openai_chat(api_key, model, messages)
+    resp_json = call_gpt(messages=messages, api_key=api_key, model=model)
     try:
         content = resp_json["choices"][0]["message"]["content"].strip()
         raw = json.loads(content)
@@ -1450,7 +1493,12 @@ def simplify_product_names(api_key: str, model: str, names: List[str], *, temper
         {"role": "user", "content": prompt},
     ]
     try:
-        resp = call_openai_chat(api_key, model, messages, temperature=temperature)
+        resp = call_gpt(
+            messages=messages,
+            api_key=api_key,
+            model=model,
+            temperature=temperature,
+        )
         # We expect a JSON response in the assistant's content
         content = resp['choices'][0]['message']['content']
         simplified = json.loads(content)
@@ -1562,7 +1610,7 @@ def recommend_winner_weights(
 
     parsed = {}
     try:
-        resp = call_openai_chat(api_key, model, messages)
+        resp = call_gpt(messages=messages, api_key=api_key, model=model)
         content = resp["choices"][0]["message"]["content"].strip()
         parsed = _extract_json_block(content)
     except Exception:
@@ -1648,7 +1696,7 @@ def summarize_top_products(api_key: str, model: str, products: List[Dict[str, An
         },
         {"role": "user", "content": prompt},
     ]
-    resp = call_openai_chat(api_key, model, messages)
+    resp = call_gpt(messages=messages, api_key=api_key, model=model)
     try:
         return resp["choices"][0]["message"]["content"].strip()
     except Exception as exc:

@@ -2612,10 +2612,14 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"error": "No API key configured"}).encode('utf-8'))
             return
         try:
-            resp = gpt.call_openai_chat(api_key, model, [
-                {"role": "system", "content": "Eres un asistente útil."},
-                {"role": "user", "content": prompt},
-            ])
+            resp = gpt.call_gpt(
+                messages=[
+                    {"role": "system", "content": "Eres un asistente útil."},
+                    {"role": "user", "content": prompt},
+                ],
+                api_key=api_key,
+                model=model,
+            )
             content = resp['choices'][0]['message']['content']
             self._set_json()
             self.wfile.write(json.dumps({"response": content}).encode('utf-8'))
@@ -2652,7 +2656,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         data = payload.get("data")
 
         try:
-            result = gpt.call_gpt(
+            result = gpt.call_prompt_task(
                 canonical,
                 context_json=context_json,
                 aggregates=aggregates,
@@ -2838,10 +2842,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                         "propón pesos (de 0 a 2) para cada métrica en formato JSON con las claves exactas: "
                         "momentum, saturation, differentiation, social_proof, margin, logistics."
                     )
-                    resp = gpt.call_openai_chat(api_key, model, [
-                        {"role": "system", "content": "Eres un asistente experto en scoring de productos."},
-                        {"role": "user", "content": prompt},
-                    ])
+                    resp = gpt.call_gpt(
+                        messages=[
+                            {"role": "system", "content": "Eres un asistente experto en scoring de productos."},
+                            {"role": "user", "content": prompt},
+                        ],
+                        api_key=api_key,
+                        model=model,
+                    )
                     content = resp['choices'][0]['message']['content']
                     # Attempt to parse JSON from content
                     try:
