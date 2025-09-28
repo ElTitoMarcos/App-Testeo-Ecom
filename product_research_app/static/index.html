@@ -373,9 +373,9 @@ const saveIfDirty = window.saveIfDirty;
 window.fetchJson = fetchJson;
 window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
-// Tramos: 0–0.20 subida | 0.20–0.70 importación | 0.70–1.00 IA
-const PROG_UPLOAD_FRAC = 0.20;
-const PROG_IMPORT_END = 0.70;
+// Tramos: 0–0.10 subida | 0.10–0.40 servidor | 0.40–1.00 IA
+const PROG_UPLOAD_FRAC = 0.10;
+const PROG_IMPORT_END = 0.40;
 const IMPORT_STATUS_URL = '/_import_status';
 const IMPORT_START_URL = '/upload';
 let savedApiKeyHash = null;
@@ -414,7 +414,7 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 function mapServerFraction(serverPct){
   const clamped = Math.max(0, Math.min(100, Number(serverPct)||0));
-  const span = PROG_IMPORT_END - PROG_UPLOAD_FRAC; // 0.50
+  const span = PROG_IMPORT_END - PROG_UPLOAD_FRAC; // 0.30
   return Math.min(PROG_IMPORT_END, PROG_UPLOAD_FRAC + (clamped/100)*span);
 }
 
@@ -437,9 +437,9 @@ function iaCountComplete(targetIds){
   return done;
 }
 
-// Tween lineal acotado para evitar saltos (máx ~2.5% por tick)
+// Tween lineal acotado para evitar saltos (máx ~1.5% por tick)
 async function animateTowards(tracker, cur, target){
-  const maxStep = 0.025; // 2.5%
+  const maxStep = 0.015; // 1.5% para que suba "a poquitos"
   return new Promise(res=>{
     function step(){
       const delta = target - cur;
@@ -454,51 +454,79 @@ async function animateTowards(tracker, cur, target){
 }
 
 // Fase IA: progresa de PROG_IMPORT_END → 1.0 leyendo productos
-async function trackIaPhase(tracker, targetIds, {pollMs=1600, maxIdle=120000} = {}){
-  if(!Array.isArray(targetIds) || targetIds.length===0){
-    // Si no pudimos aislar IDs nuevos, intenta con todos los visibles
-    targetIds = (Array.isArray(window.allProducts) ? window.allProducts : []).map(p => String(p.id));
+async function trackIaPhase(tracker, targetIds, {pollMs=1200, maxIdle=120000} = {}){
+  if (window.__iaTrackerActive) {
+    return false;
   }
-  window.__iaTailPending = true; // evita cerrar la barra en finally
-  let cur = PROG_IMPORT_END;
-  tracker.step(cur, 'Columnas IA…');
+  window.__iaTrackerActive = true;
+  try {
+    if(!Array.isArray(targetIds) || targetIds.length===0){
+      // Si no pudimos aislar IDs nuevos, intenta con todos los visibles
+      targetIds = (Array.isArray(window.allProducts) ? window.allProducts : []).map(p => String(p.id));
+    }
+    const total = Array.isArray(targetIds) ? targetIds.length : 0;
+    window.__iaTailPending = true; // evita cerrar la barra en finally
+    const start = PROG_IMPORT_END;
+    let cur = start;
+    tracker.step(cur, 'Columnas IA…');
 
-  let lastDone = -1;
-  let sinceChange = 0;
-  const startTs = Date.now();
-
-  while(true){
-    // Refresca datos con poca frecuencia para no spamear
-    try { await reloadTable({ skipProgress: true }); } catch {}
-
-    const done = iaCountComplete(targetIds);
-    const frac = done / Math.max(1, targetIds.length);
-    const target = PROG_IMPORT_END + frac * (1 - PROG_IMPORT_END);
-
-    await animateTowards(tracker, cur, target);
-    cur = target;
-
-    if(done === targetIds.length){
+    if (total === 0) {
+      await animateTowards(tracker, cur, 1);
       tracker.step(1, 'Completado');
+      tracker.done();
       window.__iaTailPending = false;
       return true;
     }
 
-    // Control de inactividad para evitar ciclos infinitos
-    if(done === lastDone){ sinceChange += pollMs; } else { sinceChange = 0; lastDone = done; }
-    if(sinceChange >= maxIdle || (Date.now()-startTs) > 10*60*1000){ // 2 min sin cambios o 10 min total
-      // Cierra igualmente, pero deja nota visual de “Completado (parcial)”
-      tracker.step(Math.max(cur, 0.98), 'Completado (parcial)');
-      window.__iaTailPending = false;
-      return false;
-    }
+    let lastDone = -1;
+    let idleFor = 0;
+    const startTs = Date.now();
 
-    await new Promise(r => setTimeout(r, pollMs));
+    while(true){
+      // Refresca datos con poca frecuencia para no spamear
+      try { await reloadTable({ skipProgress: true }); } catch {}
+
+      const done = iaCountComplete(targetIds);
+      if (done !== lastDone) {
+        lastDone = done;
+        const target = start + (done / total) * (1 - start);
+        const clamped = Math.min(1, target);
+        await animateTowards(tracker, cur, clamped);
+        cur = clamped;
+        if(done >= total){
+          tracker.step(1, 'Completado');
+          tracker.done();
+          window.__iaTailPending = false;
+          return true;
+        }
+        idleFor = 0;
+      } else {
+        idleFor += pollMs;
+      }
+
+      if((idleFor >= maxIdle && maxIdle > 0) || (Date.now()-startTs) > 10*60*1000){
+        const fallback = Math.max(cur, 0.98);
+        await animateTowards(tracker, cur, fallback);
+        cur = fallback;
+        tracker.step(cur, 'Completado (parcial)');
+        tracker.done();
+        window.__iaTailPending = false;
+        return false;
+      }
+
+      await sleep(pollMs);
+    }
+  } finally {
+    window.__iaTrackerActive = false;
   }
 }
 
 if (typeof window.__iaTailPending !== 'boolean') {
   window.__iaTailPending = false;
+}
+
+if (typeof window.__iaTrackerActive !== 'boolean') {
+  window.__iaTrackerActive = false;
 }
 
 async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL, host = getGlobalProgressHost() } = {}) {
