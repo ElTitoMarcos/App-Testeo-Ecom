@@ -1,21 +1,24 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import math
 import os
 import random
 import time
-from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-import httpx
-
 from .. import config, database, gpt
+from ..config import (
+    AI_DEGRADE_FACTOR,
+    AI_MAX_OUTPUT_TOKENS,
+    AI_MAX_PRODUCTS_PER_CALL,
+    AI_MIN_PRODUCTS_PER_CALL,
+    get_ai_cost_config,
+)
 from ..ai.strict_jsonl import parse_jsonl_and_validate
 from ..obs import log_partial_ko, log_recovered
 from ..utils.signature import compute_sig_hash
@@ -33,6 +36,17 @@ DEFAULT_BATCH_SIZE = int(os.getenv("PRAPP_AI_BATCH_SIZE", "8"))
 MIN_BATCH_SIZE = 4
 MAX_RETRIES_MISSING = int(os.getenv("PRAPP_AI_RETRIES_MISSING", "2"))
 StatusCallback = Callable[..., None]
+
+AI_COST = get_ai_cost_config()
+try:
+    EST_OUT_PER_ITEM = int((AI_COST or {}).get("estTokensPerItemOut", 80))
+except Exception:
+    EST_OUT_PER_ITEM = 80
+
+
+def _max_tokens_for_batch(batch_len: int) -> int:
+    est = EST_OUT_PER_ITEM * max(1, batch_len) + 200
+    return min(max(800, est), max(800, AI_MAX_OUTPUT_TOKENS), 4000)
 
 
 @dataclass
@@ -289,49 +303,6 @@ def _log_ko_event(
     logger.warning("ai_columns.%s: %s", event, payload)
 
 
-class _AsyncRateLimiter:
-    def __init__(self, rpm_limit: Optional[int], tpm_limit: Optional[int]) -> None:
-        self.rpm = max(0, int(rpm_limit or 0))
-        self.tpm = max(0, int(tpm_limit or 0))
-        self._lock = asyncio.Lock()
-        self._events: deque[tuple[float, int]] = deque()
-
-    async def acquire(self, tokens: int) -> None:
-        if self.rpm <= 0 and self.tpm <= 0:
-            return
-        tokens = max(0, int(tokens or 0))
-        window = 60.0
-        async with self._lock:
-            while True:
-                now = time.monotonic()
-                while self._events and now - self._events[0][0] >= window:
-                    self._events.popleft()
-                wait_time = 0.0
-                if self.rpm and len(self._events) >= self.rpm:
-                    oldest = self._events[0][0]
-                    wait_time = max(wait_time, window - (now - oldest))
-                if self.tpm:
-                    token_sum = sum(tok for _, tok in self._events)
-                    if token_sum + tokens > self.tpm:
-                        deficit = token_sum + tokens - self.tpm
-                        if deficit > 0 and self._events:
-                            running = 0
-                            target_wait = 0.0
-                            for ts, tok in self._events:
-                                running += tok
-                                if token_sum - running + tokens <= self.tpm:
-                                    target_wait = window - (now - ts)
-                                    break
-                            else:
-                                target_wait = window - (now - self._events[-1][0])
-                            wait_time = max(wait_time, max(0.0, target_wait))
-                if wait_time > 0:
-                    await asyncio.sleep(wait_time)
-                    continue
-                self._events.append((time.monotonic(), tokens))
-                return
-
-
 SYSTEM_PROMPT = (
     "Eres un analista de marketing. Devuelve exclusivamente JSONL válido, una línea JSON por producto solicitado. "
     "Cada registro debe incluir desire (string corta), desire_magnitude (0-1 o etiqueta), "
@@ -522,12 +493,11 @@ def _build_missing_prompt(batch: BatchRequest, missing_ids: List[int]) -> str:
     return "\n".join(part for part in (prompt, "### PRODUCTOS", body) if part)
 
 
-async def _recover_missing_async(
-    client: httpx.AsyncClient,
+def _recover_missing_sync(
     batch: BatchRequest,
+    api_key: str,
     model: str,
     missing_ids: List[int],
-    rate_limiter: "_AsyncRateLimiter",
 ) -> Tuple[Dict[int, Dict[str, Any]], int]:
     retries_used = 0
     recovered: Dict[int, Dict[str, Any]] = {}
@@ -537,22 +507,28 @@ async def _recover_missing_async(
         prompt_text = _build_missing_prompt(batch, to_fill)
         if warning_prefix:
             prompt_text = f"{warning_prefix}\n\n{prompt_text}"
-        est_tokens = max(200, int(batch.prompt_tokens_est * len(to_fill) / max(1, len(batch.candidates))))
-        await rate_limiter.acquire(est_tokens)
-        response = await client.post(
-            "/v1/chat/completions",
-            json={
-                "model": model,
-                "temperature": 0.2,
-                "top_p": 0.9,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt_text},
-                ],
-            },
+        est_tokens = max(
+            200,
+            int(batch.prompt_tokens_est * len(to_fill) / max(1, len(batch.candidates))),
         )
-        response.raise_for_status()
-        raw = response.json()
+        max_tokens = _max_tokens_for_batch(len(to_fill))
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt_text},
+        ]
+        try:
+            raw = gpt.call_openai_chat(
+                api_key,
+                model,
+                messages,
+                temperature=0.2,
+                max_tokens=max_tokens,
+                tokens_estimate=est_tokens,
+            )
+        except gpt.RateLimitWouldDegrade:
+            break
+        except gpt.OpenAIError:
+            break
         try:
             text = _extract_jsonl_payload(raw)
             parsed = parse_jsonl_and_validate(text, to_fill)
@@ -566,13 +542,6 @@ async def _recover_missing_async(
         to_fill = [pid for pid in missing_ids if pid not in recovered]
         retries_used += 1
     return recovered, retries_used
-
-
-def _build_missing_prompt(batch: BatchRequest, missing_ids: List[int]) -> str:
-    prompt = MISSING_ONLY_JSONL_PROMPT(missing_ids, AI_FIELDS)
-    product_lines = [batch.product_map.get(pid, "") for pid in missing_ids]
-    body = "\n".join(line for line in product_lines if line)
-    return "\n".join(part for part in (prompt, "### PRODUCTOS", body) if part)
 
 
 def _percentile(values: List[float], pct: float) -> float:
@@ -888,240 +857,189 @@ def _quantile(data: List[float], q: float) -> float:
     return s[lo] * (hi - pos) + s[hi] * (pos - lo)
 
 
-async def _call_batch_with_retries(
-    client: httpx.AsyncClient,
-    request: BatchRequest,
+def _call_batch_with_retries(
+    batch: BatchRequest,
     *,
+    api_key: str,
     model: str,
     max_retries: int,
-    rate_limiter: _AsyncRateLimiter,
-    semaphore: asyncio.Semaphore,
-    stop_event: asyncio.Event,
 ) -> Dict[str, Any]:
-    if stop_event.is_set():
-        now_iso = datetime.utcnow().isoformat()
-        logger.info(
-            "ai_columns.request: req_id=%s items=%d prompt_tokens_est=%d start=%s end=%s duration=0.00s status=%s retries=0",
-            request.req_id,
-            len(request.candidates),
-            request.prompt_tokens_est,
-            now_iso,
-            now_iso,
-            "skipped",
-        )
-        return {
-            "req_id": request.req_id,
-            "candidates": request.candidates,
-            "skipped": True,
-            "usage": {},
-            "duration": 0.0,
-            "retries": 0,
-            "prompt_tokens_est": request.prompt_tokens_est,
-        }
-
-    async with semaphore:
-        if stop_event.is_set():
-            now_iso = datetime.utcnow().isoformat()
-            logger.info(
-                "ai_columns.request: req_id=%s items=%d prompt_tokens_est=%d start=%s end=%s duration=0.00s status=%s retries=0",
-                request.req_id,
-                len(request.candidates),
-                request.prompt_tokens_est,
-                now_iso,
-                now_iso,
-                "skipped",
+    attempt = 0
+    while True:
+        attempt += 1
+        tokens_est = batch.prompt_tokens_est
+        max_tokens = _max_tokens_for_batch(len(batch.candidates))
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": batch.user_text},
+        ]
+        start_ts = time.perf_counter()
+        try:
+            raw = gpt.call_openai_chat(
+                api_key,
+                model,
+                messages,
+                temperature=0.2,
+                max_tokens=max_tokens,
+                tokens_estimate=tokens_est,
             )
+        except gpt.RateLimitWouldDegrade:
+            raise
+        except gpt.OpenAIError as exc:
+            duration = time.perf_counter() - start_ts
+            if attempt <= max_retries:
+                sleep_for = min(10.0, 0.5 * (2 ** (attempt - 1))) + random.uniform(0.05, 0.25)
+                time.sleep(sleep_for)
+                continue
+            error_message = str(exc)
             return {
-                "req_id": request.req_id,
-                "candidates": request.candidates,
-                "skipped": True,
+                "req_id": batch.req_id,
+                "candidates": batch.candidates,
+                "ok": {},
+                "ko": {str(cand.id): error_message for cand in batch.candidates},
                 "usage": {},
-                "duration": 0.0,
-                "retries": 0,
-                "prompt_tokens_est": request.prompt_tokens_est,
+                "duration": duration,
+                "retries": attempt,
+                "error": error_message,
+                "prompt_tokens_est": tokens_est,
+                "raw_text": None,
             }
 
-        attempt = 0
-        while True:
-            await rate_limiter.acquire(request.prompt_tokens_est)
-            start_ts = time.perf_counter()
-            start_iso = datetime.utcnow().isoformat()
-            status = "ok"
-            error_message: Optional[str] = None
-            try:
-                response = await client.post(
-                    "/v1/chat/completions",
-                    json={
-                        "model": model,
-                        "temperature": 0.2,
-                        "top_p": 0.9,
-                        "messages": [
-                            {"role": "system", "content": SYSTEM_PROMPT},
-                            {"role": "user", "content": request.user_text},
-                        ],
-                    },
-                )
-                response.raise_for_status()
-                raw = response.json()
-                jsonl_payload = _extract_jsonl_payload(raw)
-                expected_ids = [cand.id for cand in request.candidates]
-                strict_map: Dict[int, Dict[str, Any]] = {}
-                retries_missing_used = 0
-                recovered_payload: Dict[int, Dict[str, Any]] = {}
-                try:
-                    strict_map = parse_jsonl_and_validate(jsonl_payload, expected_ids)
-                except ValueError as exc:
-                    partial_map = _parse_jsonl_loose(jsonl_payload)
-                    returned_ids = list(partial_map.keys())
-                    missing_ids = [pid for pid in expected_ids if pid not in partial_map]
-                    log_partial_ko(
-                        "call_openai",
-                        expected_ids,
-                        returned_ids,
-                        len(request.candidates),
-                        model,
-                        note=str(exc),
-                    )
+        try:
+            jsonl_payload = _extract_jsonl_payload(raw)
+        except gpt.InvalidJSONError as exc:
+            duration = time.perf_counter() - start_ts
+            if attempt <= max_retries:
+                sleep_for = min(10.0, 0.5 * (2 ** (attempt - 1))) + random.uniform(0.05, 0.25)
+                time.sleep(sleep_for)
+                continue
+            error_message = str(exc)
+            return {
+                "req_id": batch.req_id,
+                "candidates": batch.candidates,
+                "ok": {},
+                "ko": {str(cand.id): error_message for cand in batch.candidates},
+                "usage": {},
+                "duration": duration,
+                "retries": attempt,
+                "error": error_message,
+                "prompt_tokens_est": tokens_est,
+                "raw_text": None,
+            }
 
-                    if missing_ids:
-                        recovered_payload, retries_missing_used = await _recover_missing_async(
-                            client,
-                            request,
-                            model,
-                            missing_ids,
-                            rate_limiter,
-                        )
-                    combined = {**partial_map, **recovered_payload}
-                    pending_after = [pid for pid in expected_ids if pid not in combined]
-                    if not pending_after:
-                        strict_map = combined
-                        if recovered_payload:
-                            log_recovered(
-                                "call_openai",
-                                retries_missing_used,
-                                len(request.candidates),
-                                sorted(recovered_payload.keys()),
-                            )
-                    else:
-                        strict_map = combined
-                ok: Dict[str, Dict[str, Any]] = {}
-                ko: Dict[str, str] = {}
-                data_map = {str(pid): payload for pid, payload in strict_map.items()}
-                remaining_missing = [
-                    cand.id for cand in request.candidates if str(cand.id) not in data_map
-                ]
-                for missing_id in remaining_missing:
-                    ko[str(missing_id)] = "missing"
-                for cand in request.candidates:
-                    pid = str(cand.id)
-                    entry = data_map.get(pid)
-                    if not isinstance(entry, dict):
-                        if pid not in ko:
-                            ko[pid] = "missing"
-                        continue
-                    desire_payload = dict(entry)
+        expected_ids = [cand.id for cand in batch.candidates]
+        strict_map: Dict[int, Dict[str, Any]] = {}
+        retries_missing_used = 0
+        try:
+            strict_map = parse_jsonl_and_validate(jsonl_payload, expected_ids)
+        except ValueError as exc:
+            partial_map = _parse_jsonl_loose(jsonl_payload)
+            returned_ids = list(partial_map.keys())
+            missing_ids = [pid for pid in expected_ids if pid not in partial_map]
+            log_partial_ko(
+                "call_openai",
+                expected_ids,
+                returned_ids,
+                len(batch.candidates),
+                model,
+                note=str(exc),
+            )
+            recovered_payload: Dict[int, Dict[str, Any]] = {}
+            if missing_ids:
+                recovered_payload, retries_missing_used = _recover_missing_sync(
+                    batch,
+                    api_key,
+                    model,
+                    missing_ids,
+                )
+            combined = {**partial_map, **recovered_payload}
+            pending_after = [pid for pid in expected_ids if pid not in combined]
+            if not pending_after:
+                strict_map = combined
+                if recovered_payload:
+                    log_recovered(
+                        "call_openai",
+                        retries_missing_used,
+                        len(batch.candidates),
+                        sorted(recovered_payload.keys()),
+                    )
+            else:
+                strict_map = combined
+
+        usage = raw.get("usage", {}) or {}
+        ok: Dict[str, Dict[str, Any]] = {}
+        ko: Dict[str, str] = {}
+        data_map = {str(pid): payload for pid, payload in strict_map.items()}
+        remaining_missing = [
+            cand.id for cand in batch.candidates if str(cand.id) not in data_map
+        ]
+        for missing_id in remaining_missing:
+            ko[str(missing_id)] = "missing"
+
+        for cand in batch.candidates:
+            pid = str(cand.id)
+            entry = data_map.get(pid)
+            if not isinstance(entry, dict):
+                if pid not in ko:
+                    ko[pid] = "missing"
+                continue
+            desire_payload = dict(entry)
+            draft_raw = str(
+                desire_payload.get("desire_statement")
+                or desire_payload.get("desire")
+                or ""
+            ).strip()
+            extra_title = (cand.extra or {}).get("title") if isinstance(cand.extra, dict) else None
+            title = str(cand.payload.get("name") or extra_title or "")
+            if len(draft_raw) < 280 or looks_like_product_desc(draft_raw, title):
+                refined = _refine_desire_statement(cand, draft_raw)
+                if isinstance(refined, dict):
+                    merged = dict(desire_payload)
+                    merged.update(refined)
+                    desire_payload = merged
                     draft_raw = str(
                         desire_payload.get("desire_statement")
                         or desire_payload.get("desire")
                         or ""
                     ).strip()
-                    extra_title = (cand.extra or {}).get("title") if isinstance(cand.extra, dict) else None
-                    title = str(cand.payload.get("name") or extra_title or "")
-                    if len(draft_raw) < 280 or looks_like_product_desc(draft_raw, title):
-                        refined = await _refine_desire_statement(cand, draft_raw)
-                        if isinstance(refined, dict):
-                            merged = dict(desire_payload)
-                            merged.update(refined)
-                            desire_payload = merged
-                            draft_raw = str(
-                                desire_payload.get("desire_statement")
-                                or desire_payload.get("desire")
-                                or ""
-                            ).strip()
-                    if not draft_raw:
-                        draft_raw = str(entry.get("desire") or "")
-                    cleaned_txt = cleanse(draft_raw)
-                    if not cleaned_txt:
-                        cleaned_txt = draft_raw
-                    cleaned_txt = cleaned_txt.strip()
-                    desire_primary = desire_payload.get("desire_primary")
-                    if desire_primary is None:
-                        desire_primary = entry.get("desire_primary")
-                    desire_magnitude_raw = desire_payload.get("desire_magnitude")
-                    if desire_magnitude_raw is None:
-                        desire_magnitude_raw = entry.get("desire_magnitude")
-                    if isinstance(desire_magnitude_raw, dict):
-                        desire_magnitude_raw = desire_magnitude_raw.get("overall")
-                    ok[pid] = {
-                        "desire": cleaned_txt,
-                        "desire_primary": desire_primary,
-                        "desire_magnitude": gpt._norm_tri(desire_magnitude_raw),
-                        "awareness_level": gpt._norm_awareness(
-                            desire_payload.get("awareness_level")
-                        ),
-                        "competition_level": gpt._norm_tri(
-                            desire_payload.get("competition_level")
-                        ),
-                    }
-                duration = time.perf_counter() - start_ts
-                end_iso = datetime.utcnow().isoformat()
-                usage = raw.get("usage", {}) or {}
-                logger.info(
-                    "ai_columns.request: req_id=%s items=%d prompt_tokens_est=%d start=%s end=%s duration=%.2fs status=%s retries=%d",
-                    request.req_id,
-                    len(request.candidates),
-                    request.prompt_tokens_est,
-                    start_iso,
-                    end_iso,
-                    duration,
-                    status,
-                    attempt,
-                )
-                return {
-                    "req_id": request.req_id,
-                    "candidates": request.candidates,
-                    "ok": ok,
-                    "ko": ko,
-                    "usage": usage,
-                    "duration": duration,
-                    "retries": attempt + retries_missing_used,
-                    "prompt_tokens_est": request.prompt_tokens_est,
-                    "raw_text": jsonl_payload,
-                }
-            except (httpx.HTTPError, json.JSONDecodeError, gpt.InvalidJSONError) as exc:
-                error_message = str(exc)
-                status = "retry" if attempt < max_retries else "error"
-                duration = time.perf_counter() - start_ts
-                end_iso = datetime.utcnow().isoformat()
-                logger.info(
-                    "ai_columns.request: req_id=%s items=%d prompt_tokens_est=%d start=%s end=%s duration=%.2fs status=%s retries=%d error=%s",
-                    request.req_id,
-                    len(request.candidates),
-                    request.prompt_tokens_est,
-                    start_iso,
-                    end_iso,
-                    duration,
-                    status,
-                    attempt,
-                    error_message,
-                )
-                if attempt < max_retries and not stop_event.is_set():
-                    attempt += 1
-                    sleep_for = min(10.0, 0.5 * (2**(attempt - 1))) + random.uniform(0.05, 0.25)
-                    await asyncio.sleep(sleep_for)
-                    continue
-                return {
-                    "req_id": request.req_id,
-                    "candidates": request.candidates,
-                    "ok": {},
-                    "ko": {str(cand.id): error_message for cand in request.candidates},
-                    "usage": {},
-                    "duration": duration,
-                    "retries": attempt,
-                    "error": error_message,
-                    "prompt_tokens_est": request.prompt_tokens_est,
-                    "raw_text": locals().get("jsonl_payload"),
-                }
+            if not draft_raw:
+                draft_raw = str(entry.get("desire") or "")
+            cleaned_txt = cleanse(draft_raw)
+            if not cleaned_txt:
+                cleaned_txt = draft_raw
+            cleaned_txt = cleaned_txt.strip()
+            desire_primary = desire_payload.get("desire_primary")
+            if desire_primary is None:
+                desire_primary = entry.get("desire_primary")
+            desire_magnitude_raw = desire_payload.get("desire_magnitude")
+            if desire_magnitude_raw is None:
+                desire_magnitude_raw = entry.get("desire_magnitude")
+            if isinstance(desire_magnitude_raw, dict):
+                desire_magnitude_raw = desire_magnitude_raw.get("overall")
+            ok[pid] = {
+                "desire": cleaned_txt,
+                "desire_primary": desire_primary,
+                "desire_magnitude": gpt._norm_tri(desire_magnitude_raw),
+                "awareness_level": gpt._norm_awareness(
+                    desire_payload.get("awareness_level")
+                ),
+                "competition_level": gpt._norm_tri(
+                    desire_payload.get("competition_level")
+                ),
+            }
+
+        duration = time.perf_counter() - start_ts
+        return {
+            "req_id": batch.req_id,
+            "candidates": batch.candidates,
+            "ok": ok,
+            "ko": ko,
+            "usage": usage,
+            "duration": duration,
+            "retries": attempt + retries_missing_used,
+            "prompt_tokens_est": tokens_est,
+            "raw_text": jsonl_payload,
+        }
 
 
 def _calculate_cost(usage: Dict[str, Any], price_in: float, price_out: float) -> float:
@@ -1237,13 +1155,12 @@ def _candidate_to_desire_context(candidate: Candidate) -> Dict[str, Any]:
     return {"product": product}
 
 
-async def _refine_desire_statement(
+def _refine_desire_statement(
     candidate: Candidate,
     draft_text: str,
 ) -> Optional[Dict[str, Any]]:
     context = _candidate_to_desire_context(candidate)
-
-    def _call() -> Optional[Dict[str, Any]]:
+    try:
         result = gpt.call_gpt(
             "DESIRE",
             context_json=context,
@@ -1255,13 +1172,6 @@ async def _refine_desire_statement(
             max_tokens=450,
             stop=None,
         )
-        content = result.get("content") if isinstance(result, dict) else None
-        if isinstance(content, dict):
-            return content
-        return None
-
-    try:
-        return await asyncio.to_thread(_call)
     except gpt.OpenAIError as exc:
         message = str(exc).lower()
         if "status 429" in message:
@@ -1280,6 +1190,11 @@ async def _refine_desire_statement(
     except Exception:
         logger.exception("desire refine call failed for id=%s", candidate.id)
         return None
+
+    content = result.get("content") if isinstance(result, dict) else None
+    if isinstance(content, dict):
+        return content
+    return None
 
 
 def _emit_status(
@@ -1393,31 +1308,10 @@ def run_ai_fill_job(
         parallelism = int(runtime_cfg.get("parallelism", 8) or 8)
     parallelism = max(1, parallelism)
 
-    if microbatch:
-        microbatch_size = int(microbatch)
-    else:
-        microbatch_size = int(runtime_cfg.get("microbatch", DEFAULT_BATCH_SIZE) or DEFAULT_BATCH_SIZE)
-    microbatch_size = max(MIN_BATCH_SIZE, microbatch_size)
-
-    logger.info("ai.run start items_total=%d batch_init=%d", total_items, microbatch_size)
-
     cache_enabled = bool(runtime_cfg.get("cache_enabled", True))
     cache_version = int(runtime_cfg.get("version", 1) or 1)
-    tpm_limit = runtime_cfg.get("tpm_limit")
-    if tpm_limit is not None:
-        try:
-            tpm_limit = int(tpm_limit)
-        except Exception:
-            tpm_limit = None
-    rpm_limit = runtime_cfg.get("rpm_limit")
-    if rpm_limit is not None:
-        try:
-            rpm_limit = int(rpm_limit)
-        except Exception:
-            rpm_limit = None
     trunc_title = int(runtime_cfg.get("trunc_title", 180) or 180)
     trunc_desc = int(runtime_cfg.get("trunc_desc", 800) or 800)
-    timeout_s = float(runtime_cfg.get("timeout", 45) or 45)
 
     batch_cfg = config.get_ai_batch_config()
     max_retries = int(batch_cfg.get("MAX_RETRIES", 3) or 3)
@@ -1575,41 +1469,6 @@ def run_ai_fill_job(
             "total_requested": len(requested_ids),
         }
 
-    batches: List[BatchRequest] = []
-    if remaining:
-        index = 0
-        req_counter = 0
-        total_remaining = len(remaining)
-        while index < total_remaining:
-            size = min(microbatch_size, total_remaining - index)
-            if size <= 0:
-                break
-            while size > 0:
-                chunk = remaining[index : index + size]
-                if not chunk:
-                    break
-                req_id = f"{req_counter + 1:03d}"
-                batch = _build_batch_request(req_id, chunk, trunc_title, trunc_desc)
-                if tpm_limit and batch.prompt_tokens_est > tpm_limit and size > 1:
-                    size = max(1, size - 1)
-                    continue
-                if tpm_limit and batch.prompt_tokens_est > tpm_limit and size == 1:
-                    logger.warning(
-                        "ai_columns.prompt_estimate_exceeds_limit: req_id=%s est=%d limit=%d",
-                        req_id,
-                        batch.prompt_tokens_est,
-                        int(tpm_limit),
-                    )
-                batches.append(batch)
-                req_counter += 1
-                index += size
-                break
-            else:
-                index += size or 1
-
-    rate_limiter = _AsyncRateLimiter(rpm_limit, tpm_limit)
-    stop_event = asyncio.Event()
-
     desire_scores: List[Tuple[str, float]] = []
     comp_scores: List[Tuple[str, float]] = []
     success_records: Dict[int, Dict[str, Any]] = {}
@@ -1730,14 +1589,6 @@ def run_ai_fill_job(
             message=f"IA columnas {done_val}/{total_items}",
         )
 
-        logger.info(
-            "ai.batch result items=%d parsed=%d missing=%d db_updated=%d pending_before=%d",
-            len(candidates_list),
-            len(parsed_ids),
-            len(missing_ids),
-            updated_rows,
-            pending_before,
-        )
         if missing_ids:
             logger.warning("ai.batch.missing ids_sample=%s", missing_ids[:5])
         if not parsed_ids:
@@ -1745,44 +1596,81 @@ def run_ai_fill_job(
             if raw_sample:
                 logger.error("ai.parse.empty raw_sample=%s", raw_sample)
 
-        if cost_cap is not None and cost_spent >= float(cost_cap) and not stop_event.is_set():
-            stop_event.set()
+        if cost_cap is not None and cost_spent >= float(cost_cap):
+            return
 
-    if batches:
-        semaphore = asyncio.Semaphore(parallelism)
+    if remaining:
+        pending_candidates = list(remaining)
+        batch_size = min(AI_MAX_PRODUCTS_PER_CALL, len(pending_candidates))
+        batch_size = max(AI_MIN_PRODUCTS_PER_CALL, batch_size)
+        logger.info("ai.run start items_total=%d batch_init=%d", total_items, batch_size)
+        req_counter = 0
 
-        async def _run_batches() -> None:
-            limits = httpx.Limits(max_connections=100, max_keepalive_connections=100)
-            timeout_cfg = httpx.Timeout(timeout_s)
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            }
-            async with httpx.AsyncClient(
-                base_url="https://api.openai.com",
-                timeout=timeout_cfg,
-                limits=limits,
-                headers=headers,
-            ) as client:
-                tasks = [
-                    asyncio.create_task(
-                        _call_batch_with_retries(
-                            client,
-                            batch,
-                            model=model,
-                            max_retries=max_retries,
-                            rate_limiter=rate_limiter,
-                            semaphore=semaphore,
-                            stop_event=stop_event,
-                        )
+        while pending_candidates:
+            degraded = False
+            made_progress = False
+            batch_size = min(batch_size, len(pending_candidates))
+            if batch_size <= 0:
+                break
+            chunks = [
+                pending_candidates[i : i + batch_size]
+                for i in range(0, len(pending_candidates), batch_size)
+            ]
+            for sub in chunks:
+                req_counter += 1
+                batch = _build_batch_request(f"{req_counter:03d}", sub, trunc_title, trunc_desc)
+                try:
+                    result = _call_batch_with_retries(
+                        batch,
+                        api_key=api_key,
+                        model=model,
+                        max_retries=max_retries,
                     )
-                    for batch in batches
-                ]
-                for coro in asyncio.as_completed(tasks):
-                    result = await coro
-                    process_result(result)
+                except gpt.RateLimitWouldDegrade:
+                    batch_size = max(
+                        AI_MIN_PRODUCTS_PER_CALL,
+                        int(batch_size * AI_DEGRADE_FACTOR),
+                    )
+                    logger.warning(
+                        "ai_columns.429 degrade size=%d pending=%d",
+                        batch_size,
+                        len(pending_candidates),
+                    )
+                    degraded = True
+                    break
 
-        asyncio.run(_run_batches())
+                process_result(result)
+                ok_map = result.get("ok", {}) or {}
+                parsed_ids: set[int] = set()
+                for pid_str, payload in ok_map.items():
+                    if not payload:
+                        continue
+                    try:
+                        parsed_ids.add(int(pid_str))
+                    except Exception:
+                        continue
+                if parsed_ids:
+                    made_progress = True
+                pending_candidates = [
+                    cand for cand in pending_candidates if cand.id not in parsed_ids
+                ]
+                logger.info(
+                    "ai_columns.request ok items=%d parsed=%d missing=%d pending=%d",
+                    len(sub),
+                    len(parsed_ids),
+                    len(sub) - len(parsed_ids),
+                    len(pending_candidates),
+                )
+                if cost_cap is not None and cost_spent >= float(cost_cap):
+                    pending_candidates = []
+                    break
+                if not pending_candidates:
+                    break
+
+            if degraded:
+                continue
+            if not pending_candidates or not made_progress:
+                break
     else:
         counts_with_cost = {**counts, "cost_spent_usd": cost_spent}
         if job_updates_enabled:
