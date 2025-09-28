@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -31,6 +32,14 @@ from . import scraper
 from .utils.db import row_to_dict, rget
 
 import sqlite3
+
+
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logging.getLogger("gpt.api").setLevel(logging.INFO)
+logging.getLogger("gpt.ratelimit").setLevel(logging.INFO)
 
 
 APP_DIR = Path(__file__).resolve().parent
