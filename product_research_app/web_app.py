@@ -169,6 +169,35 @@ _DB_INIT_LOCK = threading.Lock()
 IMPORT_STATUS: Dict[str, Dict[str, Any]] = {}
 _IMPORT_STATUS_LOCK = threading.Lock()
 
+_LAST_PROGRESS_SIG: dict[str, dict] = {}
+_LAST_PROGRESS_LOCK = threading.Lock()
+
+
+def _progress_signature(s: dict) -> dict:
+    """Firma mínima del estado para evitar repeticiones en log/eventos.
+    Redondea pct a enteros y toma campos clave."""
+
+    return {
+        "pct": int(s.get("pct") or 0),
+        "phase": s.get("phase"),
+        "state": s.get("state"),
+        "message": s.get("message"),
+        "processed": int(s.get("processed") or s.get("done") or 0),
+        "total": int(s.get("total") or 0),
+        "ai_done": int(s.get("ai_done") or 0),
+        "ai_total": int(s.get("ai_total") or 0),
+    }
+
+
+def _should_emit_progress(task_id: str, snapshot: dict) -> bool:
+    sig = _progress_signature(snapshot)
+    with _LAST_PROGRESS_LOCK:
+        prev = _LAST_PROGRESS_SIG.get(task_id)
+        if prev == sig:
+            return False
+        _LAST_PROGRESS_SIG[task_id] = sig
+        return True
+
 _ENRICH_WORKERS: Dict[int, threading.Thread] = {}
 _ENRICH_LOCK = threading.Lock()
 
@@ -216,7 +245,8 @@ def _update_import_status(task_id: str, **updates) -> Dict[str, Any]:
         state = IMPORT_STATUS.setdefault(task_id, {})
         state.update(updates)
         snapshot = dict(state)
-    publish_progress({"event": "import", "task_id": task_id, **snapshot})
+    if _should_emit_progress(task_id, snapshot):
+        publish_progress({"event": "import", "task_id": task_id, **snapshot})
     return snapshot
 
 
