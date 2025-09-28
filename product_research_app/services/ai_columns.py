@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -11,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from .. import config, database, gpt
+from .. import config, database, gpt, ratelimit
 from ..config import (
     AI_DEGRADE_FACTOR,
     AI_MAX_OUTPUT_TOKENS,
@@ -35,6 +36,9 @@ AI_FIELDS = ("desire", "desire_magnitude", "awareness_level", "competition_level
 DEFAULT_BATCH_SIZE = int(os.getenv("PRAPP_AI_BATCH_SIZE", "8"))
 MIN_BATCH_SIZE = 4
 MAX_RETRIES_MISSING = int(os.getenv("PRAPP_AI_RETRIES_MISSING", "2"))
+
+AI_MAX_CONCURRENCY = int(os.getenv("AI_MAX_CONCURRENCY", "3"))
+AI_BATCH_MAX_ITEMS = int(os.getenv("AI_BATCH_MAX_ITEMS", "12"))
 StatusCallback = Callable[..., None]
 
 AI_COST = get_ai_cost_config()
@@ -1475,14 +1479,24 @@ def run_ai_fill_job(
     request_latencies: List[float] = []
     processed_batches = 0
 
-    def process_result(result: Dict[str, Any]) -> None:
+    def process_result(result: Dict[str, Any]) -> Dict[str, Any]:
         nonlocal cost_spent, counts_with_cost, processed_batches
+        summary: Dict[str, Any] = {
+            "parsed_ids": [],
+            "missing_ids": [],
+            "ko_ids": [],
+            "status": "ok",
+            "candidates": result.get("candidates", []),
+            "req_id": result.get("req_id"),
+        }
         candidates_list: List[Candidate] = result.get("candidates", [])
         if result.get("skipped"):
             for cand in candidates_list:
                 pending_set.add(cand.id)
                 fail_reasons.setdefault(cand.id, "cost_cap_reached")
-            return
+            summary["status"] = "skipped"
+            summary["pending_after"] = len(pending_set)
+            return summary
 
         processed_batches += 1
         counts["sent"] += len(candidates_list)
@@ -1597,77 +1611,187 @@ def run_ai_fill_job(
                 logger.error("ai.parse.empty raw_sample=%s", raw_sample)
 
         if cost_cap is not None and cost_spent >= float(cost_cap):
-            return
+            summary["status"] = "skipped"
+            return summary
+        summary["parsed_ids"] = parsed_ids
+        summary["missing_ids"] = missing_ids
+        summary["ko_ids"] = list(ko_map.keys())
+        summary["pending_after"] = len(pending_set)
+        if result.get("error"):
+            summary["status"] = "error"
+        elif missing_ids or ko_map:
+            summary["status"] = "partial"
+        return summary
 
     if remaining:
         pending_candidates = list(remaining)
-        batch_size = min(AI_MAX_PRODUCTS_PER_CALL, len(pending_candidates))
-        batch_size = max(AI_MIN_PRODUCTS_PER_CALL, batch_size)
-        logger.info("ai.run start items_total=%d batch_init=%d", total_items, batch_size)
+        max_batch_size = min(AI_MAX_PRODUCTS_PER_CALL, len(pending_candidates))
+        max_batch_size = max(AI_MIN_PRODUCTS_PER_CALL, max_batch_size)
+        max_batch_size = max(1, min(AI_BATCH_MAX_ITEMS, max_batch_size))
+        logger.info("ai.run start items_total=%d batch_init=%d", total_items, max_batch_size)
         req_counter = 0
+
+        async def _execute_batches(batches: List[BatchRequest]) -> List[Dict[str, Any]]:
+            semaphore = asyncio.Semaphore(max(1, AI_MAX_CONCURRENCY))
+
+            async def _run_single(batch: BatchRequest) -> Dict[str, Any]:
+                async with semaphore:
+                    logger.info(
+                        "ai_columns.batch start req_id=%s items=%d prompt_tokens_est=%d",
+                        batch.req_id,
+                        len(batch.candidates),
+                        batch.prompt_tokens_est,
+                    )
+                    start_ts = time.perf_counter()
+                    try:
+                        result = await asyncio.to_thread(
+                            _call_batch_with_retries,
+                            batch,
+                            api_key=api_key,
+                            model=model,
+                            max_retries=max_retries,
+                        )
+                        duration = time.perf_counter() - start_ts
+                        if isinstance(result, dict) and "duration" not in result:
+                            result["duration"] = duration
+                        return {
+                            "status": "ok",
+                            "batch": batch,
+                            "result": result,
+                            "duration": float(result.get("duration", duration) or duration),
+                            "error": None,
+                        }
+                    except gpt.RateLimitWouldDegrade as exc:
+                        duration = time.perf_counter() - start_ts
+                        return {
+                            "status": "degraded",
+                            "batch": batch,
+                            "result": None,
+                            "duration": duration,
+                            "error": exc,
+                        }
+                    except Exception as exc:
+                        duration = time.perf_counter() - start_ts
+                        logger.exception("ai_columns.batch exception req_id=%s", batch.req_id)
+                        ko_payload = {str(c.id): str(exc) for c in batch.candidates}
+                        fallback = {
+                            "req_id": batch.req_id,
+                            "candidates": batch.candidates,
+                            "ok": {},
+                            "ko": ko_payload,
+                            "usage": {},
+                            "duration": duration,
+                            "error": str(exc),
+                        }
+                        return {
+                            "status": "error",
+                            "batch": batch,
+                            "result": fallback,
+                            "duration": duration,
+                            "error": exc,
+                        }
+
+            tasks = [asyncio.create_task(_run_single(batch)) for batch in batches]
+            gathered: List[Dict[str, Any]] = []
+            for coro in asyncio.as_completed(tasks):
+                gathered.append(await coro)
+            return gathered
 
         while pending_candidates:
             degraded = False
             made_progress = False
-            batch_size = min(batch_size, len(pending_candidates))
-            if batch_size <= 0:
+            max_per_req = min(max_batch_size, len(pending_candidates))
+            max_per_req = max(1, min(AI_BATCH_MAX_ITEMS, max_per_req))
+            if max_per_req <= 0:
                 break
-            chunks = [
-                pending_candidates[i : i + batch_size]
-                for i in range(0, len(pending_candidates), batch_size)
-            ]
-            for sub in chunks:
+            batches: List[BatchRequest] = []
+            for start in range(0, len(pending_candidates), max_per_req):
+                chunk = pending_candidates[start : start + max_per_req]
+                if not chunk:
+                    continue
                 req_counter += 1
-                batch = _build_batch_request(f"{req_counter:03d}", sub, trunc_title, trunc_desc)
-                try:
-                    result = _call_batch_with_retries(
-                        batch,
-                        api_key=api_key,
-                        model=model,
-                        max_retries=max_retries,
-                    )
-                except gpt.RateLimitWouldDegrade:
-                    batch_size = max(
-                        AI_MIN_PRODUCTS_PER_CALL,
-                        int(batch_size * AI_DEGRADE_FACTOR),
-                    )
-                    logger.warning(
-                        "ai_columns.429 degrade size=%d pending=%d",
-                        batch_size,
-                        len(pending_candidates),
-                    )
-                    degraded = True
-                    break
+                batches.append(
+                    _build_batch_request(f"{req_counter:03d}", chunk, trunc_title, trunc_desc)
+                )
+            if not batches:
+                break
 
-                process_result(result)
-                ok_map = result.get("ok", {}) or {}
-                parsed_ids: set[int] = set()
-                for pid_str, payload in ok_map.items():
-                    if not payload:
-                        continue
+            loop_results = asyncio.run(_execute_batches(batches))
+            for entry in loop_results:
+                status = entry.get("status")
+                batch = entry.get("batch")
+                if not batch:
+                    continue
+                if status == "degraded":
+                    degraded = True
+                    exc = entry.get("error")
+                    retry_after = getattr(exc, "retry_after", None)
+                    waited = float(entry.get("duration") or 0.0)
+                    ratelimit.log_throttled(batch.req_id, retry_after, waited)
+                    continue
+
+                result = entry.get("result") or {}
+                summary = process_result(result)
+                parsed_ids = {int(pid) for pid in summary.get("parsed_ids", []) if isinstance(pid, int)}
+                if not parsed_ids:
+                    parsed_ids = set()
+                    for pid in summary.get("parsed_ids", []):
+                        try:
+                            parsed_ids.add(int(pid))
+                        except Exception:
+                            continue
+                raw_missing = summary.get("missing_ids", []) or []
+                missing_ids = []
+                for mid in raw_missing:
                     try:
-                        parsed_ids.add(int(pid_str))
+                        missing_ids.append(int(mid))
                     except Exception:
                         continue
-                if parsed_ids:
-                    made_progress = True
                 pending_candidates = [
                     cand for cand in pending_candidates if cand.id not in parsed_ids
                 ]
+                if parsed_ids:
+                    made_progress = True
+
                 logger.info(
                     "ai_columns.request ok items=%d parsed=%d missing=%d pending=%d",
-                    len(sub),
+                    len(batch.candidates),
                     len(parsed_ids),
-                    len(sub) - len(parsed_ids),
+                    len(missing_ids),
                     len(pending_candidates),
                 )
+
+                status_label = summary.get("status") or status or "ok"
+                logger.info(
+                    "ai_columns.batch end req_id=%s status=%s duration=%.2f parsed=%d missing=%d pending=%d",
+                    batch.req_id,
+                    status_label,
+                    float(entry.get("duration") or 0.0),
+                    len(parsed_ids),
+                    len(missing_ids),
+                    len(pending_candidates),
+                )
+
                 if cost_cap is not None and cost_spent >= float(cost_cap):
                     pending_candidates = []
                     break
-                if not pending_candidates:
-                    break
 
             if degraded:
+                max_batch_size = max(
+                    1,
+                    min(
+                        AI_BATCH_MAX_ITEMS,
+                        max(
+                            AI_MIN_PRODUCTS_PER_CALL,
+                            int(max_batch_size * AI_DEGRADE_FACTOR),
+                        ),
+                    ),
+                )
+                logger.warning(
+                    "ai_columns.429 degrade size=%d pending=%d",
+                    max_batch_size,
+                    len(pending_candidates),
+                )
                 continue
             if not pending_candidates or not made_progress:
                 break
@@ -1682,6 +1806,25 @@ def run_ai_fill_job(
             total=total_items,
             done=counts["ok"] + counts["cached"],
         )
+
+    wall_time = max(time.perf_counter() - start_ts, 1e-6)
+    total_processed = counts.get("ok", 0) + counts.get("cached", 0)
+    remaining_total = len(pending_set)
+    total_batches = processed_batches
+    total_latency = sum(request_latencies)
+    concurrency_eff = total_latency / wall_time if request_latencies else 0.0
+    p50 = _quantile(request_latencies, 0.5) if request_latencies else 0.0
+    p95 = _quantile(request_latencies, 0.95) if request_latencies else 0.0
+    logger.info(
+        "ai.run done total=%d processed=%d remaining=%d concurrency_eff=%.2f batches=%d p50=%.2f p95=%.2f",
+        total_items,
+        total_processed,
+        remaining_total,
+        concurrency_eff,
+        total_batches,
+        p50,
+        p95,
+    )
 
     result_error: Optional[str] = None
     if cost_cap is not None and cost_spent >= float(cost_cap):
