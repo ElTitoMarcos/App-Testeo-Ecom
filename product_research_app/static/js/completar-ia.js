@@ -1,3 +1,5 @@
+import { LoadingHelpers } from './loading.js';
+
 const EC_BATCH_SIZE = 10;
 const EC_MODEL = "gpt-4o-mini-2024-07-18";
 
@@ -136,30 +138,53 @@ window.handleCompletarIA = async function(opts = {}) {
     if (!opts.silent) toast.info('No hay productos');
     return;
   }
+  // === Progreso por fases ===
+  const PHASE_IMPORT_END = 0.25; // la importación nunca debe superar el 25%
+  const PHASE_AI_START = PHASE_IMPORT_END;
+  const PHASE_AI_END = 1.00;
+  const AI_SPAN = PHASE_AI_END - PHASE_AI_START;
+  const tracker = LoadingHelpers.start('Columnas IA', { host: opts.host });
+  tracker.step(PHASE_AI_START, 'Preparando IA…');
+
   let okTotal = 0;
   const chunks = chunkArray(all, EC_BATCH_SIZE);
-  for (const ch of chunks) {
-    const payload = ch.map(p => ({
-      id: p.id,
-      name: p.name,
-      category: p.category,
-      price: p.price,
-      rating: p.rating,
-      units_sold: p.units_sold,
-      revenue: p.revenue,
-      conversion_rate: p.conversion_rate,
-      launch_date: p.launch_date,
-      date_range: p.date_range,
-      image_url: p.image_url || null
-    }));
+  const total = all.length;
+  const totalBatches = chunks.length || 1;
+  let processed = 0;
+
+  try {
+    for (let index = 0; index < chunks.length; index += 1) {
+      const ch = chunks[index];
+      const payload = ch.map(p => ({
+        id: p.id,
+        name: p.name,
+        category: p.category,
+        price: p.price,
+        rating: p.rating,
+        units_sold: p.units_sold,
+        revenue: p.revenue,
+        conversion_rate: p.conversion_rate,
+        launch_date: p.launch_date,
+        date_range: p.date_range,
+        image_url: p.image_url || null
+      }));
       try {
         const { ok, ko } = await processBatch(payload);
         okTotal += ok;
+        processed += payload.length;
+        const ratio = total ? Math.max(0, Math.min(1, processed / total)) : 1;
+        const frac = PHASE_AI_START + (ratio * AI_SPAN);
+        const batchLabel = `Lote ${Math.min(index + 1, totalBatches)}/${totalBatches}`;
+        tracker.step(frac, `IA ${Math.min(processed, total)}/${total} · ${batchLabel}`);
         if (!opts.silent) toast.info(`IA lote: +${ok} / ${payload.length} (fallos ${ko})`, { duration: 2000 });
       } catch (e) {
         if (!opts.silent) toast.error(`IA lote: ${e.message}`, { duration: 2000 });
       }
+    }
+    if (!opts.silent) toast.info(`IA: ${okTotal}/${all.length} completados`);
+    tracker.step(PHASE_AI_END, 'IA terminada');
+    updateMasterState();
+  } finally {
+    tracker.done();
   }
-  if (!opts.silent) toast.info(`IA: ${okTotal}/${all.length} completados`);
-  updateMasterState();
 };

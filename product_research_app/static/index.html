@@ -373,8 +373,8 @@ const saveIfDirty = window.saveIfDirty;
 window.fetchJson = fetchJson;
 window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
-const IMPORT_UPLOAD_FRAC = 0.30;
-const IMPORT_POLL_MAX_FRAC = 0.99;
+const IMPORT_UPLOAD_FRAC = 0.10;
+const IMPORT_POLL_MAX_FRAC = 0.25;
 const IMPORT_SERVER_SPAN = IMPORT_POLL_MAX_FRAC - IMPORT_UPLOAD_FRAC;
 const IMPORT_STATUS_URL = '/_import_status';
 const IMPORT_START_URL = '/upload';
@@ -500,7 +500,7 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     });
 
     if (startResult.kind === 'sync') {
-      tracker.step(1, 'Completado');
+      tracker.step(IMPORT_POLL_MAX_FRAC, 'Importación completada');
       await reloadTable({ skipProgress: true });
       const importedCount = startResult.data?.imported ?? startResult.data?.rows_imported;
       if (Number.isFinite(importedCount) && importedCount > 0) {
@@ -520,10 +520,10 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     if (Number.isFinite(importedCount) && importedCount > 0) {
       toast.success(`Importados ${importedCount}`);
     }
-    tracker.step(1, 'Completado');
+    tracker.step(IMPORT_POLL_MAX_FRAC, 'Importación completada');
     return lastResult;
   } catch (err) {
-    tracker.step(1, 'Error');
+    tracker.step(IMPORT_POLL_MAX_FRAC, 'Error en importación');
     toast.error(err?.message || 'Error al importar catálogo');
     throw err;
   } finally {
