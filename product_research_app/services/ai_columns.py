@@ -52,6 +52,11 @@ class BatchRequest:
     product_map: Dict[int, str]
 
 
+def _chunked(seq, n):
+    for i in range(0, len(seq), n):
+        yield seq[i : i + n]
+
+
 def _format_job_id(job_id: Optional[int]) -> str:
     """Return a stable string label for job identifiers."""
 
@@ -528,17 +533,33 @@ async def _recover_missing_async(
     model: str,
     missing_ids: List[int],
     rate_limiter: "_AsyncRateLimiter",
+    stop_event: asyncio.Event,
 ) -> Tuple[Dict[int, Dict[str, Any]], int]:
     retries_used = 0
     recovered: Dict[int, Dict[str, Any]] = {}
     warning_prefix = ""
     to_fill = list(missing_ids)
     while to_fill and retries_used < MAX_RETRIES_MISSING:
-        prompt_text = _build_missing_prompt(batch, to_fill)
+        if stop_event.is_set():
+            break
+        chunk_ids = to_fill[: config.AI_MAX_PRODUCTS_PER_CALL]
+        if not chunk_ids:
+            break
+        logger.warning(
+            "ai_columns.retry_missing: req_id=%s missing_count=%d chunk_size=%d",
+            batch.req_id,
+            len(to_fill),
+            len(chunk_ids),
+        )
+        prompt_text = _build_missing_prompt(batch, chunk_ids)
         if warning_prefix:
             prompt_text = f"{warning_prefix}\n\n{prompt_text}"
-        est_tokens = max(200, int(batch.prompt_tokens_est * len(to_fill) / max(1, len(batch.candidates))))
-        await rate_limiter.acquire(est_tokens)
+        est_tokens = max(
+            200,
+            int(batch.prompt_tokens_est * len(chunk_ids) / max(1, len(batch.candidates))),
+        )
+        prompt_tokens_est = min(2000, max(200, est_tokens))
+        await rate_limiter.acquire(prompt_tokens_est)
         response = await client.post(
             "/v1/chat/completions",
             json={
@@ -555,7 +576,7 @@ async def _recover_missing_async(
         raw = response.json()
         try:
             text = _extract_jsonl_payload(raw)
-            parsed = parse_jsonl_and_validate(text, to_fill)
+            parsed = parse_jsonl_and_validate(text, chunk_ids)
         except (gpt.InvalidJSONError, ValueError):
             if warning_prefix:
                 break
@@ -565,6 +586,7 @@ async def _recover_missing_async(
         recovered.update(parsed)
         to_fill = [pid for pid in missing_ids if pid not in recovered]
         retries_used += 1
+        warning_prefix = ""
     return recovered, retries_used
 
 
@@ -941,185 +963,254 @@ async def _call_batch_with_retries(
                 "prompt_tokens_est": request.prompt_tokens_est,
             }
 
-        attempt = 0
-        while True:
-            await rate_limiter.acquire(request.prompt_tokens_est)
-            start_ts = time.perf_counter()
-            start_iso = datetime.utcnow().isoformat()
-            status = "ok"
-            error_message: Optional[str] = None
-            try:
-                response = await client.post(
-                    "/v1/chat/completions",
-                    json={
-                        "model": model,
-                        "temperature": 0.2,
-                        "top_p": 0.9,
-                        "messages": [
-                            {"role": "system", "content": SYSTEM_PROMPT},
-                            {"role": "user", "content": request.user_text},
-                        ],
-                    },
-                )
-                response.raise_for_status()
-                raw = response.json()
-                jsonl_payload = _extract_jsonl_payload(raw)
-                expected_ids = [cand.id for cand in request.candidates]
-                strict_map: Dict[int, Dict[str, Any]] = {}
-                retries_missing_used = 0
-                recovered_payload: Dict[int, Dict[str, Any]] = {}
-                try:
-                    strict_map = parse_jsonl_and_validate(jsonl_payload, expected_ids)
-                except ValueError as exc:
-                    partial_map = _parse_jsonl_loose(jsonl_payload)
-                    returned_ids = list(partial_map.keys())
-                    missing_ids = [pid for pid in expected_ids if pid not in partial_map]
-                    log_partial_ko(
-                        "call_openai",
-                        expected_ids,
-                        returned_ids,
-                        len(request.candidates),
-                        model,
-                        note=str(exc),
-                    )
+        aggregated_ok: Dict[str, Dict[str, Any]] = {}
+        aggregated_ko: Dict[str, str] = {}
+        aggregated_usage: Dict[str, Any] = {}
+        total_duration = 0.0
+        total_retries = 0
+        total_prompt_est = 0
+        cancelled = False
 
-                    if missing_ids:
-                        recovered_payload, retries_missing_used = await _recover_missing_async(
-                            client,
-                            request,
+        for batch_idx, batch_candidates in enumerate(
+            _chunked(request.candidates, max(1, config.AI_MAX_PRODUCTS_PER_CALL))
+        ):
+            if not batch_candidates:
+                continue
+            if stop_event.is_set():
+                cancelled = True
+                for cand in batch_candidates:
+                    aggregated_ko.setdefault(str(cand.id), "cancelled")
+                break
+
+            logger.info(
+                "ai_columns.batch_plan: req_id=%s batch_index=%d batch_size=%d total_candidates=%d",
+                request.req_id,
+                batch_idx,
+                len(batch_candidates),
+                len(request.candidates),
+            )
+            chunk_ids = [cand.id for cand in batch_candidates]
+            product_lines = [request.product_map.get(pid, "") for pid in chunk_ids]
+            instruction = STRICT_JSONL_PROMPT(chunk_ids, AI_FIELDS)
+            user_parts = [instruction, USER_INSTRUCTION, "### PRODUCTOS", *product_lines]
+            user_text = "\n".join(part for part in user_parts if part)
+            estimated_tokens = _estimate_tokens_from_text(SYSTEM_PROMPT, user_text) + len(
+                batch_candidates
+            ) * 8
+            prompt_tokens_est = min(2000, max(200, estimated_tokens))
+            total_prompt_est += prompt_tokens_est
+            req_id_sub = f"{request.req_id}:{batch_idx}"
+
+            attempt = 0
+            while True:
+                if stop_event.is_set():
+                    cancelled = True
+                    for cand in batch_candidates:
+                        aggregated_ko.setdefault(str(cand.id), "cancelled")
+                    break
+
+                await rate_limiter.acquire(prompt_tokens_est)
+                start_ts = time.perf_counter()
+                start_iso = datetime.utcnow().isoformat()
+                status = "ok"
+                error_message: Optional[str] = None
+                try:
+                    response = await client.post(
+                        "/v1/chat/completions",
+                        json={
+                            "model": model,
+                            "temperature": 0.2,
+                            "top_p": 0.9,
+                            "messages": [
+                                {"role": "system", "content": SYSTEM_PROMPT},
+                                {"role": "user", "content": user_text},
+                            ],
+                        },
+                    )
+                    response.raise_for_status()
+                    raw = response.json()
+                    jsonl_payload = _extract_jsonl_payload(raw)
+                    expected_ids = list(chunk_ids)
+                    strict_map: Dict[int, Dict[str, Any]] = {}
+                    retries_missing_used = 0
+                    recovered_payload: Dict[int, Dict[str, Any]] = {}
+                    try:
+                        strict_map = parse_jsonl_and_validate(jsonl_payload, expected_ids)
+                    except ValueError as exc:
+                        partial_map = _parse_jsonl_loose(jsonl_payload)
+                        returned_ids = list(partial_map.keys())
+                        missing_ids = [pid for pid in expected_ids if pid not in partial_map]
+                        log_partial_ko(
+                            "call_openai",
+                            expected_ids,
+                            returned_ids,
+                            len(batch_candidates),
                             model,
-                            missing_ids,
-                            rate_limiter,
+                            note=str(exc),
                         )
-                    combined = {**partial_map, **recovered_payload}
-                    pending_after = [pid for pid in expected_ids if pid not in combined]
-                    if not pending_after:
-                        strict_map = combined
-                        if recovered_payload:
-                            log_recovered(
-                                "call_openai",
-                                retries_missing_used,
-                                len(request.candidates),
-                                sorted(recovered_payload.keys()),
+
+                        if missing_ids:
+                            recovered_payload, retries_missing_used = await _recover_missing_async(
+                                client,
+                                request,
+                                model,
+                                missing_ids,
+                                rate_limiter,
+                                stop_event,
                             )
-                    else:
-                        strict_map = combined
-                ok: Dict[str, Dict[str, Any]] = {}
-                ko: Dict[str, str] = {}
-                data_map = {str(pid): payload for pid, payload in strict_map.items()}
-                remaining_missing = [
-                    cand.id for cand in request.candidates if str(cand.id) not in data_map
-                ]
-                for missing_id in remaining_missing:
-                    ko[str(missing_id)] = "missing"
-                for cand in request.candidates:
-                    pid = str(cand.id)
-                    entry = data_map.get(pid)
-                    if not isinstance(entry, dict):
-                        if pid not in ko:
-                            ko[pid] = "missing"
+                        combined = {**partial_map, **recovered_payload}
+                        pending_after = [pid for pid in expected_ids if pid not in combined]
+                        if not pending_after:
+                            strict_map = combined
+                            if recovered_payload:
+                                log_recovered(
+                                    "call_openai",
+                                    retries_missing_used,
+                                    len(batch_candidates),
+                                    sorted(recovered_payload.keys()),
+                                )
+                        else:
+                            strict_map = combined
+                    ok: Dict[str, Dict[str, Any]] = {}
+                    ko: Dict[str, str] = {}
+                    data_map = {str(pid): payload for pid, payload in strict_map.items()}
+                    remaining_missing = [
+                        cand.id for cand in batch_candidates if str(cand.id) not in data_map
+                    ]
+                    for missing_id in remaining_missing:
+                        ko[str(missing_id)] = "missing"
+                    for cand in batch_candidates:
+                        pid = str(cand.id)
+                        entry = data_map.get(pid)
+                        if not isinstance(entry, dict):
+                            if pid not in ko:
+                                ko[pid] = "missing"
+                            continue
+                        desire_payload = dict(entry)
+                        draft_raw = str(
+                            desire_payload.get("desire_statement")
+                            or desire_payload.get("desire")
+                            or ""
+                        ).strip()
+                        extra_title = (cand.extra or {}).get("title") if isinstance(cand.extra, dict) else None
+                        title = str(cand.payload.get("name") or extra_title or "")
+                        if len(draft_raw) < 280 or looks_like_product_desc(draft_raw, title):
+                            refined = await _refine_desire_statement(cand, draft_raw)
+                            if isinstance(refined, dict):
+                                merged = dict(desire_payload)
+                                merged.update(refined)
+                                desire_payload = merged
+                                draft_raw = str(
+                                    desire_payload.get("desire_statement")
+                                    or desire_payload.get("desire")
+                                    or ""
+                                ).strip()
+                        if not draft_raw:
+                            draft_raw = str(entry.get("desire") or "")
+                        cleaned_txt = cleanse(draft_raw)
+                        if not cleaned_txt:
+                            cleaned_txt = draft_raw
+                        cleaned_txt = cleaned_txt.strip()
+                        desire_primary = desire_payload.get("desire_primary")
+                        if desire_primary is None:
+                            desire_primary = entry.get("desire_primary")
+                        desire_magnitude_raw = desire_payload.get("desire_magnitude")
+                        if desire_magnitude_raw is None:
+                            desire_magnitude_raw = entry.get("desire_magnitude")
+                        if isinstance(desire_magnitude_raw, dict):
+                            desire_magnitude_raw = desire_magnitude_raw.get("overall")
+                        ok[pid] = {
+                            "desire": cleaned_txt,
+                            "desire_primary": desire_primary,
+                            "desire_magnitude": gpt._norm_tri(desire_magnitude_raw),
+                            "awareness_level": gpt._norm_awareness(
+                                desire_payload.get("awareness_level")
+                            ),
+                            "competition_level": gpt._norm_tri(
+                                desire_payload.get("competition_level")
+                            ),
+                        }
+                    duration = time.perf_counter() - start_ts
+                    end_iso = datetime.utcnow().isoformat()
+                    usage = raw.get("usage", {}) or {}
+                    logger.info(
+                        "ai_columns.request: req_id=%s items=%d prompt_tokens_est=%d start=%s end=%s duration=%.2fs status=%s retries=%d",
+                        req_id_sub,
+                        len(batch_candidates),
+                        prompt_tokens_est,
+                        start_iso,
+                        end_iso,
+                        duration,
+                        status,
+                        attempt,
+                    )
+                    for key, value in usage.items():
+                        existing = aggregated_usage.get(key)
+                        if isinstance(value, (int, float)) and isinstance(existing, (int, float)):
+                            aggregated_usage[key] = existing + value
+                        else:
+                            aggregated_usage[key] = value
+                    aggregated_ok.update(ok)
+                    aggregated_ko.update(ko)
+                    total_duration += duration
+                    total_retries += attempt + retries_missing_used
+                    break
+                except (httpx.HTTPError, json.JSONDecodeError, gpt.InvalidJSONError) as exc:
+                    error_message = str(exc)
+                    status = "retry" if attempt < max_retries else "error"
+                    duration = time.perf_counter() - start_ts
+                    end_iso = datetime.utcnow().isoformat()
+                    logger.info(
+                        "ai_columns.request: req_id=%s items=%d prompt_tokens_est=%d start=%s end=%s duration=%.2fs status=%s retries=%d error=%s",
+                        req_id_sub,
+                        len(batch_candidates),
+                        prompt_tokens_est,
+                        start_iso,
+                        end_iso,
+                        duration,
+                        status,
+                        attempt,
+                        error_message,
+                    )
+                    if attempt < max_retries and not stop_event.is_set():
+                        attempt += 1
+                        sleep_for = min(10.0, 0.5 * (2**(attempt - 1))) + random.uniform(0.05, 0.25)
+                        await asyncio.sleep(sleep_for)
                         continue
-                    desire_payload = dict(entry)
-                    draft_raw = str(
-                        desire_payload.get("desire_statement")
-                        or desire_payload.get("desire")
-                        or ""
-                    ).strip()
-                    extra_title = (cand.extra or {}).get("title") if isinstance(cand.extra, dict) else None
-                    title = str(cand.payload.get("name") or extra_title or "")
-                    if len(draft_raw) < 280 or looks_like_product_desc(draft_raw, title):
-                        refined = await _refine_desire_statement(cand, draft_raw)
-                        if isinstance(refined, dict):
-                            merged = dict(desire_payload)
-                            merged.update(refined)
-                            desire_payload = merged
-                            draft_raw = str(
-                                desire_payload.get("desire_statement")
-                                or desire_payload.get("desire")
-                                or ""
-                            ).strip()
-                    if not draft_raw:
-                        draft_raw = str(entry.get("desire") or "")
-                    cleaned_txt = cleanse(draft_raw)
-                    if not cleaned_txt:
-                        cleaned_txt = draft_raw
-                    cleaned_txt = cleaned_txt.strip()
-                    desire_primary = desire_payload.get("desire_primary")
-                    if desire_primary is None:
-                        desire_primary = entry.get("desire_primary")
-                    desire_magnitude_raw = desire_payload.get("desire_magnitude")
-                    if desire_magnitude_raw is None:
-                        desire_magnitude_raw = entry.get("desire_magnitude")
-                    if isinstance(desire_magnitude_raw, dict):
-                        desire_magnitude_raw = desire_magnitude_raw.get("overall")
-                    ok[pid] = {
-                        "desire": cleaned_txt,
-                        "desire_primary": desire_primary,
-                        "desire_magnitude": gpt._norm_tri(desire_magnitude_raw),
-                        "awareness_level": gpt._norm_awareness(
-                            desire_payload.get("awareness_level")
-                        ),
-                        "competition_level": gpt._norm_tri(
-                            desire_payload.get("competition_level")
-                        ),
+                    aggregated_ko.update({str(cand.id): error_message for cand in batch_candidates})
+                    total_duration += duration
+                    total_retries += attempt
+                    return {
+                        "req_id": request.req_id,
+                        "candidates": request.candidates,
+                        "ok": aggregated_ok,
+                        "ko": aggregated_ko,
+                        "usage": aggregated_usage,
+                        "duration": total_duration,
+                        "retries": total_retries,
+                        "error": error_message,
+                        "prompt_tokens_est": total_prompt_est,
                     }
-                duration = time.perf_counter() - start_ts
-                end_iso = datetime.utcnow().isoformat()
-                usage = raw.get("usage", {}) or {}
-                logger.info(
-                    "ai_columns.request: req_id=%s items=%d prompt_tokens_est=%d start=%s end=%s duration=%.2fs status=%s retries=%d",
-                    request.req_id,
-                    len(request.candidates),
-                    request.prompt_tokens_est,
-                    start_iso,
-                    end_iso,
-                    duration,
-                    status,
-                    attempt,
-                )
-                return {
-                    "req_id": request.req_id,
-                    "candidates": request.candidates,
-                    "ok": ok,
-                    "ko": ko,
-                    "usage": usage,
-                    "duration": duration,
-                    "retries": attempt + retries_missing_used,
-                    "prompt_tokens_est": request.prompt_tokens_est,
-                }
-            except (httpx.HTTPError, json.JSONDecodeError, gpt.InvalidJSONError) as exc:
-                error_message = str(exc)
-                status = "retry" if attempt < max_retries else "error"
-                duration = time.perf_counter() - start_ts
-                end_iso = datetime.utcnow().isoformat()
-                logger.info(
-                    "ai_columns.request: req_id=%s items=%d prompt_tokens_est=%d start=%s end=%s duration=%.2fs status=%s retries=%d error=%s",
-                    request.req_id,
-                    len(request.candidates),
-                    request.prompt_tokens_est,
-                    start_iso,
-                    end_iso,
-                    duration,
-                    status,
-                    attempt,
-                    error_message,
-                )
-                if attempt < max_retries and not stop_event.is_set():
-                    attempt += 1
-                    sleep_for = min(10.0, 0.5 * (2**(attempt - 1))) + random.uniform(0.05, 0.25)
-                    await asyncio.sleep(sleep_for)
-                    continue
-                return {
-                    "req_id": request.req_id,
-                    "candidates": request.candidates,
-                    "ok": {},
-                    "ko": {str(cand.id): error_message for cand in request.candidates},
-                    "usage": {},
-                    "duration": duration,
-                    "retries": attempt,
-                    "error": error_message,
-                    "prompt_tokens_est": request.prompt_tokens_est,
-                }
+
+            if cancelled:
+                break
+
+        if cancelled:
+            for cand in request.candidates:
+                pid = str(cand.id)
+                if pid not in aggregated_ok and pid not in aggregated_ko:
+                    aggregated_ko[pid] = "cancelled"
+
+        return {
+            "req_id": request.req_id,
+            "candidates": request.candidates,
+            "ok": aggregated_ok,
+            "ko": aggregated_ko,
+            "usage": aggregated_usage,
+            "duration": total_duration,
+            "retries": total_retries,
+            "prompt_tokens_est": total_prompt_est,
+        }
 
 
 def _calculate_cost(usage: Dict[str, Any], price_in: float, price_out: float) -> float:

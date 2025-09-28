@@ -13,6 +13,9 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 
+AI_MAX_PRODUCTS_PER_CALL = int(os.getenv("PRAPP_AI_MAX_PRODUCTS_PER_CALL", "30"))
+
+
 DEFAULT_WINNER_ORDER = [
     "awareness",
     "desire",
