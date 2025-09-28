@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from .. import config, database, gpt, ratelimit
+from .. import config, database, gpt
 from ..config import (
     AI_DEGRADE_FACTOR,
     AI_MAX_OUTPUT_TOKENS,
@@ -521,16 +521,14 @@ def _recover_missing_sync(
             {"role": "user", "content": prompt_text},
         ]
         try:
-            raw = gpt.call_openai_chat(
-                api_key,
-                model,
-                messages,
+            raw = gpt.call_gpt(
+                messages=messages,
+                api_key=api_key,
+                model=model,
                 temperature=0.2,
                 max_tokens=max_tokens,
                 tokens_estimate=est_tokens,
             )
-        except gpt.RateLimitWouldDegrade:
-            break
         except gpt.OpenAIError:
             break
         try:
@@ -879,16 +877,14 @@ def _call_batch_with_retries(
         ]
         start_ts = time.perf_counter()
         try:
-            raw = gpt.call_openai_chat(
-                api_key,
-                model,
-                messages,
+            raw = gpt.call_gpt(
+                messages=messages,
+                api_key=api_key,
+                model=model,
                 temperature=0.2,
                 max_tokens=max_tokens,
                 tokens_estimate=tokens_est,
             )
-        except gpt.RateLimitWouldDegrade:
-            raise
         except gpt.OpenAIError as exc:
             duration = time.perf_counter() - start_ts
             if attempt <= max_retries:
@@ -1165,7 +1161,7 @@ def _refine_desire_statement(
 ) -> Optional[Dict[str, Any]]:
     context = _candidate_to_desire_context(candidate)
     try:
-        result = gpt.call_gpt(
+        result = gpt.call_prompt_task(
             "DESIRE",
             context_json=context,
             temperature=0,
@@ -1661,15 +1657,6 @@ def run_ai_fill_job(
                             "duration": float(result.get("duration", duration) or duration),
                             "error": None,
                         }
-                    except gpt.RateLimitWouldDegrade as exc:
-                        duration = time.perf_counter() - start_ts
-                        return {
-                            "status": "degraded",
-                            "batch": batch,
-                            "result": None,
-                            "duration": duration,
-                            "error": exc,
-                        }
                     except Exception as exc:
                         duration = time.perf_counter() - start_ts
                         logger.exception("ai_columns.batch exception req_id=%s", batch.req_id)
@@ -1698,7 +1685,6 @@ def run_ai_fill_job(
             return gathered
 
         while pending_candidates:
-            degraded = False
             made_progress = False
             max_per_req = min(max_batch_size, len(pending_candidates))
             max_per_req = max(1, min(AI_BATCH_MAX_ITEMS, max_per_req))
@@ -1722,12 +1708,14 @@ def run_ai_fill_job(
                 batch = entry.get("batch")
                 if not batch:
                     continue
-                if status == "degraded":
-                    degraded = True
+                if status != "ok":
                     exc = entry.get("error")
-                    retry_after = getattr(exc, "retry_after", None)
-                    waited = float(entry.get("duration") or 0.0)
-                    ratelimit.log_throttled(batch.req_id, retry_after, waited)
+                    logger.warning(
+                        "ai_columns.batch.retryable req_id=%s status=%s err=%s",
+                        batch.req_id,
+                        status,
+                        exc,
+                    )
                     continue
 
                 result = entry.get("result") or {}
@@ -1776,23 +1764,6 @@ def run_ai_fill_job(
                     pending_candidates = []
                     break
 
-            if degraded:
-                max_batch_size = max(
-                    1,
-                    min(
-                        AI_BATCH_MAX_ITEMS,
-                        max(
-                            AI_MIN_PRODUCTS_PER_CALL,
-                            int(max_batch_size * AI_DEGRADE_FACTOR),
-                        ),
-                    ),
-                )
-                logger.warning(
-                    "ai_columns.429 degrade size=%d pending=%d",
-                    max_batch_size,
-                    len(pending_candidates),
-                )
-                continue
             if not pending_candidates or not made_progress:
                 break
     else:

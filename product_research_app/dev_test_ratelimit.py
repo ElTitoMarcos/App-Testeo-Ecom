@@ -1,62 +1,45 @@
 from __future__ import annotations
-
 import itertools
-import os
-from typing import Any, Dict
+from product_research_app.gpt import call_gpt
 
-from product_research_app.gpt import OpenAIError, call_gpt, call_openai_chat
-
+# Para tipado del except en esta prueba
+try:
+    from product_research_app.gpt import OpenAIError  # type: ignore
+except Exception:  # pragma: no cover
+    class OpenAIError(Exception): ...
 
 class Stub:
-    """Simula una secuencia de respuestas con errores 429 antes de recuperarse."""
-
+    """
+    Simula 429 X veces y luego OK. Útil para probar el backoff/recovery.
+    """
     def __init__(self, fails: int = 3):
         self.counter = itertools.count()
-        self.fails = fails
-        self.last_index = -1
+        self.fails = int(fails)
+    def run(self):
+        i = next(self.counter)
+        if i < self.fails:
+            # "OpenAI API returned status 429: Please try again in 500ms."
+            raise OpenAIError("OpenAI API returned status 429: Please try again in 500ms.")
+        return {"ok": True, "i": i}
 
-    def run(self) -> Dict[str, Any]:
-        index = next(self.counter)
-        self.last_index = index
-        if index < self.fails:
-            raise OpenAIError(
-                "OpenAI API returned status 429: Please try again in 500ms."
-            )
-        return {
-            "choices": [
-                {
-                    "message": {
-                        "content": "{\"desire_statement\": \"texto\", \"desire_magnitude\": 5}"
-                    }
-                }
-            ]
-        }
-
-
-def main() -> None:
-    os.environ.setdefault("OPENAI_API_KEY", "test-key")
-    stub = Stub()
-    original = call_openai_chat
-
-    def _fake_call(*args: Any, **kwargs: Any) -> Dict[str, Any]:
-        return stub.run()
-
+def call_gpt_stubbed(fails: int = 3):
+    """
+    Variante de prueba: alinea la firma de call_gpt para inyectar nuestro stub.
+    """
+    stub = Stub(fails=fails)
+    messages = [
+        {"role": "system", "content": "You are a test."},
+        {"role": "user", "content": "Hello"},
+    ]
+    from product_research_app import gpt as _g
+    orig = getattr(_g, "call_openai_chat")
     try:
-        # Monkeypatch temporal para simular reintentos.
-        import product_research_app.gpt as gpt_module
-
-        gpt_module.call_openai_chat = _fake_call  # type: ignore[assignment]
-        result = call_gpt("DESIRE", context_json={"product": {"id": 1}})
-        print({"result_ok": result.get("ok"), "attempts": stub.last_index + 1})
-    except OpenAIError as exc:
-        print({"error": str(exc)})
+        setattr(_g, "call_openai_chat", lambda **_: stub.run())
+        return call_gpt(messages=messages)
     finally:
-        # Restaurar la función original.
-        import product_research_app.gpt as gpt_module
-
-        gpt_module.call_openai_chat = original  # type: ignore[assignment]
-
+        setattr(_g, "call_openai_chat", orig)
 
 if __name__ == "__main__":
-    main()
-
+    print("simulate")
+    res = call_gpt_stubbed(fails=3)
+    print("result:", res)
