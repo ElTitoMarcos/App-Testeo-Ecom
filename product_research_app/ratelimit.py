@@ -72,23 +72,40 @@ class _TokenBucket:
         self.last = time.monotonic()
 
     def acquire(self, amount: int):
+        if amount <= 0:
+            return
+
+        remaining = amount
+        warned = False
+
         with self.lock:
-            while True:
-                now = time.monotonic()
-                refill = (now - self.last) * (self.capacity / 60.0)
-                if refill > 0:
-                    self.tokens = min(self.capacity, self.tokens + refill)
-                    self.last = now
-                if self.tokens >= amount:
-                    self.tokens -= amount
-                    return
-                deficit = amount - self.tokens
-                sleep_s = max(deficit / (self.capacity / 60.0), 0.01)
-                self.lock.release()
-                try:
-                    time.sleep(sleep_s)
-                finally:
-                    self.lock.acquire()
+            while remaining > 0:
+                chunk = min(remaining, self.capacity)
+                if chunk < remaining and not warned:
+                    logger.warning(
+                        "ratelimit requested tokens=%d exceeds bucket capacity=%d; chunking request",
+                        amount,
+                        self.capacity,
+                    )
+                    warned = True
+
+                while True:
+                    now = time.monotonic()
+                    refill = (now - self.last) * (self.capacity / 60.0)
+                    if refill > 0:
+                        self.tokens = min(self.capacity, self.tokens + refill)
+                        self.last = now
+                    if self.tokens >= chunk:
+                        self.tokens -= chunk
+                        remaining -= chunk
+                        break
+                    deficit = chunk - self.tokens
+                    sleep_s = max(deficit / (self.capacity / 60.0), 0.01)
+                    self.lock.release()
+                    try:
+                        time.sleep(sleep_s)
+                    finally:
+                        self.lock.acquire()
 
     def usage_snapshot(self) -> tuple[float, float, int]:
         with self.lock:
