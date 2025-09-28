@@ -33,25 +33,35 @@ _EFF_RPM = max(1, int(_RPM * _HEADROOM))
 
 logger = logging.getLogger(__name__)
 _last_log_ts = 0.0
-_last_log_key: int | None = None
+_last_logged_pct: int | None = None
+_total_tokens_reserved = 0
+_log_state_lock = threading.Lock()
 
 
-def _maybe_log(tokens_estimate: int) -> None:
-    global _last_log_ts, _last_log_key
+def _maybe_log(tokens_acquired: int, tokens_remaining: float, pct_used: int) -> None:
+    global _last_log_ts, _last_logged_pct, _total_tokens_reserved
     now = time.monotonic()
-    pct = min(99, int(100 * tokens_estimate / max(1, _EFF_TPM)))
-    key = pct // 5
-    if (now - _last_log_ts) >= 3.0 or key != _last_log_key:
-        _last_log_ts, _last_log_key = now, key
-        logger.info(
-            "ratelimit reserve tokens_est=%d eff_tpm=%d eff_rpm=%d headroom=%.2f max_conc=%d approx_used_pct=%d",
-            tokens_estimate,
-            _EFF_TPM,
-            _EFF_RPM,
-            _HEADROOM,
-            _MAX_CONC,
-            pct,
-        )
+    with _log_state_lock:
+        _total_tokens_reserved += tokens_acquired
+        last_pct = _last_logged_pct
+        if last_pct is None:
+            should_log = True
+        else:
+            pct_increase = pct_used - last_pct
+            should_log = pct_increase >= 5 and (now - _last_log_ts) >= 3.0
+        if should_log and (last_pct is None or pct_used >= last_pct):
+            _last_logged_pct = pct_used
+            _last_log_ts = now
+            logger.info(
+                "ratelimit reserve tokens_total=%d tokens_remaining=%d eff_tpm=%d eff_rpm=%d headroom=%.2f max_conc=%d real_used_pct=%d",
+                _total_tokens_reserved,
+                int(tokens_remaining),
+                _EFF_TPM,
+                _EFF_RPM,
+                _HEADROOM,
+                _MAX_CONC,
+                pct_used,
+            )
 
 
 class _TokenBucket:
@@ -80,6 +90,13 @@ class _TokenBucket:
                 finally:
                     self.lock.acquire()
 
+    def usage_snapshot(self) -> tuple[float, float, int]:
+        with self.lock:
+            remaining = max(0.0, self.tokens)
+            used = max(0.0, self.capacity - remaining)
+            pct_used = min(99, int(100 * used / self.capacity))
+            return remaining, used, pct_used
+
 
 _tokens_bucket = _TokenBucket(_EFF_TPM)
 _requests_bucket = _TokenBucket(_EFF_RPM)
@@ -91,9 +108,11 @@ _conc_sem = threading.BoundedSemaphore(_MAX_CONC)
 def reserve(tokens_estimate: int):
     _conc_sem.acquire()
     try:
-        _maybe_log(max(1, tokens_estimate))
+        tokens_to_acquire = max(1, tokens_estimate)
         _requests_bucket.acquire(1)
-        _tokens_bucket.acquire(max(1, tokens_estimate))
+        _tokens_bucket.acquire(tokens_to_acquire)
+        remaining, _, pct_used = _tokens_bucket.usage_snapshot()
+        _maybe_log(tokens_to_acquire, remaining, pct_used)
         yield
     finally:
         _conc_sem.release()
