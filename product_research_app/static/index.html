@@ -373,9 +373,9 @@ const saveIfDirty = window.saveIfDirty;
 window.fetchJson = fetchJson;
 window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
-// Tramos: 0–0.25 subida | 0.25–0.85 servidor | 0.85–1.0 IA
-const PROG_UPLOAD_FRAC = 0.25;
-const PROG_IMPORT_END = 0.85;
+// Tramos: 0–0.20 subida | 0.20–0.70 importación | 0.70–1.00 IA
+const PROG_UPLOAD_FRAC = 0.20;
+const PROG_IMPORT_END = 0.70;
 const IMPORT_STATUS_URL = '/_import_status';
 const IMPORT_START_URL = '/upload';
 let savedApiKeyHash = null;
@@ -414,7 +414,7 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 function mapServerFraction(serverPct){
   const clamped = Math.max(0, Math.min(100, Number(serverPct)||0));
-  const span = PROG_IMPORT_END - PROG_UPLOAD_FRAC; // ~0.60
+  const span = PROG_IMPORT_END - PROG_UPLOAD_FRAC; // 0.50
   return Math.min(PROG_IMPORT_END, PROG_UPLOAD_FRAC + (clamped/100)*span);
 }
 
