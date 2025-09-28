@@ -48,6 +48,27 @@ except Exception:
     EST_OUT_PER_ITEM = 80
 
 
+def _persist_rows(rows: List[Dict[str, Any]]) -> None:
+    """Actualiza columnas de IA en la tabla product."""
+
+    from product_research_app import db
+
+    conn = db.get_conn()
+    for r in rows:
+        conn.execute(
+            """
+            UPDATE product SET
+              desire = COALESCE(:desire, desire),
+              desire_magnitude = COALESCE(:desire_magnitude, desire_magnitude),
+              awareness_level = COALESCE(:awareness_level, awareness_level),
+              competition_level = COALESCE(:competition_level, competition_level)
+            WHERE id = :id
+            """,
+            r,
+        )
+    conn.commit()
+
+
 def _max_tokens_for_batch(batch_len: int) -> int:
     est = EST_OUT_PER_ITEM * max(1, batch_len) + 200
     return min(max(800, est), max(800, AI_MAX_OUTPUT_TOKENS), 4000)

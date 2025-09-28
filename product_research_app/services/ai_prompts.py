@@ -1,0 +1,98 @@
+from __future__ import annotations
+
+import json
+from typing import Any, Dict, List
+
+AI_FIELDS = ["desire", "desire_magnitude", "awareness_level", "competition_level"]
+
+
+def build_triage_messages(batch: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """Construye mensajes para decidir si un producto requiere puntuación completa."""
+    sys = (
+        "Eres un clasificador. Responde SOLO con JSON válido. "
+        "Entrada: lista de productos. Salida: array con objetos {id, needs_scoring}."
+    )
+    items = []
+    for p in batch:
+        items.append(
+            {
+                "id": p["id"],
+                "title": p.get("title") or p.get("name") or "",
+                "category": p.get("category") or "",
+                "desc": (p.get("description") or "")[:600],
+            }
+        )
+    user = (
+        "Decide si se requiere evaluación completa (needs_scoring=true) "
+        "solo cuando el título/desc no permitan inferir con reglas obvias.\n"
+        "Responde JSON estricto: [{\"id\": <int>, \"needs_scoring\": <bool>}, ...]\n"
+        f"INPUT={json.dumps(items, ensure_ascii=False)}"
+    )
+    return [{"role": "system", "content": sys}, {"role": "user", "content": user}]
+
+
+def parse_triage(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Parsea respuesta de triaje a lista de {id, needs_scoring}."""
+    content = raw.get("content") or raw.get("message") or raw
+    if isinstance(content, dict):
+        txt = json.dumps(content, ensure_ascii=False)
+    else:
+        txt = str(content)
+    try:
+        data = json.loads(txt)
+        assert isinstance(data, list)
+        rows = []
+        for x in data:
+            if isinstance(x, dict) and "id" in x and "needs_scoring" in x:
+                rows.append({"id": int(x["id"]), "needs_scoring": bool(x["needs_scoring"])})
+        return rows
+    except Exception:
+        return []
+
+
+def build_score_messages(batch: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """Construye mensajes para puntuar productos."""
+    sys = (
+        "Eres un analista. Devuelve SOLO JSON válido. Sin texto extra. "
+        "Campos: id, desire (etiqueta corta), desire_magnitude(0..100), awareness_level(0..100), competition_level(0..100)."
+    )
+    items = []
+    for p in batch:
+        items.append(
+            {
+                "id": p["id"],
+                "title": p.get("title") or p.get("name") or "",
+                "category": p.get("category") or "",
+                "desc": (p.get("description") or "")[:1200],
+            }
+        )
+    user = (
+        "Evalúa cada producto y responde JSON estricto (array). "
+        "No expliques nada. Valores numéricos enteros 0..100. "
+        f"INPUT={json.dumps(items, ensure_ascii=False)}"
+    )
+    return [{"role": "system", "content": sys}, {"role": "user", "content": user}]
+
+
+def parse_score(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Parsea respuesta de puntuación."""
+    content = raw.get("content") or raw.get("message") or raw
+    if isinstance(content, dict):
+        txt = json.dumps(content, ensure_ascii=False)
+    else:
+        txt = str(content)
+    try:
+        data = json.loads(txt)
+        assert isinstance(data, list)
+        rows = []
+        for x in data:
+            if not isinstance(x, dict) or "id" not in x:
+                continue
+            row = {"id": int(x["id"])}
+            for k in AI_FIELDS:
+                if k in x:
+                    row[k] = x[k]
+            rows.append(row)
+        return rows
+    except Exception:
+        return []
