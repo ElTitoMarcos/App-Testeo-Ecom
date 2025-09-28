@@ -1086,6 +1086,7 @@ async def _call_batch_with_retries(
                     "duration": duration,
                     "retries": attempt + retries_missing_used,
                     "prompt_tokens_est": request.prompt_tokens_est,
+                    "raw_text": jsonl_payload,
                 }
             except (httpx.HTTPError, json.JSONDecodeError, gpt.InvalidJSONError) as exc:
                 error_message = str(exc)
@@ -1119,6 +1120,7 @@ async def _call_batch_with_retries(
                     "retries": attempt,
                     "error": error_message,
                     "prompt_tokens_est": request.prompt_tokens_est,
+                    "raw_text": locals().get("jsonl_payload"),
                 }
 
 
@@ -1142,12 +1144,13 @@ def _calculate_cost(usage: Dict[str, Any], price_in: float, price_out: float) ->
     return (prompt_val / 1_000_000.0) * price_in + (completion_val / 1_000_000.0) * price_out
 
 
-def _apply_ai_updates(conn, updates: Dict[int, Dict[str, Any]]) -> None:
+def _apply_ai_updates(conn, updates: Dict[int, Dict[str, Any]]) -> int:
     if not updates:
-        return
+        return 0
     now_iso = datetime.utcnow().isoformat()
     cur = conn.cursor()
     began_tx = False
+    affected = 0
     try:
         if not conn.in_transaction:
             conn.execute("BEGIN IMMEDIATE")
@@ -1166,12 +1169,14 @@ def _apply_ai_updates(conn, updates: Dict[int, Dict[str, Any]]) -> None:
                 f"UPDATE products SET {', '.join(assignments)} WHERE id=?",
                 params,
             )
+            affected += max(0, cur.rowcount)
         if began_tx:
             conn.commit()
     except Exception:
         if began_tx and conn.in_transaction:
             conn.rollback()
         raise
+    return affected
 
 
 def _build_payload(row: Any, extra: Dict[str, Any]) -> Dict[str, Any]:
@@ -1393,6 +1398,8 @@ def run_ai_fill_job(
     else:
         microbatch_size = int(runtime_cfg.get("microbatch", DEFAULT_BATCH_SIZE) or DEFAULT_BATCH_SIZE)
     microbatch_size = max(MIN_BATCH_SIZE, microbatch_size)
+
+    logger.info("ai.run start items_total=%d batch_init=%d", total_items, microbatch_size)
 
     cache_enabled = bool(runtime_cfg.get("cache_enabled", True))
     cache_version = int(runtime_cfg.get("version", 1) or 1)
@@ -1633,6 +1640,9 @@ def run_ai_fill_job(
         ok_map: Dict[str, Dict[str, Any]] = result.get("ok", {}) or {}
         ko_map: Dict[str, str] = result.get("ko", {}) or {}
 
+        pending_before = len(pending_set)
+        candidate_ids = [cand.id for cand in candidates_list]
+
         success_updates: Dict[int, Dict[str, Any]] = {}
         for pid_str, payload in ok_map.items():
             try:
@@ -1642,6 +1652,7 @@ def run_ai_fill_job(
             success_updates[pid] = payload
             pending_set.discard(pid)
 
+        ko_ids: set[int] = set()
         for pid_str, reason in ko_map.items():
             try:
                 pid = int(pid_str)
@@ -1649,9 +1660,15 @@ def run_ai_fill_job(
                 continue
             pending_set.add(pid)
             fail_reasons[pid] = reason or "error"
+            ko_ids.add(pid)
 
+        parsed_ids = list(success_updates.keys())
+        missing_ids = [
+            pid for pid in candidate_ids if pid not in success_updates and pid not in ko_ids
+        ]
+
+        updated_rows = _apply_ai_updates(conn, success_updates)
         if success_updates:
-            _apply_ai_updates(conn, success_updates)
             for pid, payload in success_updates.items():
                 candidate = candidate_map.get(pid)
                 sig_hash = candidate.sig_hash if candidate else ""
@@ -1712,6 +1729,21 @@ def run_ai_fill_job(
             done=done_val,
             message=f"IA columnas {done_val}/{total_items}",
         )
+
+        logger.info(
+            "ai.batch result items=%d parsed=%d missing=%d db_updated=%d pending_before=%d",
+            len(candidates_list),
+            len(parsed_ids),
+            len(missing_ids),
+            updated_rows,
+            pending_before,
+        )
+        if missing_ids:
+            logger.warning("ai.batch.missing ids_sample=%s", missing_ids[:5])
+        if not parsed_ids:
+            raw_sample = str(result.get("raw_text") or "")[:200]
+            if raw_sample:
+                logger.error("ai.parse.empty raw_sample=%s", raw_sample)
 
         if cost_cap is not None and cost_spent >= float(cost_cap) and not stop_event.is_set():
             stop_event.set()
@@ -1984,6 +2016,9 @@ def run_ai_fill_job(
 
     latency_p50 = _percentile(request_latencies, 0.5) if request_latencies else 0.0
     latency_p95 = _percentile(request_latencies, 0.95) if request_latencies else 0.0
+
+    processed_count = len(applied_outputs)
+    logger.info("ai.run done total=%d processed=%d remaining=%d", total_items, processed_count, len(pending_ids))
 
     logger.info(
         "run_ai_fill_job: job=%s total=%d ok=%d cached=%d ko=%d cost=%.4f pending=%d error=%s duration=%.2fs latency_p50=%.2fs latency_p95=%.2fs requests=%d",

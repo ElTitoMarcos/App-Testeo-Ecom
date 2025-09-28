@@ -49,6 +49,9 @@ log = logger
 APP_DIR = Path(__file__).resolve().parent
 DB_PATH = APP_DIR / "data.sqlite3"
 
+AI_API_VERBOSE = int(os.getenv("PRAPP_AI_API_VERBOSE", "0"))
+LIMIT_NEAR_FRAC = float(os.getenv("PRAPP_AI_LIMIT_NEAR_FRAC", "0.90"))
+
 # Cache for baseline arrays recalculated every 10 minutes
 _BASELINE_CACHE: Dict[str, Any] = {"ts": 0, "data": None}
 
@@ -579,16 +582,44 @@ def call_openai_chat(
     if response_format is not None:
         payload["response_format"] = response_format
     est_tokens = int(tokens_estimate or 0)
-    rl = rl_snapshot()
-    logger.info(
-        "gpt.pre model=%s est_tokens=%d eff_tpm=%d eff_rpm=%d headroom=%.2f conc=%d",
-        model,
-        est_tokens,
-        rl.get("eff_tpm", 0),
-        rl.get("eff_rpm", 0),
-        float(rl.get("headroom", 0.0)),
-        int(rl.get("max_conc", 0)),
-    )
+
+    rl_info_cache: Optional[Dict[str, Any]] = None
+
+    def _get_rl_info(*, force: bool = False) -> Dict[str, Any]:
+        nonlocal rl_info_cache
+        if rl_info_cache is None and (force or AI_API_VERBOSE):
+            try:
+                rl_info_cache = rl_snapshot() or {}
+            except Exception:
+                rl_info_cache = {}
+        return rl_info_cache or {}
+
+    def _warn_if_limit_near(token_count: int) -> None:
+        if token_count <= 0 or LIMIT_NEAR_FRAC <= 0:
+            return
+        rl_info = _get_rl_info(force=True)
+        eff_tpm = int(rl_info.get("eff_tpm") or 0)
+        if eff_tpm <= 0:
+            return
+        frac_tpm = float(token_count) / max(1, eff_tpm)
+        if frac_tpm >= LIMIT_NEAR_FRAC:
+            logger.warning(
+                "gpt.limit.near tpm_frac=%.2f tokens=%d",
+                frac_tpm,
+                token_count,
+            )
+
+    if AI_API_VERBOSE >= 2:
+        rl = _get_rl_info()
+        logger.debug(
+            "gpt.pre model=%s est_tokens=%d eff_tpm=%d eff_rpm=%d headroom=%.2f conc=%d",
+            model,
+            est_tokens,
+            int(rl.get("eff_tpm", 0)),
+            int(rl.get("eff_rpm", 0)),
+            float(rl.get("headroom", 0.0)),
+            int(rl.get("max_conc", 0)),
+        )
     attempt = 0
     while True:
         attempt += 1
@@ -613,14 +644,20 @@ def call_openai_chat(
                 prompt_tokens = int(usage.get("prompt_tokens") or 0)
                 completion_tokens = int(usage.get("completion_tokens") or 0)
                 total_tokens = int(usage.get("total_tokens") or prompt_tokens + completion_tokens)
-                logger.info(
-                    "gpt.post model=%s prompt_tokens=%d completion_tokens=%d total_tokens=%d latency_ms=%d",
-                    model,
-                    prompt_tokens,
-                    completion_tokens,
-                    total_tokens,
-                    latency_ms,
-                )
+                if AI_API_VERBOSE >= 2:
+                    logger.debug(
+                        "gpt.post model=%s prompt_tokens=%d completion_tokens=%d total_tokens=%d latency_ms=%d",
+                        model,
+                        prompt_tokens,
+                        completion_tokens,
+                        total_tokens,
+                        latency_ms,
+                    )
+                observed_tokens = total_tokens or (prompt_tokens + completion_tokens)
+                if observed_tokens:
+                    _warn_if_limit_near(int(observed_tokens))
+            elif est_tokens:
+                _warn_if_limit_near(est_tokens)
             return data
 
         try:
@@ -630,6 +667,7 @@ def call_openai_chat(
             msg = response.text
         message = f"OpenAI API returned status {response.status_code}: {msg}"
         if response.status_code != 429:
+            logger.error("gpt.error status=%s detail=%s", response.status_code, msg)
             raise OpenAIError(message)
 
         retry_hint = _parse_retry_after_seconds(response, msg)

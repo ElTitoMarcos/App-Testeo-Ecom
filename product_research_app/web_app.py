@@ -78,6 +78,8 @@ DEBUG = bool(os.environ.get("DEBUG"))
 
 DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y")
 
+_DESIRE_MISSING_STATE: Dict[Any, bool] = {}
+
 
 DEFAULT_ORDER_LIST = list(config.DEFAULT_WINNER_ORDER)
 
@@ -339,19 +341,28 @@ def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> str:
             desire_val = str(val)
             source_used = name
             break
-    if desire_val == "":
-        logger.info(
-            "desire_missing=true sources_checked=%s product=%s",
-            [s for s, _ in sources],
-            rget(product, "id"),
-        )
+    product_id = rget(product, "id")
+    missing_now = desire_val == ""
+    prev_state = _DESIRE_MISSING_STATE.get(product_id)
+    if missing_now:
+        if prev_state is not True:
+            logger.info(
+                "desire_missing=true sources_checked=%s product=%s",
+                [s for s, _ in sources],
+                product_id,
+            )
+        if product_id is not None:
+            _DESIRE_MISSING_STATE[product_id] = True
     else:
-        logger.info(
-            "product=%s desire=%s source=%s",
-            rget(product, "id"),
-            desire_val,
-            source_used,
-        )
+        if prev_state is not False:
+            logger.info(
+                "product=%s desire=%s source=%s",
+                product_id,
+                desire_val,
+                source_used,
+            )
+        if product_id is not None:
+            _DESIRE_MISSING_STATE[product_id] = False
     return desire_val
 
 
@@ -2720,6 +2731,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._set_json(503)
             self.wfile.write(json.dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
             return
+        logger.info("ai.request.start from_client items=%d", len(items or []))
         try:
             ok, ko, usage, duration = gpt.generate_batch_columns(api_key, model, items)
             logger.info("/api/ia/batch-columns tokens=%s duration=%.2fs", usage.get('total_tokens'), duration)
