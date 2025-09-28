@@ -243,6 +243,7 @@ def build_messages(
 
 
 MAX_429 = int(os.getenv("PRAPP_OPENAI_MAX_RETRIES_429", "6"))
+MAX_5XX = int(os.getenv("PRAPP_OPENAI_MAX_RETRIES_5XX", "4"))
 BACKOFF_CAP = float(os.getenv("PRAPP_OPENAI_BACKOFF_CAP_S", "8"))
 
 # Si no existe en este módulo, definimos un fallback para tipar el except
@@ -288,48 +289,115 @@ def call_gpt(*, messages: List[Dict[str, Any]], **kwargs) -> Dict[str, Any]:
         except Exception:
             pass
 
-    attempt = 0
-    sleep_prev = 0.0
+    overall_attempt = 0
+    rate_attempts = 0
+    server_attempts = 0
+    sleep_prev_rate = 0.0
+    sleep_prev_server = 0.0
 
     while True:
-        attempt += 1
+        overall_attempt += 1
         # Embudo global: RPM/TPM + concurrencia
         with reserve(tokens_est):
             try:
                 raw = call_openai_chat(messages=messages, **kwargs)
-                if attempt > 1:
-                    log.info("gpt.call_gpt.recovered status=OK_RECOVERED attempts=%s", attempt)
+                if overall_attempt > 1:
+                    log.info(
+                        "gpt.call_gpt.recovered status=OK_RECOVERED attempts=%s",
+                        overall_attempt,
+                    )
                 return raw
             except OpenAIError as e:
                 msg = str(e)
                 low = msg.lower()
-                # Si no es 429, relanza
-                if "status 429" not in low and "rate limit" not in low:
-                    raise
-                if attempt >= MAX_429:
-                    log.error("gpt.call_gpt.gave_up_429 attempts=%s", attempt)
-                    raise
-                # 1) Intenta Retry-After de cabeceras (si el cliente lo expone)
-                retry_after = None
-                try:
-                    resp = getattr(e, "response", None)
-                    headers = getattr(resp, "headers", None) if resp is not None else None
-                    if headers:
-                        ra = headers.get("Retry-After") or headers.get("retry-after")
-                        if ra:
-                            try:
-                                retry_after = float(ra)
-                            except Exception:
-                                retry_after = None  # si es un HTTP-date, ignoramos
-                except Exception:
-                    retry_after = None
-                # 2) Si no, parsea "Please try again in …"
-                wait_s = retry_after if retry_after is not None else _extract_retry_after_seconds(msg) or sleep_prev
-                # 3) Decorrelated jitter backoff
-                sleep_prev = decorrelated_jitter_sleep(wait_s, BACKOFF_CAP)
-                log.warning("gpt.call_gpt.retry_429 attempt=%s sleep=%.2fs", attempt, sleep_prev)
-                continue
+                resp = getattr(e, "response", None)
+                status_code = None
+                if resp is not None:
+                    try:
+                        status_code = int(getattr(resp, "status_code", None) or 0) or None
+                    except Exception:
+                        status_code = None
 
+                is_rate_limit = (
+                    (status_code == 429)
+                    or ("status 429" in low)
+                    or ("rate limit" in low)
+                )
+
+                if is_rate_limit:
+                    rate_attempts += 1
+                    if rate_attempts > MAX_429:
+                        log.error(
+                            "gpt.call_gpt.gave_up_429 attempts=%s",
+                            rate_attempts,
+                        )
+                        raise
+
+                    retry_after = getattr(e, "retry_after", None)
+                    if retry_after is None:
+                        try:
+                            headers = getattr(resp, "headers", None) if resp is not None else None
+                            if headers:
+                                ra = headers.get("Retry-After") or headers.get("retry-after")
+                                if ra:
+                                    retry_after = float(ra)
+                        except Exception:
+                            retry_after = None
+
+                    wait_s = (
+                        retry_after
+                        if retry_after is not None
+                        else _extract_retry_after_seconds(msg) or sleep_prev_rate
+                    )
+                    sleep_prev_rate = decorrelated_jitter_sleep(wait_s, BACKOFF_CAP)
+                    log.warning(
+                        "gpt.call_gpt.retry_429 attempt=%s sleep=%.2fs",
+                        rate_attempts,
+                        sleep_prev_rate,
+                    )
+                    continue
+
+                transient_markers = (
+                    "failed to connect",
+                    "timeout",
+                    "timed out",
+                    "connection reset",
+                    "temporarily unavailable",
+                    "service unavailable",
+                    "upstream connect error",
+                )
+                is_server_error = False
+                if status_code is not None:
+                    if 500 <= status_code < 600:
+                        is_server_error = True
+                if not is_server_error:
+                    if any(marker in low for marker in transient_markers):
+                        is_server_error = True
+
+                if is_server_error:
+                    server_attempts += 1
+                    if server_attempts > MAX_5XX:
+                        log.error(
+                            "gpt.call_gpt.gave_up_5xx status=%s attempts=%s",
+                            status_code if status_code is not None else "n/a",
+                            server_attempts,
+                        )
+                        raise
+
+                    retry_after = getattr(e, "retry_after", None)
+                    wait_base = retry_after if retry_after is not None else (
+                        sleep_prev_server if sleep_prev_server > 0 else 0.5
+                    )
+                    sleep_prev_server = decorrelated_jitter_sleep(wait_base, BACKOFF_CAP)
+                    log.warning(
+                        "gpt.call_gpt.retry_5xx status=%s attempt=%s sleep=%.2fs",
+                        status_code if status_code is not None else "n/a",
+                        server_attempts,
+                        sleep_prev_server,
+                    )
+                    continue
+
+                raise
 
 def _message_text(messages: List[Dict[str, Any]]) -> str:
     parts: List[str] = []
@@ -643,15 +711,19 @@ def call_openai_chat(
         msg = err.get("error", {}).get("message", response.text)
     except Exception:
         msg = response.text
-    message = f"OpenAI API returned status {response.status_code}: {msg}"
+    status = int(response.status_code)
+    message = f"OpenAI API returned status {status}: {msg}"
     error = OpenAIError(message)
     setattr(error, "response", response)
-    if response.status_code == 429:
-        retry_hint = _parse_retry_after_seconds(response, msg)
-        if retry_hint is not None:
-            setattr(error, "retry_after", retry_hint)
+    retry_hint = _parse_retry_after_seconds(response, msg)
+    if retry_hint is not None:
+        setattr(error, "retry_after", retry_hint)
+    if status == 429:
+        pass
+    elif 500 <= status < 600:
+        logger.warning("gpt.http status=%s detail=%s", status, msg)
     else:
-        logger.error("gpt.error status=%s detail=%s", response.status_code, msg)
+        logger.error("gpt.error status=%s detail=%s", status, msg)
     raise error
 
 
