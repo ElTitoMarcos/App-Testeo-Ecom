@@ -373,9 +373,9 @@ const saveIfDirty = window.saveIfDirty;
 window.fetchJson = fetchJson;
 window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
-const IMPORT_UPLOAD_FRAC = 0.30;
-const IMPORT_POLL_MAX_FRAC = 0.99;
-const IMPORT_SERVER_SPAN = IMPORT_POLL_MAX_FRAC - IMPORT_UPLOAD_FRAC;
+// Tramos: 0–0.25 subida | 0.25–0.85 servidor | 0.85–1.0 IA
+const PROG_UPLOAD_FRAC = 0.25;
+const PROG_IMPORT_END = 0.85;
 const IMPORT_STATUS_URL = '/_import_status';
 const IMPORT_START_URL = '/upload';
 let savedApiKeyHash = null;
@@ -412,10 +412,93 @@ async function sha256(str) {
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-function mapServerFraction(serverPct) {
-  const clamped = Math.max(0, Math.min(100, Number(serverPct) || 0));
-  const frac = IMPORT_UPLOAD_FRAC + (clamped / 100) * IMPORT_SERVER_SPAN;
-  return Math.min(IMPORT_POLL_MAX_FRAC, frac);
+function mapServerFraction(serverPct){
+  const clamped = Math.max(0, Math.min(100, Number(serverPct)||0));
+  const span = PROG_IMPORT_END - PROG_UPLOAD_FRAC; // ~0.60
+  return Math.min(PROG_IMPORT_END, PROG_UPLOAD_FRAC + (clamped/100)*span);
+}
+
+// Qué consideramos "IA completa" para una fila
+function iaRowComplete(p){
+  const txt = (p.desire ?? '').toString().trim();
+  const mag = (p.desire_magnitude ?? '').toString().trim();
+  const aw  = (p.awareness_level ?? '').toString().trim();
+  const co  = (p.competition_level ?? '').toString().trim();
+  // Requerimos texto + 2 de 3 etiquetas (tolerante a datos)
+  const tags = [mag, aw, co].filter(Boolean).length;
+  return !!txt && tags >= 2;
+}
+
+// Cuántos del conjunto objetivo ya están completos
+function iaCountComplete(targetIds){
+  const byId = new Map((window.allProducts||[]).map(p => [String(p.id), p]));
+  let done = 0;
+  for(const id of targetIds){ if(iaRowComplete(byId.get(id) || {})) done++; }
+  return done;
+}
+
+// Tween lineal acotado para evitar saltos (máx ~2.5% por tick)
+async function animateTowards(tracker, cur, target){
+  const maxStep = 0.025; // 2.5%
+  return new Promise(res=>{
+    function step(){
+      const delta = target - cur;
+      if (Math.abs(delta) < 0.002) { tracker.step(target); return res(); }
+      const inc = Math.sign(delta) * Math.min(maxStep, Math.abs(delta));
+      cur = Math.max(0, Math.min(1, cur + inc));
+      tracker.step(cur);
+      requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+  });
+}
+
+// Fase IA: progresa de PROG_IMPORT_END → 1.0 leyendo productos
+async function trackIaPhase(tracker, targetIds, {pollMs=1600, maxIdle=120000} = {}){
+  if(!Array.isArray(targetIds) || targetIds.length===0){
+    // Si no pudimos aislar IDs nuevos, intenta con todos los visibles
+    targetIds = (Array.isArray(window.allProducts) ? window.allProducts : []).map(p => String(p.id));
+  }
+  window.__iaTailPending = true; // evita cerrar la barra en finally
+  let cur = PROG_IMPORT_END;
+  tracker.step(cur, 'Columnas IA…');
+
+  let lastDone = -1;
+  let sinceChange = 0;
+  const startTs = Date.now();
+
+  while(true){
+    // Refresca datos con poca frecuencia para no spamear
+    try { await reloadTable({ skipProgress: true }); } catch {}
+
+    const done = iaCountComplete(targetIds);
+    const frac = done / Math.max(1, targetIds.length);
+    const target = PROG_IMPORT_END + frac * (1 - PROG_IMPORT_END);
+
+    await animateTowards(tracker, cur, target);
+    cur = target;
+
+    if(done === targetIds.length){
+      tracker.step(1, 'Completado');
+      window.__iaTailPending = false;
+      return true;
+    }
+
+    // Control de inactividad para evitar ciclos infinitos
+    if(done === lastDone){ sinceChange += pollMs; } else { sinceChange = 0; lastDone = done; }
+    if(sinceChange >= maxIdle || (Date.now()-startTs) > 10*60*1000){ // 2 min sin cambios o 10 min total
+      // Cierra igualmente, pero deja nota visual de “Completado (parcial)”
+      tracker.step(Math.max(cur, 0.98), 'Completado (parcial)');
+      window.__iaTailPending = false;
+      return false;
+    }
+
+    await new Promise(r => setTimeout(r, pollMs));
+  }
+}
+
+if (typeof window.__iaTailPending !== 'boolean') {
+  window.__iaTailPending = false;
 }
 
 async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL, host = getGlobalProgressHost() } = {}) {
@@ -449,7 +532,6 @@ async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL
       throw new Error('Estado de importación desconocido');
     }
     if (serverPct >= 100 || statusVal === 'done' || statusVal === 'completed' || statusVal === 'finished') {
-      await reloadTable({ skipProgress: true });
       hideImportBanner();
       return data;
     }
@@ -462,6 +544,7 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
   const host = getGlobalProgressHost();
   const tracker = LoadingHelpers.start('Importando catálogo', { host });
   tracker.setStage('Subiendo archivo…');
+  const beforeIds = new Set((Array.isArray(window.allProducts)? window.allProducts: []).map(p => String(p.id)));
   let lastResult = null;
   try {
     const fd = new FormData();
@@ -474,7 +557,7 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
       xhr.open('POST', startUrl, true);
       xhr.upload.onprogress = (event) => {
         if (!event.lengthComputable) return;
-        const frac = Math.min(IMPORT_UPLOAD_FRAC, (event.loaded / event.total) * IMPORT_UPLOAD_FRAC);
+        const frac = Math.min(PROG_UPLOAD_FRAC, (event.loaded / event.total) * PROG_UPLOAD_FRAC);
         tracker.step(frac, 'Subiendo archivo…');
       };
       xhr.onerror = () => reject(new Error('Error de red subiendo archivo'));
@@ -500,8 +583,12 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     });
 
     if (startResult.kind === 'sync') {
-      tracker.step(1, 'Completado');
+      tracker.step(PROG_IMPORT_END, 'Importación completada');
       await reloadTable({ skipProgress: true });
+      const afterIds = new Set((Array.isArray(window.allProducts)? window.allProducts: []).map(p => String(p.id)));
+      const newIds = Array.from(afterIds).filter(id => !beforeIds.has(id));
+      const iaComplete = await trackIaPhase(tracker, newIds);
+      if (iaComplete) tracker.step(1, 'Completado');
       const importedCount = startResult.data?.imported ?? startResult.data?.rows_imported;
       if (Number.isFinite(importedCount) && importedCount > 0) {
         toast.success(`Importados ${importedCount}`);
@@ -511,7 +598,7 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
 
     const taskId = startResult.taskId;
     const idStr = typeof taskId === 'string' ? taskId : String(taskId);
-    tracker.step(IMPORT_UPLOAD_FRAC, 'Archivo subido');
+    tracker.step(PROG_UPLOAD_FRAC, 'Archivo subido');
     localStorage.setItem(IMPORT_TASK_LS_KEY, idStr);
 
     lastResult = await followImportTask(idStr, tracker, { statusUrl, host });
@@ -520,14 +607,25 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     if (Number.isFinite(importedCount) && importedCount > 0) {
       toast.success(`Importados ${importedCount}`);
     }
-    tracker.step(1, 'Completado');
+
+    // Aísla IDs nuevos
+    await reloadTable({ skipProgress: true });
+    const afterIds = new Set((Array.isArray(window.allProducts)? window.allProducts: []).map(p => String(p.id)));
+    const newIds = Array.from(afterIds).filter(id => !beforeIds.has(id));
+
+    // Sigue fase IA sin crear nuevas barras
+    const iaComplete = await trackIaPhase(tracker, newIds);
+
+    // Cierre definitivo
+    if (iaComplete) tracker.step(1, 'Completado');
     return lastResult;
   } catch (err) {
+    window.__iaTailPending = false;
     tracker.step(1, 'Error');
     toast.error(err?.message || 'Error al importar catálogo');
     throw err;
   } finally {
-    tracker.done();
+    if (!window.__iaTailPending) tracker.done();
     localStorage.removeItem(IMPORT_TASK_LS_KEY);
     hideImportBanner();
   }
@@ -1146,20 +1244,26 @@ window.onload = async () => {
     toast.info('Reanudando importación previa…');
     const host = getGlobalProgressHost();
     const tracker = LoadingHelpers.start('Importando catálogo', { host });
-    tracker.step(IMPORT_UPLOAD_FRAC, 'Reanudando…');
+    tracker.step(PROG_UPLOAD_FRAC, 'Reanudando…');
+    const beforeIds = new Set((Array.isArray(window.allProducts)? window.allProducts: []).map(p => String(p.id)));
     try {
       const result = await followImportTask(tid, tracker, { host });
       const importedCount = result?.imported ?? result?.rows_imported;
       if (Number.isFinite(importedCount) && importedCount > 0) {
         toast.success(`Importados ${importedCount}`);
       }
-      tracker.step(1, 'Completado');
+      await reloadTable({ skipProgress: true });
+      const afterIds = new Set((Array.isArray(window.allProducts)? window.allProducts: []).map(p => String(p.id)));
+      const newIds = Array.from(afterIds).filter(id => !beforeIds.has(id));
+      const iaComplete = await trackIaPhase(tracker, newIds);
+      if (iaComplete) tracker.step(1, 'Completado');
     } catch (err) {
+      window.__iaTailPending = false;
       tracker.step(1, 'Error');
       toast.error(err?.message || 'Error en importación');
     } finally {
       localStorage.removeItem(IMPORT_TASK_LS_KEY);
-      tracker.done();
+      if (!window.__iaTailPending) tracker.done();
       hideImportBanner();
     }
   }
