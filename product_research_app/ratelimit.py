@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import random
 import threading
@@ -23,11 +24,22 @@ def _env_float(name, default):
 
 _TPM = _env_int("PRAPP_OPENAI_TPM", 30000)
 _RPM = _env_int("PRAPP_OPENAI_RPM", 3000)
-_HEADROOM = _env_float("PRAPP_OPENAI_HEADROOM", 0.85)
-_MAX_CONC = _env_int("PRAPP_OPENAI_MAX_CONCURRENCY", 2)
+_HEADROOM = _env_float("PRAPP_OPENAI_HEADROOM", 0.65)
+_MAX_CONC = _env_int("PRAPP_OPENAI_MAX_CONCURRENCY", 1)
 
 _EFF_TPM = max(1, int(_TPM * _HEADROOM))
 _EFF_RPM = max(1, int(_RPM * _HEADROOM))
+
+logger = logging.getLogger(__name__)
+
+
+def snapshot() -> dict[str, int | float]:
+    return {
+        "eff_tpm": _EFF_TPM,
+        "eff_rpm": _EFF_RPM,
+        "headroom": _HEADROOM,
+        "max_conc": _MAX_CONC,
+    }
 
 
 class _TokenBucket:
@@ -61,6 +73,14 @@ _tokens_bucket = _TokenBucket(_EFF_TPM)
 _requests_bucket = _TokenBucket(_EFF_RPM)
 
 _conc_sem = threading.BoundedSemaphore(_MAX_CONC)
+
+logger.info(
+    "ratelimit init eff_tpm=%d eff_rpm=%d headroom=%.2f max_conc=%d",
+    _EFF_TPM,
+    _EFF_RPM,
+    _HEADROOM,
+    _MAX_CONC,
+)
 
 
 @contextmanager
