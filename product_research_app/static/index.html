@@ -373,14 +373,20 @@ const saveIfDirty = window.saveIfDirty;
 window.fetchJson = fetchJson;
 window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
-const IMPORT_UPLOAD_FRAC = 0.30;
-const IMPORT_POLL_MAX_FRAC = 0.80;
-const IMPORT_SERVER_SPAN = IMPORT_POLL_MAX_FRAC - IMPORT_UPLOAD_FRAC;
-const IMPORT_STATUS_URL = '/_import_status';
+
+// Tramos
+const UPLOAD_MAX_FRAC  = 0.30;  // fin de subida
+const IMPORT_MAX_FRAC  = 0.80;  // fin de importación en servidor
+const ENRICH_START_FRAC = IMPORT_MAX_FRAC;
+const ENRICH_MAX_FRAC   = 0.999; // reserva margen; 1.0 solo al completar IA
+
+// Endpoints (no crear nada nuevo en backend; solo leer estado)
+const IMPORT_STATUS_URL = '/import/status';   // deja el actual que ya usas
+const ENRICH_STATUS_URL = '/enrich/status';   // si no existe, no lo inventes: prueba /ai-columns/status o /enrich/status y usa el que responda OK
 const IMPORT_START_URL = '/upload';
-const ENRICH_STATUS_URL = '/enrich/status';
-const ENRICH_START_FRAC = 0.80;
-const ENRICH_MAX_FRAC = 0.999;
+
+let lastImportData = null;
+let iaPollAbort = null;
 let savedApiKeyHash = null;
 let savedApiKeyLength = 0;
 
@@ -415,101 +421,112 @@ async function sha256(str) {
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-function mapServerFraction(serverPct) {
-  const clamped = Math.max(0, Math.min(100, Number(serverPct) || 0));
-  const frac = IMPORT_UPLOAD_FRAC + (clamped / 100) * IMPORT_SERVER_SPAN;
-  return Math.min(IMPORT_POLL_MAX_FRAC, frac);
+function mapImportToFrac(pct) {
+  const p = Math.max(0, Math.min(100, Number(pct) || 0)) / 100;
+  return UPLOAD_MAX_FRAC + p * (IMPORT_MAX_FRAC - UPLOAD_MAX_FRAC);
 }
 
-function mapAiFraction(done, total) {
+function mapIaToFrac(done, total) {
   const d = Math.max(0, Number(done) || 0);
   const t = Math.max(1, Number(total) || 1);
   const p = Math.max(0, Math.min(1, d / t));
   return ENRICH_START_FRAC + p * (ENRICH_MAX_FRAC - ENRICH_START_FRAC);
 }
 
-async function followEnrich(jobId, tracker, { host = getGlobalProgressHost() } = {}) {
-  const jobStr = jobId != null ? String(jobId).trim() : '';
-  if (!jobStr) return null;
+async function followIaStatus(jobId, tracker, { host = getGlobalProgressHost() } = {}) {
+  if (!jobId) return;
+
+  if (iaPollAbort && iaPollAbort.active) iaPollAbort.active = false;
+  iaPollAbort = { active: true };
+
+  const jobStr = String(jobId).trim();
+  if (!jobStr) return;
 
   let current = ENRICH_START_FRAC;
   tracker?.step(current, 'Generando columnas IA…');
 
-  const num = (value) => {
-    const n = Number(value);
-    return Number.isFinite(n) ? n : undefined;
-  };
-
-  while (true) {
-    let data;
-    try {
-      const resp = await fetch(`${ENRICH_STATUS_URL}?job_id=${encodeURIComponent(jobStr)}&t=${Date.now()}`,
-        { __skipLoadingHook: true, __hostEl: host, cache: 'no-store' }
-      );
-      if (!resp.ok) throw new Error('Estado IA no disponible');
-      data = await resp.json();
-    } catch (err) {
-      tracker?.step(current, 'Generando columnas IA… (reintentando)');
-      await sleep(600);
-      continue;
+  async function smoothTo(target, label) {
+    target = Math.max(current, Math.min(target, ENRICH_MAX_FRAC));
+    while (iaPollAbort.active && current + 1e-4 < target) {
+      const step = Math.max(0.005, (target - current) / 4);
+      current = Math.min(target, current + step);
+      tracker?.step(current, label);
+      await sleep(120);
     }
-
-    let done = num(data.done) ?? num(data.completed) ?? num(data.ok) ?? 0;
-    let total = num(data.total) ?? num(data.expected_total) ?? num(data.items);
-    const pending = num(data.pending) ?? num(data.todo) ?? num(data.remaining);
-    const failed = num(data.ko) ?? num(data.failed) ?? num(data.errors);
-    if (!Number.isFinite(total) || total <= 0) {
-      let derived = 0;
-      if (Number.isFinite(done)) derived += done;
-      if (Number.isFinite(pending)) derived += pending;
-      if (Number.isFinite(failed)) derived += failed;
-      if (derived > 0) total = derived;
-    }
-    if (!Number.isFinite(done) || done < 0) done = 0;
-    if (!Number.isFinite(total) || total <= 0) total = Math.max(done, 1);
-
-    const statusVal = String(data.status || data.state || data.stage || '').toLowerCase();
-    const baseStage = (data.message || data.stage || data.status_text || data.state || '').toString().trim();
-    const doneDisplay = Math.max(0, Math.round(done));
-    const totalDisplay = Math.max(doneDisplay, Math.max(1, Math.round(total)));
-    const stageText = `${baseStage ? baseStage : 'Generando columnas IA…'} (${doneDisplay}/${totalDisplay})`;
-    const target = mapAiFraction(done, total);
-
-    if (statusVal === 'error' || data.error) {
-      tracker?.step(current, `${stageText} — ${data.error || 'Error generando columnas IA'}`);
-      throw new Error(data.error || 'Error generando columnas IA');
-    }
-
-    if (target > current) {
-      let next = current;
-      while ((target - next) > 1e-4) {
-        const step = Math.max(0.005, (target - next) / 4);
-        next = Math.min(target, next + step);
-        current = next;
-        tracker?.step(current, stageText);
-        await sleep(120);
-      }
-      if (current < target) {
-        current = target;
-        tracker?.step(current, stageText);
-      }
-    } else {
+    if (iaPollAbort.active) {
       current = Math.max(current, target);
-      tracker?.step(current, stageText);
+      tracker?.step(current, label);
     }
+  }
 
-    if (statusVal === 'completed' || statusVal === 'done' || statusVal === 'finished' || done >= total) {
-      tracker?.step(1, 'Completado columnas IA');
-      return data;
+  let backoff = 500;
+  while (iaPollAbort.active) {
+    try {
+      const res = await fetch(`${ENRICH_STATUS_URL}?job_id=${encodeURIComponent(jobStr)}&t=${Date.now()}`, {
+        method: 'GET',
+        __skipLoadingHook: true,
+        __hostEl: host,
+        cache: 'no-store'
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const s = await res.json();
+
+      const num = (value) => {
+        const n = Number(value);
+        return Number.isFinite(n) ? n : undefined;
+      };
+
+      let total = num(s.total) ?? num(s.expected_total) ?? num(s.items) ?? num(s.count);
+      let done = num(s.done) ?? num(s.completed) ?? num(s.ok);
+      const pending = num(s.pending) ?? num(s.todo) ?? num(s.remaining);
+      const failed = num(s.ko) ?? num(s.failed) ?? num(s.errors);
+
+      if (done === undefined && total !== undefined && pending !== undefined) {
+        done = Math.max(0, total - pending);
+      }
+      if (done === undefined) done = 0;
+
+      if (total === undefined || total <= 0) {
+        let derived = done;
+        if (pending !== undefined) derived += Math.max(0, pending);
+        if (failed !== undefined) derived += Math.max(0, failed);
+        total = derived > 0 ? derived : Math.max(done, 1);
+      }
+
+      done = Math.max(0, done);
+      total = Math.max(done || 0, total || 1);
+
+      const doneLabel = Math.round(done);
+      const totalLabel = Math.max(doneLabel, Math.round(total));
+      const stageLabel = totalLabel > 0
+        ? `Generando columnas IA… (${doneLabel}/${totalLabel})`
+        : `Generando columnas IA… (${doneLabel})`;
+
+      const target = mapIaToFrac(done, total);
+      await smoothTo(target, stageLabel);
+
+      const st = String(s.status ?? s.state ?? '').toLowerCase();
+      if (st === 'done' || st === 'completed' || st === 'finished' || (Number(total) > 0 && Number(done) >= Number(total))) {
+        tracker?.step(1, 'Completado');
+        iaPollAbort.active = false;
+        return s;
+      }
+
+      await sleep(800);
+      backoff = 500;
+    } catch (err) {
+      if (!iaPollAbort.active) break;
+      tracker?.step(current, 'Generando columnas IA… (reintentando)');
+      await sleep(backoff);
+      backoff = Math.min(backoff * 1.6, 4000);
     }
-
-    await sleep(600);
   }
 }
 
 async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL, host = getGlobalProgressHost() } = {}) {
   const id = typeof taskId === 'string' ? taskId : String(taskId || '');
   if (!id) return null;
+  let backoff = 700;
   while (true) {
     let data;
     try {
@@ -519,16 +536,25 @@ async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL
       if (!resp.ok) throw new Error('Estado no disponible');
       data = await resp.json();
     } catch (err) {
-      await sleep(900);
+      await sleep(backoff);
+      backoff = Math.min(backoff * 1.5, 4000);
       continue;
     }
+
+    backoff = 700;
+    lastImportData = data;
+
     if (data.ui_cost_message) showImportBanner(data.ui_cost_message);
     const raw = data.pct ?? data.percent ?? data.percentage ?? data.progress ?? (data.done ? 100 : undefined);
     let serverPct = Number(raw);
     if (!Number.isFinite(serverPct)) serverPct = 0;
     serverPct = Math.max(0, Math.min(100, serverPct));
-    const stage = (data.message || data.stage || data.state || '').toString() || 'Procesando…';
-    tracker?.step(mapServerFraction(serverPct), stage);
+
+    const stageInfo = (data.message || data.stage || data.state || '').toString().trim();
+    const pctLabel = `${Math.round(serverPct)}%`;
+    const stageParts = [`Importando productos… (${pctLabel})`];
+    if (stageInfo) stageParts.push(stageInfo);
+    tracker?.step(mapImportToFrac(serverPct), stageParts.join(' · '));
 
     const statusVal = String(data.state || data.status || '').toLowerCase();
     if (statusVal === 'error' || data.error) {
@@ -538,15 +564,19 @@ async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL
       throw new Error('Estado de importación desconocido');
     }
     if (serverPct >= 100 || statusVal === 'done' || statusVal === 'completed' || statusVal === 'finished') {
-      const jobId = data.job_id ?? data.jobId ?? data.id ?? (/^\d+$/.test(id) ? Number(id) : undefined);
-      if (jobId !== undefined && jobId !== null && String(jobId).trim() !== '') {
-        await followEnrich(jobId, tracker, { host });
+      tracker?.step(IMPORT_MAX_FRAC, 'Importación completada');
+      const source = lastImportData || data;
+      const jobId = source?.enrich_job_id ?? source?.ai_job_id ?? source?.job_id ?? source?.jobId ?? source?.id;
+      if (jobId != null && String(jobId).trim() !== '') {
+        await followIaStatus(jobId, tracker, { host });
+      } else {
+        tracker?.step(IMPORT_MAX_FRAC, 'Importación completada (IA en espera)');
       }
       await reloadTable({ skipProgress: true });
       hideImportBanner();
       return data;
     }
-    await sleep(450);
+    await sleep(800);
   }
 }
 
@@ -556,6 +586,8 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
   const tracker = LoadingHelpers.start('Importando catálogo', { host });
   tracker.setStage('Subiendo archivo…');
   let lastResult = null;
+  lastImportData = null;
+  if (iaPollAbort && iaPollAbort.active) iaPollAbort.active = false;
   try {
     const fd = new FormData();
     fd.append('file', file);
@@ -567,8 +599,10 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
       xhr.open('POST', startUrl, true);
       xhr.upload.onprogress = (event) => {
         if (!event.lengthComputable) return;
-        const frac = Math.min(IMPORT_UPLOAD_FRAC, (event.loaded / event.total) * IMPORT_UPLOAD_FRAC);
-        tracker.step(frac, 'Subiendo archivo…');
+        const ratio = event.total > 0 ? (event.loaded / event.total) : 0;
+        const frac = Math.min(UPLOAD_MAX_FRAC, ratio * UPLOAD_MAX_FRAC);
+        const pct = Math.round(Math.max(0, Math.min(100, ratio * 100)));
+        tracker.step(frac, `Subiendo archivo… (${pct}%)`);
       };
       xhr.onerror = () => reject(new Error('Error de red subiendo archivo'));
       xhr.onload = () => {
@@ -604,7 +638,7 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
 
     const taskId = startResult.taskId;
     const idStr = typeof taskId === 'string' ? taskId : String(taskId);
-    tracker.step(IMPORT_UPLOAD_FRAC, 'Archivo subido');
+    tracker.step(UPLOAD_MAX_FRAC, 'Archivo subido');
     localStorage.setItem(IMPORT_TASK_LS_KEY, idStr);
 
     lastResult = await followImportTask(idStr, tracker, { statusUrl, host });
@@ -613,7 +647,6 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     if (Number.isFinite(importedCount) && importedCount > 0) {
       toast.success(`Importados ${importedCount}`);
     }
-    tracker.step(1, 'Completado');
     return lastResult;
   } catch (err) {
     tracker.step(1, 'Error');
@@ -1239,14 +1272,15 @@ window.onload = async () => {
     toast.info('Reanudando importación previa…');
     const host = getGlobalProgressHost();
     const tracker = LoadingHelpers.start('Importando catálogo', { host });
-    tracker.step(IMPORT_UPLOAD_FRAC, 'Reanudando…');
+    lastImportData = null;
+    if (iaPollAbort && iaPollAbort.active) iaPollAbort.active = false;
+    tracker.step(UPLOAD_MAX_FRAC, 'Reanudando importación…');
     try {
       const result = await followImportTask(tid, tracker, { host });
       const importedCount = result?.imported ?? result?.rows_imported;
       if (Number.isFinite(importedCount) && importedCount > 0) {
         toast.success(`Importados ${importedCount}`);
       }
-      tracker.step(1, 'Completado');
     } catch (err) {
       tracker.step(1, 'Error');
       toast.error(err?.message || 'Error en importación');
