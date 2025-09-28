@@ -14,11 +14,11 @@ import itertools
 import json
 import logging
 import os
+import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from email.utils import parsedate_to_datetime
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import httpx
@@ -28,6 +28,48 @@ from .db import get_db
 from .sse import publish_progress
 
 logger = logging.getLogger(__name__)
+gptlog = logging.getLogger("gpt.api")
+
+_SUM_TS = time.monotonic()
+_SUM_EVERY = max(1.0, float(os.environ.get("PRAPP_GPT_SUMMARY_EVERY_SEC", "60")))
+_SUM = {"calls": 0, "ok": 0, "err": 0, "tokens": 0}
+
+
+def _summary_maybe() -> None:
+    global _SUM_TS
+    now = time.monotonic()
+    if (now - _SUM_TS) >= _SUM_EVERY:
+        _SUM_TS = now
+        gptlog.info(
+            "summary calls=%d ok=%d err=%d tokens=%d",
+            _SUM["calls"],
+            _SUM["ok"],
+            _SUM["err"],
+            _SUM["tokens"],
+        )
+
+
+_RE_MS = re.compile(r"try again in ([0-9.]+)s", re.I)
+
+
+def _parse_retry_after_secs(resp=None, msg: str = "") -> Optional[float]:
+    """Parse Retry-After header or message hints."""
+
+    try:
+        retry_after = None
+        if resp is not None and getattr(resp, "headers", None):
+            retry_after = resp.headers.get("Retry-After") or resp.headers.get("retry-after")
+        if retry_after:
+            return float(retry_after)
+    except Exception:
+        pass
+    match = _RE_MS.search(msg or "")
+    if match:
+        try:
+            return float(match.group(1))
+        except Exception:
+            return None
+    return None
 
 
 def _emit_enrich_progress(job_id: int, **payload: Any) -> None:
@@ -200,27 +242,14 @@ def _minimal_json_repair(text: str) -> str:
     return stripped[start : end + 1]
 
 
-def _retry_after_seconds(value: Optional[str]) -> Optional[float]:
-    if not value:
-        return None
-    try:
-        return float(value)
-    except ValueError:
-        try:
-            dt = parsedate_to_datetime(value)
-        except (TypeError, ValueError):
-            return None
-        now = datetime.utcnow().replace(tzinfo=dt.tzinfo)
-        delta = dt - now
-        return max(delta.total_seconds(), 0.0)
-
-
 async def call_ai(
     payload: Dict[str, Any],
     *,
     client: httpx.AsyncClient,
     api_key: Optional[str],
     logger: logging.Logger,
+    job_id: Optional[Any] = None,
+    tokens_estimate: Optional[int] = None,
 ) -> Dict[str, Any]:
     headers = {"Content-Type": "application/json"}
     if api_key:
@@ -228,12 +257,27 @@ async def call_ai(
     attempt = 0
     backoff = 1.0
     last_error: Optional[Exception] = None
+    model = str(payload.get("model") or "-")
+    job_label = str(job_id) if job_id is not None else "-"
+    est_tokens = int(tokens_estimate or 0)
+    gptlog.info("start model=%s job=%s tokens_est=%s", model, job_label, est_tokens)
+    _SUM["calls"] += 1
+    start_time = time.perf_counter()
     while attempt < MAX_RETRIES:
         try:
             response = await client.post(AI_URL, json=payload, headers=headers)
             if response.status_code == 429:
-                retry = _retry_after_seconds(response.headers.get("Retry-After")) or backoff
+                retry = _parse_retry_after_secs(response, response.text) or backoff
                 logger.warning("AI 429 throttled; sleeping %.2fs", retry)
+                gptlog.warning(
+                    "err model=%s job=%s status=%d ms=%d retry_after=%.2fs detail=%s",
+                    model,
+                    job_label,
+                    response.status_code,
+                    int((time.perf_counter() - start_time) * 1000.0),
+                    retry,
+                    "rate_limit",
+                )
                 await asyncio.sleep(retry)
                 backoff = min(backoff * 2, 30.0)
                 attempt += 1
@@ -241,20 +285,100 @@ async def call_ai(
             response.raise_for_status()
             text = response.text.strip()
             try:
-                return json.loads(text)
+                data = json.loads(text)
             except json.JSONDecodeError as exc:
                 repaired = _minimal_json_repair(text)
                 try:
-                    return json.loads(repaired)
+                    data = json.loads(repaired)
                 except json.JSONDecodeError:
                     last_error = exc
                     logger.warning("AI JSON parse failed (attempt %d)", attempt + 1)
+                    gptlog.error(
+                        "err model=%s job=%s status=%d ms=%d retry_after=- detail=%s",
+                        model,
+                        job_label,
+                        response.status_code,
+                        int((time.perf_counter() - start_time) * 1000.0),
+                        "json_decode_error",
+                    )
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 30.0)
+                    attempt += 1
+                    continue
+            usage = data.get("usage") if isinstance(data, dict) else None
+
+            def _usage_val(name: str) -> int:
+                if usage is None:
+                    return 0
+                try:
+                    if hasattr(usage, name):
+                        value = getattr(usage, name)
+                    else:
+                        value = usage.get(name)  # type: ignore[arg-type]
+                except Exception:
+                    return 0
+                try:
+                    return int(value or 0)
+                except Exception:
+                    return 0
+
+            prompt_tokens = _usage_val("prompt_tokens")
+            completion_tokens = _usage_val("completion_tokens")
+            total_tokens = _usage_val("total_tokens") or (prompt_tokens + completion_tokens)
+            _SUM["ok"] += 1
+            _SUM["tokens"] += total_tokens
+            gptlog.info(
+                "ok model=%s job=%s status=%d pt=%d ct=%d tt=%d ms=%d",
+                model,
+                job_label,
+                response.status_code,
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+                int((time.perf_counter() - start_time) * 1000.0),
+            )
+            _summary_maybe()
+            return data
         except httpx.HTTPError as exc:
             last_error = exc
             logger.warning("AI request error (attempt %d): %s", attempt + 1, exc)
+            status = getattr(getattr(exc, "response", None), "status_code", None) or getattr(
+                exc, "status_code", None
+            )
+            retry_after = _parse_retry_after_secs(getattr(exc, "response", None), str(exc))
+            gptlog.error(
+                "err model=%s job=%s status=%s ms=%d retry_after=%s detail=%s",
+                model,
+                job_label,
+                status if status is not None else "-",
+                int((time.perf_counter() - start_time) * 1000.0),
+                f"{retry_after:.2f}s" if retry_after else "-",
+                str(exc),
+            )
         await asyncio.sleep(backoff)
         backoff = min(backoff * 2, 30.0)
         attempt += 1
+    total_ms = int((time.perf_counter() - start_time) * 1000.0)
+    status = None
+    if last_error is not None:
+        status = getattr(getattr(last_error, "response", None), "status_code", None) or getattr(
+            last_error, "status_code", None
+        )
+    retry_after = _parse_retry_after_secs(
+        getattr(last_error, "response", None) if last_error is not None else None,
+        str(last_error) if last_error is not None else "",
+    )
+    _SUM["err"] += 1
+    gptlog.error(
+        "err model=%s job=%s status=%s ms=%d retry_after=%s detail=%s",
+        model,
+        job_label,
+        status if status is not None else "-",
+        total_ms,
+        f"{retry_after:.2f}s" if retry_after else "-",
+        str(last_error) if last_error else "unknown_error",
+    )
+    _summary_maybe()
     raise RuntimeError(f"AI request failed after {MAX_RETRIES} attempts: {last_error}")
 
 
@@ -697,7 +821,14 @@ class EnrichmentPipeline:
         estimated_tokens = estimate_tokens(payload)
         start = time.perf_counter()
         try:
-            response = await call_ai(payload, client=client, api_key=api_key, logger=self.logger)
+            response = await call_ai(
+                payload,
+                client=client,
+                api_key=api_key,
+                logger=self.logger,
+                job_id=self.job_id,
+                tokens_estimate=estimated_tokens,
+            )
             normalised = normalize_results(response)
         except Exception as exc:
             self.logger.exception("enrich job=%s batch error: %s", self.job_id, exc)
