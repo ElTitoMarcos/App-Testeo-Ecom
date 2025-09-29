@@ -1,165 +1,120 @@
-const EC_BATCH_SIZE = 10;
-const EC_MODEL = "gpt-4o-mini-2024-07-18";
+import { fetchJson } from '/static/js/net.js';
 
-function getAllFilteredRows() {
-  if (typeof window.getAllFilteredRows === 'function') {
-    try {
-      return window.getAllFilteredRows();
-    } catch {
-      return [];
-    }
-  }
-  return Array.isArray(window.products) ? window.products.slice() : [];
-}
+const GP = window.GlobalProgress ?? {
+  beginAI() {},
+  setAIFrac() {},
+  finishOk() {},
+  finishError() {},
+  showCancel() {},
+  isActive() { return false; }
+};
 
-function isEditing(pid, field) {
-  const active = document.activeElement;
-  if (!active) return false;
-  const tr = active.closest('tr');
-  if (!tr) return false;
-  const cb = tr.querySelector('input.rowCheck');
-  if (!cb || cb.dataset.id !== String(pid)) return false;
-  const td = active.closest('td[data-key]');
-  if (!td) return false;
-  return td.dataset.key === field;
-}
-
-function applyUpdates(product, updates) {
-  const applied = {};
-  const row = document.querySelector(`input.rowCheck[data-id="${product.id}"]`)?.closest('tr');
-  const map = {
-    desire: 'td.ec-col-desire input',
-    desire_magnitude: 'td.ec-col-desire-mag select',
-    awareness_level: 'td.ec-col-awareness select',
-    competition_level: 'td.ec-col-competition select'
-  };
-  Object.keys(map).forEach(k => {
-    const nv = updates[k];
-    if (nv === undefined || isEditing(product.id, k)) return;
-    product[k] = nv;
-    const el = row ? row.querySelector(map[k]) : null;
-    if (el) {
-      if (el.tagName === 'INPUT') el.value = nv || '';
-      else el.value = nv || '';
-    }
-    applied[k] = nv;
-  });
-  if (Object.keys(applied).length) {
-    fetch(`/products/${product.id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(applied)
-    }).catch(() => {});
-    if (window.ecAutoFitColumns && window.gridRoot) ecAutoFitColumns(gridRoot);
-  }
-  return applied;
-}
-
-function chunkArray(arr, size) {
-  const out = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
-}
-
-async function processBatch(items) {
-  const res = await fetch('/api/ia/batch-columns', {
+async function startAIFill(ids) {
+  const body = ids && ids.length ? { product_ids: ids } : {};
+  return fetchJson('/ai_fill/start', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: EC_MODEL, items })
+    body: JSON.stringify(body)
   });
-  if (!res.ok) {
-    let msg = res.statusText;
-    try { const err = await res.json(); if (err.error) msg = err.error; } catch {}
-    throw new Error(msg);
-  }
-  const data = await res.json();
-  let ok = 0;
-  let ko = 0;
-  const okMap = data.ok || {};
-  const koMap = data.ko || {};
-  Object.keys(okMap).forEach(id => {
-    const product = (window.products || []).find(p => String(p.id) === String(id));
-    if (product) {
-      applyUpdates(product, okMap[id]);
-      ok++;
-    } else {
-      ko++;
-    }
-  });
-  ko += Object.keys(koMap).length;
-  return { ok, ko };
 }
 
-async function recalcDesireVisible(opts = {}) {
-  const rows = getAllFilteredRows();
-  if (!rows.length) {
-    if (!opts.silent) toast.info('No hay productos');
-    return;
+async function pollAIFill(jobId, onProgress) {
+  while (true) {
+    let st;
+    try {
+      st = await fetchJson(`/ai_fill/progress?job_id=${encodeURIComponent(jobId)}&t=${Date.now()}`, {
+        __skipLoadingHook: true,
+        cache: 'no-store'
+      });
+    } catch (err) {
+      if (err && err.name === 'AbortError') throw err;
+      await new Promise(res => setTimeout(res, 1000));
+      continue;
+    }
+
+    const pct = Math.max(0, Math.min(100, st.pct ?? ((st.processed ?? 0) / Math.max(1, st.total ?? 0) * 100)));
+    if (typeof onProgress === 'function') {
+      try { onProgress(pct / 100, st); } catch (_) {}
+    }
+
+    const statusVal = String(st.status || st.state || '').toLowerCase();
+    const cancelled = statusVal === 'cancelled' || statusVal === 'canceled';
+    const done = Boolean(st.done || cancelled || statusVal === 'done' || statusVal === 'completed' || statusVal === 'finished');
+    if (done) {
+      return { pct, cancelled, status: statusVal, payload: st };
+    }
+    await new Promise(res => setTimeout(res, 600));
   }
-  const ids = rows.map(p => Number(p.id)).filter(id => Number.isInteger(id));
+}
+
+function computeEtaMs(total = 0, estimatedMs = 0) {
+  if (estimatedMs && estimatedMs > 0) return estimatedMs;
+  if (total && Number.isFinite(total)) {
+    const perItem = 2500;
+    return Math.max(4000, total * perItem);
+  }
+  return 6000;
+}
+
+export async function runAIFill(ids) {
   try {
-    const res = await fetch('/api/recalc-desire-all', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scope: 'filtered', ids })
+    const start = await startAIFill(ids);
+    const jobId = start.job_id;
+    const total = Number(start.total || 0);
+    const estMs = computeEtaMs(total, Number(start.estimated_ms || 0));
+
+    GP.beginAI({
+      estMs,
+      onCancel: () => fetch('/ai_fill/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ job_id: jobId })
+      }).catch(() => {})
     });
-    if (!res.ok) {
-      let msg = res.statusText || 'Error';
-      try {
-        const err = await res.json();
-        if (err && err.error) msg = err.error;
-      } catch {}
-      throw new Error(msg);
+
+    const result = await pollAIFill(jobId, (aiFrac) => {
+      GP.setAIFrac(aiFrac);
+    });
+
+    GP.finishOk();
+    try {
+      await window.reloadTable?.({ skipProgress: true });
+    } catch (_) {}
+
+    if (result.cancelled) {
+      toast.info('Proceso de IA cancelado');
+    } else {
+      toast.success('Columnas de IA generadas');
     }
-    const data = await res.json();
-    if (!opts.silent) {
-      const processed = Number(data.processed || 0);
-      toast.info(`Desire recalculado: ${processed} items`);
-    }
-    updateMasterState();
+    return result;
   } catch (err) {
-    if (!opts.silent) toast.error(`Recalc Desire: ${err.message}`);
+    if (typeof GP.isActive === 'function' ? GP.isActive() : true) {
+      GP.finishError();
+    }
+    toast.error(err?.message || 'Error en IA');
+    throw err;
   }
 }
 
-window.handleRecalcDesireVisible = recalcDesireVisible;
+function resolveIds(opts = {}) {
+  if (opts && Array.isArray(opts.ids) && opts.ids.length) {
+    return opts.ids;
+  }
+  if (typeof window.getSelectedProductIds === 'function') {
+    const selected = window.getSelectedProductIds();
+    if (Array.isArray(selected) && selected.length) return selected;
+  }
+  if (opts && opts.allVisible && Array.isArray(window.products)) {
+    return window.products.map(p => p.id);
+  }
+  return [];
+}
 
-window.handleCompletarIA = async function(opts = {}) {
-  const ids = opts.ids;
-  let all;
-  if (ids && Array.isArray(ids)) {
-    all = (Array.isArray(window.products) ? window.products : []).filter(p => ids.includes(p.id));
-  } else {
-    all = getAllFilteredRows();
+window.runAIFill = runAIFill;
+window.handleCompletarIA = async function handleCompletarIA(opts = {}) {
+  const ids = resolveIds(opts);
+  if (!ids.length && (!Array.isArray(window.products) || window.products.length === 0)) {
+    toast.info('No hay productos disponibles');
+    return null;
   }
-  if (all.length === 0) {
-    if (!opts.silent) toast.info('No hay productos');
-    return;
-  }
-  let okTotal = 0;
-  const chunks = chunkArray(all, EC_BATCH_SIZE);
-  for (const ch of chunks) {
-    const payload = ch.map(p => ({
-      id: p.id,
-      name: p.name,
-      category: p.category,
-      price: p.price,
-      rating: p.rating,
-      units_sold: p.units_sold,
-      revenue: p.revenue,
-      conversion_rate: p.conversion_rate,
-      launch_date: p.launch_date,
-      date_range: p.date_range,
-      image_url: p.image_url || null
-    }));
-      try {
-        const { ok, ko } = await processBatch(payload);
-        okTotal += ok;
-        if (!opts.silent) toast.info(`IA lote: +${ok} / ${payload.length} (fallos ${ko})`, { duration: 2000 });
-      } catch (e) {
-        if (!opts.silent) toast.error(`IA lote: ${e.message}`, { duration: 2000 });
-      }
-  }
-  if (!opts.silent) toast.info(`IA: ${okTotal}/${all.length} completados`);
-  updateMasterState();
+  return runAIFill(ids.length ? ids : undefined);
 };

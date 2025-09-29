@@ -294,7 +294,36 @@ header.app-header {
 body.dark header.app-header {
   background: #1a1b2e;
 }
-#global-progress-wrapper,
+#global-progress-wrapper {
+  position: relative;
+  z-index: 50;
+}
+#global-progress-bar {
+  height: 10px;
+  border-radius: 8px;
+  overflow: hidden;
+}
+#global-cancel-btn {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 6px 12px;
+  border: none;
+  border-radius: 16px;
+  font-weight: 600;
+  background: linear-gradient(90deg, #6c4ad9, #8a5cf6);
+  color: #fff;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, .25);
+  cursor: pointer;
+  line-height: 1;
+}
+#global-cancel-btn:hover {
+  opacity: .9;
+}
+body.dark #global-cancel-btn {
+  background: linear-gradient(90deg, #3a3cad, #7a53d6);
+}
 #global-progress-bar {
   pointer-events: none;
 }
