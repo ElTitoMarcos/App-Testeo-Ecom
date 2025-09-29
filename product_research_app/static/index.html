@@ -431,7 +431,7 @@ let __activeUploadXhr = null;   // para abort() de la subida
 let __activeAIJobId   = null;   // para cancelar en backend
 function showCancelButton(onClick) {
   cancelBtn.onclick = onClick;
-  cancelBtn.style.display = 'inline-block';
+  cancelBtn.style.display = 'inline-flex';
 }
 function hideCancelButton() {
   cancelBtn.style.display = 'none';
