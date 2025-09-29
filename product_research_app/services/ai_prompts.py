@@ -9,7 +9,7 @@ AI_FIELDS = ["desire", "desire_magnitude", "awareness_level", "competition_level
 def build_triage_messages(batch: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     """Construye mensajes para decidir si un producto requiere puntuación completa."""
     sys = (
-        "Eres un clasificador. Responde SOLO con JSON válido. "
+        "Eres un clasificador. Procura responder en JSON limpio cuando sea posible. "
         "Entrada: lista de productos. Salida: array con objetos {id, needs_scoring}."
     )
     items = []
@@ -25,7 +25,7 @@ def build_triage_messages(batch: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     user = (
         "Decide si se requiere evaluación completa (needs_scoring=true) "
         "solo cuando el título/desc no permitan inferir con reglas obvias.\n"
-        "Responde JSON estricto: [{\"id\": <int>, \"needs_scoring\": <bool>}, ...]\n"
+        "Devuelve una lista JSON si puedes, con objetos {\"id\": <int>, \"needs_scoring\": <bool>}.\n"
         f"INPUT={json.dumps(items, ensure_ascii=False)}"
     )
     return [{"role": "system", "content": sys}, {"role": "user", "content": user}]

@@ -72,7 +72,7 @@ AI_MAX_CONCURRENCY = max(
         int(max(1, math.floor(RAW_MAX_CONCURRENCY * OPENAI_HEADROOM))),
     ),
 )
-AI_BATCH_MAX_ITEMS = _env_int("AI_BATCH_MAX_ITEMS", 12)
+AI_BATCH_MAX_ITEMS = _env_int("AI_BATCH_MAX_ITEMS", 16)
 
 STRICT_JSON_ENABLED = _env_bool("PRAPP_AI_COLUMNS_STRICT_JSON", True)
 MAX_TOKENS_PER_ITEM = max(32, _env_int("PRAPP_AI_COLUMNS_MAX_TOKENS_PER_ITEM", 128))
@@ -81,7 +81,7 @@ StatusCallback = Callable[..., None]
 
 TRIAGE_ENABLED = _env_bool("PRAPP_AI_TRIAGE_ENABLED", True)
 TRIAGE_MODEL = os.getenv("PRAPP_AI_TRIAGE_MODEL", "gpt-4o-mini") or "gpt-4o-mini"
-TRIAGE_CONFIDENCE = max(0.0, min(1.0, _env_float("PRAPP_AI_TRIAGE_CONFIDENCE", 0.80)))
+TRIAGE_CONFIDENCE = max(0.0, min(1.0, _env_float("PRAPP_AI_TRIAGE_CONFIDENCE", 0.70)))
 
 AI_COST = get_ai_cost_config()
 try:
@@ -2349,6 +2349,9 @@ def run_ai_fill_job(
             loop_results = asyncio.run(_execute_batches(batches))
             made_progress = False
             for entry in loop_results:
+                if cancel_requested:
+                    break
+
                 status = entry.get("status")
                 batch = entry.get("batch")
                 if not batch:
@@ -2363,7 +2366,6 @@ def run_ai_fill_job(
                     if triage_summary.get("parsed_ids"):
                         made_progress = True
                 if status == "split":
-                    reason = entry.get("reason") or "unknown"
                     json_retry_inc = int(entry.get("json_retry", 0) or 0)
                     json_retry_total += json_retry_inc
                     batch_adaptations_total += 1
@@ -2397,8 +2399,6 @@ def run_ai_fill_job(
                         (list(batch.candidates), batch.depth + 1, batch.json_retry_count, True)
                     )
                     continue
-            if cancel_requested:
-                break
 
                 result = entry.get("result") or {}
                 summary = process_result(result)
@@ -2426,11 +2426,12 @@ def run_ai_fill_job(
                 )
 
                 status_label = summary.get("status") or status or "ok"
+                duration = float(entry.get("duration") or 0.0)
                 logger.info(
                     "ai_columns.batch end req_id=%s status=%s duration=%.2f parsed=%d missing=%d pending=%d batch_adapted=%s",
                     batch.req_id,
                     status_label,
-                    float(entry.get("duration") or 0.0),
+                    duration,
                     len(parsed_ids),
                     len(missing_ids),
                     len(pending_set),
@@ -2451,6 +2452,9 @@ def run_ai_fill_job(
                 if cost_cap is not None and cost_spent >= float(cost_cap):
                     pending_groups.clear()
                     break
+
+            if cancel_requested:
+                break
 
             if not made_progress and not pending_groups:
                 break
