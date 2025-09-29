@@ -116,6 +116,7 @@ body.dark .skeleton{background:#333;}
       <div id="global-progress-bar" class="progress-hitbox">
         <div id="progress-slot-global" class="progress-slot" aria-live="polite"></div>
       </div>
+      <button id="progress-cancel-btn" type="button" aria-label="Cancelar">Cancelar</button>
     </div>
   </div>
   <!-- Search bar row with controls -->
@@ -373,11 +374,22 @@ const saveIfDirty = window.saveIfDirty;
 window.fetchJson = fetchJson;
 window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
-const IMPORT_UPLOAD_FRAC = 0.30;
-const IMPORT_POLL_MAX_FRAC = 0.99;
-const IMPORT_SERVER_SPAN = IMPORT_POLL_MAX_FRAC - IMPORT_UPLOAD_FRAC;
+// ==== Progreso y endpoints ====
+const PROGRESS_IMPORT_WEIGHT = 0.20;        // 20% archivo
+const PROGRESS_AI_WEIGHT     = 0.80;        // 80% IA
+
+// Dentro del 20% de import: ~30% subida + ~70% backend
+const IMPORT_UPLOAD_FRAC   = PROGRESS_IMPORT_WEIGHT * 0.30; // 0.06
+const IMPORT_POLL_MAX_FRAC = PROGRESS_IMPORT_WEIGHT;        // 0.20
+const IMPORT_SERVER_SPAN   = IMPORT_POLL_MAX_FRAC - IMPORT_UPLOAD_FRAC;
+
 const IMPORT_STATUS_URL = '/_import_status';
-const IMPORT_START_URL = '/upload';
+const IMPORT_START_URL  = '/upload';
+
+// IA (ajusta si tus rutas cambian en backend)
+const AI_START_URL   = '/_ai_fill/start';
+const AI_STATUS_URL  = '/_ai_fill/status';
+const AI_CANCEL_URL  = '/_ai_fill/cancel';
 let savedApiKeyHash = null;
 let savedApiKeyLength = 0;
 
@@ -412,6 +424,20 @@ async function sha256(str) {
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+// ==== Cancelación global de la carga (import/IA) ====
+const cancelBtn = document.getElementById('progress-cancel-btn');
+let __cancelRequested = false;
+let __activeUploadXhr = null;   // para abort() de la subida
+let __activeAIJobId   = null;   // para cancelar en backend
+function showCancelButton(onClick) {
+  cancelBtn.onclick = onClick;
+  cancelBtn.style.display = 'inline-block';
+}
+function hideCancelButton() {
+  cancelBtn.style.display = 'none';
+  cancelBtn.onclick = null;
+}
+
 function mapServerFraction(serverPct) {
   const clamped = Math.max(0, Math.min(100, Number(serverPct) || 0));
   const frac = IMPORT_UPLOAD_FRAC + (clamped / 100) * IMPORT_SERVER_SPAN;
@@ -422,6 +448,9 @@ async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL
   const id = typeof taskId === 'string' ? taskId : String(taskId || '');
   if (!id) return null;
   while (true) {
+    if (__cancelRequested) {
+      throw new DOMException('Importación cancelada', 'AbortError');
+    }
     let data;
     try {
       const resp = await fetch(`${statusUrl}?task_id=${encodeURIComponent(id)}&t=${Date.now()}`,
@@ -457,16 +486,30 @@ async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL
   }
 }
 
-async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IMPORT_STATUS_URL } = {}) {
+async function importCatalog(file, {
+  startUrl = IMPORT_START_URL,
+  statusUrl = IMPORT_STATUS_URL,
+  withAI = false,
+  aiStartUrl = AI_START_URL,
+  aiStatusUrl = AI_STATUS_URL,
+  aiCancelUrl = AI_CANCEL_URL
+} = {}) {
   if (!file) throw new Error('Archivo no válido');
   const host = getGlobalProgressHost();
   const tracker = LoadingHelpers.start('Importando catálogo', { host });
   tracker.setStage('Subiendo archivo…');
+  showCancelButton(() => {
+    __cancelRequested = true;
+    try { __activeUploadXhr?.abort(); } catch {}
+  });
+  __cancelRequested = false;
   let lastResult = null;
+  let finalCleanupHandled = false;
   try {
     const fd = new FormData();
     fd.append('file', file);
     const xhr = new XMLHttpRequest();
+    __activeUploadXhr = xhr;
     xhr.responseType = 'json';
     xhr.__skipLoadingHook = true;
     xhr.__hostEl = host;
@@ -477,6 +520,7 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
         const frac = Math.min(IMPORT_UPLOAD_FRAC, (event.loaded / event.total) * IMPORT_UPLOAD_FRAC);
         tracker.step(frac, 'Subiendo archivo…');
       };
+      xhr.onabort = () => reject(new DOMException('Importación cancelada', 'AbortError'));
       xhr.onerror = () => reject(new Error('Error de red subiendo archivo'));
       xhr.onload = () => {
         let payload = xhr.response;
@@ -500,13 +544,25 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     });
 
     if (startResult.kind === 'sync') {
-      tracker.step(1, 'Completado');
-      await reloadTable({ skipProgress: true });
-      const importedCount = startResult.data?.imported ?? startResult.data?.rows_imported;
+      lastResult = startResult.data;
+      tracker.step(PROGRESS_IMPORT_WEIGHT, 'Archivo importado');
+      const importedCount = lastResult?.imported ?? lastResult?.rows_imported;
       if (Number.isFinite(importedCount) && importedCount > 0) {
         toast.success(`Importados ${importedCount}`);
       }
-      return startResult.data;
+      if (withAI) {
+        await runAIFillPhase({
+          tracker,
+          aiStartUrl, aiStatusUrl, aiCancelUrl,
+          importedCount
+        });
+        tracker.done();
+        finalCleanupHandled = true;
+      } else {
+        tracker.step(1, 'Completado');
+        await reloadTable({ skipProgress: true });
+      }
+      return lastResult;
     }
 
     const taskId = startResult.taskId;
@@ -520,17 +576,131 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     if (Number.isFinite(importedCount) && importedCount > 0) {
       toast.success(`Importados ${importedCount}`);
     }
-    tracker.step(1, 'Completado');
+    tracker.step(PROGRESS_IMPORT_WEIGHT, 'Archivo importado');
+    if (withAI) {
+      await runAIFillPhase({
+        tracker,
+        aiStartUrl, aiStatusUrl, aiCancelUrl,
+        importedCount
+      });
+      tracker.done();
+      finalCleanupHandled = true;
+    } else {
+      tracker.step(1, 'Completado');
+    }
     return lastResult;
   } catch (err) {
-    tracker.step(1, 'Error');
-    toast.error(err?.message || 'Error al importar catálogo');
+    if (__cancelRequested || err?.name === 'AbortError') {
+      tracker.step(PROGRESS_IMPORT_WEIGHT, 'Cancelado');
+    } else {
+      tracker.step(1, 'Error');
+      toast.error(err?.message || 'Error al importar catálogo');
+    }
     throw err;
   } finally {
-    tracker.done();
+    __activeUploadXhr = null;
     localStorage.removeItem(IMPORT_TASK_LS_KEY);
     hideImportBanner();
+    if (!finalCleanupHandled) {
+      tracker.done();
+      hideCancelButton();
+      __cancelRequested = false;
+    }
   }
+}
+
+async function runAIFillPhase({ tracker, aiStartUrl, aiStatusUrl, aiCancelUrl, importedCount }) {
+  // 1) Iniciar job IA
+  tracker.setStage('Preparando IA…');
+  let startData;
+  try {
+    const resp = await fetch(aiStartUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ imported: importedCount || 0 }),
+      __skipLoadingHook: true,
+      __hostEl: getGlobalProgressHost()
+    });
+    if (!resp.ok) throw new Error('No se pudo iniciar IA');
+    startData = await resp.json();
+  } catch (e) {
+    tracker.step(PROGRESS_IMPORT_WEIGHT, 'Error al iniciar IA');
+    throw e;
+  }
+
+  const total     = Number(startData?.total || 0);
+  const etaMs     = Number(startData?.eta_ms || 0);
+  __activeAIJobId = String(startData?.job_id || '');
+
+  // Botón cancelar (aborta XHR si quedara algo y pide cancelación del job IA)
+  showCancelButton(async () => {
+    __cancelRequested = true;
+    try { __activeUploadXhr?.abort(); } catch {}
+    try {
+      if (__activeAIJobId) {
+        await fetch(aiCancelUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ job_id: __activeAIJobId }),
+          __skipLoadingHook: true,
+          __hostEl: getGlobalProgressHost()
+        });
+      }
+    } catch {}
+  });
+
+  // 2) Poll + ETA suave
+  const startAt = Date.now();
+  const etaEnd  = etaMs > 0 ? startAt + etaMs : 0;
+  let processed = 0;
+
+  while (true) {
+    if (__cancelRequested) {
+      tracker.setStage('Cancelando…');
+      break;
+    }
+    try {
+      const r = await fetch(`${aiStatusUrl}?job_id=${encodeURIComponent(__activeAIJobId)}&t=${Date.now()}`, {
+        cache: 'no-store', __skipLoadingHook: true, __hostEl: getGlobalProgressHost()
+      });
+      if (r.ok) {
+        const data = await r.json();
+        processed = Number(data?.processed || processed);
+        const tot = Number(data?.total || total || 1);
+        const done = data?.status === 'done' || processed >= tot;
+        const aiFrac = Math.max(0, Math.min(1, processed / Math.max(1, tot)));
+        const combined = PROGRESS_IMPORT_WEIGHT + (aiFrac * PROGRESS_AI_WEIGHT);
+        tracker.step(Math.min(0.99, combined), 'IA generando…');
+        if (done) {
+          tracker.step(1, 'Completado');
+          break;
+        }
+      }
+    } catch {
+      // Red blip: usa ETA suave si el backend no responde
+      if (etaEnd > 0) {
+        const t = Date.now();
+        const elapsed = t - startAt;
+        const etaFrac = Math.max(0, Math.min(1, elapsed / etaMs));
+        const combined = PROGRESS_IMPORT_WEIGHT + (etaFrac * PROGRESS_AI_WEIGHT);
+        tracker.step(Math.min(0.99, combined), 'Estimando…');
+      }
+    }
+
+    // Hold al 99% si ya pasó el tiempo estimado y no terminó
+    if (etaEnd > 0 && Date.now() > etaEnd) {
+      tracker.step(0.99, 'Cerrando…');
+    }
+    await sleep(600);
+  }
+
+  __activeAIJobId = null;
+  hideCancelButton();
+
+  // Auto-refresco de la tabla al terminar o cancelar
+  try { await reloadTable({ skipProgress: true }); } catch {}
+
+  __cancelRequested = false;
 }
 
 // Ensure the server shuts down cleanly when the tab or window is closed.
@@ -1225,10 +1395,20 @@ fileInputEl.onchange = async (ev) => {
   ev.preventDefault();
   const file = fileInputEl.files[0];
   if (!file) return;
+  __cancelRequested = false;
   try {
-    await importCatalog(file, { startUrl: IMPORT_START_URL, statusUrl: IMPORT_STATUS_URL });
+    await importCatalog(file, {
+      startUrl: IMPORT_START_URL,
+      statusUrl: IMPORT_STATUS_URL,
+      withAI: true,
+      aiStartUrl: AI_START_URL,
+      aiStatusUrl: AI_STATUS_URL,
+      aiCancelUrl: AI_CANCEL_URL
+    });
   } catch (err) {
-    console.error(err);
+    if (err?.name !== 'AbortError') {
+      console.error(err);
+    }
   } finally {
     fileInputEl.value = '';
   }
