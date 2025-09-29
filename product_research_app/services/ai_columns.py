@@ -776,7 +776,7 @@ def _recover_missing_sync(
     return recovered, retries_used
 
 
-def _finalize_batch_payload(
+async def _finalize_batch_payload(
     batch: BatchRequest, strict_map: Mapping[int, Dict[str, Any]]
 ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, str]]:
     data_map = {str(pid): payload for pid, payload in strict_map.items()}
@@ -805,7 +805,7 @@ def _finalize_batch_payload(
         extra_title = (cand.extra or {}).get("title") if isinstance(cand.extra, dict) else None
         title = str(cand.payload.get("name") or extra_title or "")
         if len(draft_raw) < 280 or looks_like_product_desc(draft_raw, title):
-            refined = _refine_desire_statement(cand, draft_raw)
+            refined = await _refine_desire_statement(cand, draft_raw)
             if isinstance(refined, dict):
                 merged = dict(desire_payload)
                 merged.update(refined)
@@ -1350,7 +1350,7 @@ async def _call_batch_with_retries(
                     strict_map = combined
 
         usage = raw.get("usage", {}) or {}
-        ok, ko = _finalize_batch_payload(batch, strict_map)
+        ok, ko = await _finalize_batch_payload(batch, strict_map)
 
         duration = time.perf_counter() - start_ts
         return {
@@ -1536,13 +1536,13 @@ def _candidate_to_desire_context(candidate: Candidate) -> Dict[str, Any]:
     return {"product": product}
 
 
-def _refine_desire_statement(
+async def _refine_desire_statement(
     candidate: Candidate,
     draft_text: str,
 ) -> Optional[Dict[str, Any]]:
     context = _candidate_to_desire_context(candidate)
     try:
-        result = gpt.call_prompt_task(
+        result = await gpt.call_prompt_task_async(
             "DESIRE",
             context_json=context,
             temperature=0,
@@ -2186,7 +2186,7 @@ def run_ai_fill_job(
                                     trunc_title=batch.trunc_title,
                                     trunc_desc=batch.trunc_desc,
                                 )
-                                triage_ok, _ = _finalize_batch_payload(
+                                triage_ok, _ = await _finalize_batch_payload(
                                     accepted_batch,
                                     accepted_map,
                                 )

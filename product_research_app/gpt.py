@@ -248,6 +248,30 @@ MAX_429 = int(os.getenv("PRAPP_OPENAI_MAX_RETRIES_429", "6"))
 MAX_5XX = int(os.getenv("PRAPP_OPENAI_MAX_RETRIES_5XX", "4"))
 BACKOFF_CAP = float(os.getenv("PRAPP_OPENAI_BACKOFF_CAP_S", "8"))
 
+
+def _normalize_token_kwargs(estimated_tokens: int, kwargs: Dict[str, Any]) -> int:
+    """Normaliza argumentos heredados de conteo de tokens."""
+
+    if "tokens_estimate" in kwargs and not estimated_tokens:
+        try:
+            estimated_tokens = int(kwargs.get("tokens_estimate") or 0)
+        except Exception:
+            estimated_tokens = 0
+        kwargs.pop("tokens_estimate", None)
+
+    kwargs.pop("estimated_tokens", None)
+    try:
+        return max(0, int(estimated_tokens or 0))
+    except Exception:
+        return 0
+
+
+def _ensure_no_dup_tokens(kwargs: Dict[str, Any]) -> None:
+    """Elimina claves duplicadas de estimación de tokens."""
+
+    kwargs.pop("tokens_estimate", None)
+    kwargs.pop("estimated_tokens", None)
+
 # Si no existe en este módulo, definimos un fallback para tipar el except
 try:  # pragma: no cover - protección en tiempo de ejecución
     OpenAIError  # type: ignore[name-defined]
@@ -279,6 +303,8 @@ async def call_gpt_async(
 ) -> Dict[str, Any]:
     """Asynchronous version of :func:`call_gpt` with retries and backoff."""
 
+    estimated_tokens = _normalize_token_kwargs(estimated_tokens, kwargs)
+
     tokens_est = 0
     try:
         prompt_text = "\n".join(
@@ -299,10 +325,7 @@ async def call_gpt_async(
             tokens_est = max(tokens_est, int(alias_value or 0))
         except Exception:
             pass
-        kwargs.pop("tokens_estimate", None)
-
-    # Avoid duplicates downstream if callers supplied both names accidentally.
-    kwargs.pop("estimated_tokens", None)
+    _ensure_no_dup_tokens(kwargs)
 
     overall_attempt = 0
     rate_attempts = 0
@@ -433,6 +456,18 @@ def call_gpt(
 ) -> Dict[str, Any]:
     """Synchronous wrapper around :func:`call_gpt_async`."""
 
+    try:
+        asyncio.get_running_loop()
+        raise RuntimeError(
+            "call_gpt() usado dentro de un contexto async; usa await call_gpt_async()."
+        )
+    except RuntimeError as exc:
+        if "contexto async" in str(exc):
+            raise
+
+    estimated_tokens = _normalize_token_kwargs(estimated_tokens, kwargs)
+    _ensure_no_dup_tokens(kwargs)
+
     return asyncio.run(
         call_gpt_async(
             model=model,
@@ -462,7 +497,7 @@ def _message_text(messages: List[Dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
-def call_prompt_task(
+async def call_prompt_task_async(
     task: str,
     context_json: Optional[Dict[str, Any]] = None,
     aggregates: Optional[Dict[str, Any]] = None,
@@ -473,8 +508,26 @@ def call_prompt_task(
     mode: Optional[str] = None,
     max_tokens: Optional[int] = None,
     stop: Optional[Any] = None,
+    model: Optional[str] = None,
+    messages: Optional[List[Dict[str, Any]]] = None,
+    estimated_tokens: int = 0,
+    strict_json: bool = True,
+    **kwargs,
 ) -> Dict[str, Any]:
-    """Ejecuta una llamada estándar a Prompt Maestro v3."""
+    """Ruta principal para ejecutar tareas de Prompt Maestro."""
+
+    estimated_tokens = _normalize_token_kwargs(estimated_tokens, kwargs)
+    _ensure_no_dup_tokens(kwargs)
+
+    if messages is not None:
+        model_name = model or config.get_model()
+        return await call_gpt_async(
+            model=model_name,
+            messages=messages,
+            estimated_tokens=estimated_tokens,
+            strict_json=strict_json,
+            **kwargs,
+        )
 
     try:
         canonical = normalize_task(task)
@@ -489,10 +542,10 @@ def call_prompt_task(
         extra_user=extra_user,
         mode=mode,
     )
-    api_key = config.get_api_key() or os.environ.get("OPENAI_API_KEY")
+    api_key = kwargs.pop("api_key", None) or config.get_api_key() or os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise OpenAIError("No hay API key configurada")
-    model = config.get_model()
+    model_name = model or config.get_model()
 
     schema = get_json_schema(canonical)
     response_format: Optional[Dict[str, Any]] = None
@@ -510,15 +563,19 @@ def call_prompt_task(
         except Exception:
             prompt_tokens_est += 0
 
-    raw = call_gpt(
-        model=model,
+    total_estimated = max(prompt_tokens_est, estimated_tokens)
+
+    raw = await call_gpt_async(
+        model=model_name,
         messages=messages,
         api_key=api_key,
         temperature=temperature,
         response_format=response_format,
         max_tokens=call_max_tokens,
         stop=stop,
-        estimated_tokens=prompt_tokens_est,
+        estimated_tokens=total_estimated,
+        strict_json=strict_json,
+        **kwargs,
     )
 
     parsed_json, text_content = _parse_message_content(raw)
@@ -535,6 +592,57 @@ def call_prompt_task(
             content = ""
 
     return {"ok": True, "task": canonical, "content": content, "raw": raw}
+
+
+def call_prompt_task(
+    task: str,
+    context_json: Optional[Dict[str, Any]] = None,
+    aggregates: Optional[Dict[str, Any]] = None,
+    data: Optional[Dict[str, Any]] = None,
+    temperature: float = 0,
+    *,
+    extra_user: Optional[str] = None,
+    mode: Optional[str] = None,
+    max_tokens: Optional[int] = None,
+    stop: Optional[Any] = None,
+    model: Optional[str] = None,
+    messages: Optional[List[Dict[str, Any]]] = None,
+    estimated_tokens: int = 0,
+    strict_json: bool = True,
+    **kwargs,
+) -> Dict[str, Any]:
+    """Wrapper síncrono para :func:`call_prompt_task_async`."""
+
+    try:
+        asyncio.get_running_loop()
+        raise RuntimeError(
+            "call_prompt_task() usado dentro de un contexto async; usa await call_prompt_task_async()."
+        )
+    except RuntimeError as exc:
+        if "contexto async" in str(exc):
+            raise
+
+    estimated_tokens = _normalize_token_kwargs(estimated_tokens, kwargs)
+    _ensure_no_dup_tokens(kwargs)
+
+    return asyncio.run(
+        call_prompt_task_async(
+            task,
+            context_json=context_json,
+            aggregates=aggregates,
+            data=data,
+            temperature=temperature,
+            extra_user=extra_user,
+            mode=mode,
+            max_tokens=max_tokens,
+            stop=stop,
+            model=model,
+            messages=messages,
+            estimated_tokens=estimated_tokens,
+            strict_json=strict_json,
+            **kwargs,
+        )
+    )
 
 
 def _build_image_message(image_bytes: bytes, instructions: str, filename: str) -> list:
@@ -789,8 +897,7 @@ async def call_openai_chat_async(
 ) -> Dict[str, Any]:
     """Asynchronously send a chat completion request to the OpenAI API."""
 
-    kwargs.pop("tokens_estimate", None)
-    kwargs.pop("estimated_tokens", None)
+    _ensure_no_dup_tokens(kwargs)
 
     safe_tokens = 0
     try:
