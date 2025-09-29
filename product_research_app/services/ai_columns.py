@@ -752,12 +752,12 @@ def _recover_missing_sync(
         ]
         try:
             raw = gpt.call_gpt(
+                model=model,
                 messages=messages,
                 api_key=api_key,
-                model=model,
                 temperature=0.2,
                 max_tokens=max_tokens,
-                tokens_estimate=est_tokens,
+                estimated_tokens=est_tokens,
             )
         except gpt.OpenAIError:
             break
@@ -1271,12 +1271,13 @@ async def _call_batch_with_retries(
         start_ts = time.perf_counter()
         try:
             raw = await gpt.call_gpt_async(
+                model=model,
                 messages=messages,
                 api_key=api_key,
-                model=model,
                 temperature=0.2,
                 max_tokens=max_tokens,
-                tokens_estimate=tokens_est,
+                estimated_tokens=tokens_est,
+                strict_json=STRICT_JSON_ENABLED,
             )
         except gpt.OpenAIError as exc:
             duration = time.perf_counter() - start_ts
@@ -1380,12 +1381,13 @@ async def _call_triage_batch(
     ]
     start_ts = time.perf_counter()
     raw = await gpt.call_gpt_async(
+        model=model,
         messages=messages,
         api_key=api_key,
-        model=model,
         temperature=0.2,
         max_tokens=max_tokens,
-        tokens_estimate=tokens_est,
+        estimated_tokens=tokens_est,
+        strict_json=strict_json,
     )
     duration = time.perf_counter() - start_ts
     expected_ids = [cand.id for cand in batch.candidates]

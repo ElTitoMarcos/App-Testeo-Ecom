@@ -107,10 +107,10 @@ def test_awareness_weight_impacts_score():
 
 def test_recommend_winner_weights_includes_awareness(monkeypatch):
     # simulate GPT returning weights for price and awareness
-    def fake_call(api_key, model, messages):
+    def fake_call(*, model, messages, **kwargs):
         return {"choices": [{"message": {"content": '{"pesos": {"price": 1, "awareness": 3}}'}}]}
 
-    monkeypatch.setattr(gpt, "call_openai_chat", fake_call)
+    monkeypatch.setattr(gpt, "call_gpt", fake_call)
     samples = [{"price": 10.0, "awareness": 0.75, "target": 5.0}]
     res = gpt.recommend_winner_weights("k", "m", samples, "target")
     weights = res["weights"]

@@ -329,7 +329,7 @@ class PendingItem:
     sig_hash: str
     payload: Dict[str, Any]
     raw: Dict[str, Any]
-    tokens_estimate: int
+    estimated_tokens: int
     low_priority: bool = False
 
 
@@ -463,14 +463,14 @@ class EnrichmentPipeline:
                     raw_data = {}
             product = database.get_product_by_sig_hash(self.conn, row["sig_hash"])
             payload = self._build_payload(row["id"], raw_data, product)
-            tokens_estimate = estimate_tokens(payload)
+            estimated_tokens = estimate_tokens(payload)
             low_priority = self._is_low_priority(raw_data, product)
             item = PendingItem(
                 item_id=row["id"],
                 sig_hash=row["sig_hash"],
                 payload=payload,
                 raw=raw_data,
-                tokens_estimate=tokens_estimate,
+                estimated_tokens=estimated_tokens,
                 low_priority=low_priority,
             )
             cache_entry = cache_rows.get(row["sig_hash"])
@@ -673,7 +673,7 @@ class EnrichmentPipeline:
                 return None
             batch_size = self._determine_batch_size(queue)
             items = list(itertools.islice(queue, 0, batch_size))
-            estimated_tokens = sum(max(item.tokens_estimate, 1) for item in items)
+            estimated_tokens = sum(max(item.estimated_tokens, 1) for item in items)
             if self._budget_would_exceed(estimated_tokens):
                 metrics = self.snapshot_metrics()
                 database.update_enrichment_metrics(self.conn, self.job_id, metrics)

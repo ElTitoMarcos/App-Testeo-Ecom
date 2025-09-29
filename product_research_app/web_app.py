@@ -2706,12 +2706,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         try:
             resp = gpt.call_gpt(
+                model=model,
                 messages=[
                     {"role": "system", "content": "Eres un asistente útil."},
                     {"role": "user", "content": prompt},
                 ],
                 api_key=api_key,
-                model=model,
             )
             content = resp['choices'][0]['message']['content']
             self._set_json()
@@ -2936,12 +2936,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                         "momentum, saturation, differentiation, social_proof, margin, logistics."
                     )
                     resp = gpt.call_gpt(
+                        model=model,
                         messages=[
                             {"role": "system", "content": "Eres un asistente experto en scoring de productos."},
                             {"role": "user", "content": prompt},
                         ],
                         api_key=api_key,
-                        model=model,
                     )
                     content = resp['choices'][0]['message']['content']
                     # Attempt to parse JSON from content

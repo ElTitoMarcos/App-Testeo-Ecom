@@ -40,7 +40,7 @@ def call_gpt_stubbed(fails: int = 3):
     orig = getattr(_g, "call_openai_chat")
     try:
         setattr(_g, "call_openai_chat", lambda **_: stub.run())
-        return call_gpt(messages=messages)
+        return call_gpt(model="stub-model", messages=messages)
     finally:
         setattr(_g, "call_openai_chat", orig)
 
@@ -81,7 +81,7 @@ def call_gpt_stubbed_5xx(fails: int = 2):
     orig = getattr(_g, "call_openai_chat")
     try:
         setattr(_g, "call_openai_chat", lambda **_: stub.run())
-        return call_gpt(messages=messages)
+        return call_gpt(model="stub-model", messages=messages)
     finally:
         setattr(_g, "call_openai_chat", orig)
         

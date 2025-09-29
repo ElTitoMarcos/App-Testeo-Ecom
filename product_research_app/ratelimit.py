@@ -58,7 +58,7 @@ _eff_conc = max(1, min(_MAX_CONC, int(max(1, _MAX_CONC * _HEADROOM))))
 _conc_sem = threading.BoundedSemaphore(_eff_conc)
 
 @contextmanager
-def reserve(tokens_estimate: int):
+def reserve(estimated_tokens: int):
     """
     Embudo global de RPM/TPM + concurrencia.
     Debe envolver TODA llamada real al proveedor (batch y refine).
@@ -68,7 +68,7 @@ def reserve(tokens_estimate: int):
         # 1) limita RPM (una unidad por request)
         _requests_bucket.acquire(1)
         # 2) limita TPM (tokens estimados)
-        _tokens_bucket.acquire(max(1, int(tokens_estimate)))
+        _tokens_bucket.acquire(max(1, int(estimated_tokens)))
         yield
     finally:
         _conc_sem.release()
