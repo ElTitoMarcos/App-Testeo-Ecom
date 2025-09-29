@@ -1589,6 +1589,7 @@ def run_ai_fill_job(
     microbatch: int = 32,
     parallelism: Optional[int] = None,
     status_cb: Optional[StatusCallback] = None,
+    cancel_checker: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
     start_ts = time.perf_counter()
     conn = _ensure_conn()
@@ -1662,6 +1663,15 @@ def run_ai_fill_job(
     total_items = len(candidates)
 
     runtime_cfg = config.get_ai_runtime_config()
+
+    def _cancel_requested() -> bool:
+        if cancel_checker is None:
+            return False
+        try:
+            return bool(cancel_checker())
+        except Exception:
+            logger.warning("ai.cancel_checker_failed", exc_info=True)
+            return False
     if parallelism is None:
         parallelism = int(runtime_cfg.get("parallelism", 8) or 8)
     parallelism = max(1, parallelism)
@@ -1698,6 +1708,7 @@ def run_ai_fill_job(
     }
     cost_spent = 0.0
     pending_set: set[int] = {cand.id for cand in candidates}
+    cancel_requested = False
     counts_with_cost: Dict[str, Any] = {**counts, "cost_spent_usd": cost_spent}
 
     if job_updates_enabled:
@@ -1707,6 +1718,9 @@ def run_ai_fill_job(
 
     applied_outputs: Dict[int, Dict[str, Any]] = {}
     fail_reasons: Dict[int, str] = {}
+
+    if _cancel_requested():
+        cancel_requested = True
 
     if total_items == 0:
         if job_updates_enabled and skipped_existing:
@@ -2013,8 +2027,17 @@ def run_ai_fill_job(
             semaphore = asyncio.Semaphore(max(1, AI_MAX_CONCURRENCY))
 
             async def _run_single(batch: BatchRequest) -> Dict[str, Any]:
-                nonlocal triage_covered_total, fallback_big_total
+                nonlocal triage_covered_total, fallback_big_total, cancel_requested
                 async with semaphore:
+                    if cancel_requested or _cancel_requested():
+                        cancel_requested = True
+                        return {
+                            "status": "cancelled",
+                            "batch": batch,
+                            "result": None,
+                            "duration": 0.0,
+                            "error": None,
+                        }
                     original_batch = batch
                     triage_result: Optional[Dict[str, Any]] = None
                     triage_usage: Dict[str, Any] = {}
@@ -2274,6 +2297,10 @@ def run_ai_fill_job(
         while pending_groups:
             batches: List[BatchRequest] = []
             while pending_groups:
+                if cancel_requested or _cancel_requested():
+                    cancel_requested = True
+                    pending_groups.clear()
+                    break
                 chunk, depth, json_retry_count, adapted_flag = pending_groups.popleft()
                 if not chunk:
                     continue
@@ -2315,6 +2342,10 @@ def run_ai_fill_job(
             if not batches:
                 break
 
+            if cancel_requested or _cancel_requested():
+                cancel_requested = True
+                break
+
             loop_results = asyncio.run(_execute_batches(batches))
             made_progress = False
             for entry in loop_results:
@@ -2322,6 +2353,10 @@ def run_ai_fill_job(
                 batch = entry.get("batch")
                 if not batch:
                     continue
+                if status == "cancelled":
+                    cancel_requested = True
+                    pending_groups.clear()
+                    break
                 triage_payload = entry.get("triage_result")
                 if triage_payload:
                     triage_summary = process_result(triage_payload)
@@ -2358,8 +2393,12 @@ def run_ai_fill_job(
                         status,
                         exc,
                     )
-                    pending_groups.append((list(batch.candidates), batch.depth + 1, batch.json_retry_count, True))
+                    pending_groups.append(
+                        (list(batch.candidates), batch.depth + 1, batch.json_retry_count, True)
+                    )
                     continue
+            if cancel_requested:
+                break
 
                 result = entry.get("result") or {}
                 summary = process_result(result)
@@ -2453,6 +2492,8 @@ def run_ai_fill_job(
     )
 
     result_error: Optional[str] = None
+    if cancel_requested:
+        result_error = "cancelled"
     if cost_cap is not None and cost_spent >= float(cost_cap):
         result_error = "cost_cap_reached"
 
