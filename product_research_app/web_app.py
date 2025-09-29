@@ -47,6 +47,10 @@ from .services import winner_score as winner_calc
 from .services import trends_service
 from .services.config import get_default_winner_weights
 from .services.importer_fast import DEFAULT_BATCH_SIZE, fast_import, fast_import_records
+from .services.ai_fill_manager import (
+    MANAGER as AI_FILL_MANAGER,
+    select_candidates as select_ai_candidates,
+)
 from . import gpt
 from .prompts.registry import normalize_task
 from . import title_analyzer
@@ -1007,6 +1011,36 @@ class RequestHandler(BaseHTTPRequestHandler):
             rel = path[len("/static/") :]
             self._serve_static(rel)
             return
+        if path == "/_ai_fill/status":
+            params = parse_qs(parsed.query)
+            job_id = params.get("job_id", [""])[0].strip()
+            if not job_id:
+                self.safe_write(
+                    lambda: self.send_json({"error": "missing_job_id"}, status=400)
+                )
+                return
+            job = AI_FILL_MANAGER.get_job(job_id)
+            if not job:
+                self.safe_write(
+                    lambda: self.send_json({"error": "job_not_found"}, status=404)
+                )
+                return
+            total = int(job.get("total", 0) or 0)
+            processed = int(job.get("processed", 0) or 0)
+            remaining = int(job.get("remaining", total - processed) or 0)
+            pct = float(job.get("pct", 0.0) or 0.0)
+            eta_ms = int(job.get("eta_ms", 0) or 0)
+            payload = {
+                "job_id": job_id,
+                "status": job.get("status", "running"),
+                "total": total,
+                "processed": processed,
+                "remaining": max(0, remaining),
+                "pct": round(pct, 2),
+                "eta_ms": eta_ms,
+            }
+            self.safe_write(lambda: self.send_json(payload))
+            return
         if path == "/api/log-path":
             self._set_json()
             self.wfile.write(json.dumps({"path": str(LOG_PATH)}).encode("utf-8"))
@@ -1717,6 +1751,65 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/analyze/titles":
             self.handle_analyze_titles()
+            return
+        if path == "/_ai_fill/start":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+            except Exception:
+                length = 0
+            body = self.rfile.read(length).decode("utf-8") if length > 0 else ""
+            imported = 0
+            if body:
+                try:
+                    payload = json.loads(body)
+                    imported = int(payload.get("imported", 0) or 0)
+                except Exception:
+                    imported = 0
+            limit = imported if imported and imported > 0 else 0
+            try:
+                conn = ensure_db()
+                product_ids = select_ai_candidates(conn, limit or 250)
+            except Exception as exc:
+                logger.exception("ai_fill.start failed to select candidates")
+                self.safe_write(
+                    lambda: self.send_json(
+                        {"error": "candidate_query_failed", "detail": str(exc)},
+                        status=500,
+                    )
+                )
+                return
+            job_state = AI_FILL_MANAGER.start_job(product_ids)
+            response_payload = {
+                "job_id": job_state.get("job_id"),
+                "total": job_state.get("total", 0),
+                "eta_ms": job_state.get("eta_ms", 0),
+            }
+            self.safe_write(lambda: self.send_json(response_payload))
+            return
+        if path == "/_ai_fill/cancel":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+            except Exception:
+                length = 0
+            body = self.rfile.read(length).decode("utf-8") if length > 0 else ""
+            job_id = ""
+            if body:
+                try:
+                    payload = json.loads(body)
+                    job_id = str(payload.get("job_id", "") or "").strip()
+                except Exception:
+                    job_id = ""
+            if not job_id:
+                self.safe_write(
+                    lambda: self.send_json({"error": "missing_job_id"}, status=400)
+                )
+                return
+            if not AI_FILL_MANAGER.cancel_job(job_id):
+                self.safe_write(
+                    lambda: self.send_json({"error": "job_not_found"}, status=404)
+                )
+                return
+            self.safe_write(lambda: self.send_json({"ok": True, "job_id": job_id}))
             return
         if path == "/api/export/kalodata-minimal":
             self.handle_export_kalodata_minimal()
