@@ -184,3 +184,24 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   if (btn) btn.style.display = 'none';
 });
+
+// Ajusta el offset del thead de #productTable para que quede justo bajo el topbar sticky
+(() => {
+  const root   = document.documentElement;
+  const topbar = document.getElementById('topBar') || document.querySelector('header');
+
+  function setStickyOffset(){
+    const h = topbar ? Math.round(topbar.getBoundingClientRect().height) : 0;
+    root.style.setProperty('--topbar-sticky-offset', `${h}px`);
+  }
+
+  // Inicial + en resize
+  setStickyOffset();
+  window.addEventListener('resize', setStickyOffset);
+
+  // Recalcular si cambia la altura del topbar (p.ej., aparece/desaparece la barra de progreso)
+  if (window.ResizeObserver && topbar){
+    const ro = new ResizeObserver(setStickyOffset);
+    ro.observe(topbar);
+  }
+})();
