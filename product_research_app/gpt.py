@@ -270,23 +270,39 @@ def _extract_retry_after_seconds(msg: str) -> float | None:
 
 
 async def call_gpt_async(
-    *, messages: List[Dict[str, Any]], **kwargs
+    *,
+    model: str,
+    messages: List[Dict[str, Any]],
+    estimated_tokens: int = 0,
+    strict_json: bool = True,
+    **kwargs,
 ) -> Dict[str, Any]:
     """Asynchronous version of :func:`call_gpt` with retries and backoff."""
 
+    tokens_est = 0
     try:
         prompt_text = "\n".join(
             m.get("content", "") for m in (messages or []) if isinstance(m, dict)
         )
+        tokens_est = _estimate_tokens(prompt_text)
     except Exception:
-        prompt_text = ""
-    tokens_est = _estimate_tokens(prompt_text)
-    extra_est = kwargs.get("tokens_estimate")
-    if extra_est is not None:
+        tokens_est = 0
+
+    try:
+        tokens_est = max(tokens_est, int(estimated_tokens or 0))
+    except Exception:
+        tokens_est = max(tokens_est, 0)
+
+    if "tokens_estimate" in kwargs:
+        alias_value = kwargs.get("tokens_estimate")
         try:
-            tokens_est = max(tokens_est, int(extra_est))
+            tokens_est = max(tokens_est, int(alias_value or 0))
         except Exception:
             pass
+        kwargs.pop("tokens_estimate", None)
+
+    # Avoid duplicates downstream if callers supplied both names accidentally.
+    kwargs.pop("estimated_tokens", None)
 
     overall_attempt = 0
     rate_attempts = 0
@@ -298,7 +314,11 @@ async def call_gpt_async(
         overall_attempt += 1
         try:
             raw = await call_openai_chat_async(
-                messages=messages, tokens_estimate=tokens_est, **kwargs
+                model=model,
+                messages=messages,
+                estimated_tokens=tokens_est,
+                strict_json=strict_json,
+                **kwargs,
             )
             if overall_attempt > 1:
                 log.info(
@@ -403,10 +423,25 @@ async def call_gpt_async(
             raise
 
 
-def call_gpt(*, messages: List[Dict[str, Any]], **kwargs) -> Dict[str, Any]:
+def call_gpt(
+    *,
+    model: str,
+    messages: List[Dict[str, Any]],
+    estimated_tokens: int = 0,
+    strict_json: bool = True,
+    **kwargs,
+) -> Dict[str, Any]:
     """Synchronous wrapper around :func:`call_gpt_async`."""
 
-    return asyncio.run(call_gpt_async(messages=messages, **kwargs))
+    return asyncio.run(
+        call_gpt_async(
+            model=model,
+            messages=messages,
+            estimated_tokens=estimated_tokens,
+            strict_json=strict_json,
+            **kwargs,
+        )
+    )
 
 def _message_text(messages: List[Dict[str, Any]]) -> str:
     parts: List[str] = []
@@ -476,14 +511,14 @@ def call_prompt_task(
             prompt_tokens_est += 0
 
     raw = call_gpt(
+        model=model,
         messages=messages,
         api_key=api_key,
-        model=model,
         temperature=temperature,
         response_format=response_format,
         max_tokens=call_max_tokens,
         stop=stop,
-        tokens_estimate=prompt_tokens_est,
+        estimated_tokens=prompt_tokens_est,
     )
 
     parsed_json, text_content = _parse_message_content(raw)
@@ -639,25 +674,32 @@ def extract_products_from_image(
         return []
 
 
-async def call_openai_chat_async(
-    api_key: str,
+async def _http_post_chat(
+    *,
     model: str,
     messages: List[Dict[str, Any]],
-    *,
+    strict_json: bool = True,
+    api_key: Optional[str] = None,
     temperature: float = 0.2,
     response_format: Optional[Dict[str, Any]] = None,
     max_tokens: Optional[int] = None,
     stop: Optional[Any] = None,
-    tokens_estimate: Optional[int] = None,
+    timeout: Optional[httpx.Timeout] = None,
+    **kwargs,
 ) -> Dict[str, Any]:
-    """Asynchronously send a chat completion request to the OpenAI API."""
+    """Execute the actual HTTP request to the OpenAI Chat Completions API."""
+
+    api_key = api_key or config.get_api_key() or os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise OpenAIError("No hay API key configurada")
 
     url = "https://api.openai.com/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    payload = {
+
+    payload: Dict[str, Any] = {
         "model": model,
         "messages": messages,
         "temperature": temperature,
@@ -669,32 +711,35 @@ async def call_openai_chat_async(
     if response_format is not None:
         payload["response_format"] = response_format
 
-    estimated_tokens = 0
-    if tokens_estimate is not None:
+    optional_payload_keys = (
+        "top_p",
+        "frequency_penalty",
+        "presence_penalty",
+        "logit_bias",
+        "user",
+        "seed",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+    )
+    for key in optional_payload_keys:
+        if key in kwargs:
+            value = kwargs.pop(key)
+            if value is not None:
+                payload[key] = value
+
+    if kwargs:
+        # Cualquier resto explícito se envía dentro del payload si no es None.
+        for key, value in list(kwargs.items()):
+            if value is not None:
+                payload[key] = value
+
+    timeout = timeout or httpx.Timeout(60.0, connect=10.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
         try:
-            estimated_tokens = max(0, int(tokens_estimate))
-        except Exception:
-            estimated_tokens = 0
-
-    if AI_API_VERBOSE >= 2:
-        logger.debug(
-            "gpt.pre model=%s est_tokens=%s",
-            model,
-            str(tokens_estimate or ""),
-        )
-
-    limiter = get_async_limiter()
-    async with limiter.async_guard(tokens=estimated_tokens):
-        timeout = httpx.Timeout(60.0, connect=10.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            try:
-                response = await client.post(
-                    url,
-                    headers=headers,
-                    json=payload,
-                )
-            except httpx.HTTPError as exc:
-                raise OpenAIError(f"Failed to connect to OpenAI API: {exc}") from exc
+            response = await client.post(url, headers=headers, json=payload)
+        except httpx.HTTPError as exc:
+            raise OpenAIError(f"Failed to connect to OpenAI API: {exc}") from exc
 
     if response.status_code == 200:
         try:
@@ -734,29 +779,55 @@ async def call_openai_chat_async(
     raise error
 
 
-def call_openai_chat(
-    api_key: str,
+async def call_openai_chat_async(
+    *,
     model: str,
     messages: List[Dict[str, Any]],
+    estimated_tokens: int = 0,
+    strict_json: bool = True,
+    **kwargs,
+) -> Dict[str, Any]:
+    """Asynchronously send a chat completion request to the OpenAI API."""
+
+    kwargs.pop("tokens_estimate", None)
+    kwargs.pop("estimated_tokens", None)
+
+    safe_tokens = 0
+    try:
+        safe_tokens = max(0, int(estimated_tokens))
+    except Exception:
+        safe_tokens = 0
+
+    if AI_API_VERBOSE >= 2:
+        logger.debug("gpt.pre model=%s est_tokens=%s", model, safe_tokens)
+
+    limiter = get_async_limiter()
+    async with limiter.async_guard(tokens=safe_tokens):
+        return await _http_post_chat(
+            model=model,
+            messages=messages,
+            strict_json=strict_json,
+            **kwargs,
+        )
+
+
+def call_openai_chat(
     *,
-    temperature: float = 0.2,
-    response_format: Optional[Dict[str, Any]] = None,
-    max_tokens: Optional[int] = None,
-    stop: Optional[Any] = None,
-    tokens_estimate: Optional[int] = None,
+    model: str,
+    messages: List[Dict[str, Any]],
+    estimated_tokens: int = 0,
+    strict_json: bool = True,
+    **kwargs,
 ) -> Dict[str, Any]:
     """Synchronous wrapper around :func:`call_openai_chat_async`."""
 
     return asyncio.run(
         call_openai_chat_async(
-            api_key,
-            model,
-            messages,
-            temperature=temperature,
-            response_format=response_format,
-            max_tokens=max_tokens,
-            stop=stop,
-            tokens_estimate=tokens_estimate,
+            model=model,
+            messages=messages,
+            estimated_tokens=estimated_tokens,
+            strict_json=strict_json,
+            **kwargs,
         )
     )
 
@@ -863,7 +934,7 @@ def evaluate_product(
         {"role": "system", "content": "Eres un asistente inteligente que responde en español."},
         {"role": "user", "content": prompt},
     ]
-    resp_json = call_gpt(messages=messages, api_key=api_key, model=model)
+    resp_json = call_gpt(model=model, messages=messages, api_key=api_key)
     try:
         content = resp_json["choices"][0]["message"]["content"].strip()
     except Exception as exc:
@@ -1109,9 +1180,9 @@ def generate_ba_insights(api_key: str, model: str, product: Dict[str, Any]) -> T
 
     start = time.time()
     resp = call_gpt(
+        model=model,
         messages=messages,
         api_key=api_key,
-        model=model,
         temperature=0.2,
         response_format={"type": "json_object"},
     )
@@ -1209,9 +1280,9 @@ def generate_batch_columns(api_key: str, model: str, items: List[Dict[str, Any]]
 
     start = time.time()
     resp = call_gpt(
+        model=model,
         messages=messages,
         api_key=api_key,
-        model=model,
         temperature=0.2,
         response_format={"type": "json_object"},
     )
@@ -1455,7 +1526,7 @@ def evaluate_winner_score(
         },
         {"role": "user", "content": user_content},
     ]
-    resp_json = call_gpt(messages=messages, api_key=api_key, model=model)
+    resp_json = call_gpt(model=model, messages=messages, api_key=api_key)
     try:
         content = resp_json["choices"][0]["message"]["content"].strip()
         raw = json.loads(content)
@@ -1527,9 +1598,9 @@ def simplify_product_names(api_key: str, model: str, names: List[str], *, temper
     ]
     try:
         resp = call_gpt(
+            model=model,
             messages=messages,
             api_key=api_key,
-            model=model,
             temperature=temperature,
         )
         # We expect a JSON response in the assistant's content
@@ -1643,7 +1714,7 @@ def recommend_winner_weights(
 
     parsed = {}
     try:
-        resp = call_gpt(messages=messages, api_key=api_key, model=model)
+        resp = call_gpt(model=model, messages=messages, api_key=api_key)
         content = resp["choices"][0]["message"]["content"].strip()
         parsed = _extract_json_block(content)
     except Exception:
@@ -1729,7 +1800,7 @@ def summarize_top_products(api_key: str, model: str, products: List[Dict[str, An
         },
         {"role": "user", "content": prompt},
     ]
-    resp = call_gpt(messages=messages, api_key=api_key, model=model)
+    resp = call_gpt(model=model, messages=messages, api_key=api_key)
     try:
         return resp["choices"][0]["message"]["content"].strip()
     except Exception as exc:

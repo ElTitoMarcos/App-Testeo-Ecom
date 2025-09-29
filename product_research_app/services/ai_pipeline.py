@@ -188,7 +188,7 @@ def _triage(pending: List[Dict[str, Any]]) -> List[int]:
 
 def _triage_one_batch(batch: List[Dict[str, Any]]) -> List[int]:
     msgs = ai_prompts.build_triage_messages(batch)
-    raw = gpt.call_gpt(messages=msgs, model=os.getenv("PRAPP_AI_TRIAGE_MODEL"))
+    raw = gpt.call_gpt(model=os.getenv("PRAPP_AI_TRIAGE_MODEL"), messages=msgs)
     rows = ai_prompts.parse_triage(raw)
     return [r["id"] for r in rows if r.get("needs_scoring")]
 
@@ -202,7 +202,7 @@ def _score(ids: List[int], loader_index: Dict[int, Dict[str, Any]]):
 
     def _score_batch(batch: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         msgs = ai_prompts.build_score_messages(batch)
-        raw = gpt.call_gpt(messages=msgs, model=os.getenv("PRAPP_AI_SCORE_MODEL"))
+        raw = gpt.call_gpt(model=os.getenv("PRAPP_AI_SCORE_MODEL"), messages=msgs)
         return ai_prompts.parse_score(raw)
 
     with ThreadPoolExecutor(max_workers=max(1, _CONC)) as ex:
