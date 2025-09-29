@@ -1,3 +1,5 @@
+import { AbortHub } from '/static/js/net.js';
+
 // loading.js — barra en flujo con soporte multi-host (header y modal) y limpieza de legados
 
 // ===== Legacy killer: por si algún módulo viejo intenta crear su barra/overlay =====
@@ -123,6 +125,166 @@ export const LoadingHelpers = {
     return startTaskInHost({ title, hostEl: opts.host || null });
   }
 };
+
+// --- UI de progreso global + Cancel ---
+export const ProgressUI = (() => {
+  let btn;
+  let mounted = false;
+  let active = 0;
+
+  function host() {
+    return document.querySelector('#app-header .right-controls')
+      || document.querySelector('#global-progress-wrapper')
+      || document.body;
+  }
+
+  function ensure() {
+    if (mounted) return;
+    btn = document.createElement('button');
+    btn.id = 'cancelProgressBtn';
+    btn.type = 'button';
+    btn.className = 'cancel-progress-btn';
+    btn.textContent = 'Cancelar';
+    btn.style.display = 'none';
+    btn.addEventListener('click', () => {
+      AbortHub.cancelAll('user_cancelled');
+      btn.disabled = true;
+      btn.textContent = 'Cancelando…';
+    });
+    host()?.appendChild(btn);
+    mounted = true;
+  }
+
+  function show() {
+    ensure();
+    if (!btn) return;
+    btn.style.display = 'inline-flex';
+    btn.disabled = false;
+    btn.textContent = 'Cancelar';
+  }
+
+  function hide() {
+    if (!btn) return;
+    btn.style.display = 'none';
+  }
+
+  function beginTask() {
+    active += 1;
+    show();
+  }
+
+  function endTask() {
+    active = Math.max(0, active - 1);
+    if (active === 0) hide();
+  }
+
+  return { beginTask, endTask, show, hide };
+})();
+
+// --- Tracker utilitario con reparto 20/80 y ETA ---
+export function makeProgressTracker({ slot = document.querySelector('#progress-slot-global'), phase = 'import', title } = {}) {
+  const BASE = phase === 'import' ? 0 : 0.20;
+  const MAX = phase === 'import' ? 0.20 : 0.99;
+  const span = Math.max(0.0001, MAX - BASE);
+  const defaultTitle = title || (phase === 'import' ? 'Importando catálogo' : 'Completando con IA');
+
+  const task = LoadingHelpers.start(defaultTitle, { host: slot || null });
+  let frac = BASE;
+  let stageText = phase === 'import' ? 'Preparando…' : 'IA: preparando…';
+  let raf = 0;
+  let closed = false;
+
+  ProgressUI.beginTask();
+
+  function render() {
+    task.step(Math.min(1, Math.max(0, frac)), stageText);
+  }
+
+  function toGlobal(x) {
+    const clamped = Math.max(0, Math.min(1, Number.isFinite(x) ? x : 0));
+    return BASE + span * clamped;
+  }
+
+  function setStage(stage) {
+    if (stage) {
+      stageText = stage;
+      render();
+    }
+  }
+
+  function step(x, stage) {
+    const target = Math.min(MAX, Math.max(frac, toGlobal(x)));
+    frac = target;
+    if (stage) stageText = stage;
+    cancelAnimationFrame(raf);
+    render();
+  }
+
+  function bumpToward(targetFrac, seconds = 1.0, stage) {
+    const end = Math.min(MAX, Math.max(frac, targetFrac));
+    if (end <= frac) {
+      if (stage) stageText = stage;
+      render();
+      return;
+    }
+    if (stage) stageText = stage;
+    const start = frac;
+    const dur = Math.max(50, seconds * 1000);
+    const t0 = performance.now();
+    cancelAnimationFrame(raf);
+    const tick = now => {
+      const k = Math.min(1, (now - t0) / dur);
+      frac = start + (end - start) * k;
+      render();
+      if (k < 1) {
+        raf = requestAnimationFrame(tick);
+      }
+    };
+    raf = requestAnimationFrame(tick);
+  }
+
+  function done({ cancelled = false, finalFrac, stage } = {}) {
+    if (closed) return;
+    closed = true;
+    cancelAnimationFrame(raf);
+    if (!cancelled) {
+      if (typeof finalFrac === 'number') {
+        frac = Math.max(frac, Math.min(1, finalFrac));
+      } else {
+        frac = 1;
+      }
+      if (stage) stageText = stage;
+      render();
+    }
+    try { task.done(); }
+    catch (_) { /* noop */ }
+    ProgressUI.endTask();
+  }
+
+  function startEta(ms, { stage } = {}) {
+    const targetMs = Math.max(1000, Number(ms) || 0);
+    const start = performance.now();
+    const label = stage || (phase === 'gpt' ? 'IA… procesando' : 'Procesando…');
+    let cleared = false;
+    const timer = setInterval(() => {
+      const elapsed = performance.now() - start;
+      const ratio = Math.min(1, elapsed / targetMs);
+      step(Math.min(0.98, ratio), label);
+      if (ratio >= 1) {
+        bumpToward(0.99, 1.2, label);
+        clearInterval(timer);
+        cleared = true;
+      }
+    }, 500);
+    return () => {
+      if (!cleared) clearInterval(timer);
+    };
+  }
+
+  render();
+
+  return { step, bumpToward, done, startEta, setStage, base: BASE, max: MAX };
+}
 
 // ===== Hooks de red: si se pasa init.__hostEl, el progreso aparece en ese host; si no, en el global =====
 (() => {

@@ -1,31 +1,25 @@
+import { AbortHub, fetchJson } from '/static/js/net.js';
+import { makeProgressTracker } from '/static/js/loading.js';
+
 const EC_BATCH_SIZE = 10;
-const EC_MODEL = "gpt-4o-mini-2024-07-18";
+const EC_MODEL = 'gpt-4o-mini-2024-07-18';
 
-function aiFillStart(total, jobId){
-  document.dispatchEvent(new CustomEvent('ai-fill-start', { detail:{ total, jobId }}));
+function aiFillStart(total, jobId) {
+  document.dispatchEvent(new CustomEvent('ai-fill-start', { detail: { total, jobId } }));
 }
 
-function aiFillProgress(done, total, jobId){
+function aiFillProgress(done, total, jobId) {
   const percent = Math.round((done / Math.max(total, 1)) * 100);
-  document.dispatchEvent(new CustomEvent('ai-fill-progress', { detail:{ done, total, percent, jobId }}));
+  document.dispatchEvent(new CustomEvent('ai-fill-progress', { detail: { done, total, percent, jobId } }));
 }
 
-function aiFillDone(total, jobId){
-  document.dispatchEvent(new CustomEvent('ai-fill-done', { detail:{ total, jobId }}));
+function aiFillDone(total, jobId) {
+  document.dispatchEvent(new CustomEvent('ai-fill-done', { detail: { total, jobId } }));
 }
 
-function aiFillError(message, jobId){
-  document.dispatchEvent(new CustomEvent('ai-fill-error', { detail:{ message, jobId }}));
+function aiFillError(message, jobId) {
+  document.dispatchEvent(new CustomEvent('ai-fill-error', { detail: { message, jobId } }));
 }
-
-document.addEventListener('ai-fill-cancel', async (e) => {
-  const jobId = e?.detail?.jobId;
-  try{
-    // si tu backend expone un endpoint, llama aquí
-    // await fetch('/api/ai/cancel?job_id='+encodeURIComponent(jobId), { method:'POST' });
-  }catch(_){ }
-  window.__aiCancelled = true;
-});
 
 function getAllFilteredRows() {
   if (typeof window.getAllFilteredRows === 'function') {
@@ -87,18 +81,13 @@ function chunkArray(arr, size) {
   return out;
 }
 
-async function processBatch(items) {
-  const res = await fetch('/api/ia/batch-columns', {
+async function processBatch(items, { signal } = {}) {
+  const data = await fetchJson('/api/ia/batch-columns', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: EC_MODEL, items })
+    body: JSON.stringify({ model: EC_MODEL, items }),
+    signal,
+    __skipLoadingHook: true
   });
-  if (!res.ok) {
-    let msg = res.statusText;
-    try { const err = await res.json(); if (err.error) msg = err.error; } catch {}
-    throw new Error(msg);
-  }
-  const data = await res.json();
   let ok = 0;
   let ko = 0;
   const okMap = data.ok || {};
@@ -124,20 +113,10 @@ async function recalcDesireVisible(opts = {}) {
   }
   const ids = rows.map(p => Number(p.id)).filter(id => Number.isInteger(id));
   try {
-    const res = await fetch('/api/recalc-desire-all', {
+    const data = await fetchJson('/api/recalc-desire-all', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ scope: 'filtered', ids })
     });
-    if (!res.ok) {
-      let msg = res.statusText || 'Error';
-      try {
-        const err = await res.json();
-        if (err && err.error) msg = err.error;
-      } catch {}
-      throw new Error(msg);
-    }
-    const data = await res.json();
     if (!opts.silent) {
       const processed = Number(data.processed || 0);
       toast.info(`Desire recalculado: ${processed} items`);
@@ -162,17 +141,23 @@ window.handleCompletarIA = async function(opts = {}) {
     if (!opts.silent) toast.info('No hay productos');
     return;
   }
-  let okTotal = 0;
-  const chunks = chunkArray(all, EC_BATCH_SIZE);
   const total = all.length;
   const jobId = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now());
-  window.__aiCancelled = false;
-  aiFillStart(total, jobId);
+  const chunks = chunkArray(all, EC_BATCH_SIZE);
+  const totalBatches = chunks.length;
+  const tracker = makeProgressTracker({ phase: 'gpt' });
+  const etaMs = Math.max(30000, total * 2500);
+  const stopEta = tracker.startEta(etaMs, { stage: 'IA… procesando' });
+
+  let okTotal = 0;
   let processed = 0;
+  let completedBatches = 0;
+
+  aiFillStart(total, jobId);
+
   try {
-    for (const ch of chunks) {
-      if (window.__aiCancelled) break;
-      const payload = ch.map(p => ({
+    for (const chunk of chunks) {
+      const payload = chunk.map(p => ({
         id: p.id,
         name: p.name,
         category: p.category,
@@ -185,30 +170,53 @@ window.handleCompletarIA = async function(opts = {}) {
         date_range: p.date_range,
         image_url: p.image_url || null
       }));
+
+      const ctrl = AbortHub.make();
+      const release = AbortHub.track(ctrl);
       try {
-        const { ok, ko } = await processBatch(payload);
+        const { ok, ko } = await processBatch(payload, { signal: ctrl.signal });
         okTotal += ok;
-        if (!opts.silent) toast.info(`IA lote: +${ok} / ${payload.length} (fallos ${ko})`, { duration: 2000 });
-      } catch (e) {
-        if (!opts.silent) toast.error(`IA lote: ${e.message}`, { duration: 2000 });
-        throw e;
+        if (!opts.silent) {
+          toast.info(`IA lote: +${ok} / ${payload.length} (fallos ${ko})`, { duration: 2000 });
+        }
+      } catch (err) {
+        if (!opts.silent && err?.name !== 'AbortError') {
+          toast.error(`IA lote: ${err.message || 'Error'}`, { duration: 2000 });
+        }
+        throw err;
+      } finally {
+        release();
+        try { ctrl.abort(); } catch (_) {}
       }
+
+      completedBatches += 1;
       processed += payload.length;
+      tracker.step(completedBatches / Math.max(1, totalBatches), `IA… ${processed}/${total}`);
       aiFillProgress(Math.min(processed, total), total, jobId);
     }
   } catch (err) {
+    stopEta();
+    if (err?.name === 'AbortError' || String(err?.message).includes('user_cancelled')) {
+      tracker.done({ cancelled: true });
+      return;
+    }
+    tracker.done({ cancelled: true });
     aiFillError(err?.message || 'Error en IA', jobId);
-    return;
+    throw err;
   }
 
-  if (window.__aiCancelled) {
-    window.__aiCancelled = false;
-    aiFillError('Proceso cancelado por el usuario', jobId);
-    if (!opts.silent) toast.info('Proceso cancelado por el usuario');
-    return;
-  }
-
+  stopEta();
+  tracker.done({ cancelled: false });
   aiFillDone(total, jobId);
-  if (!opts.silent) toast.info(`IA: ${okTotal}/${all.length} completados`);
+
+  if (!opts.silent) {
+    toast.info(`IA: ${okTotal}/${all.length} completados`);
+  }
+
   updateMasterState();
+  try {
+    await window.reloadTable?.({ skipProgress: true });
+  } catch (_) {
+    /* ignore */
+  }
 };
