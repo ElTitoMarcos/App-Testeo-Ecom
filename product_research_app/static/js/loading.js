@@ -64,6 +64,11 @@ function getRailState(host) {
 function refreshHost(host) {
   const s = getRailState(host); if (!s) return;
   const tasks = s.tasks;
+  const cancelBtn = document.getElementById('progress-cancel-btn');
+  const globalSlot = document.getElementById('progress-slot-global');
+  if (cancelBtn && host === globalSlot) {
+    cancelBtn.style.display = tasks.size ? 'inline-flex' : 'none';
+  }
   if (tasks.size === 0) {
     // completar al 100% brevemente y colapsar el slot
     s.fill.style.width = '100%';
@@ -72,7 +77,7 @@ function refreshHost(host) {
     s.hideTimer = setTimeout(() => {
       s.fill.style.width = '0%';
       s.pctEl.textContent = '0%';
-      host.classList.remove('active'); // colapsa el slot (height:0)
+      host.classList.toggle('active', false); // colapsa el slot (height:0)
     }, 300);
     return;
   }
@@ -83,7 +88,7 @@ function refreshHost(host) {
   const pct = Math.round(avg * 100);
   s.fill.style.width = pct + '%';
   s.pctEl.textContent = pct + '%';
-  host.classList.add('active');
+  host.classList.toggle('active', true);
   if (last) {
     if (last.title) s.titleEl.textContent = last.title;
     if (last.stage) s.stageEl.textContent = last.stage;

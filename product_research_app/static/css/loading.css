@@ -2,7 +2,7 @@
 #app-header { position: relative; display: grid; grid-template-rows: auto auto; row-gap: 6px; }
 
 /* Slot genérico: colapsado por defecto para NO ocupar espacio */
-.progress-slot { height: 0; overflow: clip; transition: height 160ms ease; }
+.progress-slot { height: 0; overflow: hidden; transition: height 160ms ease; }
 
 /* Cuando hay progreso, el slot se expande y empuja el contenido (sin solapar) */
 .progress-slot.active { height: 18px; }
@@ -38,56 +38,59 @@
 /* Kill switch por si aparece legacy UI */
 #top-progress, .loading-overlay { display: none !important; }
 
-/* === Barra global + botón Cancelar: layout flex, sin solapes === */
+/* ===== Barra global + botón Cancelar (layout flex) ===== */
+:root{ --gp-height:16px; }
+
 #global-progress-wrapper{
-  display: flex;                 /* barra + botón en fila */
-  align-items: center;           /* centrado vertical real */
-  gap: 8px;                      /* respiración entre barra y botón */
-  position: relative;
-  z-index: 40;
-  pointer-events: auto;
+  display:flex;
+  align-items:center;
+  gap:8px;
+  position:relative;
+  z-index:40;
 }
 
-/* La barra se estira, el botón no */
-#global-progress-bar{
-  flex: 1 1 auto;                /* ocupa el espacio sobrante */
-  height: 10px;
-  border-radius: 8px;
-  overflow: hidden;
+/* El slot ocupa el ancho y muestra el rail cuando está activo */
+#progress-slot-global{
+  flex:1 1 auto;
+  min-width:0;
+  height:0;
+  overflow:visible;
+  transition:height .15s ease;
+}
+#progress-slot-global.active{ height:var(--gp-height); }
+
+/* Rail y fill: misma altura que el slot activo */
+.progress-rail{
+  position:relative;
+  width:100%;
+  height:var(--gp-height);
+  border-radius:8px;
+  background:rgba(255,255,255,.12);
+  overflow:hidden;
+}
+.progress-fill{
+  position:absolute; left:0; top:0; bottom:0;
+  width:0%;
+  background:linear-gradient(90deg,#5b4dd7,#7a53d6);
+  transition:width .25s ease;
 }
 
-/* La barrita no debe bloquear los clics del botón */
-#global-progress-bar,
-#progress-slot-global { pointer-events: none; }
-
-/* Botón Cancelar con texto centrado y color de la app */
+/* Botón Cancelar: centrado y en la paleta de la app */
 #progress-cancel-btn{
-  position: static !important;   /* fuera el absolute */
-  transform: none !important;
-  display: none;                 /* lo muestra el JS sólo en carga */
-  min-width: 92px;
-  height: 30px;
-  padding: 0 14px;
-  border: 0;
-  border-radius: 9999px;
-  background: linear-gradient(90deg,#5b4dd7,#7a53d6);
-  color: #fff;
-  font-weight: 600;
-  font-size: 13px;
-  line-height: 1;                /* evita desajustes */
-  align-items: center;
-  justify-content: center;
-  box-shadow: 0 2px 8px rgba(0,0,0,.25);
-  cursor: pointer;
-  pointer-events: auto;          /* clickeable */
+  display:none;
+  position:static !important;
+  transform:none !important;
+  min-width:92px; height:30px; padding:0 14px;
+  border:0; border-radius:9999px;
+  background:linear-gradient(90deg,#5b4dd7,#7a53d6);
+  color:#fff; font-weight:600; font-size:13px; line-height:1;
+  align-items:center; justify-content:center;
+  box-shadow:0 2px 8px rgba(0,0,0,.25);
+  cursor:pointer; pointer-events:auto;
 }
+#progress-cancel-btn:hover{ opacity:.9; }
+#progress-cancel-btn:disabled{ opacity:.6; cursor:not-allowed; }
 
-#progress-cancel-btn:hover { opacity: .9; }
-#progress-cancel-btn:disabled { opacity:.6; cursor:not-allowed; }
-
-/* Compacto en pantallas angostas */
-@media (max-width: 700px){
-  #progress-cancel-btn{
-    min-width: 78px; height: 28px; padding: 0 10px; font-size: 12px;
-  }
+@media (max-width:700px){
+  #progress-cancel-btn{ min-width:78px; height:28px; padding:0 10px; font-size:12px; }
 }

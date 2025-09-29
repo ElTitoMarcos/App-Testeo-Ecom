@@ -294,9 +294,9 @@ header.app-header {
 body.dark header.app-header {
   background: #1a1b2e;
 }
-#global-progress-wrapper,
-#global-progress-bar {
-  pointer-events: none;
+header .app-header #global-progress-wrapper,
+#global-progress-wrapper {
+  pointer-events: auto;
 }
 .global-progress-overlay {
   position: relative;
