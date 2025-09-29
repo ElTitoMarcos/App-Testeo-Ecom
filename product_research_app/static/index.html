@@ -38,27 +38,6 @@ tbody tr:hover {
   transform: translateY(-2px);
   transition: box-shadow 0.2s, transform 0.2s;
 }
-/* ==== Progreso global + Cancelar ==== */
-#global-progress-wrapper {
-  position: relative;
-  padding-right: 96px;          /* deja espacio para el botón */
-  z-index: 5;
-}
-#global-progress-bar,
-#progress-slot-global {
-  pointer-events: none;         /* que no tapen clics del botón */
-}
-
-#cancelProgressBtn{
-  position:absolute; right:8px; top:50%; transform:translateY(-50%);
-  display:none; padding:6px 12px; border:1px solid rgba(255,255,255,.12);
-  border-radius:8px; font-weight:600; cursor:pointer; white-space:nowrap;
-  background: #ef4444;          /* rojo acorde a dark theme */
-  color:#fff; box-shadow:0 2px 4px rgba(0,0,0,.25);
-  z-index: 10;                   /* por encima de la barra */
-}
-#cancelProgressBtn:hover{ filter:brightness(.95); }
-
 /* colores de la barra (siempre morado like app) */
 .progress-hitbox{ background:rgba(255,255,255,.08); }
 .progress-slot{
@@ -143,7 +122,7 @@ body.dark .skeleton{background:#333;}
       <div id="global-progress-bar" class="progress-hitbox">
         <div id="progress-slot-global" class="progress-slot" aria-live="polite"></div>
       </div>
-      <button id="cancelProgressBtn" type="button" title="Cancelar proceso">Cancelar</button>
+      <button id="cancelProgressBtn" type="button" title="Cancelar" style="display:none;">Cancelar</button>
     </div>
   </div>
   <!-- Search bar row with controls -->
@@ -401,33 +380,142 @@ const saveIfDirty = window.saveIfDirty;
 window.fetchJson = fetchJson;
 window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
-// 20% para importar archivo, 80% para IA
+// 20% import / 80% IA
 const IMPORT_UPLOAD_FRAC = 0.20;
-const IMPORT_POLL_MAX_FRAC = 0.20;  // import alcanza 20% máx
-const AI_STAGE_START_FRAC = IMPORT_POLL_MAX_FRAC;
-const IMPORT_SERVER_SPAN = Math.max(0, IMPORT_POLL_MAX_FRAC - IMPORT_UPLOAD_FRAC);
+const IMPORT_POLL_MAX_FRAC = 0.20;   // el import nunca pasará del 20%
+const IMPORT_SERVER_SPAN = IMPORT_POLL_MAX_FRAC - IMPORT_UPLOAD_FRAC;
 const IMPORT_STATUS_URL = '/_import_status';
 const IMPORT_START_URL = '/upload';
 
-// Estimación base si el backend no proporciona ETA
-const DEFAULT_MS_PER_ITEM = 3000;   // ~3s por producto (ajustable)
-const ETA_TICK_MS = 200;            // suavizado de progreso
-let savedApiKeyHash = null;
-let savedApiKeyLength = 0;
-
-// Estado para cancelar y para fase IA
+// ===== Cancelar + ETA IA =====
 let __importXhr = null;
 let __importTaskId = null;
 let __aiJobId = null;
 let __aiStageActive = false;
-let __aiListenersBound = false;
-
-// ETA smoothing
+let __aiTimer = null;
 let __aiStartTs = 0;
 let __aiEtaMs = 0;
-let __aiTimer = null;
-let __aiReportedFrac = 0; // real (done/total) si tenemos eventos
-let __aiTracker = null;
+let __aiReportedFrac = 0; // progreso real (done/total) si llega
+
+const DEFAULT_MS_PER_ITEM = 3000;  // auto-calibrable
+const ETA_TICK_MS = 250;
+
+function showCancelBtn(show=true){
+  const b = document.getElementById('cancelProgressBtn');
+  if (b) b.style.display = show ? 'inline-flex' : 'none';
+}
+function installCancelHandlerOnce(){
+  const btn = document.getElementById('cancelProgressBtn');
+  if (!btn || btn.__bound) return;
+  btn.__bound = true;
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try{
+      if (__importXhr?.abort) __importXhr.abort();                // cancela subida
+      if (__aiJobId) { try{ await fetch(`/api/ai-fill/${__aiJobId}/cancel`, {method:'POST'}); }catch{} } // si hay endpoint
+      window.dispatchEvent(new CustomEvent('ai-fill-cancel', { detail:{ jobId: __aiJobId } }));
+    } finally {
+      btn.disabled = false;
+      showCancelBtn(false);
+    }
+  });
+}
+
+function startAiEta(total, { msPerItem, etaMs } = {}, tracker){
+  __aiStartTs = performance.now();
+  const stored = Number(localStorage.getItem('ai_ms_per_item')||'0');
+  const base = msPerItem || (stored>0 ? stored : DEFAULT_MS_PER_ITEM);
+  __aiEtaMs = etaMs || (total * base);
+  stopAiEta();
+  __aiTimer = setInterval(() => {
+    const elapsed = performance.now() - __aiStartTs;
+    const raw = Math.min(0.99, elapsed / Math.max(__aiEtaMs,1));       // tope 99%
+    const fracInsideAI = Math.max(raw, __aiReportedFrac);              // respeta progreso real
+    const global = IMPORT_POLL_MAX_FRAC + fracInsideAI * (1 - IMPORT_POLL_MAX_FRAC);
+    const remaining = Math.max(0, __aiEtaMs - elapsed);
+    const stage = (raw < 0.99) ? `IA… quedan ~${Math.ceil(remaining/1000)}s` : 'IA… afinando';
+    tracker.step(global, stage);
+  }, ETA_TICK_MS);
+}
+function stopAiEta(){ if(__aiTimer){ clearInterval(__aiTimer); __aiTimer = null; } }
+
+function bindAiProgressEvents(tracker){
+  bindAiProgressEvents.__tracker = tracker;
+  if (bindAiProgressEvents.__bound) return; bindAiProgressEvents.__bound = true;
+
+  document.addEventListener('ai-fill-start', (e) => {
+    const activeTracker = bindAiProgressEvents.__tracker;
+    if(!activeTracker) return;
+    __aiStageActive = true;
+    __aiJobId = e?.detail?.jobId ?? null;
+    __aiReportedFrac = 0;
+    const total = Number(e?.detail?.total ?? 0);
+    const msPerItem = Number(e?.detail?.msPerItem || 0) || undefined;
+    const etaMs = Number(e?.detail?.etaMs || 0) || undefined;
+    showCancelBtn(true);
+    installCancelHandlerOnce();
+    activeTracker.step(IMPORT_POLL_MAX_FRAC, 'IA: preparando…');
+    startAiEta(total, { msPerItem, etaMs }, activeTracker);
+  });
+
+  document.addEventListener('ai-fill-progress', (e) => {
+    const done = Number(e?.detail?.done ?? 0);
+    const total = Math.max(1, Number(e?.detail?.total ?? 1));
+    __aiReportedFrac = Math.min(0.99, done/total);
+    // auto-calibra ms/item
+    if(__aiStartTs && done>0){
+      const elapsed = performance.now() - __aiStartTs;
+      const obs = elapsed / done;
+      if (Number.isFinite(obs) && obs > 50) localStorage.setItem('ai_ms_per_item', String(Math.round(obs)));
+    }
+  });
+
+  document.addEventListener('ai-fill-done', async () => {
+    if(!__aiStageActive) return;
+    const activeTracker = bindAiProgressEvents.__tracker;
+    if(!activeTracker) return;
+    __aiStageActive = false;
+    __aiReportedFrac = 1;
+    stopAiEta();
+    showCancelBtn(false);
+    __aiJobId = null;
+    activeTracker.step(1, 'Completado');
+    await reloadTable({ skipProgress: true });   // refresco automático
+    activeTracker.done();
+  });
+
+  document.addEventListener('ai-fill-error', (e) => {
+    const activeTracker = bindAiProgressEvents.__tracker;
+    stopAiEta();
+    __aiStageActive = false;
+    showCancelBtn(false);
+    __aiJobId = null;
+    if(activeTracker){
+      activeTracker.step(1, 'Error');
+      activeTracker.done();
+    }
+    toast.error(e?.detail?.message || 'Error en IA');
+  });
+}
+
+// Si nadie emite eventos IA, cierra a 99% tras tiempo prudente (no saltes al 100%)
+async function waitAiOrTimeout(tracker, ms=120000){
+  await new Promise((resolve) => {
+    let finished = false;
+    const done = () => { if(finished) return; finished = true; resolve(); };
+    const t = setTimeout(() => {
+      if(__aiStageActive) return;               // hay IA real: no cierres
+      tracker.step(0.99, 'IA… afinando');
+      showCancelBtn(false);
+      done();
+    }, ms);
+    document.addEventListener('ai-fill-done',  () => { clearTimeout(t); done(); }, { once:true });
+    document.addEventListener('ai-fill-error', () => { clearTimeout(t); done(); }, { once:true });
+  });
+}
+
+let savedApiKeyHash = null;
+let savedApiKeyLength = 0;
 
 const getGlobalProgressHost = () => document.querySelector('#progress-slot-global');
 const getActionHost = () => document.querySelector('#bottomBar') || getGlobalProgressHost();
@@ -467,138 +555,6 @@ function mapServerFraction(serverPct) {
   return Math.min(IMPORT_POLL_MAX_FRAC, frac);
 }
 
-function showCancelBtn(show=true){
-  const btn = document.getElementById('cancelProgressBtn');
-  if(btn) btn.style.display = show ? 'inline-flex' : 'none';
-}
-function hideCancelBtn(){ showCancelBtn(false); }
-
-function fmtTimeLeft(ms){
-  ms = Math.max(0, ms|0);
-  const s = Math.ceil(ms/1000);
-  const m = Math.floor(s/60);
-  const sec = s%60;
-  return m>0 ? `${m}:${String(sec).padStart(2,'0')}` : `${sec}s`;
-}
-
-function startAiEta(total, { msPerItem, etaMs } = {}, tracker){
-  __aiStartTs = performance.now();
-  const stored = Number(localStorage.getItem('ai_ms_per_item')||'0');
-  const baseMsPerItem = msPerItem || (stored>0 ? stored : DEFAULT_MS_PER_ITEM);
-  __aiEtaMs = etaMs || (total * baseMsPerItem);
-  stopAiEta(); // limpia si hubiera un timer anterior
-
-  const tick = () => {
-    const now = performance.now();
-    const elapsed = now - __aiStartTs;
-    const fracByTime = Math.min(0.99, elapsed / Math.max(__aiEtaMs, 1)); // tope 99%
-    const fracInsideAI = Math.max(fracByTime, __aiReportedFrac);         // respeta progreso real si llega
-    const fracGlobal = AI_STAGE_START_FRAC + fracInsideAI * (1 - AI_STAGE_START_FRAC);
-
-    const remaining = Math.max(0, __aiEtaMs - elapsed);
-    const label = remaining>0 && fracByTime<0.99
-      ? `IA… quedan ~${fmtTimeLeft(remaining)}`
-      : (fracByTime>=0.99 && !__aiStageActive ? 'Completado' : 'IA… afinando');
-
-    tracker.step(fracGlobal, label);
-  };
-  __aiTimer = setInterval(tick, ETA_TICK_MS);
-  tick();
-}
-function stopAiEta(){
-  if(__aiTimer){ clearInterval(__aiTimer); __aiTimer = null; }
-}
-
-function bindAiProgressEvents(tracker){
-  __aiTracker = tracker;
-  if(__aiListenersBound) return;
-  __aiListenersBound = true;
-
-  document.addEventListener('ai-fill-start', (e) => {
-    const tracker = __aiTracker;
-    if(!tracker) return;
-    __aiStageActive = true;
-    __aiJobId = e?.detail?.jobId ?? null;
-    const total = Number(e?.detail?.total ?? 0);
-    const msPerItem = Number(e?.detail?.msPerItem || 0) || undefined;
-    const etaMs = Number(e?.detail?.etaMs || 0) || undefined;
-
-    __aiReportedFrac = 0;
-    showCancelBtn(true);
-    tracker.step(AI_STAGE_START_FRAC, 'IA: preparando…');
-    startAiEta(total, { msPerItem, etaMs }, tracker);
-  });
-
-  document.addEventListener('ai-fill-progress', (e) => {
-    if(!__aiStageActive) return;
-    const done = Number(e?.detail?.done ?? 0);
-    const total = Math.max(1, Number(e?.detail?.total ?? 1));
-    __aiReportedFrac = Math.min(0.99, done/total);
-    if(__aiStartTs){
-      const elapsed = performance.now()-__aiStartTs;
-      const msPerItemObs = elapsed / Math.max(done,1);
-      if(Number.isFinite(msPerItemObs) && msPerItemObs>50){
-        localStorage.setItem('ai_ms_per_item', String(Math.round(msPerItemObs)));
-      }
-    }
-  });
-
-  document.addEventListener('ai-fill-done', async () => {
-    if(!__aiStageActive) return;
-    __aiStageActive = false;
-    __aiReportedFrac = 1;
-    stopAiEta();
-    const tracker = __aiTracker;
-    if(!tracker) return;
-    const fracGlobal = 1;
-    tracker.step(fracGlobal, 'Completado');
-    hideCancelBtn();
-    await reloadTable({ skipProgress: true });
-    tracker.done();
-  });
-
-  document.addEventListener('ai-fill-error', (e) => {
-    const msg = e?.detail?.message || 'Error en IA';
-    stopAiEta();
-    toast.error(msg);
-    __aiStageActive = false;
-    hideCancelBtn();
-    const tracker = __aiTracker;
-    if(!tracker) return;
-    tracker.step(1, 'Error');
-    tracker.done();
-  });
-
-  document.getElementById('cancelProgressBtn')?.addEventListener('click', async () => {
-    try{
-      if(__importXhr && __importXhr.readyState !== 4){ __importXhr.abort(); }
-      if(__importTaskId){
-        try{ await fetch('/_import_cancel?task_id='+encodeURIComponent(__importTaskId), {method:'POST', keepalive:true}); }catch(_){}
-      }
-      document.dispatchEvent(new CustomEvent('ai-fill-cancel', { detail: { jobId: __aiJobId }}));
-      toast.info('Proceso cancelado');
-    }catch(_){ }
-    stopAiEta();
-    hideCancelBtn();
-  });
-}
-
-// Si nadie emite eventos IA, cerramos con timeout sin saltar a 100%
-function waitAiOrTimeout(tracker, ms=120000){
-  return new Promise((resolve) => {
-    let finished = false;
-    const done = () => { if(finished) return; finished = true; resolve(); };
-    const t = setTimeout(() => {
-      if(__aiStageActive) return; // hay IA real, no cierres
-      tracker.step(0.99, 'IA… afinando'); // se queda en 99%
-      hideCancelBtn();
-      done();
-    }, ms);
-    document.addEventListener('ai-fill-done',  () => { clearTimeout(t); done(); }, { once:true });
-    document.addEventListener('ai-fill-error', () => { clearTimeout(t); done(); }, { once:true });
-  });
-}
-
 async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL, host = getGlobalProgressHost() } = {}) {
   const id = typeof taskId === 'string' ? taskId : String(taskId || '');
   if (!id) return null;
@@ -630,7 +586,6 @@ async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL
       throw new Error('Estado de importación desconocido');
     }
     if (serverPct >= 100 || statusVal === 'done' || statusVal === 'completed' || statusVal === 'finished') {
-      await reloadTable({ skipProgress: true });
       hideImportBanner();
       return data;
     }
@@ -650,6 +605,7 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     const xhr = new XMLHttpRequest();
     __importXhr = xhr;
     showCancelBtn(true);
+    installCancelHandlerOnce();
     __aiStageActive = false;
     __aiJobId = null;
     __aiReportedFrac = 0;
@@ -707,11 +663,15 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
 
     // Import terminó: NO cierres la barra. Pasa a fase IA.
     bindAiProgressEvents(tracker);
-    tracker.step(AI_STAGE_START_FRAC, 'IA: preparando…');
+    tracker.step(IMPORT_POLL_MAX_FRAC, 'IA: preparando…');
 
     // Si tu módulo de IA dispara eventos, esta promesa se resuelve sola.
     // Si no, tras 2 minutos cerraremos la barra para no quedarnos pillados.
     await waitAiOrTimeout(tracker);
+
+    if (!__aiStageActive && __aiReportedFrac < 1) {
+      await reloadTable({ skipProgress: true });
+    }
 
     // Toast y retorno (si el server te devolvió contadores)
     const importedCount = lastResult?.imported ?? lastResult?.rows_imported;
@@ -730,7 +690,7 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     // Si la fase IA ya terminó (o no existe), la barra ya se cerró en waitAiOrTimeout/ai-fill-done.
     // Si falló antes, tracker.done() ya se llamará en el catch.
     if (!__aiStageActive) {
-      hideCancelBtn();
+      showCancelBtn(false);
       try {
         tracker.done();
       } catch (_) {}
@@ -1356,6 +1316,7 @@ window.onload = async () => {
     tracker.step(IMPORT_UPLOAD_FRAC, 'Reanudando…');
     __importTaskId = tid;
     showCancelBtn(true);
+    installCancelHandlerOnce();
     __aiStageActive = false;
     __aiJobId = null;
     __aiReportedFrac = 0;
@@ -1368,8 +1329,11 @@ window.onload = async () => {
       }
       // Import reanudado terminó: encadena IA igual que en importCatalog
       bindAiProgressEvents(tracker);
-      tracker.step(AI_STAGE_START_FRAC, 'IA: preparando…');
+      tracker.step(IMPORT_POLL_MAX_FRAC, 'IA: preparando…');
       await waitAiOrTimeout(tracker);
+      if (!__aiStageActive && __aiReportedFrac < 1) {
+        await reloadTable({ skipProgress: true });
+      }
     } catch (err) {
       tracker.step(1, 'Error');
       toast.error(err?.message || 'Error en importación');
@@ -1378,7 +1342,7 @@ window.onload = async () => {
       hideImportBanner();
       stopAiEta();
       if (!__aiStageActive) {
-        hideCancelBtn();
+        showCancelBtn(false);
         try {
           tracker.done();
         } catch (_) {}

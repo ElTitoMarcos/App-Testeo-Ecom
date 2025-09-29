@@ -37,3 +37,32 @@
 
 /* Kill switch por si aparece legacy UI */
 #top-progress, .loading-overlay { display: none !important; }
+/* ==== Barra + botón Cancelar (tema morado) ==== */
+#global-progress-wrapper{
+  position: relative;
+  padding-right: 128px;            /* deja espacio para el botón */
+  z-index: 5;
+}
+/* evita que el rail tape clicks */
+#global-progress-bar,
+#progress-slot-global{
+  pointer-events: none;
+}
+
+#cancelProgressBtn{
+  position: absolute;
+  right: 0; top: 50%;
+  transform: translateY(-50%);
+  height: 28px; padding: 0 14px;
+  border-radius: 9999px;
+  border: 1px solid rgba(255,255,255,.15);
+  background: linear-gradient(90deg,#6d28d9,#8b5cf6);
+  color: #fff; font-weight:600; font-size:13px;
+  box-shadow: 0 2px 10px rgba(0,0,0,.25);
+  cursor: pointer;
+  pointer-events: auto;            /* sí recibe el click */
+  z-index: 10;
+}
+#cancelProgressBtn:hover{ filter: brightness(1.08); }
+#cancelProgressBtn:active{ transform: translateY(-50%) scale(.98); }
+#cancelProgressBtn[disabled]{ opacity:.45; cursor:not-allowed; }
