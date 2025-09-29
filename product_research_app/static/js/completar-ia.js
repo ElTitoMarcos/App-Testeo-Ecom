@@ -1,6 +1,32 @@
 const EC_BATCH_SIZE = 10;
 const EC_MODEL = "gpt-4o-mini-2024-07-18";
 
+function aiFillStart(total, jobId){
+  document.dispatchEvent(new CustomEvent('ai-fill-start', { detail:{ total, jobId }}));
+}
+
+function aiFillProgress(done, total, jobId){
+  const percent = Math.round((done / Math.max(total, 1)) * 100);
+  document.dispatchEvent(new CustomEvent('ai-fill-progress', { detail:{ done, total, percent, jobId }}));
+}
+
+function aiFillDone(total, jobId){
+  document.dispatchEvent(new CustomEvent('ai-fill-done', { detail:{ total, jobId }}));
+}
+
+function aiFillError(message, jobId){
+  document.dispatchEvent(new CustomEvent('ai-fill-error', { detail:{ message, jobId }}));
+}
+
+document.addEventListener('ai-fill-cancel', async (e) => {
+  const jobId = e?.detail?.jobId;
+  try{
+    // si tu backend expone un endpoint, llama aquí
+    // await fetch('/api/ai/cancel?job_id='+encodeURIComponent(jobId), { method:'POST' });
+  }catch(_){ }
+  window.__aiCancelled = true;
+});
+
 function getAllFilteredRows() {
   if (typeof window.getAllFilteredRows === 'function') {
     try {
@@ -138,28 +164,51 @@ window.handleCompletarIA = async function(opts = {}) {
   }
   let okTotal = 0;
   const chunks = chunkArray(all, EC_BATCH_SIZE);
-  for (const ch of chunks) {
-    const payload = ch.map(p => ({
-      id: p.id,
-      name: p.name,
-      category: p.category,
-      price: p.price,
-      rating: p.rating,
-      units_sold: p.units_sold,
-      revenue: p.revenue,
-      conversion_rate: p.conversion_rate,
-      launch_date: p.launch_date,
-      date_range: p.date_range,
-      image_url: p.image_url || null
-    }));
+  const total = all.length;
+  const jobId = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now());
+  window.__aiCancelled = false;
+  aiFillStart(total, jobId);
+  let processed = 0;
+  try {
+    for (const ch of chunks) {
+      if (window.__aiCancelled) break;
+      const payload = ch.map(p => ({
+        id: p.id,
+        name: p.name,
+        category: p.category,
+        price: p.price,
+        rating: p.rating,
+        units_sold: p.units_sold,
+        revenue: p.revenue,
+        conversion_rate: p.conversion_rate,
+        launch_date: p.launch_date,
+        date_range: p.date_range,
+        image_url: p.image_url || null
+      }));
       try {
         const { ok, ko } = await processBatch(payload);
         okTotal += ok;
         if (!opts.silent) toast.info(`IA lote: +${ok} / ${payload.length} (fallos ${ko})`, { duration: 2000 });
       } catch (e) {
         if (!opts.silent) toast.error(`IA lote: ${e.message}`, { duration: 2000 });
+        throw e;
       }
+      processed += payload.length;
+      aiFillProgress(Math.min(processed, total), total, jobId);
+    }
+  } catch (err) {
+    aiFillError(err?.message || 'Error en IA', jobId);
+    return;
   }
+
+  if (window.__aiCancelled) {
+    window.__aiCancelled = false;
+    aiFillError('Proceso cancelado por el usuario', jobId);
+    if (!opts.silent) toast.info('Proceso cancelado por el usuario');
+    return;
+  }
+
+  aiFillDone(total, jobId);
   if (!opts.silent) toast.info(`IA: ${okTotal}/${all.length} completados`);
   updateMasterState();
 };
