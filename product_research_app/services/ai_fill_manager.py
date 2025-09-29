@@ -14,6 +14,7 @@ from . import ai_columns
 
 DEFAULT_MS_PER_ITEM = 2500.0
 HISTORY_LIMIT = 25
+JOB_DONE_TTL_SECONDS = 120
 
 
 class AIFillJobManager:
@@ -42,6 +43,10 @@ class AIFillJobManager:
             "updated_at": now_ms,
             "cancel_flag": False,
             "error": None,
+            "result": None if total else "done",
+            "counts": {},
+            "errors": 0,
+            "finished_at": now_ms if total == 0 else None,
         }
         with self._lock:
             self._jobs[job_id] = state
@@ -60,7 +65,21 @@ class AIFillJobManager:
     def get_job(self, job_id: str) -> Optional[Dict[str, object]]:
         with self._lock:
             state = self._jobs.get(job_id)
-            return dict(state) if state else None
+            if not state:
+                return None
+            finished_at = float(state.get("finished_at") or 0.0)
+            if (
+                state.get("status") == "done"
+                and finished_at > 0
+                and (self._now_ms() - finished_at) > (JOB_DONE_TTL_SECONDS * 1000.0)
+            ):
+                self._jobs.pop(job_id, None)
+                return None
+            snapshot = dict(state)
+            counts = state.get("counts")
+            if isinstance(counts, dict):
+                snapshot["counts"] = dict(counts)
+            return snapshot
 
     def cancel_job(self, job_id: str) -> bool:
         with self._lock:
@@ -120,6 +139,10 @@ class AIFillJobManager:
         processed: Optional[int] = None,
         status: Optional[str] = None,
         error: Optional[str] = None,
+        counts: Optional[Dict[str, object]] = None,
+        errors: Optional[int] = None,
+        result: Optional[str] = None,
+        finished: bool = False,
     ) -> None:
         with self._lock:
             state = self._jobs.get(job_id)
@@ -134,10 +157,24 @@ class AIFillJobManager:
                 state["pct"] = round(pct, 2)
             if status is not None:
                 state["status"] = status
-                if status in {"done", "canceled", "error"}:
+                if status != "done":
+                    state["finished_at"] = None
+                else:
                     state["eta_ms"] = 0
             if error is not None:
                 state["error"] = error
+            if counts is not None:
+                state["counts"] = dict(counts)
+            if errors is not None:
+                try:
+                    state["errors"] = max(0, int(errors))
+                except Exception:
+                    state["errors"] = errors
+            if result is not None:
+                state["result"] = result
+            if finished:
+                state["finished_at"] = self._now_ms()
+                state["cancel_flag"] = False
             state["updated_at"] = self._now_ms()
 
     def _run_job(self, job_id: str, product_ids: List[int], bucket: int) -> None:
@@ -147,14 +184,26 @@ class AIFillJobManager:
         def status_cb(**payload: object) -> None:
             done = int(payload.get("done", 0) or 0)  # type: ignore[arg-type]
             total_from_cb = int(payload.get("total", total) or total)  # type: ignore[arg-type]
-            self._update_state(job_id, processed=min(done, total_from_cb))
+            counts_payload = payload.get("counts")
+            errors_payload: Optional[int] = None
+            if isinstance(counts_payload, dict):
+                try:
+                    errors_payload = int(counts_payload.get("errors") or counts_payload.get("ko") or 0)
+                except Exception:
+                    errors_payload = None
+            self._update_state(
+                job_id,
+                processed=min(done, total_from_cb),
+                counts=counts_payload if isinstance(counts_payload, dict) else None,
+                errors=errors_payload,
+            )
 
         def cancel_checker() -> bool:
             with self._lock:
                 state = self._jobs.get(job_id)
                 return bool(state and state.get("cancel_flag"))
 
-        self._update_state(job_id, status="running")
+        self._update_state(job_id, status="running", result=None)
 
         try:
             result = ai_columns.run_ai_fill_job(
@@ -167,21 +216,41 @@ class AIFillJobManager:
             done = int(counts.get("ok", 0) + counts.get("cached", 0))
             error = result.get("error") if isinstance(result, dict) else None
             if cancel_checker():
-                final_status = "canceled"
+                final_result = "canceled"
                 error = None
             elif error == "cancelled":
-                final_status = "canceled"
+                final_result = "canceled"
                 error = None
             elif error:
-                final_status = "error"
+                final_result = "error"
             else:
-                final_status = "done"
-            self._update_state(job_id, processed=done, status=final_status, error=error)
-            if final_status == "done":
+                final_result = "done"
+            errors_payload = None
+            try:
+                errors_payload = int(counts.get("errors") or counts.get("ko") or 0)
+            except Exception:
+                errors_payload = None
+            self._update_state(
+                job_id,
+                processed=done,
+                status="done",
+                error=error,
+                counts=counts if isinstance(counts, dict) else None,
+                errors=errors_payload,
+                result=final_result,
+                finished=True,
+            )
+            if final_result == "done":
                 duration_ms = self._now_ms() - start_ms
                 self._record_duration(bucket, total, duration_ms)
         except Exception as exc:  # pragma: no cover - defensive
-            self._update_state(job_id, status="error", error=str(exc))
+            self._update_state(
+                job_id,
+                status="done",
+                error=str(exc),
+                result="error",
+                finished=True,
+            )
 
 
 def select_candidates(conn: sqlite3.Connection, limit: int) -> List[int]:

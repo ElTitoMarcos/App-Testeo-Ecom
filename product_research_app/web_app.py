@@ -78,6 +78,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+for noisy_logger in ("httpx", "httpcore"):
+    logging.getLogger(noisy_logger).setLevel(logging.WARNING)
+
 DEBUG = bool(os.environ.get("DEBUG"))
 
 DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y")
@@ -911,10 +914,17 @@ class _SilentWriter:
 
 class RequestHandler(BaseHTTPRequestHandler):
     server_version = "ProductResearchCopilot/1.0"
+    QUIET_PATHS = ("/_ai_fill/status", "/_import_status")
 
     def setup(self):
         super().setup()
         self.wfile = _SilentWriter(self.wfile)
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
 
     def _set_json(self, status=200):
         self.send_response(status)
@@ -1001,6 +1011,24 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
         self.end_headers()
 
+    def log_message(self, fmt, *args):  # noqa: D401 - same contract as parent
+        path = getattr(self, "path", "")
+        if any(path.startswith(prefix) for prefix in self.QUIET_PATHS):
+            return
+        try:
+            rendered = fmt % args if args else fmt
+        except Exception:
+            rendered = fmt
+        if "Bad request version" in rendered:
+            return
+        super().log_message(fmt, *args)
+
+    def handle_one_request(self):
+        try:
+            super().handle_one_request()
+        except ValueError:
+            pass
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
@@ -1030,15 +1058,27 @@ class RequestHandler(BaseHTTPRequestHandler):
             remaining = int(job.get("remaining", total - processed) or 0)
             pct = float(job.get("pct", 0.0) or 0.0)
             eta_ms = int(job.get("eta_ms", 0) or 0)
+            result = job.get("result") or job.get("status")
+            raw_counts = job.get("counts")
+            counts = dict(raw_counts) if isinstance(raw_counts, dict) else {}
+            errors = job.get("errors")
             payload = {
                 "job_id": job_id,
                 "status": job.get("status", "running"),
+                "state": job.get("status", "running"),
+                "result": result,
                 "total": total,
                 "processed": processed,
                 "remaining": max(0, remaining),
                 "pct": round(pct, 2),
                 "eta_ms": eta_ms,
+                "counts": counts,
             }
+            if errors is not None:
+                try:
+                    payload["errors"] = int(errors)
+                except Exception:
+                    payload["errors"] = errors
             self.safe_write(lambda: self.send_json(payload))
             return
         if path == "/api/log-path":
