@@ -1,4 +1,5 @@
 import logging
+import os
 import sqlite3
 import threading
 from pathlib import Path
@@ -10,12 +11,15 @@ logger = logging.getLogger(__name__)
 _DB: Optional[sqlite3.Connection] = None
 _DB_PATH: Optional[str] = None
 _DB_LOCK = threading.Lock()
+_TLS = threading.local()
 _PERF_APPLIED: dict[str, bool] = {}
 _PERF_CONFIG: dict[str, Union[str, int]] = {
     "journal_mode": "WAL",
     "synchronous": "NORMAL",
     "temp_store": "MEMORY",
     "mmap_size": 268_435_456,
+    "busy_timeout": 5_000,
+    "foreign_keys": "ON",
 }
 
 
@@ -72,40 +76,66 @@ def get_last_performance_config() -> dict[str, Union[str, int]]:
     return dict(_PERF_CONFIG)
 
 
+def _resolve_db_path() -> str:
+    env_path = os.environ.get("PRAPP_DB_PATH")
+    if env_path:
+        return str(Path(env_path).expanduser().resolve())
+    default_path = Path(__file__).resolve().parent / "data.sqlite3"
+    return str(default_path)
+
+
+def _make_conn() -> sqlite3.Connection:
+    path = _resolve_db_path()
+    conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON;")
+    conn.execute("PRAGMA busy_timeout=5000;")
+    init_db_performance(path, connection=conn)
+    global _DB_PATH
+    _DB_PATH = path
+    return conn
+
+
+def get_conn() -> sqlite3.Connection:
+    """Return a thread-local SQLite connection."""
+
+    conn: Optional[sqlite3.Connection] = getattr(_TLS, "conn", None)
+    try:
+        cursor = conn.cursor() if conn is not None else None
+    except sqlite3.ProgrammingError:
+        cursor = None
+    if conn is None or cursor is None:
+        conn = _make_conn()
+        _TLS.conn = conn
+    elif cursor is not None:
+        cursor.close()
+    return conn
+
+
 def get_db(path: str = "product_research_app/data.sqlite3", write: bool = False) -> sqlite3.Connection:
-    """Return a cached SQLite connection.
+    """Backwards compatibility wrapper for existing call sites."""
 
-    The connection is shared across the process to avoid re‑initializing the
-    database on every request.  When ``path`` changes the previous connection is
-    closed and a new one is opened lazily.  ``write`` is accepted for
-    compatibility with existing call sites but currently unused.
-    """
-
-    global _DB, _DB_PATH
-
-    target_path = path or _DB_PATH or "product_research_app/data.sqlite3"
-    if _DB is None or _DB_PATH != target_path:
-        with _DB_LOCK:
-            if _DB is not None and _DB_PATH != target_path:
-                try:
-                    _DB.close()
-                except Exception:
-                    pass
-                _DB = None
-            if _DB is None:
-                conn = sqlite3.connect(target_path, check_same_thread=False, isolation_level=None)
-                conn.execute("PRAGMA foreign_keys=ON;")
-                init_db_performance(target_path, connection=conn)
-                conn.row_factory = sqlite3.Row
-                _DB = conn
-                _DB_PATH = target_path
-    return _DB
+    current_path = _resolve_db_path()
+    if path and path != current_path:
+        new_path = str(Path(path).expanduser().resolve())
+        os.environ["PRAPP_DB_PATH"] = new_path
+        close_db()
+    return get_conn()
 
 
 def close_db():
     """Close the cached connection.
 
     Useful for tests that need to reset the database path between runs."""
+
+    conn = getattr(_TLS, "conn", None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    if hasattr(_TLS, "conn"):
+        delattr(_TLS, "conn")
 
     global _DB, _DB_PATH
     with _DB_LOCK:
