@@ -397,13 +397,22 @@ let __aiStartTs = 0;
 let __aiEtaMs = 0;
 let __aiReportedFrac = 0; // progreso real (done/total) si llega
 
+window.__importXhr = __importXhr;
+window.__importTaskId = __importTaskId;
+window.__aiJobId = __aiJobId;
+window.__aiStageActive = __aiStageActive;
+
 const DEFAULT_MS_PER_ITEM = 3000;  // auto-calibrable
 const ETA_TICK_MS = 250;
 
-function showCancelBtn(show=true){
-  const b = document.getElementById('cancelProgressBtn');
-  if (b) b.style.display = show ? 'inline-flex' : 'none';
+function showCancelBtn(show = true){
+  const btn = document.getElementById('cancelProgressBtn');
+  if (!btn) return;
+  btn.style.display = show ? 'inline-flex' : 'none';  // hace visible/invisible
 }
+
+function hideCancelBtn(){ showCancelBtn(false); }
+
 function installCancelHandlerOnce(){
   const btn = document.getElementById('cancelProgressBtn');
   if (!btn || btn.__bound) return;
@@ -411,15 +420,23 @@ function installCancelHandlerOnce(){
   btn.addEventListener('click', async () => {
     btn.disabled = true;
     try{
-      if (__importXhr?.abort) __importXhr.abort();                // cancela subida
-      if (__aiJobId) { try{ await fetch(`/api/ai-fill/${__aiJobId}/cancel`, {method:'POST'}); }catch{} } // si hay endpoint
-      window.dispatchEvent(new CustomEvent('ai-fill-cancel', { detail:{ jobId: __aiJobId } }));
+      // abortar import y/o IA si están en curso (ajusta a tus variables)
+      if (window.__importXhr?.abort) window.__importXhr.abort();
+      if (window.__aiFillAbort?.abort) window.__aiFillAbort.abort();
+      else if (window.__aiJobId) { try{ await fetch(`/api/ai-fill/${window.__aiJobId}/cancel`, { method:'POST' }); }catch{} }
+      window.dispatchEvent(new CustomEvent('ai-fill-cancel', { detail:{ jobId: window.__aiJobId }}));
     } finally {
       btn.disabled = false;
-      showCancelBtn(false);
+      hideCancelBtn();
     }
   });
 }
+
+/* Asegura que el botón arranca oculto siempre que se cargue la página */
+document.addEventListener('DOMContentLoaded', () => {
+  hideCancelBtn();            // << clave para que no aparezca “siempre”
+  installCancelHandlerOnce(); // engancha el handler una sola vez
+});
 
 function startAiEta(total, { msPerItem, etaMs } = {}, tracker){
   __aiStartTs = performance.now();
@@ -447,7 +464,9 @@ function bindAiProgressEvents(tracker){
     const activeTracker = bindAiProgressEvents.__tracker;
     if(!activeTracker) return;
     __aiStageActive = true;
+    window.__aiStageActive = __aiStageActive;
     __aiJobId = e?.detail?.jobId ?? null;
+    window.__aiJobId = __aiJobId;
     __aiReportedFrac = 0;
     const total = Number(e?.detail?.total ?? 0);
     const msPerItem = Number(e?.detail?.msPerItem || 0) || undefined;
@@ -475,10 +494,12 @@ function bindAiProgressEvents(tracker){
     const activeTracker = bindAiProgressEvents.__tracker;
     if(!activeTracker) return;
     __aiStageActive = false;
+    window.__aiStageActive = __aiStageActive;
     __aiReportedFrac = 1;
     stopAiEta();
-    showCancelBtn(false);
+    hideCancelBtn();
     __aiJobId = null;
+    window.__aiJobId = __aiJobId;
     activeTracker.step(1, 'Completado');
     await reloadTable({ skipProgress: true });   // refresco automático
     activeTracker.done();
@@ -488,8 +509,10 @@ function bindAiProgressEvents(tracker){
     const activeTracker = bindAiProgressEvents.__tracker;
     stopAiEta();
     __aiStageActive = false;
-    showCancelBtn(false);
+    window.__aiStageActive = __aiStageActive;
+    hideCancelBtn();
     __aiJobId = null;
+    window.__aiJobId = __aiJobId;
     if(activeTracker){
       activeTracker.step(1, 'Error');
       activeTracker.done();
@@ -506,7 +529,7 @@ async function waitAiOrTimeout(tracker, ms=120000){
     const t = setTimeout(() => {
       if(__aiStageActive) return;               // hay IA real: no cierres
       tracker.step(0.99, 'IA… afinando');
-      showCancelBtn(false);
+      hideCancelBtn();
       done();
     }, ms);
     document.addEventListener('ai-fill-done',  () => { clearTimeout(t); done(); }, { once:true });
@@ -604,10 +627,13 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     fd.append('file', file);
     const xhr = new XMLHttpRequest();
     __importXhr = xhr;
+    window.__importXhr = __importXhr;
     showCancelBtn(true);
     installCancelHandlerOnce();
     __aiStageActive = false;
+    window.__aiStageActive = __aiStageActive;
     __aiJobId = null;
+    window.__aiJobId = __aiJobId;
     __aiReportedFrac = 0;
     stopAiEta();
     xhr.responseType = 'json';
@@ -657,6 +683,7 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     tracker.step(IMPORT_UPLOAD_FRAC, 'Archivo subido');
     localStorage.setItem(IMPORT_TASK_LS_KEY, idStr);
     __importTaskId = idStr;
+    window.__importTaskId = __importTaskId;
 
     // Seguimos el estado del import hasta "done", pero mapeado máx. al 20%.
     lastResult = await followImportTask(idStr, tracker, { statusUrl, host });
@@ -690,13 +717,15 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     // Si la fase IA ya terminó (o no existe), la barra ya se cerró en waitAiOrTimeout/ai-fill-done.
     // Si falló antes, tracker.done() ya se llamará en el catch.
     if (!__aiStageActive) {
-      showCancelBtn(false);
+      hideCancelBtn();
       try {
         tracker.done();
       } catch (_) {}
     }
     __importXhr = null;
+    window.__importXhr = __importXhr;
     __importTaskId = null;
+    window.__importTaskId = __importTaskId;
   }
 }
 
@@ -1315,10 +1344,13 @@ window.onload = async () => {
     const tracker = LoadingHelpers.start('Importando catálogo', { host });
     tracker.step(IMPORT_UPLOAD_FRAC, 'Reanudando…');
     __importTaskId = tid;
+    window.__importTaskId = __importTaskId;
     showCancelBtn(true);
     installCancelHandlerOnce();
     __aiStageActive = false;
+    window.__aiStageActive = __aiStageActive;
     __aiJobId = null;
+    window.__aiJobId = __aiJobId;
     __aiReportedFrac = 0;
     stopAiEta();
     try {
@@ -1342,12 +1374,13 @@ window.onload = async () => {
       hideImportBanner();
       stopAiEta();
       if (!__aiStageActive) {
-        showCancelBtn(false);
+        hideCancelBtn();
         try {
           tracker.done();
         } catch (_) {}
       }
       __importTaskId = null;
+      window.__importTaskId = __importTaskId;
     }
   }
 };
