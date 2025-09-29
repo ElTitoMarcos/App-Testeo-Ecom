@@ -6,6 +6,7 @@ import logging
 import math
 import os
 import random
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ from ..config import (
 )
 from ..ai.strict_jsonl import parse_jsonl_and_validate
 from ..obs import log_partial_ko, log_recovered
+from ..ratelimit import async_decorrelated_jitter_sleep
 from ..utils.signature import compute_sig_hash
 from .desire_utils import cleanse, looks_like_product_desc
 from .prompt_templates import MISSING_ONLY_JSONL_PROMPT, STRICT_JSONL_PROMPT
@@ -34,6 +36,10 @@ DB_PATH = APP_DIR / "data.sqlite3"
 CALIBRATION_CACHE_FILE = APP_DIR / "ai_calibration_cache.json"
 
 AI_FIELDS = ("desire", "desire_magnitude", "awareness_level", "competition_level")
+
+
+_ACTIVE_JOB_LOCK = threading.Lock()
+_ACTIVE_JOB_KEYS: Dict[frozenset[int], int] = {}
 
 
 def _env_int(name: str, default: int) -> int:
@@ -1231,7 +1237,7 @@ def _quantile(data: List[float], q: float) -> float:
     return s[lo] * (hi - pos) + s[hi] * (pos - lo)
 
 
-def _call_batch_with_retries(
+async def _call_batch_with_retries(
     batch: BatchRequest,
     *,
     api_key: str,
@@ -1253,6 +1259,7 @@ def _call_batch_with_retries(
         }
 
     attempt = 0
+    backoff_prev = 0.0
     while True:
         attempt += 1
         tokens_est = batch.prompt_tokens_est
@@ -1263,7 +1270,7 @@ def _call_batch_with_retries(
         ]
         start_ts = time.perf_counter()
         try:
-            raw = gpt.call_gpt(
+            raw = await gpt.call_gpt_async(
                 messages=messages,
                 api_key=api_key,
                 model=model,
@@ -1277,8 +1284,7 @@ def _call_batch_with_retries(
             if reason and len(batch.candidates) > 1:
                 raise BatchAdaptationRequired(reason, str(exc), allow_split=True) from exc
             if attempt <= max_retries:
-                sleep_for = min(10.0, 0.5 * (2 ** (attempt - 1))) + random.uniform(0.05, 0.25)
-                time.sleep(sleep_for)
+                backoff_prev = await async_decorrelated_jitter_sleep(backoff_prev or 0.5, 10.0)
                 continue
             return _error_payload(str(exc), duration, attempt)
 
@@ -1301,8 +1307,7 @@ def _call_batch_with_retries(
             except gpt.InvalidJSONError as exc:
                 duration = time.perf_counter() - start_ts
                 if attempt <= max_retries:
-                    sleep_for = min(10.0, 0.5 * (2 ** (attempt - 1))) + random.uniform(0.05, 0.25)
-                    time.sleep(sleep_for)
+                    backoff_prev = await async_decorrelated_jitter_sleep(backoff_prev or 0.5, 10.0)
                     continue
                 return _error_payload(str(exc), duration, attempt)
 
@@ -1360,11 +1365,12 @@ def _call_batch_with_retries(
         }
 
 
-def _call_triage_batch(
+async def _call_triage_batch(
     batch: BatchRequest,
     *,
     api_key: str,
     model: str,
+    strict_json: bool,
 ) -> Dict[str, Any]:
     tokens_est = batch.prompt_tokens_est
     max_tokens = _max_tokens_for_batch(len(batch.candidates))
@@ -1373,7 +1379,7 @@ def _call_triage_batch(
         {"role": "user", "content": batch.user_text},
     ]
     start_ts = time.perf_counter()
-    raw = gpt.call_gpt(
+    raw = await gpt.call_gpt_async(
         messages=messages,
         api_key=api_key,
         model=model,
@@ -1383,11 +1389,26 @@ def _call_triage_batch(
     )
     duration = time.perf_counter() - start_ts
     expected_ids = [cand.id for cand in batch.candidates]
-    strict_map, raw_payload_text = _parse_strict_json_payload(
-        raw,
-        expected_ids,
-        require_confidence=True,
-    )
+    strict_map: Dict[int, Dict[str, Any]] = {}
+    raw_payload_text: Optional[str] = None
+    if strict_json:
+        strict_map, raw_payload_text = _parse_strict_json_payload(
+            raw,
+            expected_ids,
+            require_confidence=True,
+        )
+    else:
+        try:
+            raw_payload_text = _extract_jsonl_payload(raw)
+        except gpt.InvalidJSONError:
+            raw_payload_text = None
+        if raw_payload_text:
+            try:
+                strict_map = parse_jsonl_and_validate(raw_payload_text, expected_ids)
+            except ValueError:
+                strict_map = _parse_jsonl_loose(raw_payload_text)
+        else:
+            strict_map = {}
     usage = raw.get("usage", {}) or {}
     return {
         "req_id": batch.req_id,
@@ -1606,6 +1627,53 @@ def run_ai_fill_job(
         seen_ids.add(num)
         requested_ids.append(num)
 
+    job_key = frozenset(requested_ids) if requested_ids else None
+    registered_job = False
+    if job_key:
+        with _ACTIVE_JOB_LOCK:
+            existing_job = _ACTIVE_JOB_KEYS.get(job_key)
+            if existing_job is not None:
+                logger.info(
+                    "ai.run skip already_running job_id=%s existing_job=%s items=%d",
+                    job_id,
+                    existing_job,
+                    len(requested_ids),
+                )
+                empty_counts: Dict[str, Any] = {
+                    "queued": len(requested_ids),
+                    "sent": 0,
+                    "ok": 0,
+                    "ko": 0,
+                    "cached": 0,
+                    "retried": 0,
+                    "cost_spent_usd": 0.0,
+                }
+                conn.close()
+                return {
+                    "counts": empty_counts,
+                    "pending_ids": requested_ids,
+                    "error": "already_running",
+                    "ok": {},
+                    "ko": {},
+                    "skipped_existing": 0,
+                    "total_requested": len(requested_ids),
+                    "json_retry": 0,
+                    "batch_adapted": 0,
+                    "metrics": {"triage_covered": 0, "fallback_big": 0},
+                    "triage_covered": 0,
+                    "fallback_big": 0,
+                }
+            _ACTIVE_JOB_KEYS[job_key] = int(job_id or 0)
+            registered_job = True
+
+    def _release_job_guard() -> None:
+        nonlocal registered_job
+        if not registered_job or job_key is None:
+            return
+        with _ACTIVE_JOB_LOCK:
+            _ACTIVE_JOB_KEYS.pop(job_key, None)
+        registered_job = False
+
     rows = database.get_products_by_ids(conn, requested_ids)
     row_map = {int(row["id"]): dict(row) for row in rows}
 
@@ -1726,6 +1794,7 @@ def run_ai_fill_job(
         if job_updates_enabled and skipped_existing:
             database.set_import_job_ai_counts(conn, int(job_id), counts_with_cost, [])
         _emit_status(status_cb, phase="enrich", counts=counts_with_cost, total=total_items, done=0)
+        _release_job_guard()
         conn.close()
         return {
             "counts": counts_with_cost,
@@ -1834,6 +1903,7 @@ def run_ai_fill_job(
                     "sample_pending_ids": sorted(pending_set)[:5],
                 },
             )
+        _release_job_guard()
         conn.close()
         return {
             "counts": counts_with_cost,
@@ -2052,20 +2122,25 @@ def run_ai_fill_job(
                     )
 
                     if allow_triage:
+                        triage_model_name = TRIAGE_MODEL or ""
+                        triage_is_mini = triage_model_name.startswith("gpt-4o-mini")
+                        if not triage_is_mini:
+                            triage_is_mini = triage_model_name.startswith("gpt-4o-mini-2024")
+                        triage_strict_json = False if triage_is_mini else True
                         logger.info(
                             "ai_columns.triage start req_id=%s model=%s items=%d confidence_min=%.2f strict_json=%s",
                             batch.req_id,
                             TRIAGE_MODEL,
                             len(batch.candidates),
                             TRIAGE_CONFIDENCE,
-                            STRICT_JSON_ENABLED,
+                            triage_strict_json,
                         )
                         try:
-                            triage_payload = await asyncio.to_thread(
-                                _call_triage_batch,
+                            triage_payload = await _call_triage_batch(
                                 batch,
                                 api_key=api_key,
                                 model=TRIAGE_MODEL,
+                                strict_json=triage_strict_json,
                             )
                             triage_duration = float(
                                 triage_payload.get("duration", 0.0) or 0.0
@@ -2197,8 +2272,7 @@ def run_ai_fill_job(
                     )
                     start_local = time.perf_counter()
                     try:
-                        result = await asyncio.to_thread(
-                            _call_batch_with_retries,
+                        result = await _call_batch_with_retries(
                             fallback_batch,
                             api_key=api_key,
                             model=model,
@@ -2475,7 +2549,8 @@ def run_ai_fill_job(
     remaining_total = len(pending_set)
     total_batches = processed_batches
     total_latency = sum(request_latencies)
-    concurrency_eff = total_latency / wall_time if request_latencies else 0.0
+    avg_concurrency = (total_latency / wall_time) if wall_time > 0 else 0.0
+    concurrency_eff = round(avg_concurrency, 2)
     p50 = _quantile(request_latencies, 0.5) if request_latencies else 0.0
     p95 = _quantile(request_latencies, 0.95) if request_latencies else 0.0
     logger.info(
@@ -2762,6 +2837,7 @@ def run_ai_fill_job(
             },
         )
 
+    _release_job_guard()
     conn.close()
     return {
         "counts": counts_with_cost,

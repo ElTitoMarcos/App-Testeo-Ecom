@@ -1,6 +1,7 @@
 from __future__ import annotations
+import asyncio
 import os, time, threading, random
-from contextlib import contextmanager
+from contextlib import contextmanager, asynccontextmanager
 
 def _env_int(name, default):
     try: return int(os.getenv(name, default))
@@ -81,4 +82,65 @@ def decorrelated_jitter_sleep(prev: float, cap: float) -> float:
     cap = max(base, float(cap or base))
     next_sleep = min(cap, random.uniform(base, prev * 3 if prev > 0 else 1.0))
     time.sleep(next_sleep)
+    return next_sleep
+
+
+class AsyncTokenBucket:
+    def __init__(self, capacity_per_min: int):
+        self.capacity = max(1, int(capacity_per_min))
+        self.tokens = self.capacity
+        self.updated = time.time()
+        self._lock = asyncio.Lock()
+
+    async def _refill(self):
+        now = time.time()
+        delta = now - self.updated
+        if delta >= 1.0:
+            per_sec = self.capacity / 60.0
+            add = int(delta * per_sec)
+            if add > 0:
+                self.tokens = min(self.capacity, self.tokens + add)
+                self.updated = now
+
+    async def take(self, n: int = 1):
+        n = max(0, int(n))
+        async with self._lock:
+            while self.tokens < n:
+                await self._refill()
+                if self.tokens < n:
+                    await asyncio.sleep(0.2)
+            self.tokens -= n
+
+
+class AsyncRateLimiter:
+    def __init__(self, tpm: int, rpm: int, max_conc: int):
+        self.tpm = AsyncTokenBucket(max(1, int(tpm)))
+        self.rpm = AsyncTokenBucket(max(1, int(rpm)))
+        self.conc = asyncio.Semaphore(max(1, int(max_conc)))
+
+    @asynccontextmanager
+    async def async_guard(self, *, tokens: int = 0):
+        await self.conc.acquire()
+        try:
+            await self.rpm.take(1)
+            if tokens > 0:
+                await self.tpm.take(tokens)
+            yield
+        finally:
+            self.conc.release()
+
+
+_async_limiter = AsyncRateLimiter(_EFF_TPM, _EFF_RPM, _eff_conc)
+
+
+def get_async_limiter() -> AsyncRateLimiter:
+    return _async_limiter
+
+
+async def async_decorrelated_jitter_sleep(prev: float, cap: float) -> float:
+    base = 0.3
+    prev = max(0.0, float(prev or 0.0))
+    cap = max(base, float(cap or base))
+    next_sleep = min(cap, random.uniform(base, prev * 3 if prev > 0 else 1.0))
+    await asyncio.sleep(next_sleep)
     return next_sleep

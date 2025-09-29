@@ -19,6 +19,7 @@ defined in the provided document.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -30,10 +31,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import httpx
 import requests
 
 from . import database, config
-from .ratelimit import decorrelated_jitter_sleep, reserve
+from .ratelimit import async_decorrelated_jitter_sleep, get_async_limiter
 from .prompts.registry import (
     get_json_schema,
     get_system_prompt,
@@ -267,14 +269,11 @@ def _extract_retry_after_seconds(msg: str) -> float | None:
     return None
 
 
-def call_gpt(*, messages: List[Dict[str, Any]], **kwargs) -> Dict[str, Any]:
-    """
-    F U N E L  Ú N I C O:
-    - Concurrencia acotada + RPM/TPM por token bucket (reserve).
-    - Reintentos 429 con Retry-After / parseo del mensaje y backoff con jitter.
-    Mantiene la API pública existente.
-    """
-    # Estimación simple de tokens del prompt (si no hay otra función ya en uso)
+async def call_gpt_async(
+    *, messages: List[Dict[str, Any]], **kwargs
+) -> Dict[str, Any]:
+    """Asynchronous version of :func:`call_gpt` with retries and backoff."""
+
     try:
         prompt_text = "\n".join(
             m.get("content", "") for m in (messages or []) if isinstance(m, dict)
@@ -297,107 +296,117 @@ def call_gpt(*, messages: List[Dict[str, Any]], **kwargs) -> Dict[str, Any]:
 
     while True:
         overall_attempt += 1
-        # Embudo global: RPM/TPM + concurrencia
-        with reserve(tokens_est):
-            try:
-                raw = call_openai_chat(messages=messages, **kwargs)
-                if overall_attempt > 1:
-                    log.info(
-                        "gpt.call_gpt.recovered status=OK_RECOVERED attempts=%s",
-                        overall_attempt,
-                    )
-                return raw
-            except OpenAIError as e:
-                msg = str(e)
-                low = msg.lower()
-                resp = getattr(e, "response", None)
-                status_code = None
-                if resp is not None:
-                    try:
-                        status_code = int(getattr(resp, "status_code", None) or 0) or None
-                    except Exception:
-                        status_code = None
-
-                is_rate_limit = (
-                    (status_code == 429)
-                    or ("status 429" in low)
-                    or ("rate limit" in low)
+        try:
+            raw = await call_openai_chat_async(
+                messages=messages, tokens_estimate=tokens_est, **kwargs
+            )
+            if overall_attempt > 1:
+                log.info(
+                    "gpt.call_gpt.recovered status=OK_RECOVERED attempts=%s",
+                    overall_attempt,
                 )
+            return raw
+        except OpenAIError as e:
+            msg = str(e)
+            low = msg.lower()
+            resp = getattr(e, "response", None)
+            status_code = None
+            if resp is not None:
+                try:
+                    status_code = int(getattr(resp, "status_code", None) or 0) or None
+                except Exception:
+                    status_code = None
 
-                if is_rate_limit:
-                    rate_attempts += 1
-                    if rate_attempts > MAX_429:
-                        log.error(
-                            "gpt.call_gpt.gave_up_429 attempts=%s",
-                            rate_attempts,
-                        )
-                        raise
+            is_rate_limit = (
+                (status_code == 429)
+                or ("status 429" in low)
+                or ("rate limit" in low)
+            )
 
-                    retry_after = getattr(e, "retry_after", None)
-                    if retry_after is None:
-                        try:
-                            headers = getattr(resp, "headers", None) if resp is not None else None
-                            if headers:
-                                ra = headers.get("Retry-After") or headers.get("retry-after")
-                                if ra:
-                                    retry_after = float(ra)
-                        except Exception:
-                            retry_after = None
-
-                    wait_s = (
-                        retry_after
-                        if retry_after is not None
-                        else _extract_retry_after_seconds(msg) or sleep_prev_rate
-                    )
-                    sleep_prev_rate = decorrelated_jitter_sleep(wait_s, BACKOFF_CAP)
-                    log.warning(
-                        "gpt.call_gpt.retry_429 attempt=%s sleep=%.2fs",
+            if is_rate_limit:
+                rate_attempts += 1
+                if rate_attempts > MAX_429:
+                    log.error(
+                        "gpt.call_gpt.gave_up_429 attempts=%s",
                         rate_attempts,
-                        sleep_prev_rate,
                     )
-                    continue
+                    raise
 
-                transient_markers = (
-                    "failed to connect",
-                    "timeout",
-                    "timed out",
-                    "connection reset",
-                    "temporarily unavailable",
-                    "service unavailable",
-                    "upstream connect error",
+                retry_after = getattr(e, "retry_after", None)
+                if retry_after is None:
+                    try:
+                        headers = getattr(resp, "headers", None) if resp is not None else None
+                        if headers:
+                            ra = headers.get("Retry-After") or headers.get("retry-after")
+                            if ra:
+                                retry_after = float(ra)
+                    except Exception:
+                        retry_after = None
+
+                wait_s = (
+                    retry_after
+                    if retry_after is not None
+                    else _extract_retry_after_seconds(msg) or sleep_prev_rate
                 )
-                is_server_error = False
-                if status_code is not None:
-                    if 500 <= status_code < 600:
-                        is_server_error = True
-                if not is_server_error:
-                    if any(marker in low for marker in transient_markers):
-                        is_server_error = True
+                sleep_prev_rate = await async_decorrelated_jitter_sleep(
+                    wait_s, BACKOFF_CAP
+                )
+                log.warning(
+                    "gpt.call_gpt.retry_429 attempt=%s sleep=%.2fs",
+                    rate_attempts,
+                    sleep_prev_rate,
+                )
+                continue
 
-                if is_server_error:
-                    server_attempts += 1
-                    if server_attempts > MAX_5XX:
-                        log.error(
-                            "gpt.call_gpt.gave_up_5xx status=%s attempts=%s",
-                            status_code if status_code is not None else "n/a",
-                            server_attempts,
-                        )
-                        raise
+            transient_markers = (
+                "failed to connect",
+                "timeout",
+                "timed out",
+                "connection reset",
+                "temporarily unavailable",
+                "service unavailable",
+                "upstream connect error",
+            )
+            is_server_error = False
+            if status_code is not None and 500 <= status_code < 600:
+                is_server_error = True
+            if not is_server_error and any(marker in low for marker in transient_markers):
+                is_server_error = True
 
-                    retry_after = getattr(e, "retry_after", None)
-                    wait_base = retry_after if retry_after is not None else (
-                        sleep_prev_server if sleep_prev_server > 0 else 0.5
-                    )
-                    sleep_prev_server = decorrelated_jitter_sleep(wait_base, BACKOFF_CAP)
-                    log.warning(
-                        "gpt.call_gpt.retry_5xx status=%s attempt=%s sleep=%.2fs",
+            if is_server_error:
+                server_attempts += 1
+                if server_attempts > MAX_5XX:
+                    log.error(
+                        "gpt.call_gpt.gave_up_5xx status=%s attempts=%s",
                         status_code if status_code is not None else "n/a",
                         server_attempts,
-                        sleep_prev_server,
                     )
-                    continue
+                    raise
 
-                raise
+                retry_after = getattr(e, "retry_after", None)
+                wait_base = (
+                    retry_after
+                    if retry_after is not None
+                    else (sleep_prev_server if sleep_prev_server > 0 else 0.5)
+                )
+                sleep_prev_server = await async_decorrelated_jitter_sleep(
+                    wait_base, BACKOFF_CAP
+                )
+                log.warning(
+                    "gpt.call_gpt.retry_5xx status=%s attempt=%s sleep=%.2fs",
+                    status_code if status_code is not None else "n/a",
+                    server_attempts,
+                    sleep_prev_server,
+                )
+                continue
+
+            raise
+
+
+def call_gpt(*, messages: List[Dict[str, Any]], **kwargs) -> Dict[str, Any]:
+    """Synchronous wrapper around :func:`call_gpt_async`."""
+
+    return asyncio.run(call_gpt_async(messages=messages, **kwargs))
 
 def _message_text(messages: List[Dict[str, Any]]) -> str:
     parts: List[str] = []
@@ -630,7 +639,7 @@ def extract_products_from_image(
         return []
 
 
-def call_openai_chat(
+async def call_openai_chat_async(
     api_key: str,
     model: str,
     messages: List[Dict[str, Any]],
@@ -641,20 +650,8 @@ def call_openai_chat(
     stop: Optional[Any] = None,
     tokens_estimate: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Send a chat completion request to the OpenAI API.
+    """Asynchronously send a chat completion request to the OpenAI API."""
 
-    Args:
-        api_key: The user's OpenAI API key.
-        model: The identifier of the model to call, e.g. ``gpt-4o`` or ``gpt-3.5-turbo``.
-        messages: A list of message dicts, each containing ``role`` and ``content`` fields.
-        temperature: The sampling temperature; lower values produce more deterministic output.
-
-    Returns:
-        The parsed JSON response from OpenAI.
-
-    Raises:
-        OpenAIError: If the API responds with an error or unexpected content.
-    """
     url = "https://api.openai.com/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -672,6 +669,13 @@ def call_openai_chat(
     if response_format is not None:
         payload["response_format"] = response_format
 
+    estimated_tokens = 0
+    if tokens_estimate is not None:
+        try:
+            estimated_tokens = max(0, int(tokens_estimate))
+        except Exception:
+            estimated_tokens = 0
+
     if AI_API_VERBOSE >= 2:
         logger.debug(
             "gpt.pre model=%s est_tokens=%s",
@@ -679,15 +683,18 @@ def call_openai_chat(
             str(tokens_estimate or ""),
         )
 
-    try:
-        response = requests.post(
-            url,
-            headers=headers,
-            data=json.dumps(payload),
-            timeout=60,
-        )
-    except requests.RequestException as exc:
-        raise OpenAIError(f"Failed to connect to OpenAI API: {exc}") from exc
+    limiter = get_async_limiter()
+    async with limiter.async_guard(tokens=estimated_tokens):
+        timeout = httpx.Timeout(60.0, connect=10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            try:
+                response = await client.post(
+                    url,
+                    headers=headers,
+                    json=payload,
+                )
+            except httpx.HTTPError as exc:
+                raise OpenAIError(f"Failed to connect to OpenAI API: {exc}") from exc
 
     if response.status_code == 200:
         try:
@@ -725,6 +732,33 @@ def call_openai_chat(
     else:
         logger.error("gpt.error status=%s detail=%s", status, msg)
     raise error
+
+
+def call_openai_chat(
+    api_key: str,
+    model: str,
+    messages: List[Dict[str, Any]],
+    *,
+    temperature: float = 0.2,
+    response_format: Optional[Dict[str, Any]] = None,
+    max_tokens: Optional[int] = None,
+    stop: Optional[Any] = None,
+    tokens_estimate: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Synchronous wrapper around :func:`call_openai_chat_async`."""
+
+    return asyncio.run(
+        call_openai_chat_async(
+            api_key,
+            model,
+            messages,
+            temperature=temperature,
+            response_format=response_format,
+            max_tokens=max_tokens,
+            stop=stop,
+            tokens_estimate=tokens_estimate,
+        )
+    )
 
 
 def build_evaluation_prompt(product: Dict[str, Any]) -> str:
