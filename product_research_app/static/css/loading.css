@@ -41,7 +41,11 @@
 /* ===== Barra global + botón Cancelar (layout flex) ===== */
 :root{ --gp-height:16px; }
 
-#global-progress-wrapper{
+/* Oculto si no hay tareas */
+#global-progress-wrapper{ display:none; }
+
+/* Visible solo cuando el JS lo marca como .show */
+#global-progress-wrapper.show{
   display:flex;
   align-items:center;
   gap:8px;

@@ -64,21 +64,32 @@ function getRailState(host) {
 function refreshHost(host) {
   const s = getRailState(host); if (!s) return;
   const tasks = s.tasks;
-  const cancelBtn = document.getElementById('progress-cancel-btn');
-  const globalSlot = document.getElementById('progress-slot-global');
-  if (cancelBtn && host === globalSlot) {
-    cancelBtn.style.display = tasks.size ? 'inline-flex' : 'none';
+  const hasTasks = tasks.size > 0;
+
+  // 1) Activar/colapsar el slot (barra)
+  host.classList.toggle('active', hasTasks);
+
+  const isGlobalHost = host && host.id === 'progress-slot-global';
+
+  // 2) Mostrar/ocultar el wrapper completo
+  if (isGlobalHost) {
+    const wrapper = document.getElementById('global-progress-wrapper');
+    if (wrapper) wrapper.classList.toggle('show', hasTasks);
   }
-  if (tasks.size === 0) {
-    // completar al 100% brevemente y colapsar el slot
-    s.fill.style.width = '100%';
-    s.pctEl.textContent = '100%';
+
+  // 3) Mostrar/ocultar el botón Cancelar
+  if (isGlobalHost) {
+    const cancelBtn = document.getElementById('progress-cancel-btn');
+    if (cancelBtn) cancelBtn.style.display = hasTasks ? 'inline-flex' : 'none';
+  }
+
+  // 4) Si no hay tareas, limpiar el slot (evita textos/0%)
+  if (!hasTasks) {
     clearTimeout(s.hideTimer);
-    s.hideTimer = setTimeout(() => {
-      s.fill.style.width = '0%';
-      s.pctEl.textContent = '0%';
-      host.classList.toggle('active', false); // colapsa el slot (height:0)
-    }, 300);
+    s.hideTimer = null;
+    tasks.clear();
+    host.innerHTML = '';
+    Rails.delete(host);
     return;
   }
   // promedio simple de progresos
@@ -88,7 +99,6 @@ function refreshHost(host) {
   const pct = Math.round(avg * 100);
   s.fill.style.width = pct + '%';
   s.pctEl.textContent = pct + '%';
-  host.classList.toggle('active', true);
   if (last) {
     if (last.title) s.titleEl.textContent = last.title;
     if (last.stage) s.stageEl.textContent = last.stage;
@@ -162,3 +172,15 @@ export const LoadingHelpers = {
     catch (e) { end(); throw e; }
   };
 })();
+
+document.addEventListener('DOMContentLoaded', () => {
+  const wrapper = document.getElementById('global-progress-wrapper');
+  const host = document.getElementById('progress-slot-global');
+  const btn = document.getElementById('progress-cancel-btn');
+  if (wrapper) wrapper.classList.remove('show');
+  if (host) {
+    host.classList.remove('active');
+    host.innerHTML = '';
+  }
+  if (btn) btn.style.display = 'none';
+});
