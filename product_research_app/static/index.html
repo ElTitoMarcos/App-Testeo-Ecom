@@ -112,10 +112,12 @@ body.dark .skeleton{background:#333;}
         <button id="configBtn" title="Configuración avanzada">⚙️</button>
       </div>
     </div>
-    <div id="global-progress-wrapper">
+    <div id="global-progress-wrapper" style="display:none; position:relative;">
       <div id="global-progress-bar" class="progress-hitbox">
         <div id="progress-slot-global" class="progress-slot" aria-live="polite"></div>
       </div>
+      <button id="global-cancel-btn" type="button" aria-label="Cancelar" title="Cancelar"
+              style="display:none;">Cancelar</button>
     </div>
   </div>
   <!-- Search bar row with controls -->
@@ -373,7 +375,7 @@ const saveIfDirty = window.saveIfDirty;
 window.fetchJson = fetchJson;
 window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
-const IMPORT_UPLOAD_FRAC = 0.30;
+const IMPORT_UPLOAD_FRAC = 0.20;
 const IMPORT_POLL_MAX_FRAC = 0.99;
 const IMPORT_SERVER_SPAN = IMPORT_POLL_MAX_FRAC - IMPORT_UPLOAD_FRAC;
 const IMPORT_STATUS_URL = '/_import_status';
@@ -383,6 +385,153 @@ let savedApiKeyLength = 0;
 
 const getGlobalProgressHost = () => document.querySelector('#progress-slot-global');
 const getActionHost = () => document.querySelector('#bottomBar') || getGlobalProgressHost();
+
+// --- Progreso combinado import (20%) + IA (80%) con ETA y cancel ---
+const GlobalProgress = (() => {
+  const WRAP   = document.getElementById('global-progress-wrapper');
+  const SLOT   = document.getElementById('progress-slot-global');
+  const CANCEL = document.getElementById('global-cancel-btn');
+
+  const W_IMPORT = 0.20;
+  const W_AI     = 0.80;
+
+  let state = {
+    active: false,
+    phase: null,
+    importFrac: 0,
+    aiFrac: 0,
+    displayed: 0,
+    tick: null,
+    etaEnd: 0,
+    hardHold: false,
+    onCancel: null
+  };
+
+  function show() { WRAP.style.display = 'block'; SLOT.classList.add('active'); }
+  function hide() { WRAP.style.display = 'none'; SLOT.classList.remove('active'); }
+  function showCancel(show) { CANCEL.style.display = show ? 'inline-flex' : 'none'; }
+  function composed() { return (state.importFrac * W_IMPORT) + (state.aiFrac * W_AI); }
+
+  function renderBar() {
+    const pct = Math.round(state.displayed * 100);
+    SLOT.style.setProperty('--progress', pct + '%');
+    SLOT.textContent = '';
+    SLOT.style.background = `linear-gradient(90deg, #7a53d6 ${pct}%, rgba(122,83,214,.2) ${pct}%)`;
+  }
+
+  function startTick() {
+    stopTick();
+    state.tick = setInterval(() => {
+      const target = Math.min(state.hardHold ? 0.99 : 1, composed());
+      const diff = target - state.displayed;
+      const step = Math.max(0.004, diff * 0.15);
+      if (diff > 0.001) {
+        state.displayed += step;
+        renderBar();
+      }
+      if (state.phase === 'ai' && !state.hardHold && state.etaEnd && Date.now() > state.etaEnd && target < 1) {
+        state.hardHold = true;
+      }
+    }, 250);
+  }
+
+  function stopTick() {
+    if (state.tick) {
+      clearInterval(state.tick);
+      state.tick = null;
+    }
+  }
+
+  function beginImport({ onCancel } = {}) {
+    state.active = true;
+    state.phase = 'import';
+    state.importFrac = 0;
+    state.aiFrac = 0;
+    state.displayed = 0;
+    state.hardHold = false;
+    state.onCancel = onCancel || null;
+    show();
+    showCancel(true);
+    renderBar();
+    startTick();
+  }
+
+  function setImportFraction(frac) {
+    state.importFrac = Math.max(0, Math.min(1, frac));
+  }
+
+  function endImport() {
+    state.importFrac = 1;
+    state.phase = 'import-done';
+    state.onCancel = null;
+    showCancel(false);
+  }
+
+  function ensureActiveForAI() {
+    if (!state.active) {
+      state.active = true;
+      state.importFrac = Math.max(state.importFrac, 1);
+      state.displayed = Math.max(state.displayed, composed());
+      show();
+      renderBar();
+      startTick();
+    }
+  }
+
+  function beginAI({ estMs = 0, onCancel } = {}) {
+    ensureActiveForAI();
+    state.phase = 'ai';
+    state.aiFrac = 0;
+    state.hardHold = false;
+    state.onCancel = onCancel || null;
+    state.etaEnd = estMs ? (Date.now() + estMs) : 0;
+    showCancel(true);
+  }
+
+  function setAIFrac(frac) {
+    state.aiFrac = Math.max(0, Math.min(1, frac));
+  }
+
+  function finishOk() {
+    state.aiFrac = 1;
+    state.displayed = 1;
+    renderBar();
+    stopTick();
+    state.active = false;
+    state.phase = null;
+    state.onCancel = null;
+    showCancel(false);
+    setTimeout(() => { hide(); }, 500);
+  }
+
+  function finishError() {
+    stopTick();
+    state.active = false;
+    state.phase = null;
+    state.onCancel = null;
+    showCancel(false);
+    SLOT.style.background = 'linear-gradient(90deg,#ff6b6b 100%, rgba(255,107,107,.2) 0%)';
+    setTimeout(() => { hide(); }, 1200);
+  }
+
+  CANCEL.onclick = () => { if (state.onCancel) state.onCancel(); };
+
+  renderBar();
+
+  return {
+    beginImport,
+    setImportFraction,
+    endImport,
+    beginAI,
+    setAIFrac,
+    finishOk,
+    finishError,
+    showCancel,
+    isActive: () => state.active
+  };
+})();
+
+window.GlobalProgress = GlobalProgress;
 
 function formatPrice(n) {
   const num = Number(n);
@@ -439,7 +588,11 @@ async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL
     if (!Number.isFinite(serverPct)) serverPct = 0;
     serverPct = Math.max(0, Math.min(100, serverPct));
     const stage = (data.message || data.stage || data.state || '').toString() || 'Procesando…';
-    tracker?.step(mapServerFraction(serverPct), stage);
+    if (tracker && typeof tracker.step === 'function') {
+      try {
+        tracker.step(serverPct, stage, data);
+      } catch (_) {}
+    }
 
     const statusVal = String(data.state || data.status || '').toLowerCase();
     if (statusVal === 'error' || data.error) {
@@ -462,6 +615,20 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
   const host = getGlobalProgressHost();
   const tracker = LoadingHelpers.start('Importando catálogo', { host });
   tracker.setStage('Subiendo archivo…');
+
+  let abortUpload = null;
+  GlobalProgress.beginImport({
+    onCancel: () => {
+      try { if (abortUpload) abortUpload(); } catch (_) {}
+      const taskId = localStorage.getItem(IMPORT_TASK_LS_KEY);
+      fetch('/import/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task_id: taskId })
+      }).catch(() => {});
+    }
+  });
+
   let lastResult = null;
   try {
     const fd = new FormData();
@@ -470,14 +637,21 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     xhr.responseType = 'json';
     xhr.__skipLoadingHook = true;
     xhr.__hostEl = host;
+
+    abortUpload = () => {
+      try { xhr.abort(); } catch (_) {}
+    };
+
     const startResult = await new Promise((resolve, reject) => {
       xhr.open('POST', startUrl, true);
       xhr.upload.onprogress = (event) => {
         if (!event.lengthComputable) return;
-        const frac = Math.min(IMPORT_UPLOAD_FRAC, (event.loaded / event.total) * IMPORT_UPLOAD_FRAC);
-        tracker.step(frac, 'Subiendo archivo…');
+        const rawFrac = Math.min(1, event.loaded / event.total);
+        tracker.step(rawFrac * IMPORT_UPLOAD_FRAC, 'Subiendo archivo…');
+        GlobalProgress.setImportFraction(rawFrac);
       };
       xhr.onerror = () => reject(new Error('Error de red subiendo archivo'));
+      xhr.onabort = () => reject(new Error('Importación cancelada'));
       xhr.onload = () => {
         let payload = xhr.response;
         if (!payload && xhr.responseText) {
@@ -501,6 +675,9 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
 
     if (startResult.kind === 'sync') {
       tracker.step(1, 'Completado');
+      GlobalProgress.setImportFraction(1);
+      GlobalProgress.endImport();
+      GlobalProgress.finishOk();
       await reloadTable({ skipProgress: true });
       const importedCount = startResult.data?.imported ?? startResult.data?.rows_imported;
       if (Number.isFinite(importedCount) && importedCount > 0) {
@@ -509,12 +686,21 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
       return startResult.data;
     }
 
-    const taskId = startResult.taskId;
-    const idStr = typeof taskId === 'string' ? taskId : String(taskId);
+    const taskId = String(startResult.taskId);
+    localStorage.setItem(IMPORT_TASK_LS_KEY, taskId);
     tracker.step(IMPORT_UPLOAD_FRAC, 'Archivo subido');
-    localStorage.setItem(IMPORT_TASK_LS_KEY, idStr);
+    GlobalProgress.setImportFraction(1);
 
-    lastResult = await followImportTask(idStr, tracker, { statusUrl, host });
+    const progressTracker = {
+      step(serverPct, stage) {
+        const frac = Math.max(0, Math.min(1, serverPct / 100));
+        GlobalProgress.setImportFraction(frac);
+        tracker.step(mapServerFraction(serverPct), stage);
+      }
+    };
+
+    lastResult = await followImportTask(taskId, progressTracker, { statusUrl, host });
+    GlobalProgress.endImport();
 
     const importedCount = lastResult?.imported ?? lastResult?.rows_imported;
     if (Number.isFinite(importedCount) && importedCount > 0) {
@@ -524,12 +710,14 @@ async function importCatalog(file, { startUrl = IMPORT_START_URL, statusUrl = IM
     return lastResult;
   } catch (err) {
     tracker.step(1, 'Error');
+    GlobalProgress.finishError();
     toast.error(err?.message || 'Error al importar catálogo');
     throw err;
   } finally {
     tracker.done();
     localStorage.removeItem(IMPORT_TASK_LS_KEY);
     hideImportBanner();
+    abortUpload = null;
   }
 }
 
@@ -1147,20 +1335,39 @@ window.onload = async () => {
     const host = getGlobalProgressHost();
     const tracker = LoadingHelpers.start('Importando catálogo', { host });
     tracker.step(IMPORT_UPLOAD_FRAC, 'Reanudando…');
+    GlobalProgress.beginImport({
+      onCancel: () => {
+        fetch('/import/cancel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ task_id: tid })
+        }).catch(() => {});
+      }
+    });
+    GlobalProgress.setImportFraction(1);
     try {
-      const result = await followImportTask(tid, tracker, { host });
+      const result = await followImportTask(tid, {
+        step(serverPct, stage) {
+          const frac = Math.max(0, Math.min(1, serverPct / 100));
+          GlobalProgress.setImportFraction(frac);
+          tracker.step(mapServerFraction(serverPct), stage);
+        }
+      }, { host });
       const importedCount = result?.imported ?? result?.rows_imported;
       if (Number.isFinite(importedCount) && importedCount > 0) {
         toast.success(`Importados ${importedCount}`);
       }
       tracker.step(1, 'Completado');
+      GlobalProgress.endImport();
     } catch (err) {
       tracker.step(1, 'Error');
+      GlobalProgress.finishError();
       toast.error(err?.message || 'Error en importación');
     } finally {
       localStorage.removeItem(IMPORT_TASK_LS_KEY);
       tracker.done();
       hideImportBanner();
+      GlobalProgress.showCancel(false);
     }
   }
 };
