@@ -2728,6 +2728,10 @@ def run_ai_fill_job(
         "total_requested": len(requested_ids),
         "json_retry": json_retry_total,
         "batch_adapted": batch_adaptations_total,
+        "metrics": {
+            "triage_covered": triage_covered_total,
+            "fallback_big": fallback_big_total,
+        },
         "triage_covered": triage_covered_total,
         "fallback_big": fallback_big_total,
     }
