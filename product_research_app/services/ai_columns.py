@@ -6,6 +6,7 @@ import logging
 import math
 import os
 import random
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -78,6 +79,7 @@ STRICT_JSON_ENABLED = _env_bool("PRAPP_AI_COLUMNS_STRICT_JSON", True)
 MAX_TOKENS_PER_ITEM = max(32, _env_int("PRAPP_AI_COLUMNS_MAX_TOKENS_PER_ITEM", 128))
 SAFE_CONTEXT_TOKENS = max(4000, _env_int("PRAPP_OPENAI_CONTEXT_SAFE_TOKENS", 120000))
 StatusCallback = Callable[..., None]
+
 
 TRIAGE_ENABLED = _env_bool("PRAPP_AI_TRIAGE_ENABLED", True)
 TRIAGE_MODEL = os.getenv("PRAPP_AI_TRIAGE_MODEL", "gpt-4o-mini") or "gpt-4o-mini"
@@ -1589,10 +1591,15 @@ def run_ai_fill_job(
     microbatch: int = 32,
     parallelism: Optional[int] = None,
     status_cb: Optional[StatusCallback] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> Dict[str, Any]:
     start_ts = time.perf_counter()
     conn = _ensure_conn()
     job_updates_enabled = job_id is not None and int(job_id) > 0
+
+    def _should_cancel() -> bool:
+        return bool(cancel_event and cancel_event.is_set())
+
     requested_ids: List[int] = []
     seen_ids: set[int] = set()
     for pid in product_ids:
@@ -1707,6 +1714,10 @@ def run_ai_fill_job(
 
     applied_outputs: Dict[int, Dict[str, Any]] = {}
     fail_reasons: Dict[int, str] = {}
+    json_retry_total = 0
+    batch_adaptations_total = 0
+    triage_covered_total = 0
+    fallback_big_total = 0
 
     if total_items == 0:
         if job_updates_enabled and skipped_existing:
@@ -1730,6 +1741,47 @@ def run_ai_fill_job(
     candidate_map = {cand.id: cand for cand in candidates}
 
     cache_rows: Dict[str, Any] = {}
+    def _finalize_cancel(message: str = "IA cancelada") -> Dict[str, Any]:
+        nonlocal counts_with_cost
+        counts_with_cost = {**counts, "cost_spent_usd": cost_spent}
+        pending_ids = sorted(pending_set)
+        done_val = counts.get("ok", 0) + counts.get("cached", 0)
+        if job_updates_enabled:
+            database.update_import_job_ai_progress(conn, int(job_id), done_val)
+            database.set_import_job_ai_counts(conn, int(job_id), counts_with_cost, pending_ids)
+            database.set_import_job_ai_error(conn, int(job_id), "cancelled")
+        _emit_status(
+            status_cb,
+            phase="enrich",
+            counts=counts_with_cost,
+            total=total_items,
+            done=done_val,
+            message=message,
+        )
+        if conn.in_transaction:
+            conn.commit()
+        conn.close()
+        return {
+            "counts": counts_with_cost,
+            "pending_ids": pending_ids,
+            "error": "cancelled",
+            "ok": applied_outputs,
+            "ko": fail_reasons,
+            "skipped_existing": skipped_existing,
+            "total_requested": len(requested_ids),
+            "json_retry": json_retry_total,
+            "batch_adapted": batch_adaptations_total,
+            "metrics": {
+                "triage_covered": triage_covered_total,
+                "fallback_big": fallback_big_total,
+            },
+            "triage_covered": triage_covered_total,
+            "fallback_big": fallback_big_total,
+            "cancelled": True,
+        }
+
+    if _should_cancel():
+        return _finalize_cancel()
     if cache_enabled:
         sig_hashes = [cand.sig_hash for cand in candidates if cand.sig_hash]
         if sig_hashes:
@@ -1840,13 +1892,10 @@ def run_ai_fill_job(
     success_records: Dict[int, Dict[str, Any]] = {}
     request_latencies: List[float] = []
     processed_batches = 0
-    json_retry_total = 0
-    batch_adaptations_total = 0
-    triage_covered_total = 0
-    fallback_big_total = 0
-
     def process_result(result: Dict[str, Any]) -> Dict[str, Any]:
         nonlocal cost_spent, counts_with_cost, processed_batches
+        if _should_cancel():
+            return _finalize_cancel()
         summary: Dict[str, Any] = {
             "parsed_ids": [],
             "missing_ids": [],
@@ -2012,108 +2061,124 @@ def run_ai_fill_job(
         async def _execute_batches(batches: List[BatchRequest]) -> List[Dict[str, Any]]:
             semaphore = asyncio.Semaphore(max(1, AI_MAX_CONCURRENCY))
 
-            async def _run_single(batch: BatchRequest) -> Dict[str, Any]:
-                nonlocal triage_covered_total, fallback_big_total
-                async with semaphore:
-                    original_batch = batch
-                    triage_result: Optional[Dict[str, Any]] = None
-                    triage_usage: Dict[str, Any] = {}
-                    triage_duration = 0.0
-                    triage_raw_text: Optional[str] = None
-                    fallback_candidates: List[Candidate] = list(batch.candidates)
-                    allow_triage = (
-                        TRIAGE_ENABLED
-                        and batch.candidates
-                        and batch.depth == 0
-                        and not batch.adapted
-                    )
+        async def _run_single(batch: BatchRequest) -> Dict[str, Any]:
+            nonlocal triage_covered_total, fallback_big_total
+            if _should_cancel():
+                return {
+                    "status": "cancelled",
+                    "batch": batch,
+                    "result": None,
+                    "duration": 0.0,
+                    "error": "cancelled",
+                }
+            async with semaphore:
+                original_batch = batch
+                triage_result: Optional[Dict[str, Any]] = None
+                triage_usage: Dict[str, Any] = {}
+                triage_duration = 0.0
+                triage_raw_text: Optional[str] = None
+                fallback_candidates: List[Candidate] = list(batch.candidates)
+                allow_triage = (
+                    TRIAGE_ENABLED
+                    and batch.candidates
+                    and batch.depth == 0
+                    and not batch.adapted
+                )
 
-                    if allow_triage:
-                        logger.info(
-                            "ai_columns.triage start req_id=%s model=%s items=%d confidence_min=%.2f strict_json=%s",
-                            batch.req_id,
-                            TRIAGE_MODEL,
-                            len(batch.candidates),
-                            TRIAGE_CONFIDENCE,
-                            STRICT_JSON_ENABLED,
+                if allow_triage:
+                    if _should_cancel():
+                        return {
+                            "status": "cancelled",
+                            "batch": batch,
+                            "result": None,
+                            "duration": 0.0,
+                            "error": "cancelled",
+                        }
+                    logger.info(
+                        "ai_columns.triage start req_id=%s model=%s items=%d confidence_min=%.2f strict_json=%s",
+                        batch.req_id,
+                        TRIAGE_MODEL,
+                        len(batch.candidates),
+                        TRIAGE_CONFIDENCE,
+                        STRICT_JSON_ENABLED,
+                    )
+                    try:
+                        triage_payload = await asyncio.to_thread(
+                            _call_triage_batch,
+                            batch,
+                            api_key=api_key,
+                            model=TRIAGE_MODEL,
                         )
-                        try:
-                            triage_payload = await asyncio.to_thread(
-                                _call_triage_batch,
-                                batch,
-                                api_key=api_key,
-                                model=TRIAGE_MODEL,
+                        triage_duration = float(
+                            triage_payload.get("duration", 0.0) or 0.0
+                        )
+                        triage_usage = triage_payload.get("usage", {}) or {}
+                        triage_raw_text = triage_payload.get("raw_text")
+                        strict_map = triage_payload.get("strict_map") or {}
+                        accepted_candidates: List[Candidate] = []
+                        accepted_map: Dict[int, Dict[str, Any]] = {}
+                        fallback_candidates = []
+                        for cand in batch.candidates:
+                            entry = strict_map.get(cand.id)
+                            if not isinstance(entry, dict):
+                                fallback_candidates.append(cand)
+                                continue
+                            confidence = _extract_confidence(entry)
+                            if confidence is None or confidence < TRIAGE_CONFIDENCE:
+                                fallback_candidates.append(cand)
+                                continue
+                            accepted_candidates.append(cand)
+                            accepted_map[cand.id] = entry
+                        triage_covered = len(accepted_candidates)
+                        triage_covered_total += triage_covered
+                        logger.info(
+                            "ai_columns.triage done req_id=%s accepted=%d fallback=%d duration=%.2f",
+                            batch.req_id,
+                            triage_covered,
+                            len(fallback_candidates),
+                            triage_duration,
+                        )
+                        if accepted_candidates:
+                            accepted_batch = BatchRequest(
+                                req_id=f"{batch.req_id}-triage",
+                                candidates=accepted_candidates,
+                                user_text=batch.user_text,
+                                prompt_tokens_est=batch.prompt_tokens_est,
+                                product_map=batch.product_map,
+                                depth=batch.depth,
+                                json_retry_count=0,
+                                adapted=batch.adapted,
+                                trunc_title=batch.trunc_title,
+                                trunc_desc=batch.trunc_desc,
                             )
-                            triage_duration = float(
-                                triage_payload.get("duration", 0.0) or 0.0
+                            triage_ok, _ = _finalize_batch_payload(
+                                accepted_batch,
+                                accepted_map,
                             )
-                            triage_usage = triage_payload.get("usage", {}) or {}
-                            triage_raw_text = triage_payload.get("raw_text")
-                            strict_map = triage_payload.get("strict_map") or {}
-                            accepted_candidates: List[Candidate] = []
-                            accepted_map: Dict[int, Dict[str, Any]] = {}
-                            fallback_candidates = []
-                            for cand in batch.candidates:
-                                entry = strict_map.get(cand.id)
-                                if not isinstance(entry, dict):
-                                    fallback_candidates.append(cand)
-                                    continue
-                                confidence = _extract_confidence(entry)
-                                if confidence is None or confidence < TRIAGE_CONFIDENCE:
-                                    fallback_candidates.append(cand)
-                                    continue
-                                accepted_candidates.append(cand)
-                                accepted_map[cand.id] = entry
-                            triage_covered = len(accepted_candidates)
-                            triage_covered_total += triage_covered
-                            logger.info(
-                                "ai_columns.triage done req_id=%s accepted=%d fallback=%d duration=%.2f",
-                                batch.req_id,
-                                triage_covered,
-                                len(fallback_candidates),
-                                triage_duration,
-                            )
-                            if accepted_candidates:
-                                accepted_batch = BatchRequest(
-                                    req_id=f"{batch.req_id}-triage",
-                                    candidates=accepted_candidates,
-                                    user_text=batch.user_text,
-                                    prompt_tokens_est=batch.prompt_tokens_est,
-                                    product_map=batch.product_map,
-                                    depth=batch.depth,
-                                    json_retry_count=0,
-                                    adapted=batch.adapted,
-                                    trunc_title=batch.trunc_title,
-                                    trunc_desc=batch.trunc_desc,
-                                )
-                                triage_ok, _ = _finalize_batch_payload(
-                                    accepted_batch,
-                                    accepted_map,
-                                )
-                                triage_result = {
-                                    "req_id": accepted_batch.req_id,
-                                    "candidates": accepted_candidates,
-                                    "ok": triage_ok,
-                                    "ko": {},
-                                    "usage": triage_usage,
-                                    "duration": triage_duration,
-                                    "retries": 0,
-                                    "prompt_tokens_est": triage_payload.get(
-                                        "prompt_tokens_est", 0
-                                    ),
-                                    "raw_text": triage_raw_text,
-                                }
-                        except Exception as exc:
-                            logger.warning(
-                                "ai_columns.triage failed req_id=%s err=%s",
-                                batch.req_id,
-                                exc,
-                            )
-                            fallback_candidates = list(batch.candidates)
-                            triage_result = None
-                            triage_usage = {}
-                            triage_duration = 0.0
-                            triage_raw_text = None
+                            triage_result = {
+                                "req_id": accepted_batch.req_id,
+                                "candidates": accepted_candidates,
+                                "ok": triage_ok,
+                                "ko": {},
+                                "usage": triage_usage,
+                                "duration": triage_duration,
+                                "retries": 0,
+                                "prompt_tokens_est": triage_payload.get(
+                                    "prompt_tokens_est", 0
+                                ),
+                                "raw_text": triage_raw_text,
+                            }
+                    except Exception as exc:
+                        logger.warning(
+                            "ai_columns.triage failed req_id=%s err=%s",
+                            batch.req_id,
+                            exc,
+                        )
+                        fallback_candidates = list(batch.candidates)
+                        triage_result = None
+                        triage_usage = {}
+                        triage_duration = 0.0
+                        triage_raw_text = None
 
                     if not allow_triage and TRIAGE_ENABLED:
                         triage_covered_total += 0
@@ -2173,6 +2238,14 @@ def run_ai_fill_job(
                         fallback_batch.adapted,
                     )
                     start_local = time.perf_counter()
+                    if _should_cancel():
+                        return {
+                            "status": "cancelled",
+                            "batch": fallback_batch,
+                            "result": None,
+                            "duration": 0.0,
+                            "error": "cancelled",
+                        }
                     try:
                         result = await asyncio.to_thread(
                             _call_batch_with_retries,
@@ -2272,8 +2345,12 @@ def run_ai_fill_job(
             return gathered
 
         while pending_groups:
+            if _should_cancel():
+                return _finalize_cancel()
             batches: List[BatchRequest] = []
             while pending_groups:
+                if _should_cancel():
+                    return _finalize_cancel()
                 chunk, depth, json_retry_count, adapted_flag = pending_groups.popleft()
                 if not chunk:
                     continue
@@ -2315,6 +2392,8 @@ def run_ai_fill_job(
             if not batches:
                 break
 
+            if _should_cancel():
+                return _finalize_cancel()
             loop_results = asyncio.run(_execute_batches(batches))
             made_progress = False
             for entry in loop_results:
@@ -2322,6 +2401,8 @@ def run_ai_fill_job(
                 batch = entry.get("batch")
                 if not batch:
                     continue
+                if status == "cancelled":
+                    return _finalize_cancel()
                 triage_payload = entry.get("triage_result")
                 if triage_payload:
                     triage_summary = process_result(triage_payload)
@@ -2734,6 +2815,7 @@ def run_ai_fill_job(
         },
         "triage_covered": triage_covered_total,
         "fallback_big": fallback_big_total,
+        "cancelled": False,
     }
 
 

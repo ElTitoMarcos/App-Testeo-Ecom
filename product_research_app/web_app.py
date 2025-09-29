@@ -43,6 +43,7 @@ from . import database
 from .db import get_db, get_last_performance_config
 from . import config
 from .services import ai_columns
+from . import ai_fill
 from .services import winner_score as winner_calc
 from .services import trends_service
 from .services.config import get_default_winner_weights
@@ -1007,6 +1008,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             rel = path[len("/static/") :]
             self._serve_static(rel)
             return
+        if path == "/ai_fill/progress":
+            self.handle_ai_fill_progress(parsed)
+            return
         if path == "/api/log-path":
             self._set_json()
             self.wfile.write(json.dumps({"path": str(LOG_PATH)}).encode("utf-8"))
@@ -1759,6 +1763,15 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/evaluate_all":
             self.handle_evaluate_all()
             return
+        if path == "/ai_fill/start":
+            self.handle_ai_fill_start()
+            return
+        if path == "/ai_fill/cancel":
+            self.handle_ai_fill_cancel()
+            return
+        if path == "/import/cancel":
+            self.handle_import_cancel()
+            return
         if path == "/setconfig":
             self.handle_setconfig()
             return
@@ -2496,6 +2509,71 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
 
         self.safe_write(lambda: self.send_json({"error": "unsupported_format"}, status=400))
+
+    def handle_ai_fill_start(self) -> None:
+        length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(length) if length else b""
+        product_ids = None
+        if body:
+            try:
+                data = json.loads(body.decode('utf-8'))
+                if isinstance(data, dict):
+                    raw_ids = data.get("product_ids")
+                    if isinstance(raw_ids, list):
+                        product_ids = [pid for pid in raw_ids if isinstance(pid, (int, str))]
+            except Exception:
+                product_ids = None
+        try:
+            job = ai_fill.start_job(product_ids, db_path=DB_PATH)
+        except Exception as exc:
+            logger.exception("ai_fill.start failed")
+            self.send_json({"error": str(exc)}, 500)
+            return
+        payload = {
+            "job_id": job.id,
+            "total": job.total,
+            "estimated_ms": job.est_ms,
+            "parallelism": job.parallelism,
+        }
+        self.send_json(payload, 200)
+
+    def handle_ai_fill_cancel(self) -> None:
+        length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(length) if length else b""
+        job_id = ""
+        if body:
+            try:
+                data = json.loads(body.decode('utf-8'))
+                if isinstance(data, dict):
+                    job_id = str(data.get("job_id", ""))
+            except Exception:
+                job_id = ""
+        if not job_id:
+            self.send_json({"ok": False, "error": "missing job_id"}, 400)
+            return
+        if not ai_fill.cancel_job(job_id):
+            self.send_json({"ok": False, "error": "unknown job"}, 404)
+            return
+        self.send_json({"ok": True}, 200)
+
+    def handle_ai_fill_progress(self, parsed) -> None:
+        params = parse_qs(parsed.query)
+        job_id = params.get("job_id", [""])[0]
+        if not job_id:
+            self.send_json({"error": "missing job_id"}, 400)
+            return
+        job = ai_fill.get_job(job_id)
+        if not job:
+            self.send_json({"error": "unknown job"}, 404)
+            return
+        payload = ai_fill.job_to_dict(job)
+        self.send_json(payload, 200)
+
+    def handle_import_cancel(self) -> None:
+        length = int(self.headers.get('Content-Length', 0))
+        if length:
+            _ = self.rfile.read(length)
+        self.send_json({"ok": True}, 200)
 
     def handle_evaluate_all(self):
         conn = ensure_db()
