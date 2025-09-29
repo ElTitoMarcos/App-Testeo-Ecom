@@ -7,10 +7,11 @@ import math
 import os
 import random
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .. import config, database, gpt
 from ..config import (
@@ -33,13 +34,54 @@ DB_PATH = APP_DIR / "data.sqlite3"
 CALIBRATION_CACHE_FILE = APP_DIR / "ai_calibration_cache.json"
 
 AI_FIELDS = ("desire", "desire_magnitude", "awareness_level", "competition_level")
-DEFAULT_BATCH_SIZE = int(os.getenv("PRAPP_AI_BATCH_SIZE", "8"))
-MIN_BATCH_SIZE = 4
-MAX_RETRIES_MISSING = int(os.getenv("PRAPP_AI_RETRIES_MISSING", "2"))
 
-AI_MAX_CONCURRENCY = int(os.getenv("AI_MAX_CONCURRENCY", "3"))
-AI_BATCH_MAX_ITEMS = int(os.getenv("AI_BATCH_MAX_ITEMS", "12"))
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = str(os.getenv(name, str(default))).strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+DEFAULT_BATCH_SIZE = max(8, _env_int("PRAPP_AI_COLUMNS_BATCH_SIZE", 32))
+MIN_BATCH_SIZE = 8
+MAX_RETRIES_MISSING = _env_int("PRAPP_AI_RETRIES_MISSING", 2)
+
+RAW_MAX_CONCURRENCY = max(1, _env_int("PRAPP_OPENAI_MAX_CONCURRENCY", 8))
+OPENAI_HEADROOM = max(0.1, min(0.99, _env_float("PRAPP_OPENAI_HEADROOM", 0.90)))
+AI_MAX_CONCURRENCY = max(
+    1,
+    min(
+        RAW_MAX_CONCURRENCY,
+        int(max(1, math.floor(RAW_MAX_CONCURRENCY * OPENAI_HEADROOM))),
+    ),
+)
+AI_BATCH_MAX_ITEMS = _env_int("AI_BATCH_MAX_ITEMS", 12)
+
+STRICT_JSON_ENABLED = _env_bool("PRAPP_AI_COLUMNS_STRICT_JSON", True)
+MAX_TOKENS_PER_ITEM = max(32, _env_int("PRAPP_AI_COLUMNS_MAX_TOKENS_PER_ITEM", 128))
+SAFE_CONTEXT_TOKENS = max(4000, _env_int("PRAPP_OPENAI_CONTEXT_SAFE_TOKENS", 120000))
 StatusCallback = Callable[..., None]
+
+TRIAGE_ENABLED = _env_bool("PRAPP_AI_TRIAGE_ENABLED", True)
+TRIAGE_MODEL = os.getenv("PRAPP_AI_TRIAGE_MODEL", "gpt-4o-mini") or "gpt-4o-mini"
+TRIAGE_CONFIDENCE = max(0.0, min(1.0, _env_float("PRAPP_AI_TRIAGE_CONFIDENCE", 0.80)))
 
 AI_COST = get_ai_cost_config()
 try:
@@ -89,6 +131,49 @@ class BatchRequest:
     user_text: str
     prompt_tokens_est: int
     product_map: Dict[int, str]
+    depth: int = 0
+    json_retry_count: int = 0
+    adapted: bool = False
+    trunc_title: int = 0
+    trunc_desc: int = 0
+
+
+class BatchAdaptationRequired(Exception):
+    """Raised when a batch should be split before retrying."""
+
+    def __init__(self, reason: str, message: str, *, allow_split: bool = True):
+        super().__init__(message)
+        self.reason = reason
+        self.allow_split = allow_split
+
+
+def _estimate_batch_tokens(batch: BatchRequest) -> int:
+    """Estimate total tokens (prompt + completion headroom) for a batch."""
+
+    completion_budget = len(batch.candidates) * MAX_TOKENS_PER_ITEM
+    return max(0, int(batch.prompt_tokens_est)) + completion_budget
+
+
+def _should_downshift(batch: BatchRequest) -> bool:
+    if len(batch.candidates) <= MIN_BATCH_SIZE:
+        return False
+    estimated = _estimate_batch_tokens(batch)
+    return estimated >= SAFE_CONTEXT_TOKENS
+
+
+def _detect_adaptation_reason(exc: Exception) -> Optional[str]:
+    message = str(exc).lower()
+    status = getattr(exc, "status_code", None)
+    try:
+        status = int(status) if status is not None else None
+    except Exception:
+        status = None
+    if status == 429 or "rate limit" in message or "too many requests" in message:
+        return "rate_limit"
+    context_markers = ("context", "maximum context", "max_tokens", "length")
+    if any(marker in message for marker in context_markers):
+        return "context"
+    return None
 
 
 def _format_job_id(job_id: Optional[int]) -> str:
@@ -329,12 +414,15 @@ def _log_ko_event(
 
 
 SYSTEM_PROMPT = (
-    "Eres un analista de marketing. Devuelve exclusivamente JSONL válido, una línea JSON por producto solicitado. "
-    "Cada registro debe incluir desire (string corta), desire_magnitude (0-1 o etiqueta), "
-    "awareness_level (problem|solution|product|most) y competition_level (low|mid|high), sin texto adicional."
+    "Eres un analista de marketing. Devuelve exclusivamente un array JSON. "
+    "Cada elemento debe corresponder al producto solicitado en el mismo orden y contener exactamente las claves: "
+    "aw, aw_m, d, d_m, c, c_m, confidence. No añadas notas ni texto adicional. "
+    "aw y c deben ser 'Low', 'Medium' o 'High'. aw_m, d_m y c_m son números entre 0 y 100. "
+    "confidence es un número entre 0 y 1 (por ejemplo 0.87)."
 )
 USER_INSTRUCTION = (
-    "Analiza los siguientes productos y responde solo con JSONL. El conjunto de product_id debe coincidir exactamente con los solicitados."
+    "Analiza los siguientes productos y responde únicamente con un array JSON siguiendo el formato indicado. "
+    "El número de objetos debe coincidir con los product_id solicitados y mantener el mismo orden."
 )
 
 def _truncate_text(value: Any, limit: int) -> str:
@@ -435,6 +523,10 @@ def _build_batch_request(
     candidates: List[Candidate],
     trunc_title: int,
     trunc_desc: int,
+    *,
+    depth: int = 0,
+    json_retry_count: int = 0,
+    adapted: bool = False,
 ) -> BatchRequest:
     product_lines: List[str] = []
     product_map: Dict[int, str] = {}
@@ -454,6 +546,11 @@ def _build_batch_request(
         user_text=user_text,
         prompt_tokens_est=prompt_tokens_est,
         product_map=product_map,
+        depth=depth,
+        json_retry_count=json_retry_count,
+        adapted=adapted,
+        trunc_title=trunc_title,
+        trunc_desc=trunc_desc,
     )
 
 
@@ -518,6 +615,113 @@ def _build_missing_prompt(batch: BatchRequest, missing_ids: List[int]) -> str:
     return "\n".join(part for part in (prompt, "### PRODUCTOS", body) if part)
 
 
+def _parse_strict_json_payload(
+    raw: Dict[str, Any],
+    expected_ids: Sequence[int],
+    *,
+    require_confidence: bool = False,
+) -> Tuple[Dict[int, Dict[str, Any]], str]:
+    parsed_json, text_content = gpt._parse_message_content(raw)
+    payload_list: Optional[List[Any]] = None
+    if isinstance(parsed_json, list):
+        payload_list = list(parsed_json)
+    elif isinstance(parsed_json, dict):
+        maybe = parsed_json.get("results")
+        if isinstance(maybe, list):
+            payload_list = list(maybe)
+    raw_text: Optional[str] = None
+    if payload_list is None:
+        source_text = text_content
+        if not source_text and parsed_json is not None:
+            try:
+                source_text = json.dumps(parsed_json, ensure_ascii=False)
+            except Exception:
+                source_text = None
+        if not source_text:
+            raise ValueError("Respuesta vacía o sin JSON")
+        try:
+            loaded = json.loads(source_text)
+        except Exception as exc:
+            raise ValueError("Respuesta no es JSON válido") from exc
+        if not isinstance(loaded, list):
+            raise ValueError("Se esperaba un array JSON")
+        payload_list = list(loaded)
+        raw_text = source_text
+    if payload_list is None:
+        raise ValueError("Respuesta sin array JSON")
+    if len(payload_list) != len(expected_ids):
+        raise ValueError(
+            f"Longitud incorrecta: respuesta={len(payload_list)} esperada={len(expected_ids)}"
+        )
+    result: Dict[int, Dict[str, Any]] = {}
+    serialisable: List[Dict[str, Any]] = []
+    for pid, item in zip(expected_ids, payload_list):
+        if not isinstance(item, dict):
+            raise ValueError("Cada elemento del array debe ser un objeto JSON")
+        aw_raw = item.get("aw")
+        c_raw = item.get("c")
+        d_raw = item.get("d")
+        aw_score = _coerce_percent(item.get("aw_m"), label="aw_m")
+        desire_score = _coerce_percent(item.get("d_m"), label="d_m")
+        comp_score = _coerce_percent(item.get("c_m"), label="c_m")
+        confidence = _coerce_confidence(item.get("confidence"), required=require_confidence)
+        if not isinstance(aw_raw, str):
+            raise ValueError("aw debe ser string")
+        if not isinstance(c_raw, str):
+            raise ValueError("c debe ser string")
+        if not isinstance(d_raw, (str, type(None))):
+            raise ValueError("d debe ser string")
+        aw_label = aw_raw.strip().title()
+        comp_label = c_raw.strip().title()
+        if aw_label not in {"Low", "Medium", "High"}:
+            raise ValueError("aw fuera de rango")
+        if comp_label not in {"Low", "Medium", "High"}:
+            raise ValueError("c fuera de rango")
+        desire_text = cleanse(d_raw or "").strip()
+        if not desire_text and isinstance(d_raw, str):
+            desire_text = d_raw.strip()
+        desire_label = _tri_label_from_percent(desire_score)
+        comp_level = _tri_label_from_percent(comp_score)
+        awareness = _map_awareness_bucket(aw_label, aw_score)
+        audit_payload = {
+            "aw_bucket": aw_label,
+            "aw_pct": aw_score,
+            "desire_pct": desire_score,
+            "competition_pct": comp_score,
+        }
+        if confidence is not None:
+            audit_payload["confidence"] = confidence
+        result[int(pid)] = {
+            "product_id": int(pid),
+            "desire": desire_text,
+            "desire_statement": desire_text,
+            "desire_magnitude": desire_label,
+            "awareness_level": awareness,
+            "competition_level": comp_level,
+            "_audit": audit_payload,
+        }
+        serialisable.append(
+            {
+                "aw": aw_label,
+                "aw_m": aw_score,
+                "d": desire_text,
+                "d_m": desire_score,
+                "c": comp_label,
+                "c_m": comp_score,
+                **({"confidence": confidence} if confidence is not None else {}),
+            }
+        )
+    if raw_text is None:
+        raw_text = json.dumps(serialisable, ensure_ascii=False, separators=(",", ":"))
+    return result, raw_text
+
+
+def _parse_strict_json_text(text: str, expected_ids: Sequence[int]) -> Dict[int, Dict[str, Any]]:
+    fake_raw = {"choices": [{"message": {"content": text}}]}
+    parsed, _ = _parse_strict_json_payload(fake_raw, expected_ids)
+    return parsed
+
+
 def _recover_missing_sync(
     batch: BatchRequest,
     api_key: str,
@@ -565,6 +769,105 @@ def _recover_missing_sync(
         to_fill = [pid for pid in missing_ids if pid not in recovered]
         retries_used += 1
     return recovered, retries_used
+
+
+def _finalize_batch_payload(
+    batch: BatchRequest, strict_map: Mapping[int, Dict[str, Any]]
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, str]]:
+    data_map = {str(pid): payload for pid, payload in strict_map.items()}
+    ok: Dict[str, Dict[str, Any]] = {}
+    ko: Dict[str, str] = {}
+
+    remaining_missing = [
+        cand.id for cand in batch.candidates if str(cand.id) not in data_map
+    ]
+    for missing_id in remaining_missing:
+        ko[str(missing_id)] = "missing"
+
+    for cand in batch.candidates:
+        pid = str(cand.id)
+        entry = data_map.get(pid)
+        if not isinstance(entry, dict):
+            if pid not in ko:
+                ko[pid] = "missing"
+            continue
+        desire_payload = dict(entry)
+        draft_raw = str(
+            desire_payload.get("desire_statement")
+            or desire_payload.get("desire")
+            or ""
+        ).strip()
+        extra_title = (cand.extra or {}).get("title") if isinstance(cand.extra, dict) else None
+        title = str(cand.payload.get("name") or extra_title or "")
+        if len(draft_raw) < 280 or looks_like_product_desc(draft_raw, title):
+            refined = _refine_desire_statement(cand, draft_raw)
+            if isinstance(refined, dict):
+                merged = dict(desire_payload)
+                merged.update(refined)
+                desire_payload = merged
+                draft_raw = str(
+                    desire_payload.get("desire_statement")
+                    or desire_payload.get("desire")
+                    or ""
+                ).strip()
+        if not draft_raw:
+            draft_raw = str(entry.get("desire") or "")
+        cleaned_txt = cleanse(draft_raw)
+        if not cleaned_txt:
+            cleaned_txt = draft_raw
+        cleaned_txt = cleaned_txt.strip()
+        desire_primary = desire_payload.get("desire_primary")
+        if desire_primary is None:
+            desire_primary = entry.get("desire_primary")
+        desire_magnitude_raw = desire_payload.get("desire_magnitude")
+        if desire_magnitude_raw is None:
+            desire_magnitude_raw = entry.get("desire_magnitude")
+        if isinstance(desire_magnitude_raw, dict):
+            desire_magnitude_raw = desire_magnitude_raw.get("overall")
+        ok[pid] = {
+            "desire": cleaned_txt,
+            "desire_primary": desire_primary,
+            "desire_magnitude": gpt._norm_tri(desire_magnitude_raw),
+            "awareness_level": gpt._norm_awareness(desire_payload.get("awareness_level")),
+            "competition_level": gpt._norm_tri(
+                desire_payload.get("competition_level")
+            ),
+        }
+    return ok, ko
+
+
+def _merge_usage(*usage_maps: Mapping[str, Any]) -> Dict[str, Any]:
+    combined: Dict[str, Any] = {}
+    for usage in usage_maps:
+        if not usage:
+            continue
+        for key, value in usage.items():
+            if isinstance(value, (int, float)):
+                prev = combined.get(key)
+                if isinstance(prev, (int, float)):
+                    combined[key] = float(prev) + float(value)
+                else:
+                    combined[key] = float(value)
+            else:
+                combined.setdefault(key, value)
+    return combined
+
+
+def _extract_confidence(payload: Mapping[str, Any]) -> Optional[float]:
+    if not isinstance(payload, Mapping):
+        return None
+    audit = payload.get("_audit")
+    value = None
+    if isinstance(audit, Mapping):
+        value = audit.get("confidence")
+    if value is None:
+        value = payload.get("confidence")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
 
 
 def _percentile(values: List[float], pct: float) -> float:
@@ -753,9 +1056,61 @@ def _parse_score(val: Any) -> Optional[float]:
             return 0.2
         if txt.startswith("med"):
             return 0.5
-        if txt.startswith("high"):
-            return 0.8
+    if txt.startswith("high"):
+        return 0.8
     return None
+
+
+def _coerce_percent(value: Any, *, label: str) -> float:
+    if isinstance(value, (int, float)):
+        num = float(value)
+    elif isinstance(value, str):
+        try:
+            num = float(value.strip())
+        except Exception as exc:
+            raise ValueError(f"{label} debe ser numérico") from exc
+    else:
+        raise ValueError(f"{label} debe ser numérico")
+    if not 0 <= num <= 100:
+        raise ValueError(f"{label} fuera de rango (0-100)")
+    return float(num)
+
+
+def _coerce_confidence(value: Any, *, required: bool) -> Optional[float]:
+    if value is None:
+        if required:
+            raise ValueError("confidence requerido")
+        return None
+    try:
+        num = float(value)
+    except Exception as exc:
+        raise ValueError("confidence debe ser numérico") from exc
+    if math.isnan(num) or num < 0.0 or num > 1.0:
+        raise ValueError("confidence fuera de rango (0-1)")
+    return float(num)
+
+
+def _tri_label_from_percent(percent: float) -> str:
+    if percent <= 33:
+        return "Low"
+    if percent >= 67:
+        return "High"
+    return "Medium"
+
+
+def _map_awareness_bucket(bucket: str, score: float) -> str:
+    canonical = (bucket or "").strip().lower()
+    if canonical == "low":
+        if score <= 10:
+            return "Unaware"
+        return "Problem-Aware"
+    if canonical == "medium":
+        return "Solution-Aware"
+    if canonical == "high":
+        if score >= 90:
+            return "Most Aware"
+        return "Product-Aware"
+    return gpt._norm_awareness(bucket)
 
 
 def _classify_scores(
@@ -887,6 +1242,20 @@ def _call_batch_with_retries(
     model: str,
     max_retries: int,
 ) -> Dict[str, Any]:
+    def _error_payload(error_message: str, duration: float, retries: int) -> Dict[str, Any]:
+        return {
+            "req_id": batch.req_id,
+            "candidates": batch.candidates,
+            "ok": {},
+            "ko": {str(cand.id): error_message for cand in batch.candidates},
+            "usage": {},
+            "duration": duration,
+            "retries": retries,
+            "error": error_message,
+            "prompt_tokens_est": batch.prompt_tokens_est,
+            "raw_text": None,
+        }
+
     attempt = 0
     while True:
         attempt += 1
@@ -908,146 +1277,78 @@ def _call_batch_with_retries(
             )
         except gpt.OpenAIError as exc:
             duration = time.perf_counter() - start_ts
+            reason = _detect_adaptation_reason(exc)
+            if reason and len(batch.candidates) > 1:
+                raise BatchAdaptationRequired(reason, str(exc), allow_split=True) from exc
             if attempt <= max_retries:
                 sleep_for = min(10.0, 0.5 * (2 ** (attempt - 1))) + random.uniform(0.05, 0.25)
                 time.sleep(sleep_for)
                 continue
-            error_message = str(exc)
-            return {
-                "req_id": batch.req_id,
-                "candidates": batch.candidates,
-                "ok": {},
-                "ko": {str(cand.id): error_message for cand in batch.candidates},
-                "usage": {},
-                "duration": duration,
-                "retries": attempt,
-                "error": error_message,
-                "prompt_tokens_est": tokens_est,
-                "raw_text": None,
-            }
-
-        try:
-            jsonl_payload = _extract_jsonl_payload(raw)
-        except gpt.InvalidJSONError as exc:
-            duration = time.perf_counter() - start_ts
-            if attempt <= max_retries:
-                sleep_for = min(10.0, 0.5 * (2 ** (attempt - 1))) + random.uniform(0.05, 0.25)
-                time.sleep(sleep_for)
-                continue
-            error_message = str(exc)
-            return {
-                "req_id": batch.req_id,
-                "candidates": batch.candidates,
-                "ok": {},
-                "ko": {str(cand.id): error_message for cand in batch.candidates},
-                "usage": {},
-                "duration": duration,
-                "retries": attempt,
-                "error": error_message,
-                "prompt_tokens_est": tokens_est,
-                "raw_text": None,
-            }
+            return _error_payload(str(exc), duration, attempt)
 
         expected_ids = [cand.id for cand in batch.candidates]
-        strict_map: Dict[int, Dict[str, Any]] = {}
         retries_missing_used = 0
-        try:
-            strict_map = parse_jsonl_and_validate(jsonl_payload, expected_ids)
-        except ValueError as exc:
-            partial_map = _parse_jsonl_loose(jsonl_payload)
-            returned_ids = list(partial_map.keys())
-            missing_ids = [pid for pid in expected_ids if pid not in partial_map]
-            log_partial_ko(
-                "call_openai",
-                expected_ids,
-                returned_ids,
-                len(batch.candidates),
-                model,
-                note=str(exc),
-            )
-            recovered_payload: Dict[int, Dict[str, Any]] = {}
-            if missing_ids:
-                recovered_payload, retries_missing_used = _recover_missing_sync(
-                    batch,
-                    api_key,
+        raw_payload_text: Optional[str] = None
+        strict_map: Dict[int, Dict[str, Any]] = {}
+
+        if STRICT_JSON_ENABLED:
+            duration = time.perf_counter() - start_ts
+            try:
+                strict_map, raw_payload_text = _parse_strict_json_payload(raw, expected_ids)
+            except ValueError as exc:
+                if batch.json_retry_count < 1 and len(batch.candidates) > 1:
+                    raise BatchAdaptationRequired("json_parse", str(exc), allow_split=True) from exc
+                return _error_payload(str(exc), duration, attempt)
+        else:
+            try:
+                jsonl_payload = _extract_jsonl_payload(raw)
+            except gpt.InvalidJSONError as exc:
+                duration = time.perf_counter() - start_ts
+                if attempt <= max_retries:
+                    sleep_for = min(10.0, 0.5 * (2 ** (attempt - 1))) + random.uniform(0.05, 0.25)
+                    time.sleep(sleep_for)
+                    continue
+                return _error_payload(str(exc), duration, attempt)
+
+            raw_payload_text = jsonl_payload
+            try:
+                strict_map = parse_jsonl_and_validate(jsonl_payload, expected_ids)
+            except ValueError as exc:
+                partial_map = _parse_jsonl_loose(jsonl_payload)
+                returned_ids = list(partial_map.keys())
+                missing_ids = [pid for pid in expected_ids if pid not in partial_map]
+                log_partial_ko(
+                    "call_openai",
+                    expected_ids,
+                    returned_ids,
+                    len(batch.candidates),
                     model,
-                    missing_ids,
+                    note=str(exc),
                 )
-            combined = {**partial_map, **recovered_payload}
-            pending_after = [pid for pid in expected_ids if pid not in combined]
-            if not pending_after:
-                strict_map = combined
-                if recovered_payload:
-                    log_recovered(
-                        "call_openai",
-                        retries_missing_used,
-                        len(batch.candidates),
-                        sorted(recovered_payload.keys()),
+                recovered_payload: Dict[int, Dict[str, Any]] = {}
+                if missing_ids:
+                    recovered_payload, retries_missing_used = _recover_missing_sync(
+                        batch,
+                        api_key,
+                        model,
+                        missing_ids,
                     )
-            else:
-                strict_map = combined
+                combined = {**partial_map, **recovered_payload}
+                pending_after = [pid for pid in expected_ids if pid not in combined]
+                if not pending_after:
+                    strict_map = combined
+                    if recovered_payload:
+                        log_recovered(
+                            "call_openai",
+                            retries_missing_used,
+                            len(batch.candidates),
+                            sorted(recovered_payload.keys()),
+                        )
+                else:
+                    strict_map = combined
 
         usage = raw.get("usage", {}) or {}
-        ok: Dict[str, Dict[str, Any]] = {}
-        ko: Dict[str, str] = {}
-        data_map = {str(pid): payload for pid, payload in strict_map.items()}
-        remaining_missing = [
-            cand.id for cand in batch.candidates if str(cand.id) not in data_map
-        ]
-        for missing_id in remaining_missing:
-            ko[str(missing_id)] = "missing"
-
-        for cand in batch.candidates:
-            pid = str(cand.id)
-            entry = data_map.get(pid)
-            if not isinstance(entry, dict):
-                if pid not in ko:
-                    ko[pid] = "missing"
-                continue
-            desire_payload = dict(entry)
-            draft_raw = str(
-                desire_payload.get("desire_statement")
-                or desire_payload.get("desire")
-                or ""
-            ).strip()
-            extra_title = (cand.extra or {}).get("title") if isinstance(cand.extra, dict) else None
-            title = str(cand.payload.get("name") or extra_title or "")
-            if len(draft_raw) < 280 or looks_like_product_desc(draft_raw, title):
-                refined = _refine_desire_statement(cand, draft_raw)
-                if isinstance(refined, dict):
-                    merged = dict(desire_payload)
-                    merged.update(refined)
-                    desire_payload = merged
-                    draft_raw = str(
-                        desire_payload.get("desire_statement")
-                        or desire_payload.get("desire")
-                        or ""
-                    ).strip()
-            if not draft_raw:
-                draft_raw = str(entry.get("desire") or "")
-            cleaned_txt = cleanse(draft_raw)
-            if not cleaned_txt:
-                cleaned_txt = draft_raw
-            cleaned_txt = cleaned_txt.strip()
-            desire_primary = desire_payload.get("desire_primary")
-            if desire_primary is None:
-                desire_primary = entry.get("desire_primary")
-            desire_magnitude_raw = desire_payload.get("desire_magnitude")
-            if desire_magnitude_raw is None:
-                desire_magnitude_raw = entry.get("desire_magnitude")
-            if isinstance(desire_magnitude_raw, dict):
-                desire_magnitude_raw = desire_magnitude_raw.get("overall")
-            ok[pid] = {
-                "desire": cleaned_txt,
-                "desire_primary": desire_primary,
-                "desire_magnitude": gpt._norm_tri(desire_magnitude_raw),
-                "awareness_level": gpt._norm_awareness(
-                    desire_payload.get("awareness_level")
-                ),
-                "competition_level": gpt._norm_tri(
-                    desire_payload.get("competition_level")
-                ),
-            }
+        ok, ko = _finalize_batch_payload(batch, strict_map)
 
         duration = time.perf_counter() - start_ts
         return {
@@ -1059,8 +1360,48 @@ def _call_batch_with_retries(
             "duration": duration,
             "retries": attempt + retries_missing_used,
             "prompt_tokens_est": tokens_est,
-            "raw_text": jsonl_payload,
+            "raw_text": raw_payload_text,
         }
+
+
+def _call_triage_batch(
+    batch: BatchRequest,
+    *,
+    api_key: str,
+    model: str,
+) -> Dict[str, Any]:
+    tokens_est = batch.prompt_tokens_est
+    max_tokens = _max_tokens_for_batch(len(batch.candidates))
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": batch.user_text},
+    ]
+    start_ts = time.perf_counter()
+    raw = gpt.call_gpt(
+        messages=messages,
+        api_key=api_key,
+        model=model,
+        temperature=0.2,
+        max_tokens=max_tokens,
+        tokens_estimate=tokens_est,
+    )
+    duration = time.perf_counter() - start_ts
+    expected_ids = [cand.id for cand in batch.candidates]
+    strict_map, raw_payload_text = _parse_strict_json_payload(
+        raw,
+        expected_ids,
+        require_confidence=True,
+    )
+    usage = raw.get("usage", {}) or {}
+    return {
+        "req_id": batch.req_id,
+        "candidates": batch.candidates,
+        "strict_map": strict_map,
+        "usage": usage,
+        "duration": duration,
+        "raw_text": raw_payload_text,
+        "prompt_tokens_est": tokens_est,
+    }
 
 
 def _calculate_cost(usage: Dict[str, Any], price_in: float, price_out: float) -> float:
@@ -1384,6 +1725,10 @@ def run_ai_fill_job(
             "ko": fail_reasons,
             "skipped_existing": skipped_existing,
             "total_requested": len(requested_ids),
+            "json_retry": 0,
+            "batch_adapted": 0,
+            "triage_covered": 0,
+            "fallback_big": 0,
         }
 
     candidate_map = {cand.id: cand for cand in candidates}
@@ -1488,6 +1833,10 @@ def run_ai_fill_job(
             "ko": fail_reasons,
             "skipped_existing": skipped_existing,
             "total_requested": len(requested_ids),
+            "json_retry": 0,
+            "batch_adapted": 0,
+            "triage_covered": 0,
+            "fallback_big": 0,
         }
 
     desire_scores: List[Tuple[str, float]] = []
@@ -1495,6 +1844,10 @@ def run_ai_fill_job(
     success_records: Dict[int, Dict[str, Any]] = {}
     request_latencies: List[float] = []
     processed_batches = 0
+    json_retry_total = 0
+    batch_adaptations_total = 0
+    triage_covered_total = 0
+    fallback_big_total = 0
 
     def process_result(result: Dict[str, Any]) -> Dict[str, Any]:
         nonlocal cost_spent, counts_with_cost, processed_batches
@@ -1645,46 +1998,262 @@ def run_ai_fill_job(
         max_batch_size = min(AI_MAX_PRODUCTS_PER_CALL, len(pending_candidates))
         max_batch_size = max(AI_MIN_PRODUCTS_PER_CALL, max_batch_size)
         max_batch_size = max(1, min(AI_BATCH_MAX_ITEMS, max_batch_size))
-        logger.info("ai.run start items_total=%d batch_init=%d", total_items, max_batch_size)
+        logger.info(
+            "ai.run start items_total=%d batch_init=%d concurrency_target=%d strict_json=%s",
+            total_items,
+            max_batch_size,
+            AI_MAX_CONCURRENCY,
+            STRICT_JSON_ENABLED,
+        )
         req_counter = 0
+        pending_groups: Deque[Tuple[List[Candidate], int, int, bool]] = deque()
+        for start in range(0, len(pending_candidates), max_batch_size):
+            chunk = pending_candidates[start : start + max_batch_size]
+            if not chunk:
+                continue
+            pending_groups.append((chunk, 0, 0, False))
 
         async def _execute_batches(batches: List[BatchRequest]) -> List[Dict[str, Any]]:
             semaphore = asyncio.Semaphore(max(1, AI_MAX_CONCURRENCY))
 
             async def _run_single(batch: BatchRequest) -> Dict[str, Any]:
+                nonlocal triage_covered_total, fallback_big_total
                 async with semaphore:
-                    logger.info(
-                        "ai_columns.batch start req_id=%s items=%d prompt_tokens_est=%d",
-                        batch.req_id,
-                        len(batch.candidates),
-                        batch.prompt_tokens_est,
+                    original_batch = batch
+                    triage_result: Optional[Dict[str, Any]] = None
+                    triage_usage: Dict[str, Any] = {}
+                    triage_duration = 0.0
+                    triage_raw_text: Optional[str] = None
+                    fallback_candidates: List[Candidate] = list(batch.candidates)
+                    allow_triage = (
+                        TRIAGE_ENABLED
+                        and batch.candidates
+                        and batch.depth == 0
+                        and not batch.adapted
                     )
-                    start_ts = time.perf_counter()
+
+                    if allow_triage:
+                        logger.info(
+                            "ai_columns.triage start req_id=%s model=%s items=%d confidence_min=%.2f strict_json=%s",
+                            batch.req_id,
+                            TRIAGE_MODEL,
+                            len(batch.candidates),
+                            TRIAGE_CONFIDENCE,
+                            STRICT_JSON_ENABLED,
+                        )
+                        try:
+                            triage_payload = await asyncio.to_thread(
+                                _call_triage_batch,
+                                batch,
+                                api_key=api_key,
+                                model=TRIAGE_MODEL,
+                            )
+                            triage_duration = float(
+                                triage_payload.get("duration", 0.0) or 0.0
+                            )
+                            triage_usage = triage_payload.get("usage", {}) or {}
+                            triage_raw_text = triage_payload.get("raw_text")
+                            strict_map = triage_payload.get("strict_map") or {}
+                            accepted_candidates: List[Candidate] = []
+                            accepted_map: Dict[int, Dict[str, Any]] = {}
+                            fallback_candidates = []
+                            for cand in batch.candidates:
+                                entry = strict_map.get(cand.id)
+                                if not isinstance(entry, dict):
+                                    fallback_candidates.append(cand)
+                                    continue
+                                confidence = _extract_confidence(entry)
+                                if confidence is None or confidence < TRIAGE_CONFIDENCE:
+                                    fallback_candidates.append(cand)
+                                    continue
+                                accepted_candidates.append(cand)
+                                accepted_map[cand.id] = entry
+                            triage_covered = len(accepted_candidates)
+                            triage_covered_total += triage_covered
+                            logger.info(
+                                "ai_columns.triage done req_id=%s accepted=%d fallback=%d duration=%.2f",
+                                batch.req_id,
+                                triage_covered,
+                                len(fallback_candidates),
+                                triage_duration,
+                            )
+                            if accepted_candidates:
+                                accepted_batch = BatchRequest(
+                                    req_id=f"{batch.req_id}-triage",
+                                    candidates=accepted_candidates,
+                                    user_text=batch.user_text,
+                                    prompt_tokens_est=batch.prompt_tokens_est,
+                                    product_map=batch.product_map,
+                                    depth=batch.depth,
+                                    json_retry_count=0,
+                                    adapted=batch.adapted,
+                                    trunc_title=batch.trunc_title,
+                                    trunc_desc=batch.trunc_desc,
+                                )
+                                triage_ok, _ = _finalize_batch_payload(
+                                    accepted_batch,
+                                    accepted_map,
+                                )
+                                triage_result = {
+                                    "req_id": accepted_batch.req_id,
+                                    "candidates": accepted_candidates,
+                                    "ok": triage_ok,
+                                    "ko": {},
+                                    "usage": triage_usage,
+                                    "duration": triage_duration,
+                                    "retries": 0,
+                                    "prompt_tokens_est": triage_payload.get(
+                                        "prompt_tokens_est", 0
+                                    ),
+                                    "raw_text": triage_raw_text,
+                                }
+                        except Exception as exc:
+                            logger.warning(
+                                "ai_columns.triage failed req_id=%s err=%s",
+                                batch.req_id,
+                                exc,
+                            )
+                            fallback_candidates = list(batch.candidates)
+                            triage_result = None
+                            triage_usage = {}
+                            triage_duration = 0.0
+                            triage_raw_text = None
+
+                    if not allow_triage and TRIAGE_ENABLED:
+                        triage_covered_total += 0
+
+                    if not fallback_candidates:
+                        result_payload = triage_result or {
+                            "req_id": f"{batch.req_id}-triage",
+                            "candidates": batch.candidates,
+                            "ok": {},
+                            "ko": {},
+                            "usage": triage_usage,
+                            "duration": triage_duration,
+                            "retries": 0,
+                            "prompt_tokens_est": batch.prompt_tokens_est,
+                            "raw_text": triage_raw_text,
+                        }
+                        final_result = {
+                            "req_id": batch.req_id,
+                            "candidates": batch.candidates,
+                            "ok": result_payload.get("ok", {}),
+                            "ko": {},
+                            "usage": result_payload.get("usage", {}),
+                            "duration": result_payload.get("duration", triage_duration),
+                            "retries": 0,
+                            "prompt_tokens_est": result_payload.get(
+                                "prompt_tokens_est", batch.prompt_tokens_est
+                            ),
+                            "raw_text": result_payload.get("raw_text"),
+                        }
+                        return {
+                            "status": "ok",
+                            "batch": batch,
+                            "result": final_result,
+                            "duration": float(final_result.get("duration", 0.0) or 0.0),
+                            "error": None,
+                        }
+
+                    fallback_batch = _build_batch_request(
+                        f"{batch.req_id}-main",
+                        fallback_candidates,
+                        batch.trunc_title,
+                        batch.trunc_desc,
+                        depth=batch.depth,
+                        json_retry_count=batch.json_retry_count,
+                        adapted=batch.adapted,
+                    )
+
+                    fallback_big_total += len(fallback_candidates)
+
+                    logger.info(
+                        "ai_columns.batch start req_id=%s model=%s items=%d prompt_tokens_est=%d strict_json=%s batch_adapted=%s",
+                        fallback_batch.req_id,
+                        model,
+                        len(fallback_batch.candidates),
+                        fallback_batch.prompt_tokens_est,
+                        STRICT_JSON_ENABLED,
+                        fallback_batch.adapted,
+                    )
+                    start_local = time.perf_counter()
                     try:
                         result = await asyncio.to_thread(
                             _call_batch_with_retries,
-                            batch,
+                            fallback_batch,
                             api_key=api_key,
                             model=model,
                             max_retries=max_retries,
                         )
-                        duration = time.perf_counter() - start_ts
+                        duration = time.perf_counter() - start_local
                         if isinstance(result, dict) and "duration" not in result:
                             result["duration"] = duration
+                        triage_ok = triage_result.get("ok", {}) if triage_result else {}
+                        combined_ok: Dict[str, Dict[str, Any]] = {}
+                        combined_ok.update(triage_ok)
+                        combined_ok.update(result.get("ok", {}) or {})
+                        combined_ko = dict(result.get("ko", {}) or {})
+                        combined_usage = _merge_usage(
+                            triage_result.get("usage") if triage_result else {},
+                            result.get("usage", {}),
+                        )
+                        combined_duration = float(triage_duration) + float(
+                            result.get("duration", duration) or duration
+                        )
+                        combined_prompt = 0
+                        if triage_result:
+                            combined_prompt += int(
+                                triage_result.get("prompt_tokens_est") or 0
+                            )
+                        combined_prompt += int(result.get("prompt_tokens_est") or 0)
+                        combined_result = {
+                            "req_id": batch.req_id,
+                            "candidates": list(batch.candidates),
+                            "ok": combined_ok,
+                            "ko": combined_ko,
+                            "usage": combined_usage,
+                            "duration": combined_duration,
+                            "retries": result.get("retries", 0),
+                            "prompt_tokens_est": combined_prompt or batch.prompt_tokens_est,
+                            "raw_text": result.get("raw_text")
+                            or (triage_result.get("raw_text") if triage_result else None),
+                        }
                         return {
                             "status": "ok",
-                            "batch": batch,
-                            "result": result,
-                            "duration": float(result.get("duration", duration) or duration),
+                            "batch": fallback_batch,
+                            "result": combined_result,
+                            "duration": combined_duration,
                             "error": None,
                         }
+                    except BatchAdaptationRequired as exc:
+                        duration = time.perf_counter() - start_local
+                        logger.warning(
+                            "ai_columns.batch split req_id=%s reason=%s duration=%.2f",
+                            fallback_batch.req_id,
+                            exc.reason,
+                            duration,
+                        )
+                        return {
+                            "status": "split",
+                            "batch": fallback_batch,
+                            "result": None,
+                            "duration": duration,
+                            "error": exc,
+                            "reason": exc.reason,
+                            "json_retry": 1 if exc.reason == "json_parse" else 0,
+                            "allow_split": exc.allow_split,
+                            "triage_result": triage_result,
+                        }
                     except Exception as exc:
-                        duration = time.perf_counter() - start_ts
-                        logger.exception("ai_columns.batch exception req_id=%s", batch.req_id)
-                        ko_payload = {str(c.id): str(exc) for c in batch.candidates}
+                        duration = time.perf_counter() - start_local
+                        logger.exception(
+                            "ai_columns.batch exception req_id=%s",
+                            fallback_batch.req_id,
+                        )
+                        ko_payload = {str(c.id): str(exc) for c in fallback_batch.candidates}
                         fallback = {
-                            "req_id": batch.req_id,
-                            "candidates": batch.candidates,
+                            "req_id": fallback_batch.req_id,
+                            "candidates": fallback_batch.candidates,
                             "ok": {},
                             "ko": ko_payload,
                             "usage": {},
@@ -1693,10 +2262,11 @@ def run_ai_fill_job(
                         }
                         return {
                             "status": "error",
-                            "batch": batch,
+                            "batch": fallback_batch,
                             "result": fallback,
                             "duration": duration,
                             "error": exc,
+                            "triage_result": triage_result,
                         }
 
             tasks = [asyncio.create_task(_run_single(batch)) for batch in batches]
@@ -1705,29 +2275,84 @@ def run_ai_fill_job(
                 gathered.append(await coro)
             return gathered
 
-        while pending_candidates:
-            made_progress = False
-            max_per_req = min(max_batch_size, len(pending_candidates))
-            max_per_req = max(1, min(AI_BATCH_MAX_ITEMS, max_per_req))
-            if max_per_req <= 0:
-                break
+        while pending_groups:
             batches: List[BatchRequest] = []
-            for start in range(0, len(pending_candidates), max_per_req):
-                chunk = pending_candidates[start : start + max_per_req]
+            while pending_groups:
+                chunk, depth, json_retry_count, adapted_flag = pending_groups.popleft()
                 if not chunk:
                     continue
                 req_counter += 1
-                batches.append(
-                    _build_batch_request(f"{req_counter:03d}", chunk, trunc_title, trunc_desc)
+                batch = _build_batch_request(
+                    f"{req_counter:03d}",
+                    chunk,
+                    trunc_title,
+                    trunc_desc,
+                    depth=depth,
+                    json_retry_count=json_retry_count,
+                    adapted=adapted_flag,
                 )
+                if _should_downshift(batch):
+                    batch_adaptations_total += 1
+                    logger.info(
+                        "ai_columns.batch adapt_pre req_id=%s items=%d prompt_tokens_est=%d est_tokens=%d limit=%d",
+                        batch.req_id,
+                        len(batch.candidates),
+                        batch.prompt_tokens_est,
+                        _estimate_batch_tokens(batch),
+                        SAFE_CONTEXT_TOKENS,
+                    )
+                    if len(chunk) <= MIN_BATCH_SIZE:
+                        batch.adapted = True
+                        batches.append(batch)
+                        continue
+                    split_point = max(1, math.ceil(len(chunk) / 2))
+                    if split_point >= len(chunk):
+                        split_point = max(1, len(chunk) // 2)
+                    first = chunk[:split_point]
+                    second = chunk[split_point:]
+                    if second:
+                        pending_groups.appendleft((second, depth + 1, json_retry_count, True))
+                    if first:
+                        pending_groups.appendleft((first, depth + 1, json_retry_count, True))
+                    continue
+                batches.append(batch)
             if not batches:
                 break
 
             loop_results = asyncio.run(_execute_batches(batches))
+            made_progress = False
             for entry in loop_results:
                 status = entry.get("status")
                 batch = entry.get("batch")
                 if not batch:
+                    continue
+                triage_payload = entry.get("triage_result")
+                if triage_payload:
+                    triage_summary = process_result(triage_payload)
+                    if triage_summary.get("parsed_ids"):
+                        made_progress = True
+                if status == "split":
+                    reason = entry.get("reason") or "unknown"
+                    json_retry_inc = int(entry.get("json_retry", 0) or 0)
+                    json_retry_total += json_retry_inc
+                    batch_adaptations_total += 1
+                    if len(batch.candidates) <= 1 or not entry.get("allow_split", True):
+                        fallback = entry.get("result")
+                        if isinstance(fallback, dict):
+                            summary = process_result(fallback)
+                            if summary.get("parsed_ids"):
+                                made_progress = True
+                        continue
+                    split_point = max(1, math.ceil(len(batch.candidates) / 2))
+                    if split_point >= len(batch.candidates):
+                        split_point = max(1, len(batch.candidates) // 2)
+                    first = batch.candidates[:split_point]
+                    second = batch.candidates[split_point:]
+                    next_json_retry = batch.json_retry_count + json_retry_inc
+                    if second:
+                        pending_groups.appendleft((second, batch.depth + 1, next_json_retry, True))
+                    if first:
+                        pending_groups.appendleft((first, batch.depth + 1, next_json_retry, True))
                     continue
                 if status != "ok":
                     exc = entry.get("error")
@@ -1737,28 +2362,23 @@ def run_ai_fill_job(
                         status,
                         exc,
                     )
+                    pending_groups.append((list(batch.candidates), batch.depth + 1, batch.json_retry_count, True))
                     continue
 
                 result = entry.get("result") or {}
                 summary = process_result(result)
-                parsed_ids = {int(pid) for pid in summary.get("parsed_ids", []) if isinstance(pid, int)}
-                if not parsed_ids:
-                    parsed_ids = set()
-                    for pid in summary.get("parsed_ids", []):
-                        try:
-                            parsed_ids.add(int(pid))
-                        except Exception:
-                            continue
-                raw_missing = summary.get("missing_ids", []) or []
-                missing_ids = []
-                for mid in raw_missing:
+                parsed_ids = {
+                    int(pid)
+                    for pid in summary.get("parsed_ids", [])
+                    if isinstance(pid, int)
+                }
+                missing_ids_list = summary.get("missing_ids", []) or []
+                missing_ids: List[int] = []
+                for mid in missing_ids_list:
                     try:
                         missing_ids.append(int(mid))
                     except Exception:
                         continue
-                pending_candidates = [
-                    cand for cand in pending_candidates if cand.id not in parsed_ids
-                ]
                 if parsed_ids:
                     made_progress = True
 
@@ -1767,25 +2387,37 @@ def run_ai_fill_job(
                     len(batch.candidates),
                     len(parsed_ids),
                     len(missing_ids),
-                    len(pending_candidates),
+                    len(pending_set),
                 )
 
                 status_label = summary.get("status") or status or "ok"
                 logger.info(
-                    "ai_columns.batch end req_id=%s status=%s duration=%.2f parsed=%d missing=%d pending=%d",
+                    "ai_columns.batch end req_id=%s status=%s duration=%.2f parsed=%d missing=%d pending=%d batch_adapted=%s",
                     batch.req_id,
                     status_label,
                     float(entry.get("duration") or 0.0),
                     len(parsed_ids),
                     len(missing_ids),
-                    len(pending_candidates),
+                    len(pending_set),
+                    batch.adapted,
                 )
 
+                if missing_ids:
+                    missing_candidates = [
+                        candidate_map.get(pid)
+                        for pid in missing_ids
+                        if candidate_map.get(pid)
+                    ]
+                    if missing_candidates:
+                        pending_groups.append(
+                            (missing_candidates, batch.depth + 1, batch.json_retry_count, True)
+                        )
+
                 if cost_cap is not None and cost_spent >= float(cost_cap):
-                    pending_candidates = []
+                    pending_groups.clear()
                     break
 
-            if not pending_candidates or not made_progress:
+            if not made_progress and not pending_groups:
                 break
     else:
         counts_with_cost = {**counts, "cost_spent_usd": cost_spent}
@@ -1808,14 +2440,20 @@ def run_ai_fill_job(
     p50 = _quantile(request_latencies, 0.5) if request_latencies else 0.0
     p95 = _quantile(request_latencies, 0.95) if request_latencies else 0.0
     logger.info(
-        "ai.run done total=%d processed=%d remaining=%d concurrency_eff=%.2f batches=%d p50=%.2f p95=%.2f",
+        "ai.run done total=%d processed=%d remaining=%d concurrency_eff=%.2f concurrency_target=%d batches=%d p50=%.2f p95=%.2f batch_adapted=%d json_retry=%d strict_json=%s triage_covered=%d fallback_big=%d",
         total_items,
         total_processed,
         remaining_total,
         concurrency_eff,
+        AI_MAX_CONCURRENCY,
         total_batches,
         p50,
         p95,
+        batch_adaptations_total,
+        json_retry_total,
+        STRICT_JSON_ENABLED,
+        triage_covered_total,
+        fallback_big_total,
     )
 
     result_error: Optional[str] = None
@@ -2041,7 +2679,16 @@ def run_ai_fill_job(
     latency_p95 = _percentile(request_latencies, 0.95) if request_latencies else 0.0
 
     processed_count = len(applied_outputs)
-    logger.info("ai.run done total=%d processed=%d remaining=%d", total_items, processed_count, len(pending_ids))
+    logger.info(
+        "ai.run done total=%d processed=%d remaining=%d batch_adapted=%d json_retry=%d triage_covered=%d fallback_big=%d",
+        total_items,
+        processed_count,
+        len(pending_ids),
+        batch_adaptations_total,
+        json_retry_total,
+        triage_covered_total,
+        fallback_big_total,
+    )
 
     logger.info(
         "run_ai_fill_job: job=%s total=%d ok=%d cached=%d ko=%d cost=%.4f pending=%d error=%s duration=%.2fs latency_p50=%.2fs latency_p95=%.2fs requests=%d",
@@ -2083,6 +2730,10 @@ def run_ai_fill_job(
         "ko": fail_reasons,
         "skipped_existing": skipped_existing,
         "total_requested": len(requested_ids),
+        "json_retry": json_retry_total,
+        "batch_adapted": batch_adaptations_total,
+        "triage_covered": triage_covered_total,
+        "fallback_big": fallback_big_total,
     }
 
 
@@ -2193,6 +2844,8 @@ def _call_model_sync(model_client: Any, prompt: str) -> str:
 def _retry_missing_sync(model_client: Any, missing_ids: List[int]) -> Dict[int, Dict[str, Any]]:
     prompt = MISSING_ONLY_JSONL_PROMPT(missing_ids, AI_FIELDS)
     text = _call_model_sync(model_client, prompt)
+    if STRICT_JSON_ENABLED:
+        return _parse_strict_json_text(text, missing_ids)
     return parse_jsonl_and_validate(text, missing_ids)
 
 
@@ -2207,12 +2860,18 @@ def fill_ai_columns_with_recovery(model_client: Any, product_ids: List[int]) -> 
         instruction = STRICT_JSONL_PROMPT(batch_ids, AI_FIELDS)
         try:
             text = _call_model_sync(model_client, instruction)
-            parsed = parse_jsonl_and_validate(text, batch_ids)
+            if STRICT_JSON_ENABLED:
+                parsed = _parse_strict_json_text(text, batch_ids)
+            else:
+                parsed = parse_jsonl_and_validate(text, batch_ids)
             out.update(parsed)
             consecutive_partial = 0
             index += batch_size
         except ValueError as exc:
-            parsed_loose = _parse_jsonl_loose(text if 'text' in locals() else "")
+            if STRICT_JSON_ENABLED:
+                parsed_loose: Dict[int, Dict[str, Any]] = {}
+            else:
+                parsed_loose = _parse_jsonl_loose(text if 'text' in locals() else "")
             if parsed_loose:
                 out.update(parsed_loose)
             returned = list(parsed_loose.keys())
