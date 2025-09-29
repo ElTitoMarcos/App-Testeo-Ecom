@@ -1,4 +1,7 @@
 /* Global page styling */
+:root {
+  --topbar-sticky-offset: 0px;
+}
 body {
   margin: 0;
   padding: 0;
@@ -1255,3 +1258,14 @@ td.col-desire, td.col-desire .desire-text {
   overflow-wrap: anywhere;
   max-height: none !important;
 }
+
+/* Header sticky SOLO para la tabla principal de productos */
+#productTable thead th{
+  position: sticky;
+  top: var(--topbar-sticky-offset); /* pegado al topbar */
+  z-index: 50;                      /* por encima de filas */
+  background: #0f1223;              /* mismo tono de cabecera (dark) */
+}
+
+/* Si hay una regla previa que pone otro 'top', esta gana por especificidad. */
+/* No uses !important salvo que sea estrictamente necesario. */
