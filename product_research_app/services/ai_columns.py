@@ -137,7 +137,6 @@ class BatchRequest:
     trunc_title: int = 0
     trunc_desc: int = 0
 
-
 class BatchAdaptationRequired(Exception):
     """Raised when a batch should be split before retrying."""
 
@@ -1075,7 +1074,6 @@ def _coerce_percent(value: Any, *, label: str) -> float:
         raise ValueError(f"{label} fuera de rango (0-100)")
     return float(num)
 
-
 def _coerce_confidence(value: Any, *, required: bool) -> Optional[float]:
     if value is None:
         if required:
@@ -1089,14 +1087,12 @@ def _coerce_confidence(value: Any, *, required: bool) -> Optional[float]:
         raise ValueError("confidence fuera de rango (0-1)")
     return float(num)
 
-
 def _tri_label_from_percent(percent: float) -> str:
     if percent <= 33:
         return "Low"
     if percent >= 67:
         return "High"
     return "Medium"
-
 
 def _map_awareness_bucket(bucket: str, score: float) -> str:
     canonical = (bucket or "").strip().lower()
