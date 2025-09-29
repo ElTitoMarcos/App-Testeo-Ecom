@@ -11,8 +11,8 @@ def _env_float(name, default):
 
 _TPM = _env_int("PRAPP_OPENAI_TPM", 30000)
 _RPM = _env_int("PRAPP_OPENAI_RPM", 3000)
-_HEADROOM = _env_float("PRAPP_OPENAI_HEADROOM", 0.85)
-_MAX_CONC = _env_int("PRAPP_OPENAI_MAX_CONCURRENCY", 2)
+_HEADROOM = _env_float("PRAPP_OPENAI_HEADROOM", 0.90)
+_MAX_CONC = _env_int("PRAPP_OPENAI_MAX_CONCURRENCY", 8)
 
 # Efectivo tras aplicar headroom
 _EFF_TPM = max(1, int(_TPM * _HEADROOM))
@@ -53,7 +53,8 @@ _tokens_bucket = _TokenBucket(_EFF_TPM)
 _requests_bucket = _TokenBucket(_EFF_RPM)
 
 # semáforo global para capar concurrencia
-_conc_sem = threading.BoundedSemaphore(_MAX_CONC)
+_eff_conc = max(1, min(_MAX_CONC, int(max(1, _MAX_CONC * _HEADROOM))))
+_conc_sem = threading.BoundedSemaphore(_eff_conc)
 
 @contextmanager
 def reserve(tokens_estimate: int):
