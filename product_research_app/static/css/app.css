@@ -20,6 +20,7 @@ body {
   --ws-thumb: var(--ws-accent);
   --ws-pill-bg: rgba(167,139,250,.15);
   --ws-pill-border: rgba(167,139,250,.45);
+  --table-sticky-top: 0px; /* se calcula dinámicamente desde JS */
 }
 
 body.dark {
@@ -1214,6 +1215,16 @@ th.col-desire, td.col-desire { width: 360px; max-width: 360px; }
 .table--compact tbody tr:hover{ background:#0f1430; }
 th[aria-sort="ascending"]::after{ content:" ▲"; opacity:.6; }
 th[aria-sort="descending"]::after{ content:" ▼"; opacity:.6; }
+
+/* Cabecera sticky específica para la tabla principal */
+#productTable.table--compact thead th {
+  position: sticky;
+  top: var(--table-sticky-top);
+  z-index: 30;               /* por encima de filas/scroll */
+  background: #0f1223;       /* mismo tono que el resto de cabeceras en dark */
+  /* evita que se vea “traslúcida” al pasar por celdas con contenido */
+  box-shadow: 0 1px 0 rgba(255,255,255,0.04) inset;
+}
 
 /* Insights */
 .insights-toolbar {

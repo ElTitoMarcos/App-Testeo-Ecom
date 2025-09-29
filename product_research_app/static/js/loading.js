@@ -184,3 +184,27 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   if (btn) btn.style.display = 'none';
 });
+
+// === Sticky header offset for product table (header + global progress height) ===
+(() => {
+  const root = document.documentElement;
+  const headerEl = document.getElementById('topBar');
+  const progWrap = document.getElementById('global-progress-wrapper');
+
+  function setStickyTop() {
+    // Altura total del header (incluye barra de progreso si está activa porque va dentro)
+    const h = headerEl ? headerEl.getBoundingClientRect().height : 0;
+    root.style.setProperty('--table-sticky-top', `${Math.round(h)}px`);
+  }
+
+  // Inicial y en cambios de tamaño
+  setStickyTop();
+  window.addEventListener('resize', setStickyTop);
+
+  // Recalcular si cambia el header o la barra de progreso
+  if (window.ResizeObserver) {
+    const ro = new ResizeObserver(setStickyTop);
+    if (headerEl) ro.observe(headerEl);
+    if (progWrap) ro.observe(progWrap);
+  }
+})();
