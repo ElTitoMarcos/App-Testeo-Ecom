@@ -1,0 +1,44 @@
+/* === Encabezados de tabla en tema claro/oscuro === */
+:root {
+  --thead-bg-light: #eef5ff;   /* azul muy claro */
+  --thead-fg-light: #0f172a;   /* slate-900 */
+  --thead-br-light: #cbd5e1;   /* slate-300 */
+  --thead-bg: var(--thead-bg-light);
+  --thead-fg: var(--thead-fg-light);
+  --thead-br: var(--thead-br-light);
+}
+
+body.dark {
+  --thead-bg: #1f2344;   /* tono del dashboard oscuro */
+  --thead-fg: #e5e7eb;   /* slate-200 */
+  --thead-br: #333a6a;   /* borde sutil en oscuro */
+}
+
+/* Tabla principal y tablas en la pestaña de tendencias */
+table thead th,
+.data-table thead th,
+#trends thead th,
+.trends-pane thead th,
+.summary-table thead th {
+  background: var(--thead-bg) !important;
+  color: var(--thead-fg) !important;
+  border-bottom: 1px solid var(--thead-br) !important;
+}
+
+/* Iconos de ordenación/ayuda dentro de los th heredan color */
+table thead th .sort-icon,
+.data-table thead th .sort-icon,
+#trends thead th .sort-icon,
+.trends-pane thead th .sort-icon {
+  color: inherit !important;
+  opacity: .85;
+}
+
+/* Cuando haya sticky headers, mantén el color al fijarse */
+table thead.sticky th,
+.data-table thead.sticky th,
+#trends thead.sticky th,
+.trends-pane thead.sticky th {
+  background: var(--thead-bg) !important;
+  color: var(--thead-fg) !important;
+}
