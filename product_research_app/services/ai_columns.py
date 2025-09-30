@@ -25,6 +25,9 @@ from ..config import (
 from ..ai.strict_jsonl import parse_jsonl_and_validate
 from ..obs import log_partial_ko, log_recovered
 from ..ratelimit import async_decorrelated_jitter_sleep
+from ..routes.ai_events import legacy_progress_updater
+from ..utils.event_broker import broker
+from ..utils.progress import ProgressTracker
 from ..utils.signature import compute_sig_hash
 from .desire_utils import cleanse, looks_like_product_desc
 from .prompt_templates import MISSING_ONLY_JSONL_PROMPT, STRICT_JSONL_PROMPT
@@ -36,6 +39,85 @@ DB_PATH = APP_DIR / "data.sqlite3"
 CALIBRATION_CACHE_FILE = APP_DIR / "ai_calibration_cache.json"
 
 AI_FIELDS = ("desire", "desire_magnitude", "awareness_level", "competition_level")
+
+
+def run_ai_fill_job(
+    job_id: int,
+    product_ids: Sequence[int],
+    *,
+    microbatch: int = 32,
+    parallelism: Optional[int] = None,
+    status_cb: Optional[StatusCallback] = None,
+    cancel_checker: Optional[Callable[[], bool]] = None,
+) -> Dict[str, Any]:
+    """Wrapper that augments the legacy job runner with SSE progress."""
+
+    total_requested = len(product_ids or [])
+    legacy_cb = legacy_progress_updater()
+
+    def _dispatch_progress(pct: float, message: str) -> None:
+        progress_val = max(0.0, min(round(float(pct), 4), 1.0))
+        payload = {"type": "ai.progress", "progress": progress_val, "message": message or ""}
+        broker.publish(payload)
+        try:
+            legacy_cb(pct, message or "running")
+        except Exception:
+            logger.debug("legacy progress updater failed", exc_info=True)
+
+    tracker = ProgressTracker(total=max(total_requested, 1), on_progress=_dispatch_progress)
+    tracker.update_absolute(0, "starting")
+
+    original_status_cb = status_cb
+
+    def _status_wrapper(**payload: object) -> None:
+        counts_obj = payload.get("ai_counts") if isinstance(payload, dict) else {}
+        if isinstance(counts_obj, dict):
+            processed = int(counts_obj.get("ok", 0) or 0) + int(counts_obj.get("cached", 0) or 0)
+            processed += int(counts_obj.get("ko", 0) or 0)
+        else:
+            processed = 0
+            counts_obj = {}
+        total_hint = payload.get("ai_total") if isinstance(payload, dict) else None
+        if isinstance(total_hint, int) and total_hint > 0 and tracker.total != total_hint:
+            tracker.total = max(total_hint, 1)
+        message = str(payload.get("message") or payload.get("phase") or "")
+        tracker.update_absolute(processed, message)
+        if original_status_cb is not None:
+            try:
+                original_status_cb(**payload)
+            except Exception:
+                logger.debug("status callback failed", exc_info=True)
+
+    progress_message = "done"
+    try:
+        result = _run_ai_fill_job_impl(
+            job_id,
+            product_ids,
+            microbatch=microbatch,
+            parallelism=parallelism,
+            status_cb=_status_wrapper,
+            cancel_checker=cancel_checker,
+        )
+        error_val = result.get("error") if isinstance(result, dict) else None
+        if isinstance(result, dict):
+            counts_obj = result.get("counts") if isinstance(result.get("counts"), dict) else {}
+            processed_final = int(counts_obj.get("ok", 0) or 0) + int(counts_obj.get("cached", 0) or 0)
+            processed_final += int(counts_obj.get("ko", 0) or 0)
+            tracker.update_absolute(processed_final, str(error_val or "done"))
+        progress_message = str(error_val or "done")
+        return result
+    except Exception as exc:
+        progress_message = "error"
+        broker.publish({"type": "ai.error", "progress": 0.0, "error": str(exc)})
+        try:
+            legacy_cb(0.0, "error")
+        except Exception:
+            logger.debug("legacy progress updater failed", exc_info=True)
+        raise
+    finally:
+        tracker.force_100(progress_message)
+        broker.publish({"type": "ai.done", "progress": 1.0, "reload": True})
+
 
 
 _ACTIVE_JOB_LOCK = threading.Lock()
@@ -1605,7 +1687,7 @@ def _emit_status(
         logger.debug("status callback failed", exc_info=True)
 
 
-def run_ai_fill_job(
+def _run_ai_fill_job_impl(
     job_id: int,
     product_ids: Sequence[int],
     *,
@@ -2775,6 +2857,7 @@ def run_ai_fill_job(
                 competition_level=updates.get("competition_level"),
             )
     conn.commit()
+    broker.publish({"type": "products.updated"})
 
     pending_ids = sorted(pending_set)
     done_val = counts["ok"] + counts["cached"]

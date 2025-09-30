@@ -8,9 +8,11 @@ app = Flask(__name__)
 from . import config  # noqa: E402,F401
 from .winner_score import winner_score_api  # noqa: E402
 from ..sse import sse_bp  # noqa: E402
+from ..routes.ai_events import ai_events_bp  # noqa: E402
 
 app.register_blueprint(winner_score_api, url_prefix="/api")
 app.register_blueprint(sse_bp)
+app.register_blueprint(ai_events_bp)
 
 
 @app.get("/healthz")
