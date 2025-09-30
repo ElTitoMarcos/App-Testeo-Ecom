@@ -95,7 +95,8 @@ function refreshHost(host) {
   // promedio simple de progresos
   let sum = 0, last;
   for (const t of tasks.values()) { sum += (t.progress || 0); last = t; }
-  const avg = Math.min(0.99, sum / tasks.size);
+  const rawAvg = tasks.size ? (sum / tasks.size) : 0;
+  const avg = rawAvg >= 1 ? 1 : Math.min(rawAvg, 0.99);
   const pct = Math.round(avg * 100);
   s.fill.style.width = pct + '%';
   s.pctEl.textContent = pct + '%';
