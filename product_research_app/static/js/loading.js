@@ -10,6 +10,9 @@
   mo.observe(document.documentElement, { childList: true, subtree: true });
 })();
 
+// Config
+const FINAL_CAP = 0.97;
+
 // ===== ProgressRail: una barra por "host" (slot). host = elemento contenedor (header, modal, etc.)
 function createRailInHost(host) {
   if (!host) return null;
@@ -56,9 +59,29 @@ function getRailState(host) {
   const pctEl = rail.querySelector('.progress-percent');
   const titleEl = rail.querySelector('.progress-title');
   const stageEl = rail.querySelector('.progress-stage');
-  state = { rail, fill, pctEl, titleEl, stageEl, tasks: new Map(), hideTimer: null };
+  state = {
+    rail,
+    fill,
+    pctEl,
+    titleEl,
+    stageEl,
+    tasks: new Map(),
+    hideTimer: null,
+    shown: 0,
+    unlock100: false,
+    lastBumpAt: Date.now(),
+    lastRaw: 0,
+    raf: null,
+  };
+  paintProgress(state, 0);
   Rails.set(host, state);
   return state;
+}
+
+function paintProgress(s, frac) {
+  const pct = Math.max(0, Math.min(1, frac));
+  s.fill.style.transform = `translateX(${(-1 + pct) * 100}%)`;
+  if (s.pctEl) s.pctEl.textContent = `${Math.round(pct * 100)}%`;
 }
 
 function refreshHost(host) {
@@ -66,42 +89,84 @@ function refreshHost(host) {
   const tasks = s.tasks;
   const hasTasks = tasks.size > 0;
 
-  // 1) Activar/colapsar el slot (barra)
-  host.classList.toggle('active', hasTasks);
-
-  const isGlobalHost = host && host.id === 'progress-slot-global';
-
-  // 2) Mostrar/ocultar el wrapper completo
-  if (isGlobalHost) {
-    const wrapper = document.getElementById('global-progress-wrapper');
-    if (wrapper) wrapper.classList.toggle('show', hasTasks);
+  let raw = 0;
+  if (hasTasks) {
+    let sum = 0;
+    for (const t of tasks.values()) sum += (t.progress || 0);
+    raw = sum / tasks.size;
   }
 
-  // 3) Mostrar/ocultar el botón Cancelar
+  if (raw > s.lastRaw + 0.0005) s.lastBumpAt = Date.now();
+  s.lastRaw = raw;
+
+  if (!hasTasks && !s.unlock100) s.unlock100 = true;
+
+  const shouldShow = hasTasks || s.unlock100;
+
+  host.classList.toggle('active', shouldShow);
+
+  const isGlobalHost = host && host.id === 'progress-slot-global';
   if (isGlobalHost) {
+    const wrapper = document.getElementById('global-progress-wrapper');
+    if (wrapper) wrapper.classList.toggle('show', shouldShow);
     const cancelBtn = document.getElementById('progress-cancel-btn');
     if (cancelBtn) cancelBtn.style.display = hasTasks ? 'inline-flex' : 'none';
   }
 
-  // 4) Si no hay tareas, limpiar el slot (evita textos/0%)
-  if (!hasTasks) {
+  const target = s.unlock100 ? 1 : Math.min(raw, FINAL_CAP);
+
+  s.shown = s.shown + (target - s.shown) * 0.25;
+  paintProgress(s, s.shown);
+
+  if (hasTasks) {
+    // Actualizar título/etapa desde la tarea más reciente
+    let last;
+    for (const t of tasks.values()) last = t;
+    if (last) {
+      if (last.title && s.titleEl) s.titleEl.textContent = last.title;
+      if (last.stage && s.stageEl) s.stageEl.textContent = last.stage;
+    }
+  }
+
+  if (s.stageEl && !s.unlock100 && Date.now() - s.lastBumpAt > 20000) {
+    s.stageEl.textContent = 'Últimos detalles…';
+  }
+
+  if (s.unlock100 && s.shown >= 0.999) {
+    clearTimeout(s.hideTimer);
+    s.hideTimer = setTimeout(() => {
+      if (s.raf) {
+        cancelAnimationFrame(s.raf);
+        s.raf = null;
+      }
+      s.shown = 0;
+      s.unlock100 = false;
+      paintProgress(s, 0);
+      host.classList.remove('active');
+      if (isGlobalHost) {
+        const wrapper = document.getElementById('global-progress-wrapper');
+        if (wrapper) wrapper.classList.remove('show');
+        const cancelBtn = document.getElementById('progress-cancel-btn');
+        if (cancelBtn) cancelBtn.style.display = 'none';
+      }
+      s.lastRaw = 0;
+    }, 800);
+  } else if (!s.unlock100) {
     clearTimeout(s.hideTimer);
     s.hideTimer = null;
-    tasks.clear();
-    host.innerHTML = '';
-    Rails.delete(host);
-    return;
   }
-  // promedio simple de progresos
-  let sum = 0, last;
-  for (const t of tasks.values()) { sum += (t.progress || 0); last = t; }
-  const avg = Math.min(0.99, sum / tasks.size);
-  const pct = Math.round(avg * 100);
-  s.fill.style.width = pct + '%';
-  s.pctEl.textContent = pct + '%';
-  if (last) {
-    if (last.title) s.titleEl.textContent = last.title;
-    if (last.stage) s.stageEl.textContent = last.stage;
+
+  const delta = Math.abs(target - s.shown);
+  if (delta > 0.001 || (s.unlock100 && s.shown < 0.999)) {
+    if (!s.raf) {
+      s.raf = requestAnimationFrame(() => {
+        s.raf = null;
+        refreshHost(host);
+      });
+    }
+  } else if (s.raf) {
+    cancelAnimationFrame(s.raf);
+    s.raf = null;
   }
 }
 
@@ -111,22 +176,39 @@ function startTaskInHost({ title = 'Procesando…', hostEl = null } = {}) {
   if (!s) return { step(){}, setStage(){}, done(){} };
 
   const id = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+  clearTimeout(s.hideTimer);
+  s.hideTimer = null;
+  s.unlock100 = false;
+  s.lastBumpAt = Date.now();
+  s.lastRaw = 0;
+  if (s.raf) {
+    cancelAnimationFrame(s.raf);
+    s.raf = null;
+  }
   s.tasks.set(id, { progress: 0, title, stage: 'Iniciando…' });
+  if (s.titleEl) s.titleEl.textContent = title;
+  if (s.stageEl) s.stageEl.textContent = 'Iniciando…';
   refreshHost(host);
 
   return {
     step(frac, stage) {
       const t = s.tasks.get(id); if (!t) return;
       t.progress = Math.max(0, Math.min(1, frac));
-      if (stage) t.stage = stage;
+      if (stage) {
+        t.stage = stage;
+        if (s.stageEl) s.stageEl.textContent = stage;
+      }
       refreshHost(host);
     },
     setStage(stage) {
       const t = s.tasks.get(id); if (!t) return;
-      t.stage = stage; refreshHost(host);
+      t.stage = stage;
+      if (s.stageEl) s.stageEl.textContent = stage;
+      refreshHost(host);
     },
     done() {
       s.tasks.delete(id);
+      if (s.tasks.size === 0) s.unlock100 = true;
       refreshHost(host);
     }
   };
