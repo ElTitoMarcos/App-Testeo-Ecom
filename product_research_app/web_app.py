@@ -39,10 +39,30 @@ import hashlib
 from datetime import date, datetime, timedelta
 from typing import Dict, Any, List, Optional
 
-from . import database
-from .db import get_db, get_last_performance_config
-from . import config
-from .services import ai_columns
+try:
+    from fastapi import APIRouter
+    from fastapi.responses import StreamingResponse
+except Exception:  # pragma: no cover - FastAPI optional in some test environments
+    class _DummyRouter:
+        def get(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            def decorator(func):
+                return func
+
+            return decorator
+
+    class _DummyStreamingResponse:  # pragma: no cover - simple stub
+        def __init__(self, content, headers=None):
+            self.content = content
+            self.headers = headers or {}
+
+    APIRouter = _DummyRouter  # type: ignore[assignment]
+    StreamingResponse = _DummyStreamingResponse  # type: ignore[assignment]
+
+from product_research_app import ai_columns
+from product_research_app import config
+from product_research_app import database
+from product_research_app.ai_columns import run_ai_fill_job
+from product_research_app.db import get_db, get_last_performance_config
 from .services import winner_score as winner_calc
 from .services import trends_service
 from .services.config import get_default_winner_weights
@@ -55,7 +75,7 @@ from . import gpt
 from .prompts.registry import normalize_task
 from . import title_analyzer
 from . import product_enrichment
-from .sse import publish_progress
+from product_research_app.sse import broker, publish_progress
 from .utils import sanitize_product_name
 from .utils.db import row_to_dict, rget
 
@@ -77,6 +97,47 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger(__name__)
+
+
+router = APIRouter()
+
+
+@router.get("/events/ai")
+async def events_ai():
+    async def stream():
+        async for chunk in broker.subscribe():
+            yield chunk
+
+    headers = {
+        "Cache-Control": "no-cache, no-transform",
+        "Content-Type": "text/event-stream",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    return StreamingResponse(stream(), headers=headers)
+
+
+def _publish_progress(
+    processed: int, total: int, note: str | None = None, *, extra: Dict[str, Any] | None = None
+) -> None:
+    pct = (processed / total) if total else 0.0
+    payload: Dict[str, Any] = {
+        "processed": processed,
+        "total": total,
+        "percent": pct,
+        "note": note or "",
+    }
+    if extra:
+        payload.update(extra)
+    broker.publish("progress", payload)
+
+
+def _publish_done(summary: Dict[str, Any], *, extra: Dict[str, Any] | None = None) -> None:
+    payload: Dict[str, Any] = {"summary": summary}
+    if extra:
+        payload.update(extra)
+    broker.publish("done", payload)
+
 
 DEBUG = bool(os.environ.get("DEBUG"))
 
@@ -445,6 +506,12 @@ def _schedule_post_import_tasks(
 ) -> None:
     auto_ai = config.is_auto_fill_ia_on_import_enabled()
 
+    def _job_publish_progress(processed: int, total: int, note: str | None = None) -> None:
+        _publish_progress(processed, total, note, extra={"job_id": job_id})
+
+    def _job_publish_done(summary: Dict[str, Any]) -> None:
+        _publish_done(summary, extra={"job_id": job_id})
+
     def status_cb(**payload: Any) -> None:
         payload.setdefault("job_id", job_id)
         payload.setdefault("task_id", task_key)
@@ -463,14 +530,22 @@ def _schedule_post_import_tasks(
                 "cost_spent_usd": 0.0,
             }
             pending_ids: List[int] = list(product_ids)
+            summary_payload: Dict[str, Any] | None = None
             try:
                 if auto_ai and product_ids:
-                    result = ai_columns.run_ai_fill_job(job_id, product_ids, status_cb=status_cb)
+                    result = run_ai_fill_job(
+                        job_id,
+                        product_ids,
+                        status_cb=status_cb,
+                        on_progress=_job_publish_progress,
+                    )
                     final_counts = result.get("counts", final_counts)
                     pending_ids = result.get("pending_ids", pending_ids)
                     error = result.get("error")
                     if error:
                         database.set_import_job_ai_error(conn, job_id, str(error))
+                    if isinstance(result, dict):
+                        summary_payload = dict(result)
                 else:
                     final_counts = {
                         "queued": 0,
@@ -484,6 +559,11 @@ def _schedule_post_import_tasks(
                     pending_ids = []
                     database.set_import_job_ai_counts(conn, job_id, final_counts, pending_ids)
                     database.update_import_job_ai_progress(conn, job_id, 0)
+                    summary_payload = {
+                        "counts": final_counts,
+                        "pending_ids": pending_ids,
+                        "error": None,
+                    }
             except Exception as exc:
                 logger.exception("AI enrichment failed job=%s", job_id)
                 final_counts = {
@@ -499,6 +579,19 @@ def _schedule_post_import_tasks(
                 database.set_import_job_ai_error(conn, job_id, str(exc))
                 database.set_import_job_ai_counts(conn, job_id, final_counts, pending_ids)
                 database.update_import_job_ai_progress(conn, job_id, 0)
+                summary_payload = {
+                    "counts": final_counts,
+                    "pending_ids": pending_ids,
+                    "error": str(exc),
+                }
+            finally:
+                if summary_payload is None:
+                    summary_payload = {
+                        "counts": final_counts,
+                        "pending_ids": pending_ids,
+                        "error": None,
+                    }
+                _job_publish_done(summary_payload)
             total_ai = int(final_counts.get("queued", 0) or 0)
             done_ai = int(final_counts.get("ok", 0) + final_counts.get("cached", 0))
             _update_import_status(

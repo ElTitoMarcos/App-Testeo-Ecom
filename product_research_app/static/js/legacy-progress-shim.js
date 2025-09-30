@@ -8,6 +8,15 @@
   window.hideLoadingBar   = window.hideLoadingBar   || function(){ toSSE({operation:'legacy', percent:100}); };
 
   // Si detectas otros nombres, añádelos:
+  window.setLegacyProgress = window.setLegacyProgress || function(p){
+    const pct = Math.max(0, Math.min(1, p || 0));
+    try {
+      window.updateLoadingBar(pct * 100);
+    } catch (_) {
+      noop(pct);
+    }
+    return pct;
+  };
   window.setProgress = window.setProgress || noop;
   window.startProgress = window.startProgress || noop;
   window.stopProgress  = window.stopProgress  || noop;

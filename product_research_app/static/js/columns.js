@@ -119,3 +119,18 @@
   ensureColumnVisible('desire');
   build();
 })();
+
+(function(){
+  function hardReload(){
+    if (window.myDataTable && window.myDataTable.ajax) {
+      window.myDataTable.ajax.reload(null, false);
+      return;
+    }
+    if (typeof window.renderProducts === 'function') {
+      window.renderProducts({force: true});
+      return;
+    }
+    location.reload();
+  }
+  window.addEventListener('products:reload', hardReload);
+})();

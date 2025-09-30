@@ -1,90 +1,87 @@
-"""Server-Sent Events helpers and blueprint."""
-
-from __future__ import annotations
-
+import asyncio
 import json
-import logging
-import queue
-import threading
-from datetime import date, datetime
-from pathlib import Path
-from typing import Any
-
-from flask import Blueprint, Response, stream_with_context
-
-from .settings import SSE_ENABLED
-
-logger = logging.getLogger(__name__)
-
-sse_bp = Blueprint("sse", __name__)
-_clients: set[queue.Queue[str]] = set()
-_clients_lock = threading.Lock()
+from typing import Any, AsyncIterator, Iterable, Iterator
 
 
-def _headers() -> dict[str, str]:
-    return {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-        "X-Accel-Buffering": "no",
-        "Access-Control-Allow-Origin": "*",
-    }
+class SSEBroker:
+    def __init__(self) -> None:
+        self._subs: set[asyncio.Queue[str]] = set()
 
-
-def _json_default(value: Any) -> Any:
-    if isinstance(value, (datetime, date, Path)):
-        return str(value)
-    if isinstance(value, set):
-        return list(value)
-    try:
-        return str(value)
-    except Exception:  # pragma: no cover - defensive fallback
-        return repr(value)
-
-
-def publish_progress(payload: dict[str, Any]) -> None:
-    """Broadcast a JSON payload to all connected SSE clients."""
-
-    if not SSE_ENABLED:
-        return
-    try:
-        msg = json.dumps(payload, separators=(",", ":"), default=_json_default)
-    except TypeError:  # pragma: no cover - defensive fallback
-        logger.exception("Failed to encode SSE payload")
-        return
-    dead: list[queue.Queue[str]] = []
-    with _clients_lock:
-        targets = list(_clients)
-    for q in targets:
-        try:
-            q.put_nowait(msg)
-        except queue.Full:
-            dead.append(q)
-    if dead:
-        with _clients_lock:
-            for q in dead:
-                _clients.discard(q)
-
-
-@sse_bp.route("/events")
-def events() -> Response:
-    if not SSE_ENABLED:
-        return Response("", status=204)
-    client_queue: queue.Queue[str] = queue.Queue(maxsize=1000)
-    with _clients_lock:
-        _clients.add(client_queue)
-
-    def gen():
+    async def subscribe(self) -> AsyncIterator[str]:
+        queue: asyncio.Queue[str] = asyncio.Queue()
+        self._subs.add(queue)
         try:
             while True:
                 try:
-                    msg = client_queue.get(timeout=10)
-                except queue.Empty:
-                    yield ":keepalive\n\n"
-                else:
+                    msg = await asyncio.wait_for(queue.get(), timeout=15)
                     yield f"data: {msg}\n\n"
+                except asyncio.TimeoutError:
+                    # mantén la conexión viva para proxies
+                    yield ": keep-alive\n\n"
         finally:
-            with _clients_lock:
-                _clients.discard(client_queue)
+            self._subs.discard(queue)
 
-    return Response(stream_with_context(gen()), headers=_headers())
+    def subscribe_sync(self) -> Iterator[str]:
+        policy = asyncio.get_event_loop_policy()
+        try:
+            prev_loop = policy.get_event_loop()
+        except RuntimeError:
+            prev_loop = None
+        loop = policy.new_event_loop()
+        policy.set_event_loop(loop)
+        queue: asyncio.Queue[str] = asyncio.Queue()
+        policy.set_event_loop(prev_loop)
+        self._subs.add(queue)
+
+        def generator() -> Iterator[str]:
+            try:
+                while True:
+                    try:
+                        msg = loop.run_until_complete(asyncio.wait_for(queue.get(), timeout=15))
+                        yield f"data: {msg}\n\n"
+                    except asyncio.TimeoutError:
+                        yield ": keep-alive\n\n"
+            finally:
+                self._subs.discard(queue)
+                loop.close()
+                if prev_loop is not None:
+                    policy.set_event_loop(prev_loop)
+
+        return generator()
+
+    def publish(self, event: str, data: dict[str, Any]) -> None:
+        payload = json.dumps({"event": event, "data": data}, ensure_ascii=False)
+        for queue in list(self._subs):
+            queue.put_nowait(payload)
+
+
+def publish_progress(payload: dict[str, Any]) -> None:
+    event = str(payload.get("event") or "message")
+    data = {k: v for k, v in payload.items() if k != "event"}
+    broker.publish(event, data)
+
+
+def publish_many(event: str, payloads: Iterable[dict[str, Any]]) -> None:
+    for data in payloads:
+        broker.publish(event, data)
+
+
+broker = SSEBroker()
+
+try:  # pragma: no cover - Flask compat optional
+    from flask import Blueprint, Response, stream_with_context  # type: ignore
+except Exception:  # pragma: no cover - Flask not installed in FastAPI path
+    sse_bp = None  # type: ignore
+else:  # pragma: no cover - legacy shim
+    sse_bp = Blueprint("sse", __name__)
+
+    @sse_bp.route("/events/ai")
+    def events_ai() -> Response:
+        headers = {
+            "Cache-Control": "no-cache, no-transform",
+            "Content-Type": "text/event-stream",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+        stream = broker.subscribe_sync()
+        return Response(stream_with_context(stream), headers=headers, mimetype="text/event-stream")

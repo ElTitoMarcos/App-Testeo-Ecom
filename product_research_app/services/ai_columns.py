@@ -84,6 +84,7 @@ STRICT_JSON_ENABLED = _env_bool("PRAPP_AI_COLUMNS_STRICT_JSON", True)
 MAX_TOKENS_PER_ITEM = max(32, _env_int("PRAPP_AI_COLUMNS_MAX_TOKENS_PER_ITEM", 128))
 SAFE_CONTEXT_TOKENS = max(4000, _env_int("PRAPP_OPENAI_CONTEXT_SAFE_TOKENS", 120000))
 StatusCallback = Callable[..., None]
+ProgressCallback = Callable[[int, int, str], None]
 
 TRIAGE_ENABLED = _env_bool("PRAPP_AI_TRIAGE_ENABLED", True)
 TRIAGE_MODEL = os.getenv("PRAPP_AI_TRIAGE_MODEL", "gpt-4o-mini") or "gpt-4o-mini"
@@ -1613,6 +1614,7 @@ def run_ai_fill_job(
     parallelism: Optional[int] = None,
     status_cb: Optional[StatusCallback] = None,
     cancel_checker: Optional[Callable[[], bool]] = None,
+    on_progress: Optional[ProgressCallback] = None,
 ) -> Dict[str, Any]:
     start_ts = time.perf_counter()
     conn = _ensure_conn()
@@ -1628,6 +1630,16 @@ def run_ai_fill_job(
             continue
         seen_ids.add(num)
         requested_ids.append(num)
+
+    total_requested = len(requested_ids)
+
+    def _notify_progress(processed: int, total: int, note: str) -> None:
+        if on_progress is None:
+            return
+        try:
+            on_progress(int(processed), int(total), note)
+        except Exception:
+            pass
 
     job_key = frozenset(requested_ids) if requested_ids else None
     registered_job = False
@@ -1650,6 +1662,7 @@ def run_ai_fill_job(
                     "retried": 0,
                     "cost_spent_usd": 0.0,
                 }
+                _notify_progress(total_requested, total_requested, "complete")
                 conn.close()
                 return {
                     "counts": empty_counts,
@@ -1731,6 +1744,7 @@ def run_ai_fill_job(
             )
 
     total_items = len(candidates)
+    _notify_progress(0, total_items, "start")
 
     runtime_cfg = config.get_ai_runtime_config()
 
@@ -1796,6 +1810,7 @@ def run_ai_fill_job(
         if job_updates_enabled and skipped_existing:
             database.set_import_job_ai_counts(conn, int(job_id), counts_with_cost, [])
         _emit_status(status_cb, phase="enrich", counts=counts_with_cost, total=total_items, done=0)
+        _notify_progress(0, total_items, "complete")
         _release_job_guard()
         conn.close()
         return {
@@ -1905,6 +1920,7 @@ def run_ai_fill_job(
                     "sample_pending_ids": sorted(pending_set)[:5],
                 },
             )
+        _notify_progress(counts["cached"], total_items, "complete")
         _release_job_guard()
         conn.close()
         return {
@@ -2054,6 +2070,7 @@ def run_ai_fill_job(
             done=done_val,
             message=f"IA columnas {done_val}/{total_items}",
         )
+        _notify_progress(done_val, total_items, "batch_end")
 
         if missing_ids:
             logger.warning("ai.batch.missing ids_sample=%s", missing_ids[:5])
@@ -2839,6 +2856,7 @@ def run_ai_fill_job(
             },
         )
 
+    _notify_progress(total_processed, total_items, "complete")
     _release_job_guard()
     conn.close()
     return {
