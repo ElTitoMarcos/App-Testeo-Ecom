@@ -11,7 +11,7 @@ from ..utils.event_broker import broker
 
 ai_events_bp = Blueprint("ai_events", __name__)
 
-_last_progress: Dict[str, Any] = {"progress": 0.0, "status": "idle"}
+_last_progress: Dict[str, Any] = {"progress": 0.0, "status": "idle", "label": "Listo"}
 
 
 def _sse_headers() -> Dict[str, str]:
@@ -42,15 +42,25 @@ def get_ai_progress() -> Response:
 
 
 def _update_progress_for_legacy(progress: float, status: str) -> None:
-    _last_progress["progress"] = max(0.0, min(float(progress), 1.0))
-    _last_progress["status"] = status
+    pct = max(0.0, min(float(progress), 1.0))
+    _last_progress["progress"] = pct
+    normalized_status = "running" if str(status).startswith("running") else status
+    _last_progress["status"] = normalized_status
+    _last_progress["label"] = "IA Generando..." if normalized_status == "running" else "Listo"
 
 
 def legacy_progress_updater() -> Callable[[float, str], None]:
     def _callback(pct: float, message: str) -> None:
-        _update_progress_for_legacy(pct, message or "running")
+        status_msg = message or "running"
+        _update_progress_for_legacy(pct, status_msg)
 
     return _callback
+
+
+# Event conventions consumed by the UI:
+# - ai.progress {progress: 0..1}
+# - ai.done     {progress: 1.0, reload: true}
+# - products.updated / products.reload
 
 
 __all__ = [

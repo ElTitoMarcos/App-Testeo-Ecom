@@ -17,6 +17,18 @@ The AI enrichment flow now uses configurable micro-batching and parallel HTTP ca
 
 All variables also exist under `config["ai"]` so they can be persisted in `product_research_app/config.json` when running locally.
 
+### Progress smoothing
+
+The AI progress indicator now blends step-based updates with a time estimator controlled through environment variables:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PRAPP_AI_ITEM_SEC_BASE` | `3.0` | Base time (seconds) assumed per product when estimating duration. |
+| `PRAPP_AI_ITEM_SEC_OFFSET` | `-0.2` | Offset applied to the per-item estimate (defaults to subtracting 0.2 s). |
+| `PRAPP_AI_PROGRESS_TICK` | `0.4` | Interval (seconds) between background progress updates. |
+
+The time-based loop gently advances progress up to 98 % while the job is running and hands off to the step tracker once results arrive.
+
 ## Calibration cache
 
 Calibrations for desire/competition percentiles are cached once per weights version in `product_research_app/ai_calibration_cache.json`. When insufficient data is available the fallback percentiles are persisted so subsequent jobs skip the heavy recalculation step.

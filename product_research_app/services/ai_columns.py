@@ -27,7 +27,7 @@ from ..obs import log_partial_ko, log_recovered
 from ..ratelimit import async_decorrelated_jitter_sleep
 from ..routes.ai_events import legacy_progress_updater
 from ..utils.event_broker import broker
-from ..utils.progress import ProgressTracker
+from ..utils.progress import ProgressTracker, TimeProgressLoop
 from ..utils.signature import compute_sig_hash
 from .desire_utils import cleanse, looks_like_product_desc
 from .prompt_templates import MISSING_ONLY_JSONL_PROMPT, STRICT_JSONL_PROMPT
@@ -65,7 +65,9 @@ def run_ai_fill_job(
             logger.debug("legacy progress updater failed", exc_info=True)
 
     tracker = ProgressTracker(total=max(total_requested, 1), on_progress=_dispatch_progress)
+    time_loop = TimeProgressLoop(n_items=total_requested, on_progress=_dispatch_progress)
     tracker.update_absolute(0, "starting")
+    time_loop.start()
 
     original_status_cb = status_cb
 
@@ -115,8 +117,10 @@ def run_ai_fill_job(
             logger.debug("legacy progress updater failed", exc_info=True)
         raise
     finally:
+        time_loop.stop_and_force_100()
         tracker.force_100(progress_message)
         broker.publish({"type": "ai.done", "progress": 1.0, "reload": True})
+        broker.publish({"type": "products.reload"})
 
 
 
@@ -2858,6 +2862,7 @@ def _run_ai_fill_job_impl(
             )
     conn.commit()
     broker.publish({"type": "products.updated"})
+    broker.publish({"type": "products.reload"})
 
     pending_ids = sorted(pending_set)
     done_val = counts["ok"] + counts["cached"]
