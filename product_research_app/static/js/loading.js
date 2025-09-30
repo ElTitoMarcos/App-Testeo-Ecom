@@ -1,24 +1,30 @@
 // loading.js — barra en flujo con soporte multi-host (header y modal) y limpieza de legados
 
-// ======= PROGRESO POR ETA (AJUSTADO) =======
+// ===== ETA por producto + Watchdog =====
 let etaTimer = null;
 let etaStart = 0;
 let etaTotalMs = 0;
 let etaLastPct = 0;
 let etaFinished = false;
 
-// Evita 100% precoz: solo cerramos cuando ya está cableado el job de IA
-let etaBound = false;
+// Señales backend
+let lastBackendSignalAt = 0;
+let sawBackendActivity = false;
+let watchdogTimer = null;
 
-// Rango permitido (3.4–3.7 s) y por defecto 3.55
+// Rango 3.4–3.7 s/ítem (por defecto 3.55)
 const ETA_MIN = 3.4;
 const ETA_MAX = 3.7;
 const ETA_DEFAULT = 3.55;
 
+// Watchdog: si hay silencio del backend y la ETA va alta, cerramos
+const WATCHDOG_CHECK_MS = 1500;
+const WATCHDOG_IDLE_MS = 10000;
+const WATCHDOG_PCT_GATE = 80;
+
 function startEtaProgress(totalItems, secondsPerItem = ETA_DEFAULT) {
   stopEtaProgress(false);
   etaFinished = false;
-  etaBound = false; // aún NO sabemos del job de IA
 
   if (!Number.isFinite(totalItems) || totalItems <= 0) totalItems = 1;
   const spi = Math.max(ETA_MIN, Math.min(ETA_MAX, secondsPerItem));
@@ -27,9 +33,13 @@ function startEtaProgress(totalItems, secondsPerItem = ETA_DEFAULT) {
   etaStart = Date.now();
   etaLastPct = 0;
 
+  // reset señales backend
+  lastBackendSignalAt = 0;
+  sawBackendActivity = false;
+
   setProgressUI(0);
 
-  // Intervalo suave (150 ms)
+  // Tick de ETA
   etaTimer = setInterval(() => {
     if (etaFinished) return;
     const elapsed = Date.now() - etaStart;
@@ -40,32 +50,38 @@ function startEtaProgress(totalItems, secondsPerItem = ETA_DEFAULT) {
       setProgressUI(pct);
     }
   }, 150);
+
+  // Watchdog
+  watchdogTimer = setInterval(() => {
+    if (etaFinished) return clearInterval(watchdogTimer);
+    const now = Date.now();
+    const pctNow = etaLastPct;
+
+    if (sawBackendActivity &&
+        pctNow >= WATCHDOG_PCT_GATE &&
+        lastBackendSignalAt > 0 &&
+        (now - lastBackendSignalAt) >= WATCHDOG_IDLE_MS) {
+      console.debug('[watchdog] cierre por silencio backend con ETA alta');
+      markBackendDone();
+    }
+  }, WATCHDOG_CHECK_MS);
 }
 
 function stopEtaProgress(done) {
-  if (etaTimer) {
-    clearInterval(etaTimer);
-    etaTimer = null;
-  }
+  if (etaTimer) { clearInterval(etaTimer); etaTimer = null; }
+  if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
   if (done) {
     etaFinished = true;
-    setProgressUI(100);  // 100% sólo cuando hay "done" real
+    setProgressUI(100);
   }
 }
 
-// Señal universal: llamar SOLO cuando el backend de IA haya finalizado de verdad
 function markBackendDone() {
-  // Si alguien la llama antes de cablear el job IA (fin de import), se ignora
-  if (!etaBound) {
-    console.debug('Ignorado: “done” antes de cablear el job IA');
-    return;
-  }
   if (etaFinished) return;
-  stopEtaProgress(true);   // salta a 100%
-  refreshProductsTable();  // refresca la tabla
+  stopEtaProgress(true);
+  refreshProductsTable();
 }
 
-// Refresco robusto de la tabla (usa lo que exista)
 async function refreshProductsTable() {
   try {
     if (window.table && table.ajax && typeof table.ajax.reload === 'function') {
@@ -81,13 +97,12 @@ async function refreshProductsTable() {
       return;
     }
     location.reload();
-  } catch (err) {
-    console.error('Error refrescando tabla:', err);
+  } catch (e) {
+    console.error('Error refrescando tabla:', e);
     location.reload();
   }
 }
 
-// Pinta barra y %
 function setProgressUI(pct) {
   const bar = document.querySelector('.progress-fill, #import-progress .bar, [role="progressbar"] .bar');
   if (bar) bar.style.width = pct + '%';
@@ -100,83 +115,101 @@ function setProgressUI(pct) {
 }
 
 function wireJobDoneSignals({ jobId, sseUrl, pollUrl, totalItems }) {
-  // Ya estamos escuchando el job IA => permitimos 100% cuando llegue el “done” real
-  etaBound = true;
-
-  // 1) SSE si existe
   if (sseUrl) {
     try {
       const es = new EventSource(sseUrl);
       const close = () => { try { es.close(); } catch {} };
 
-      es.addEventListener('message', (e) => {
-        try {
-          const msg = JSON.parse(e.data);
-          if (isDoneMsg(msg, totalItems)) {
-            close();
-            markBackendDone();
-          }
-        } catch {}
-      });
+      const onMessage = (raw) => {
+        backendHeartbeat();
+        const msg = parseSseData(raw?.data);
+        if (isDoneMsg(msg, totalItems)) {
+          close();
+          markBackendDone();
+        }
+      };
+
+      es.addEventListener('message', (e) => onMessage(e));
+      es.addEventListener('done', (e) => onMessage(e));
+      es.addEventListener('complete', (e) => onMessage(e));
+      es.addEventListener('finished', (e) => onMessage(e));
 
       es.addEventListener('error', () => {
         close();
-        if (pollUrl) startPolling(pollUrl);
+        if (pollUrl) startPolling(pollUrl, totalItems);
       });
 
       return;
     } catch {
-      // seguimos con polling si falla SSE
+      // continuamos con polling
     }
   }
 
-  // 2) Polling si no hay SSE
-  if (pollUrl) startPolling(pollUrl);
-
-  function startPolling(url) {
-    const iv = setInterval(async () => {
-      if (etaFinished) return clearInterval(iv);
-      try {
-        const r = await fetch(url, { cache: 'no-store' });
-        const j = await r.json();
-        if (isDoneMsg(j, totalItems)) {
-          clearInterval(iv);
-          markBackendDone();
-        }
-      } catch (_) { /* ignoramos y seguimos */ }
-    }, 1200);
-  }
+  if (pollUrl) startPolling(pollUrl, totalItems);
 }
 
-// Detección estricta de final real (no cerrar en import/parse/triage)
+function startPolling(url, totalItems) {
+  const iv = setInterval(async () => {
+    if (etaFinished) return clearInterval(iv);
+    try {
+      const r = await fetch(url, { cache: 'no-store' });
+      backendHeartbeat();
+      let j = null;
+      try { j = await r.json(); } catch {}
+      if (isDoneMsg(j, totalItems)) {
+        clearInterval(iv);
+        markBackendDone();
+      }
+    } catch {
+      // ignoramos y seguimos
+    }
+  }, 1200);
+}
+
+function backendHeartbeat() {
+  lastBackendSignalAt = Date.now();
+  sawBackendActivity = true;
+}
+
+function parseSseData(data) {
+  if (!data) return null;
+  if (typeof data === 'string') {
+    try { return JSON.parse(data); }
+    catch { return { _text: data }; }
+  }
+  if (typeof data === 'object') return data;
+  return null;
+}
+
 function isDoneMsg(m, totalItems) {
+  if (!m) return false;
+
+  const text = (m._text || m.message || '').toString();
+  if (text.includes('ai.run done')) return true;
+  if (text.toLowerCase().includes('completed') || text.toLowerCase().includes('finished')) return true;
+
+  const norm = (v) => (v == null ? '' : String(v)).toLowerCase();
   const tnum = (v) => { const n = Number(v); return Number.isFinite(n) ? n : NaN; };
 
-  const phase = String(m?.phase || m?.stage || '').toLowerCase();
-  const status = String(m?.status || m?.state || '').toLowerCase();
-  const msg = String(m?.message || '');
+  const phase = norm(m.phase || m.stage);
+  const status = norm(m.status || m.state);
+  const pending = tnum(m.pending ?? m.remaining);
+  const remaining = tnum(m.remaining ?? m.pending);
+  const processed = tnum(m.processed ?? m.done ?? m.parsed);
+  const total = tnum(m.total ?? m.items ?? totalItems);
 
-  const remaining = tnum(m?.remaining ?? m?.pending);
-  const processed = tnum(m?.processed ?? m?.done ?? m?.parsed);
-  const total = tnum(m?.total ?? m?.items ?? totalItems);
-
-  // Fases que NO deben cerrar la barra
-  const notAiPhases = ['upload', 'import', 'parse', 'parsed', 'queued', 'triage', 'reading'];
+  const notAiPhases = ['upload','import','parse','parsed','queued','triage','reading'];
   if (phase && notAiPhases.includes(phase)) return false;
-  if (msg.includes('triage')) return false;
 
-  // Señales válidas de final real
-  if (msg.includes('ai.run done')) return true;
-
-  if ((status === 'done' || status === 'ok' || status === 'completed' || status === 'finished') && remaining === 0) {
-    return true;
+  if (status === 'done' || status === 'ok' || status === 'completed' || status === 'finished') {
+    if (Number.isFinite(remaining) && remaining === 0) return true;
+    if (Number.isFinite(pending) && pending === 0) return true;
+    if (Number.isFinite(processed) && Number.isFinite(total) && total > 0 && processed >= total) return true;
   }
 
-  if (Number.isFinite(remaining) && remaining === 0 &&
-      Number.isFinite(total) && total > 0 &&
-      Number.isFinite(processed) && processed >= total) {
-    return true;
-  }
+  if (Number.isFinite(remaining) && remaining === 0) return true;
+  if (Number.isFinite(pending) && pending === 0) return true;
+  if (Number.isFinite(processed) && Number.isFinite(total) && total > 0 && processed >= total) return true;
 
   return false;
 }
