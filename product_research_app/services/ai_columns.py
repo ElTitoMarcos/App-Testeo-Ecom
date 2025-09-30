@@ -1814,12 +1814,17 @@ def run_ai_fill_job(
         if total_items == 0:
             if job_updates_enabled and job_int is not None and skipped_existing:
                 database.set_import_job_ai_counts(conn, job_int, counts_with_cost, [])
-            _emit_status(status_cb, phase="enrich", counts=counts_with_cost, total=total_items, done=0)
+            _emit_status(
+                status_cb,
+                phase="enrich",
+                counts=counts_with_cost,
+                total=total_items,
+                done=0,
+            )
             job_completed = True
-    job_completed = True
-    _release_job_guard()
-    conn.close()
-    return {
+            _release_job_guard()
+            conn.close()
+            return {
                 "counts": counts_with_cost,
                 "pending_ids": [],
                 "error": None,
@@ -1847,6 +1852,9 @@ def run_ai_fill_job(
                 )
     
         remaining: List[Candidate] = []
+        done_val = counts["ok"] + counts["cached"]
+        counts_with_cost = {**counts, "cost_spent_usd": cost_spent}
+
         if cache_rows:
             cached_updates: Dict[int, Dict[str, Any]] = {}
             for cand in candidates:
@@ -1891,6 +1899,7 @@ def run_ai_fill_job(
             candidates = remaining
             counts_with_cost = {**counts, "cost_spent_usd": cost_spent}
             done_val = counts["ok"] + counts["cached"]
+
         if job_updates_enabled and job_int is not None:
             database.update_import_job_ai_progress(conn, job_int, done_val)
             database.set_import_job_ai_counts(conn, job_int, counts_with_cost, sorted(pending_set))
@@ -2815,23 +2824,23 @@ def run_ai_fill_job(
         pending_ids = sorted(pending_set)
         done_val = counts["ok"] + counts["cached"]
         counts_with_cost = {**counts, "cost_spent_usd": cost_spent}
-    if job_updates_enabled and job_int is not None:
-        database.update_import_job_ai_progress(conn, job_int, done_val)
-        database.set_import_job_ai_counts(conn, job_int, counts_with_cost, pending_ids)
-        if result_error:
-            database.set_import_job_ai_error(conn, job_int, result_error)
-        _emit_status(
-            status_cb,
-            phase="enrich",
-            counts=counts_with_cost,
-            total=total_items,
-            done=done_val,
-            message=f"IA columnas {done_val}/{total_items}",
-        )
-    
+        if job_updates_enabled and job_int is not None:
+            database.update_import_job_ai_progress(conn, job_int, done_val)
+            database.set_import_job_ai_counts(conn, job_int, counts_with_cost, pending_ids)
+            if result_error:
+                database.set_import_job_ai_error(conn, job_int, result_error)
+            _emit_status(
+                status_cb,
+                phase="enrich",
+                counts=counts_with_cost,
+                total=total_items,
+                done=done_val,
+                message=f"IA columnas {done_val}/{total_items}",
+            )
+
         latency_p50 = _percentile(request_latencies, 0.5) if request_latencies else 0.0
         latency_p95 = _percentile(request_latencies, 0.95) if request_latencies else 0.0
-    
+
         processed_count = len(applied_outputs)
         logger.info(
             "ai.run done total=%d processed=%d remaining=%d batch_adapted=%d json_retry=%d triage_covered=%d fallback_big=%d",
@@ -2843,7 +2852,7 @@ def run_ai_fill_job(
             triage_covered_total,
             fallback_big_total,
         )
-    
+
         logger.info(
             "run_ai_fill_job: job=%s total=%d ok=%d cached=%d ko=%d cost=%.4f pending=%d error=%s duration=%.2fs latency_p50=%.2fs latency_p95=%.2fs requests=%d",
             job_id,
@@ -2859,7 +2868,7 @@ def run_ai_fill_job(
             latency_p95,
             len(request_latencies),
         )
-    
+
         if fail_reasons:
             _log_ko_event(
                 "job_ko_summary",
