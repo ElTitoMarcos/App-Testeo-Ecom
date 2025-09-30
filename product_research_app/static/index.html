@@ -374,13 +374,105 @@ window.fetchJson = fetchJson;
 window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
 // ==== Progreso y endpoints ====
-const PROGRESS_IMPORT_WEIGHT = 0.20;        // 20% archivo
-const PROGRESS_AI_WEIGHT     = 0.80;        // 80% IA
+const ETA_SECONDS_PER_ITEM = 3.65;
 
-// Dentro del 20% de import: ~30% subida + ~70% backend
-const IMPORT_UPLOAD_FRAC   = PROGRESS_IMPORT_WEIGHT * 0.30; // 0.06
-const IMPORT_POLL_MAX_FRAC = PROGRESS_IMPORT_WEIGHT;        // 0.20
-const IMPORT_SERVER_SPAN   = IMPORT_POLL_MAX_FRAC - IMPORT_UPLOAD_FRAC;
+// === Progreso por ETA (3.5–3.8 s por producto) ===
+let etaTimer = null;
+let etaStart = 0;
+let etaTotalMs = 0;
+let etaLastPct = 0;
+let etaTracker = null;
+
+function setEtaTracker(tracker) {
+  etaTracker = tracker || null;
+}
+
+function syncEtaToTracker(pct) {
+  if (!etaTracker || typeof etaTracker.step !== 'function') return;
+  const frac = Math.max(0, Math.min(1, pct / 100));
+  try { etaTracker.step(frac); } catch (_) {}
+}
+
+function startEtaProgress(totalItems, secondsPerItem = ETA_SECONDS_PER_ITEM) {
+  stopEtaProgress(false);
+  if (!Number.isFinite(totalItems) || totalItems <= 0) totalItems = 1;
+
+  const spi = Math.max(3.5, Math.min(3.8, secondsPerItem));
+  etaTotalMs = Math.max(500, Math.round(totalItems * spi * 1000));
+  etaStart = Date.now();
+  etaLastPct = 0;
+
+  setProgressUI(0);
+  syncEtaToTracker(0);
+
+  etaTimer = setInterval(() => {
+    const elapsed = Date.now() - etaStart;
+    const raw = (elapsed / etaTotalMs) * 100;
+    const pct = Math.max(0, Math.min(99, Math.floor(raw)));
+    if (pct > etaLastPct) {
+      etaLastPct = pct;
+      setProgressUI(pct);
+      syncEtaToTracker(pct);
+    }
+  }, 200);
+}
+
+function stopEtaProgress(done) {
+  if (etaTimer) {
+    clearInterval(etaTimer);
+    etaTimer = null;
+  }
+  if (done) {
+    etaLastPct = 100;
+    setProgressUI(100);
+    syncEtaToTracker(100);
+  }
+  if (!etaTimer) {
+    etaStart = 0;
+    etaTotalMs = 0;
+  }
+}
+
+// Adapta los selectores a TU barra y TU etiqueta de porcentaje
+function setProgressUI(pct) {
+  const host = document.getElementById('progress-slot-global');
+  const bar = host?.querySelector('.progress-fill') || document.querySelector('.progress-fill');
+  if (bar) bar.style.width = pct + '%';
+
+  const label = host?.querySelector('.progress-percent') || document.querySelector('.progress-percent');
+  if (label) label.textContent = pct + '%';
+}
+
+function pickEtaTotal(source) {
+  if (!source || typeof source !== 'object') return null;
+  const candidates = [
+    source.total,
+    source.expected,
+    source.rows_total,
+    source.rows_expected,
+    source.rows_imported,
+    source.imported,
+    source.count,
+    source.items,
+    source.items_count,
+    source.config?.expected,
+  ];
+  for (const candidate of candidates) {
+    const num = Number(candidate);
+    if (Number.isFinite(num) && num > 0) return num;
+  }
+  return null;
+}
+
+function ensureEtaFromSource(source, secondsPerItem = ETA_SECONDS_PER_ITEM) {
+  if (etaTimer) return false;
+  const total = pickEtaTotal(source);
+  if (Number.isFinite(total) && total > 0) {
+    startEtaProgress(total, secondsPerItem);
+    return true;
+  }
+  return false;
+}
 
 const IMPORT_STATUS_URL = '/_import_status';
 const IMPORT_START_URL  = '/upload';
@@ -437,13 +529,12 @@ function hideCancelButton() {
   cancelBtn.onclick = null;
 }
 
-function mapServerFraction(serverPct) {
-  const clamped = Math.max(0, Math.min(100, Number(serverPct) || 0));
-  const frac = IMPORT_UPLOAD_FRAC + (clamped / 100) * IMPORT_SERVER_SPAN;
-  return Math.min(IMPORT_POLL_MAX_FRAC, frac);
-}
-
-async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL, host = getGlobalProgressHost() } = {}) {
+async function followImportTask(taskId, tracker, {
+  statusUrl = IMPORT_STATUS_URL,
+  host = getGlobalProgressHost(),
+  stopOnDone = true,
+  secondsPerItem = ETA_SECONDS_PER_ITEM,
+} = {}) {
   const id = typeof taskId === 'string' ? taskId : String(taskId || '');
   if (!id) return null;
   while (true) {
@@ -462,21 +553,26 @@ async function followImportTask(taskId, tracker, { statusUrl = IMPORT_STATUS_URL
       continue;
     }
     if (data.ui_cost_message) showImportBanner(data.ui_cost_message);
-    const raw = data.pct ?? data.percent ?? data.percentage ?? data.progress ?? (data.done ? 100 : undefined);
-    let serverPct = Number(raw);
-    if (!Number.isFinite(serverPct)) serverPct = 0;
-    serverPct = Math.max(0, Math.min(100, serverPct));
     const stage = (data.message || data.stage || data.state || '').toString() || 'Procesando…';
-    tracker?.step(mapServerFraction(serverPct), stage);
+    tracker?.setStage(stage);
+    ensureEtaFromSource(data, secondsPerItem);
 
     const statusVal = String(data.state || data.status || '').toLowerCase();
     if (statusVal === 'error' || data.error) {
+      stopEtaProgress(false);
       throw new Error(data.error || 'Error en importación');
     }
+    if (statusVal === 'cancelled' || statusVal === 'canceled') {
+      stopEtaProgress(false);
+      throw new DOMException('Importación cancelada', 'AbortError');
+    }
     if (statusVal === 'unknown' || !statusVal) {
+      stopEtaProgress(false);
       throw new Error('Estado de importación desconocido');
     }
-    if (serverPct >= 100 || statusVal === 'done' || statusVal === 'completed' || statusVal === 'finished') {
+    const doneFlag = statusVal === 'done' || statusVal === 'completed' || statusVal === 'finished' || data.done;
+    if (doneFlag) {
+      if (stopOnDone) stopEtaProgress(true);
       await reloadTable({ skipProgress: true });
       hideImportBanner();
       return data;
@@ -496,6 +592,8 @@ async function importCatalog(file, {
   if (!file) throw new Error('Archivo no válido');
   const host = getGlobalProgressHost();
   const tracker = LoadingHelpers.start('Importando catálogo', { host });
+  setEtaTracker(tracker);
+  setProgressUI(0);
   tracker.setStage('Subiendo archivo…');
   showCancelButton(() => {
     __cancelRequested = true;
@@ -514,10 +612,9 @@ async function importCatalog(file, {
     xhr.__hostEl = host;
     const startResult = await new Promise((resolve, reject) => {
       xhr.open('POST', startUrl, true);
-      xhr.upload.onprogress = (event) => {
-        if (!event.lengthComputable) return;
-        const frac = Math.min(IMPORT_UPLOAD_FRAC, (event.loaded / event.total) * IMPORT_UPLOAD_FRAC);
-        tracker.step(frac, 'Subiendo archivo…');
+      xhr.upload.onprogress = () => {
+        // El progreso depende solo del reloj; mantiene la etapa visible.
+        tracker.setStage('Subiendo archivo…');
       };
       xhr.onabort = () => reject(new DOMException('Importación cancelada', 'AbortError'));
       xhr.onerror = () => reject(new Error('Error de red subiendo archivo'));
@@ -533,6 +630,7 @@ async function importCatalog(file, {
           reject(new Error(message));
           return;
         }
+        ensureEtaFromSource(payload, ETA_SECONDS_PER_ITEM);
         if (payload.task_id) {
           resolve({ kind: 'async', taskId: payload.task_id, data: payload });
           return;
@@ -544,7 +642,11 @@ async function importCatalog(file, {
 
     if (startResult.kind === 'sync') {
       lastResult = startResult.data;
-      tracker.step(PROGRESS_IMPORT_WEIGHT, 'Archivo importado');
+      ensureEtaFromSource(lastResult, ETA_SECONDS_PER_ITEM);
+      if (!etaTimer) {
+        const fallbackTotal = lastResult?.imported ?? lastResult?.rows_imported ?? 1;
+        startEtaProgress(Number(fallbackTotal) || 1, ETA_SECONDS_PER_ITEM);
+      }
       const importedCount = lastResult?.imported ?? lastResult?.rows_imported;
       if (Number.isFinite(importedCount) && importedCount > 0) {
         toast.success(`Importados ${importedCount}`);
@@ -553,12 +655,14 @@ async function importCatalog(file, {
         await runAIFillPhase({
           tracker,
           aiStartUrl, aiStatusUrl, aiCancelUrl,
-          importedCount
+          importedCount,
+          secondsPerItem: ETA_SECONDS_PER_ITEM
         });
         tracker.done();
         finalCleanupHandled = true;
       } else {
-        tracker.step(1, 'Completado');
+        stopEtaProgress(true);
+        tracker.setStage('Completado');
         await reloadTable({ skipProgress: true });
       }
       return lastResult;
@@ -566,33 +670,42 @@ async function importCatalog(file, {
 
     const taskId = startResult.taskId;
     const idStr = typeof taskId === 'string' ? taskId : String(taskId);
-    tracker.step(IMPORT_UPLOAD_FRAC, 'Archivo subido');
+    tracker.setStage('Archivo subido');
     localStorage.setItem(IMPORT_TASK_LS_KEY, idStr);
 
-    lastResult = await followImportTask(idStr, tracker, { statusUrl, host });
+    lastResult = await followImportTask(idStr, tracker, {
+      statusUrl,
+      host,
+      stopOnDone: !withAI,
+      secondsPerItem: ETA_SECONDS_PER_ITEM,
+    });
 
     const importedCount = lastResult?.imported ?? lastResult?.rows_imported;
     if (Number.isFinite(importedCount) && importedCount > 0) {
       toast.success(`Importados ${importedCount}`);
     }
-    tracker.step(PROGRESS_IMPORT_WEIGHT, 'Archivo importado');
+    ensureEtaFromSource(lastResult, ETA_SECONDS_PER_ITEM);
     if (withAI) {
       await runAIFillPhase({
         tracker,
         aiStartUrl, aiStatusUrl, aiCancelUrl,
-        importedCount
+        importedCount,
+        secondsPerItem: ETA_SECONDS_PER_ITEM
       });
       tracker.done();
       finalCleanupHandled = true;
     } else {
-      tracker.step(1, 'Completado');
+      stopEtaProgress(true);
+      tracker.setStage('Completado');
     }
     return lastResult;
   } catch (err) {
     if (__cancelRequested || err?.name === 'AbortError') {
-      tracker.step(PROGRESS_IMPORT_WEIGHT, 'Cancelado');
+      tracker.setStage('Cancelado');
+      stopEtaProgress(false);
     } else {
-      tracker.step(1, 'Error');
+      tracker.setStage('Error');
+      stopEtaProgress(false);
       toast.error(err?.message || 'Error al importar catálogo');
     }
     throw err;
@@ -602,13 +715,14 @@ async function importCatalog(file, {
     hideImportBanner();
     if (!finalCleanupHandled) {
       tracker.done();
-      hideCancelButton();
-      __cancelRequested = false;
     }
+    hideCancelButton();
+    __cancelRequested = false;
+    setEtaTracker(null);
   }
 }
 
-async function runAIFillPhase({ tracker, aiStartUrl, aiStatusUrl, aiCancelUrl, importedCount }) {
+async function runAIFillPhase({ tracker, aiStartUrl, aiStatusUrl, aiCancelUrl, importedCount, secondsPerItem = ETA_SECONDS_PER_ITEM }) {
   // 1) Iniciar job IA
   tracker.setStage('Preparando IA…');
   let startData;
@@ -623,12 +737,18 @@ async function runAIFillPhase({ tracker, aiStartUrl, aiStatusUrl, aiCancelUrl, i
     if (!resp.ok) throw new Error('No se pudo iniciar IA');
     startData = await resp.json();
   } catch (e) {
-    tracker.step(PROGRESS_IMPORT_WEIGHT, 'Error al iniciar IA');
+    tracker.setStage('Error al iniciar IA');
+    stopEtaProgress(false);
     throw e;
   }
 
-  const total     = Number(startData?.total || 0);
-  const etaMs     = Number(startData?.eta_ms || 0);
+  ensureEtaFromSource(startData, secondsPerItem);
+  if (!etaTimer) {
+    const fallback = startData?.total ?? importedCount ?? 1;
+    startEtaProgress(Number(fallback) || 1, secondsPerItem);
+  }
+
+  const total     = Number(startData?.total || importedCount || 0);
   __activeAIJobId = String(startData?.job_id || '');
 
   // Botón cancelar (aborta XHR si quedara algo y pide cancelación del job IA)
@@ -649,13 +769,13 @@ async function runAIFillPhase({ tracker, aiStartUrl, aiStatusUrl, aiCancelUrl, i
   });
 
   // 2) Poll + ETA suave
-  const startAt = Date.now();
-  const etaEnd  = etaMs > 0 ? startAt + etaMs : 0;
   let processed = 0;
+  let finishedOk = false;
 
   while (true) {
     if (__cancelRequested) {
       tracker.setStage('Cancelando…');
+      stopEtaProgress(false);
       break;
     }
     try {
@@ -664,32 +784,27 @@ async function runAIFillPhase({ tracker, aiStartUrl, aiStatusUrl, aiCancelUrl, i
       });
       if (r.ok) {
         const data = await r.json();
+        ensureEtaFromSource(data, secondsPerItem);
         processed = Number(data?.processed || processed);
         const tot = Number(data?.total || total || 1);
         const done = data?.status === 'done' || processed >= tot;
-        const aiFrac = Math.max(0, Math.min(1, processed / Math.max(1, tot)));
-        const combined = PROGRESS_IMPORT_WEIGHT + (aiFrac * PROGRESS_AI_WEIGHT);
-        tracker.step(Math.min(0.99, combined), 'IA generando…');
+        const safeTot = Math.max(1, tot);
+        const safeDone = Math.min(processed, safeTot);
+        tracker.setStage(done
+          ? 'IA finalizando…'
+          : `IA generando… (${safeDone}/${safeTot})`
+        );
         if (done) {
-          tracker.step(1, 'Completado');
+          stopEtaProgress(true);
+          tracker.setStage('Completado');
+          finishedOk = true;
           break;
         }
       }
     } catch {
-      // Red blip: usa ETA suave si el backend no responde
-      if (etaEnd > 0) {
-        const t = Date.now();
-        const elapsed = t - startAt;
-        const etaFrac = Math.max(0, Math.min(1, elapsed / etaMs));
-        const combined = PROGRESS_IMPORT_WEIGHT + (etaFrac * PROGRESS_AI_WEIGHT);
-        tracker.step(Math.min(0.99, combined), 'Estimando…');
-      }
+      tracker.setStage('Esperando IA…');
     }
 
-    // Hold al 99% si ya pasó el tiempo estimado y no terminó
-    if (etaEnd > 0 && Date.now() > etaEnd) {
-      tracker.step(0.99, 'Cerrando…');
-    }
     await sleep(600);
   }
 
@@ -699,6 +814,9 @@ async function runAIFillPhase({ tracker, aiStartUrl, aiStatusUrl, aiCancelUrl, i
   // Auto-refresco de la tabla al terminar o cancelar
   try { await reloadTable({ skipProgress: true }); } catch {}
 
+  if (!finishedOk && !__cancelRequested) {
+    stopEtaProgress(false);
+  }
   __cancelRequested = false;
 }
 
@@ -1315,21 +1433,28 @@ window.onload = async () => {
     toast.info('Reanudando importación previa…');
     const host = getGlobalProgressHost();
     const tracker = LoadingHelpers.start('Importando catálogo', { host });
-    tracker.step(IMPORT_UPLOAD_FRAC, 'Reanudando…');
+    setEtaTracker(tracker);
+    setProgressUI(0);
+    tracker.setStage('Reanudando…');
     try {
-      const result = await followImportTask(tid, tracker, { host });
+      const result = await followImportTask(tid, tracker, {
+        host,
+        secondsPerItem: ETA_SECONDS_PER_ITEM,
+      });
       const importedCount = result?.imported ?? result?.rows_imported;
       if (Number.isFinite(importedCount) && importedCount > 0) {
         toast.success(`Importados ${importedCount}`);
       }
-      tracker.step(1, 'Completado');
+      tracker.setStage('Completado');
     } catch (err) {
-      tracker.step(1, 'Error');
+      tracker.setStage('Error');
+      stopEtaProgress(false);
       toast.error(err?.message || 'Error en importación');
     } finally {
       localStorage.removeItem(IMPORT_TASK_LS_KEY);
       tracker.done();
       hideImportBanner();
+      setEtaTracker(null);
     }
   }
 };
