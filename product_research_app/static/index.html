@@ -364,7 +364,7 @@ body.dark .skeleton{background:#333;}
 import { applyFilters, readFilters } from '/static/js/filters-panel.js';
 import * as api from "/static/js/net.js";
 import * as groupsService from "/static/js/groups-service.js";
-import { LoadingHelpers } from '/static/js/loading.js';
+import { LoadingHelpers, FINAL_CAP } from '/static/js/loading.js';
 const { fetchJson } = api;
 const metricKeys = window.metricKeys;
 const openConfigModal = window.openConfigModal;
@@ -665,14 +665,16 @@ async function runAIFillPhase({ tracker, aiStartUrl, aiStatusUrl, aiCancelUrl, i
         const data = await r.json();
         processed = Number(data?.processed || processed);
         const tot = Number(data?.total || total || 1);
-        const done = data?.status === 'done' || processed >= tot;
+        const statusRaw = (data?.state ?? data?.status ?? '').toString().toLowerCase();
+        const doneStates = ['done', 'completed', 'finished'];
+        const done = doneStates.includes(statusRaw) || processed >= tot;
         const aiFrac = Math.max(0, Math.min(1, processed / Math.max(1, tot)));
         const combined = PROGRESS_IMPORT_WEIGHT + (aiFrac * PROGRESS_AI_WEIGHT);
-        tracker.step(Math.min(0.99, combined), 'IA generando…');
         if (done) {
-          tracker.step(1, 'Completado');
+          tracker.setStage('Finalizando…');
           break;
         }
+        tracker.step(Math.min(1, combined), 'IA generando…');
       }
     } catch {
       // Red blip: usa ETA suave si el backend no responde
@@ -681,13 +683,13 @@ async function runAIFillPhase({ tracker, aiStartUrl, aiStatusUrl, aiCancelUrl, i
         const elapsed = t - startAt;
         const etaFrac = Math.max(0, Math.min(1, elapsed / etaMs));
         const combined = PROGRESS_IMPORT_WEIGHT + (etaFrac * PROGRESS_AI_WEIGHT);
-        tracker.step(Math.min(0.99, combined), 'Estimando…');
+        tracker.step(Math.min(1, combined), 'Estimando…');
       }
     }
 
     // Hold al 99% si ya pasó el tiempo estimado y no terminó
     if (etaEnd > 0 && Date.now() > etaEnd) {
-      tracker.step(0.99, 'Cerrando…');
+      tracker.step(FINAL_CAP, 'Cerrando…');
     }
     await sleep(600);
   }

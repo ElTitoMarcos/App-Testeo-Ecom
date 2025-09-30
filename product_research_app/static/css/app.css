@@ -43,6 +43,22 @@ table {
   margin-top: 0;
 }
 
+.data-table thead th,
+table thead th,
+#trends thead th,
+.trends-pane thead th {
+  background: #eef5ff;
+  color: #0f172a;
+}
+
+body.dark .data-table thead th,
+body.dark table thead th,
+body.dark #trends thead th,
+body.dark .trends-pane thead th {
+  background: #1f2344;
+  color: #e5e7eb;
+}
+
 .table-toolbar {
   position: sticky;
   top: var(--header-h, 60px);

@@ -10,6 +10,13 @@
   mo.observe(document.documentElement, { childList: true, subtree: true });
 })();
 
+export const FINAL_CAP = 0.97;
+const EMA_FACTOR = 0.25;
+const HIDE_DELAY_MS = 900;
+const STUCK_THRESHOLD_MS = 20000;
+const STUCK_STAGE_TEXT = 'Últimos detalles…';
+const FINAL_STAGE_TEXT = 'Finalizando…';
+
 // ===== ProgressRail: una barra por "host" (slot). host = elemento contenedor (header, modal, etc.)
 function createRailInHost(host) {
   if (!host) return null;
@@ -44,7 +51,7 @@ function ensureSlot(el) {
   return host;
 }
 
-const Rails = new WeakMap(); // host -> { rail, fill, pctEl, titleEl, stageEl, tasks: Map }
+const Rails = new WeakMap(); // host -> { rail, fill, pctEl, titleEl, stageEl, tasks: Map, ... }
 
 function getRailState(host) {
   if (!host) return null;
@@ -56,7 +63,20 @@ function getRailState(host) {
   const pctEl = rail.querySelector('.progress-percent');
   const titleEl = rail.querySelector('.progress-title');
   const stageEl = rail.querySelector('.progress-stage');
-  state = { rail, fill, pctEl, titleEl, stageEl, tasks: new Map(), hideTimer: null };
+  state = {
+    rail,
+    fill,
+    pctEl,
+    titleEl,
+    stageEl,
+    tasks: new Map(),
+    hideTimer: null,
+    shown: 0,
+    unlock100: false,
+    lastBumpAt: Date.now(),
+    rawProgress: 0,
+    animFrame: null
+  };
   Rails.set(host, state);
   return state;
 }
@@ -66,42 +86,88 @@ function refreshHost(host) {
   const tasks = s.tasks;
   const hasTasks = tasks.size > 0;
 
-  // 1) Activar/colapsar el slot (barra)
-  host.classList.toggle('active', hasTasks);
+  if (hasTasks && s.hideTimer) { clearTimeout(s.hideTimer); s.hideTimer = null; }
 
-  const isGlobalHost = host && host.id === 'progress-slot-global';
+  let sum = 0;
+  let last = null;
+  for (const t of tasks.values()) {
+    sum += (t.progress || 0);
+    last = t;
+  }
+  const raw = hasTasks ? (sum / tasks.size) : 0;
+  if (raw > s.rawProgress + 0.0001) {
+    s.lastBumpAt = Date.now();
+  }
+  s.rawProgress = raw;
 
-  // 2) Mostrar/ocultar el wrapper completo
-  if (isGlobalHost) {
-    const wrapper = document.getElementById('global-progress-wrapper');
-    if (wrapper) wrapper.classList.toggle('show', hasTasks);
+  if (!hasTasks && !s.unlock100) {
+    s.unlock100 = true;
+    s.lastBumpAt = Date.now();
   }
 
-  // 3) Mostrar/ocultar el botón Cancelar
+  const capped = s.unlock100 ? 1 : Math.min(raw, FINAL_CAP);
+  s.shown += (capped - s.shown) * EMA_FACTOR;
+  if (s.unlock100 && Math.abs(1 - s.shown) < 0.001) {
+    s.shown = 1;
+  }
+
+  const pct = Math.max(0, Math.min(100, Math.round(s.shown * 100)));
+  s.fill.style.width = pct + '%';
+  s.pctEl.textContent = pct + '%';
+
+  const shouldShow = hasTasks || s.unlock100 || s.shown > 0.001 || !!s.hideTimer;
+  const isGlobalHost = host && host.id === 'progress-slot-global';
+  host.classList.toggle('active', shouldShow);
+
   if (isGlobalHost) {
+    const wrapper = document.getElementById('global-progress-wrapper');
+    if (wrapper) wrapper.classList.toggle('show', shouldShow);
     const cancelBtn = document.getElementById('progress-cancel-btn');
     if (cancelBtn) cancelBtn.style.display = hasTasks ? 'inline-flex' : 'none';
   }
 
-  // 4) Si no hay tareas, limpiar el slot (evita textos/0%)
-  if (!hasTasks) {
-    clearTimeout(s.hideTimer);
-    s.hideTimer = null;
-    tasks.clear();
-    host.innerHTML = '';
-    Rails.delete(host);
-    return;
-  }
-  // promedio simple de progresos
-  let sum = 0, last;
-  for (const t of tasks.values()) { sum += (t.progress || 0); last = t; }
-  const avg = Math.min(0.99, sum / tasks.size);
-  const pct = Math.round(avg * 100);
-  s.fill.style.width = pct + '%';
-  s.pctEl.textContent = pct + '%';
   if (last) {
     if (last.title) s.titleEl.textContent = last.title;
-    if (last.stage) s.stageEl.textContent = last.stage;
+    let stageText = last.stage || 'Procesando…';
+    const isCapped = !s.unlock100 && capped < raw - 0.0001;
+    if (isCapped && Date.now() - s.lastBumpAt > STUCK_THRESHOLD_MS) {
+      stageText = STUCK_STAGE_TEXT;
+    }
+    s.stageEl.textContent = stageText;
+  } else if (s.unlock100 && !s.stageEl.textContent.trim()) {
+    s.stageEl.textContent = FINAL_STAGE_TEXT;
+  }
+
+  const needsMoreFrames = Math.abs(capped - s.shown) > 0.001;
+  if (needsMoreFrames && !s.animFrame) {
+    s.animFrame = requestAnimationFrame(() => {
+      s.animFrame = null;
+      refreshHost(host);
+    });
+  } else if (!needsMoreFrames && s.animFrame) {
+    cancelAnimationFrame(s.animFrame);
+    s.animFrame = null;
+  }
+
+  if (s.unlock100 && !hasTasks && s.shown >= 0.999) {
+    if (!s.hideTimer) {
+      s.hideTimer = setTimeout(() => {
+        if (s.animFrame) {
+          cancelAnimationFrame(s.animFrame);
+          s.animFrame = null;
+        }
+        host.classList.remove('active');
+        if (isGlobalHost) {
+          const wrapper = document.getElementById('global-progress-wrapper');
+          if (wrapper) wrapper.classList.remove('show');
+          const cancelBtn = document.getElementById('progress-cancel-btn');
+          if (cancelBtn) cancelBtn.style.display = 'none';
+        }
+        host.innerHTML = '';
+        tasks.clear();
+        Rails.delete(host);
+      }, HIDE_DELAY_MS);
+    }
   }
 }
 
@@ -111,6 +177,14 @@ function startTaskInHost({ title = 'Procesando…', hostEl = null } = {}) {
   if (!s) return { step(){}, setStage(){}, done(){} };
 
   const id = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+  if (s.hideTimer) { clearTimeout(s.hideTimer); s.hideTimer = null; }
+  if (s.animFrame) { cancelAnimationFrame(s.animFrame); s.animFrame = null; }
+  if (!s.tasks.size) {
+    s.shown = 0;
+  }
+  s.unlock100 = false;
+  s.lastBumpAt = Date.now();
+  s.rawProgress = 0;
   s.tasks.set(id, { progress: 0, title, stage: 'Iniciando…' });
   refreshHost(host);
 
@@ -123,10 +197,19 @@ function startTaskInHost({ title = 'Procesando…', hostEl = null } = {}) {
     },
     setStage(stage) {
       const t = s.tasks.get(id); if (!t) return;
-      t.stage = stage; refreshHost(host);
+      t.stage = stage;
+      if (stage === FINAL_STAGE_TEXT) {
+        s.unlock100 = true;
+        s.lastBumpAt = Date.now();
+      }
+      refreshHost(host);
     },
     done() {
       s.tasks.delete(id);
+      if (s.tasks.size === 0) {
+        s.unlock100 = true;
+        s.lastBumpAt = Date.now();
+      }
       refreshHost(host);
     }
   };
