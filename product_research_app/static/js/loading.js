@@ -1,3 +1,6 @@
+const APPROACH = 0.30; // suavizado de animación (0.2–0.4 va bien)
+function clamp01(x){ return Math.max(0, Math.min(1, x || 0)); }
+
 // loading.js — barra en flujo con soporte multi-host (header y modal) y limpieza de legados
 
 // ===== Legacy killer: por si algún módulo viejo intenta crear su barra/overlay =====
@@ -44,7 +47,7 @@ function ensureSlot(el) {
   return host;
 }
 
-const Rails = new WeakMap(); // host -> { rail, fill, pctEl, titleEl, stageEl, tasks: Map }
+const Rails = new WeakMap(); // host -> { host, rail, fill, pctEl, titleEl, stageEl, tasks: Map, shown, reported, unlock100, _raf }
 
 function getRailState(host) {
   if (!host) return null;
@@ -56,53 +59,99 @@ function getRailState(host) {
   const pctEl = rail.querySelector('.progress-percent');
   const titleEl = rail.querySelector('.progress-title');
   const stageEl = rail.querySelector('.progress-stage');
-  state = { rail, fill, pctEl, titleEl, stageEl, tasks: new Map(), hideTimer: null };
+  state = {
+    host,
+    rail,
+    fill,
+    pctEl,
+    titleEl,
+    stageEl,
+    tasks: new Map(),
+    hideTimer: null,
+    shown: 0,
+    reported: 0,
+    unlock100: false,
+    _raf: null
+  };
   Rails.set(host, state);
   return state;
+}
+
+function finishAndHide(state) {
+  const host = state.host;
+  if (!host) return;
+  if (state._raf) {
+    cancelAnimationFrame(state._raf);
+    state._raf = null;
+  }
+  state.shown = 0;
+  state.reported = 0;
+  state.unlock100 = false;
+  if (state.fill) state.fill.style.width = '0%';
+  if (state.pctEl) state.pctEl.textContent = '0%';
+  host.classList.remove('active');
+
+  const isGlobalHost = host && host.id === 'progress-slot-global';
+  if (isGlobalHost) {
+    const wrapper = document.getElementById('global-progress-wrapper');
+    if (wrapper) wrapper.classList.remove('show');
+    const cancelBtn = document.getElementById('progress-cancel-btn');
+    if (cancelBtn) cancelBtn.style.display = 'none';
+  }
+
+  state.tasks.clear();
+  host.innerHTML = '';
+  Rails.delete(host);
+}
+
+function rafLoop(state) {
+  state._raf = null;
+  const target = state.unlock100 ? 1 : state.reported;
+  state.shown = state.shown + (target - state.shown) * APPROACH;
+
+  const shownPct = Math.round(state.shown * 100);
+  const realPct  = Math.round(state.reported * 100);
+
+  state.fill.style.width = (state.shown * 100) + '%';
+
+  const labelPct = state.unlock100 ? shownPct : realPct;
+  if (state.pctEl) state.pctEl.textContent = labelPct + '%';
+
+  if (state.unlock100 && state.shown >= 0.999) {
+    state.unlock100 = false;
+    finishAndHide(state);
+    return;
+  }
+  state._raf = requestAnimationFrame(() => rafLoop(state));
+}
+
+function ensureLoop(state) {
+  if (!state._raf) state._raf = requestAnimationFrame(() => rafLoop(state));
 }
 
 function refreshHost(host) {
   const s = getRailState(host); if (!s) return;
   const tasks = s.tasks;
   const hasTasks = tasks.size > 0;
+  const isActive = hasTasks || s.unlock100;
 
-  // 1) Activar/colapsar el slot (barra)
-  host.classList.toggle('active', hasTasks);
+  host.classList.toggle('active', isActive);
 
   const isGlobalHost = host && host.id === 'progress-slot-global';
 
-  // 2) Mostrar/ocultar el wrapper completo
   if (isGlobalHost) {
     const wrapper = document.getElementById('global-progress-wrapper');
-    if (wrapper) wrapper.classList.toggle('show', hasTasks);
-  }
-
-  // 3) Mostrar/ocultar el botón Cancelar
-  if (isGlobalHost) {
+    if (wrapper) wrapper.classList.toggle('show', isActive);
     const cancelBtn = document.getElementById('progress-cancel-btn');
-    if (cancelBtn) cancelBtn.style.display = hasTasks ? 'inline-flex' : 'none';
+    if (cancelBtn) cancelBtn.style.display = isActive ? 'inline-flex' : 'none';
   }
 
-  // 4) Si no hay tareas, limpiar el slot (evita textos/0%)
-  if (!hasTasks) {
-    clearTimeout(s.hideTimer);
-    s.hideTimer = null;
-    tasks.clear();
-    host.innerHTML = '';
-    Rails.delete(host);
+  if (!isActive) {
+    finishAndHide(s);
     return;
   }
-  // promedio simple de progresos
-  let sum = 0, last;
-  for (const t of tasks.values()) { sum += (t.progress || 0); last = t; }
-  const avg = Math.min(0.99, sum / tasks.size);
-  const pct = Math.round(avg * 100);
-  s.fill.style.width = pct + '%';
-  s.pctEl.textContent = pct + '%';
-  if (last) {
-    if (last.title) s.titleEl.textContent = last.title;
-    if (last.stage) s.stageEl.textContent = last.stage;
-  }
+
+  ensureLoop(s);
 }
 
 function startTaskInHost({ title = 'Procesando…', hostEl = null } = {}) {
@@ -111,22 +160,50 @@ function startTaskInHost({ title = 'Procesando…', hostEl = null } = {}) {
   if (!s) return { step(){}, setStage(){}, done(){} };
 
   const id = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
-  s.tasks.set(id, { progress: 0, title, stage: 'Iniciando…' });
+  const task = { progress: 0, title, stage: 'Iniciando…' };
+  s.tasks.set(id, task);
+  s.unlock100 = false;
+  s.reported = 0;
+  s.shown = 0;
+  if (s.titleEl) s.titleEl.textContent = title;
+  if (s.stageEl) s.stageEl.textContent = task.stage;
+  if (s.pctEl) s.pctEl.textContent = '0%';
+  if (s.fill) s.fill.style.width = '0%';
   refreshHost(host);
 
   return {
     step(frac, stage) {
       const t = s.tasks.get(id); if (!t) return;
-      t.progress = Math.max(0, Math.min(1, frac));
-      if (stage) t.stage = stage;
+      const clamped = clamp01(frac);
+      t.progress = clamped;
+      s.reported = clamped;
+      if (stage) {
+        t.stage = stage;
+        if (s.stageEl) s.stageEl.textContent = stage;
+      }
       refreshHost(host);
     },
     setStage(stage) {
       const t = s.tasks.get(id); if (!t) return;
-      t.stage = stage; refreshHost(host);
+      t.stage = stage;
+      if (s.stageEl) s.stageEl.textContent = stage;
+      refreshHost(host);
     },
     done() {
+      if (!s.tasks.has(id)) return;
       s.tasks.delete(id);
+      if (s.tasks.size === 0) {
+        s.unlock100 = true;
+        ensureLoop(s);
+      } else {
+        let last;
+        for (const t of s.tasks.values()) last = t;
+        if (last) {
+          if (last.title && s.titleEl) s.titleEl.textContent = last.title;
+          if (last.stage && s.stageEl) s.stageEl.textContent = last.stage;
+          if (typeof last.progress === 'number') s.reported = clamp01(last.progress);
+        }
+      }
       refreshHost(host);
     }
   };
