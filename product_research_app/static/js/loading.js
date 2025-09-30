@@ -1,5 +1,186 @@
 // loading.js — barra en flujo con soporte multi-host (header y modal) y limpieza de legados
 
+// ======= PROGRESO POR ETA (AJUSTADO) =======
+let etaTimer = null;
+let etaStart = 0;
+let etaTotalMs = 0;
+let etaLastPct = 0;
+let etaFinished = false;
+
+// Evita 100% precoz: solo cerramos cuando ya está cableado el job de IA
+let etaBound = false;
+
+// Rango permitido (3.4–3.7 s) y por defecto 3.55
+const ETA_MIN = 3.4;
+const ETA_MAX = 3.7;
+const ETA_DEFAULT = 3.55;
+
+function startEtaProgress(totalItems, secondsPerItem = ETA_DEFAULT) {
+  stopEtaProgress(false);
+  etaFinished = false;
+  etaBound = false; // aún NO sabemos del job de IA
+
+  if (!Number.isFinite(totalItems) || totalItems <= 0) totalItems = 1;
+  const spi = Math.max(ETA_MIN, Math.min(ETA_MAX, secondsPerItem));
+
+  etaTotalMs = Math.max(500, Math.round(totalItems * spi * 1000));
+  etaStart = Date.now();
+  etaLastPct = 0;
+
+  setProgressUI(0);
+
+  // Intervalo suave (150 ms)
+  etaTimer = setInterval(() => {
+    if (etaFinished) return;
+    const elapsed = Date.now() - etaStart;
+    const raw = (elapsed / etaTotalMs) * 100;
+    const pct = Math.max(0, Math.min(99, Math.floor(raw)));
+    if (pct > etaLastPct) {
+      etaLastPct = pct;
+      setProgressUI(pct);
+    }
+  }, 150);
+}
+
+function stopEtaProgress(done) {
+  if (etaTimer) {
+    clearInterval(etaTimer);
+    etaTimer = null;
+  }
+  if (done) {
+    etaFinished = true;
+    setProgressUI(100);  // 100% sólo cuando hay "done" real
+  }
+}
+
+// Señal universal: llamar SOLO cuando el backend de IA haya finalizado de verdad
+function markBackendDone() {
+  // Si alguien la llama antes de cablear el job IA (fin de import), se ignora
+  if (!etaBound) {
+    console.debug('Ignorado: “done” antes de cablear el job IA');
+    return;
+  }
+  if (etaFinished) return;
+  stopEtaProgress(true);   // salta a 100%
+  refreshProductsTable();  // refresca la tabla
+}
+
+// Refresco robusto de la tabla (usa lo que exista)
+async function refreshProductsTable() {
+  try {
+    if (window.table && table.ajax && typeof table.ajax.reload === 'function') {
+      table.ajax.reload(null, false);
+      return;
+    }
+    if (typeof window.reloadProductsTable === 'function') {
+      await window.reloadProductsTable();
+      return;
+    }
+    if (typeof window.fetchProductsAndRender === 'function') {
+      await window.fetchProductsAndRender();
+      return;
+    }
+    location.reload();
+  } catch (err) {
+    console.error('Error refrescando tabla:', err);
+    location.reload();
+  }
+}
+
+// Pinta barra y %
+function setProgressUI(pct) {
+  const bar = document.querySelector('.progress-fill, #import-progress .bar, [role="progressbar"] .bar');
+  if (bar) bar.style.width = pct + '%';
+
+  const label = document.querySelector('.progress-percent, #import-progress .percent');
+  if (label) label.textContent = pct + '%';
+
+  const topLabel = document.querySelector('#top-import-label, .import-status-text');
+  if (topLabel) topLabel.textContent = pct + '%';
+}
+
+function wireJobDoneSignals({ jobId, sseUrl, pollUrl, totalItems }) {
+  // Ya estamos escuchando el job IA => permitimos 100% cuando llegue el “done” real
+  etaBound = true;
+
+  // 1) SSE si existe
+  if (sseUrl) {
+    try {
+      const es = new EventSource(sseUrl);
+      const close = () => { try { es.close(); } catch {} };
+
+      es.addEventListener('message', (e) => {
+        try {
+          const msg = JSON.parse(e.data);
+          if (isDoneMsg(msg, totalItems)) {
+            close();
+            markBackendDone();
+          }
+        } catch {}
+      });
+
+      es.addEventListener('error', () => {
+        close();
+        if (pollUrl) startPolling(pollUrl);
+      });
+
+      return;
+    } catch {
+      // seguimos con polling si falla SSE
+    }
+  }
+
+  // 2) Polling si no hay SSE
+  if (pollUrl) startPolling(pollUrl);
+
+  function startPolling(url) {
+    const iv = setInterval(async () => {
+      if (etaFinished) return clearInterval(iv);
+      try {
+        const r = await fetch(url, { cache: 'no-store' });
+        const j = await r.json();
+        if (isDoneMsg(j, totalItems)) {
+          clearInterval(iv);
+          markBackendDone();
+        }
+      } catch (_) { /* ignoramos y seguimos */ }
+    }, 1200);
+  }
+}
+
+// Detección estricta de final real (no cerrar en import/parse/triage)
+function isDoneMsg(m, totalItems) {
+  const tnum = (v) => { const n = Number(v); return Number.isFinite(n) ? n : NaN; };
+
+  const phase = String(m?.phase || m?.stage || '').toLowerCase();
+  const status = String(m?.status || m?.state || '').toLowerCase();
+  const msg = String(m?.message || '');
+
+  const remaining = tnum(m?.remaining ?? m?.pending);
+  const processed = tnum(m?.processed ?? m?.done ?? m?.parsed);
+  const total = tnum(m?.total ?? m?.items ?? totalItems);
+
+  // Fases que NO deben cerrar la barra
+  const notAiPhases = ['upload', 'import', 'parse', 'parsed', 'queued', 'triage', 'reading'];
+  if (phase && notAiPhases.includes(phase)) return false;
+  if (msg.includes('triage')) return false;
+
+  // Señales válidas de final real
+  if (msg.includes('ai.run done')) return true;
+
+  if ((status === 'done' || status === 'ok' || status === 'completed' || status === 'finished') && remaining === 0) {
+    return true;
+  }
+
+  if (Number.isFinite(remaining) && remaining === 0 &&
+      Number.isFinite(total) && total > 0 &&
+      Number.isFinite(processed) && processed >= total) {
+    return true;
+  }
+
+  return false;
+}
+
 // ===== Legacy killer: por si algún módulo viejo intenta crear su barra/overlay =====
 (function killLegacy() {
   const zap = () => {
@@ -136,8 +317,28 @@ function startTaskInHost({ title = 'Procesando…', hostEl = null } = {}) {
 export const LoadingHelpers = {
   start(title, opts = {}) {
     return startTaskInHost({ title, hostEl: opts.host || null });
-  }
+  },
+  startEtaProgress,
+  stopEtaProgress,
+  markBackendDone,
+  wireJobDoneSignals
 };
+
+export {
+  startEtaProgress,
+  stopEtaProgress,
+  markBackendDone,
+  wireJobDoneSignals
+};
+
+if (typeof window !== 'undefined') {
+  Object.assign(window, {
+    startEtaProgress,
+    stopEtaProgress,
+    markBackendDone,
+    wireJobDoneSignals
+  });
+}
 
 // ===== Hooks de red: si se pasa init.__hostEl, el progreso aparece en ese host; si no, en el global =====
 (() => {
