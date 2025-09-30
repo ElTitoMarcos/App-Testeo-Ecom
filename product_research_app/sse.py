@@ -42,9 +42,7 @@ def _json_default(value: Any) -> Any:
         return repr(value)
 
 
-def publish_progress(payload: dict[str, Any]) -> None:
-    """Broadcast a JSON payload to all connected SSE clients."""
-
+def _broadcast(payload: dict[str, Any]) -> None:
     if not SSE_ENABLED:
         return
     try:
@@ -64,6 +62,33 @@ def publish_progress(payload: dict[str, Any]) -> None:
         with _clients_lock:
             for q in dead:
                 _clients.discard(q)
+
+
+def publish_progress(payload: dict[str, Any]) -> None:
+    """Broadcast a JSON payload to all connected SSE clients."""
+
+    if not isinstance(payload, dict):
+        logger.debug("Ignored non-dict SSE payload: %s", type(payload))
+        return
+    _broadcast(payload)
+
+
+def publish(channel: str, data: dict[str, Any] | None = None) -> None:
+    """Publish an event payload with an explicit channel name."""
+
+    channel_name = str(channel or "").strip()
+    if not channel_name:
+        return
+    payload: dict[str, Any] = {"event": channel_name}
+    if data:
+        if isinstance(data, dict):
+            payload.update(data)
+        else:  # pragma: no cover - defensive fallback
+            try:
+                payload.update(dict(data))
+            except Exception:
+                payload["data"] = data
+    _broadcast(payload)
 
 
 @sse_bp.route("/events")

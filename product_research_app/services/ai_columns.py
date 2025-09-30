@@ -26,6 +26,7 @@ from ..ai.strict_jsonl import parse_jsonl_and_validate
 from ..obs import log_partial_ko, log_recovered
 from ..ratelimit import async_decorrelated_jitter_sleep
 from ..utils.signature import compute_sig_hash
+from ..sse import publish as sse_publish
 from .desire_utils import cleanse, looks_like_product_desc
 from .prompt_templates import MISSING_ONLY_JSONL_PROMPT, STRICT_JSONL_PROMPT
 
@@ -40,6 +41,249 @@ AI_FIELDS = ("desire", "desire_magnitude", "awareness_level", "competition_level
 
 _ACTIVE_JOB_LOCK = threading.Lock()
 _ACTIVE_JOB_KEYS: Dict[frozenset[int], int] = {}
+
+_JOB_PROGRESS_LOCK = threading.Lock()
+_JOB_PROGRESS: Dict[str, Dict[str, Any]] = {}
+_JOB_PROGRESS_MIN_INTERVAL = 0.25
+
+
+def _job_progress_key(job_id: Any) -> Optional[str]:
+    try:
+        if job_id in (None, "", 0, "0"):
+            return None
+        return str(job_id)
+    except Exception:
+        return None
+
+
+def _job_pct_from_state(st: Mapping[str, Any]) -> int:
+    phase = str(st.get("phase") or "triage")
+    if phase == "triage":
+        total = max(1, int(st.get("triage_total") or 0))
+        done = int(st.get("triage_done") or 0)
+        return max(0, min(10, int(10 * done / total)))
+    if phase == "main":
+        total = max(1, int(st.get("total") or 0))
+        processed = int(st.get("processed") or 0)
+        return max(10, min(96, 10 + int(86 * processed / total)))
+    post_total = max(1, int(st.get("post_steps_total") or 1))
+    post_done = int(st.get("post_steps_done") or 0)
+    return max(96, min(99, 96 + int(4 * post_done / post_total)))
+
+
+def _job_eta_from_state(st: Mapping[str, Any]) -> Optional[int]:
+    phase = str(st.get("phase") or "triage")
+    if phase != "main":
+        return None
+    elapsed = float(time.monotonic() - float(st.get("t0", time.monotonic())))
+    if elapsed <= 0:
+        return None
+    processed = int(st.get("processed") or 0)
+    if processed <= 0:
+        return None
+    total = int(st.get("total") or 0)
+    remaining = max(0, total - processed)
+    if remaining <= 0:
+        return 0
+    speed = processed / elapsed
+    if speed <= 0:
+        return None
+    return int(remaining / speed)
+
+
+def _publish_job_progress(state: Dict[str, Any], *, status: str = "running", force: bool = False) -> None:
+    if not state:
+        return
+    now = time.monotonic()
+    with _JOB_PROGRESS_LOCK:
+        last_emit = float(state.get("last_emit") or 0.0)
+        if not force and (now - last_emit) < _JOB_PROGRESS_MIN_INTERVAL:
+            return
+        state["last_emit"] = now
+        snapshot = dict(state)
+    pct = 100 if status == "done" else _job_pct_from_state(snapshot)
+    eta = _job_eta_from_state(snapshot)
+    payload = {
+        "job_id": snapshot.get("job_id"),
+        "phase": snapshot.get("phase"),
+        "processed": int(snapshot.get("processed") or 0),
+        "total": int(snapshot.get("total") or 0),
+        "pct": int(max(0, min(100, pct))),
+        "eta": eta,
+        "status": status,
+    }
+    try:
+        sse_publish("import_progress", payload)
+    except Exception:
+        logger.debug("sse publish failed", exc_info=True)
+
+
+def _mutate_job_progress(
+    state: Optional[Dict[str, Any]],
+    mutator: Callable[[Dict[str, Any]], bool],
+    *,
+    force: bool = False,
+    status: str = "running",
+) -> None:
+    if state is None:
+        return
+    changed = False
+    with _JOB_PROGRESS_LOCK:
+        try:
+            changed = bool(mutator(state))
+        except Exception:
+            logger.debug("job progress mutator failed", exc_info=True)
+            changed = False
+    if changed or force:
+        _publish_job_progress(state, status=status, force=force)
+
+
+def _init_job_progress(job_id: Any, total_items: int) -> Optional[Dict[str, Any]]:
+    key = _job_progress_key(job_id)
+    if key is None:
+        return None
+    state: Dict[str, Any] = {
+        "job_id": key,
+        "total": max(0, int(total_items or 0)),
+        "processed": 0,
+        "triage_done": 0,
+        "triage_total": 0,
+        "phase": "triage",
+        "t0": time.monotonic(),
+        "post_steps_done": 0,
+        "post_steps_total": 1,
+        "last_emit": 0.0,
+    }
+    with _JOB_PROGRESS_LOCK:
+        _JOB_PROGRESS[key] = state
+    _publish_job_progress(state, force=True)
+    return state
+
+
+def _job_progress_set_total(state: Optional[Dict[str, Any]], total: int) -> None:
+    total_int = max(0, int(total or 0))
+
+    def mutator(st: Dict[str, Any]) -> bool:
+        prev = int(st.get("total") or 0)
+        if prev == total_int:
+            return False
+        st["total"] = total_int
+        processed = int(st.get("processed") or 0)
+        if total_int >= 0 and processed > total_int:
+            st["processed"] = total_int
+        return True
+
+    _mutate_job_progress(state, mutator, force=True)
+
+
+def _job_progress_set_triage_total(state: Optional[Dict[str, Any]], total: int) -> None:
+    total_int = max(0, int(total or 0))
+
+    def mutator(st: Dict[str, Any]) -> bool:
+        changed = False
+        if int(st.get("triage_total") or 0) != total_int:
+            st["triage_total"] = total_int
+            changed = True
+        triage_done = int(st.get("triage_done") or 0)
+        if triage_done > int(st.get("triage_total") or 0):
+            st["triage_total"] = triage_done
+            changed = True
+        if total_int == 0 and st.get("phase") == "triage":
+            st["phase"] = "main"
+            changed = True
+        return changed
+
+    _mutate_job_progress(state, mutator, force=True)
+
+
+def _job_progress_mark_triage_done(state: Optional[Dict[str, Any]]) -> None:
+    def mutator(st: Dict[str, Any]) -> bool:
+        st["triage_done"] = int(st.get("triage_done") or 0) + 1
+        triage_total = int(st.get("triage_total") or 0)
+        if st["triage_done"] > triage_total:
+            st["triage_total"] = st["triage_done"]
+        return True
+
+    _mutate_job_progress(state, mutator)
+
+
+def _job_progress_set_processed(state: Optional[Dict[str, Any]], processed: int) -> None:
+    processed_int = max(0, int(processed or 0))
+
+    def mutator(st: Dict[str, Any]) -> bool:
+        total = int(st.get("total") or 0)
+        new_val = processed_int if total <= 0 else min(processed_int, total)
+        changed = False
+        if int(st.get("processed") or 0) != new_val:
+            st["processed"] = new_val
+            changed = True
+        if st.get("phase") == "triage" and (new_val > 0 or int(st.get("triage_total") or 0) == 0):
+            st["phase"] = "main"
+            changed = True
+        triage_done = int(st.get("triage_done") or 0)
+        triage_total = int(st.get("triage_total") or 0)
+        if triage_done > triage_total:
+            st["triage_total"] = triage_done
+            changed = True
+        return changed
+
+    _mutate_job_progress(state, mutator)
+
+
+def _job_progress_start_post(state: Optional[Dict[str, Any]], steps_total: int = 4) -> None:
+    steps_total = max(1, int(steps_total or 1))
+
+    def mutator(st: Dict[str, Any]) -> bool:
+        changed = False
+        if st.get("phase") != "post":
+            st["phase"] = "post"
+            changed = True
+        if int(st.get("post_steps_total") or 0) != steps_total:
+            st["post_steps_total"] = steps_total
+            changed = True
+        if int(st.get("post_steps_done") or 0) != 0:
+            st["post_steps_done"] = 0
+            changed = True
+        return changed
+
+    _mutate_job_progress(state, mutator, force=True)
+
+
+def _job_progress_step_post(state: Optional[Dict[str, Any]]) -> None:
+    def mutator(st: Dict[str, Any]) -> bool:
+        total = max(1, int(st.get("post_steps_total") or 1))
+        done = int(st.get("post_steps_done") or 0)
+        if done >= total:
+            return False
+        st["post_steps_done"] = min(total, done + 1)
+        return True
+
+    _mutate_job_progress(state, mutator)
+
+
+def _complete_job_progress(state: Optional[Dict[str, Any]], status: str = "done") -> None:
+    if state is None:
+        return
+
+    def finalize(st: Dict[str, Any]) -> bool:
+        changed = False
+        if st.get("phase") != "post":
+            st["phase"] = "post"
+            changed = True
+        total = max(1, int(st.get("post_steps_total") or 1))
+        if int(st.get("post_steps_total") or 0) != total:
+            st["post_steps_total"] = total
+            changed = True
+        if int(st.get("post_steps_done") or 0) != total:
+            st["post_steps_done"] = total
+            changed = True
+        return changed
+
+    _mutate_job_progress(state, finalize, force=True, status=status)
+    key = str(state.get("job_id")) if state.get("job_id") is not None else None
+    if key:
+        with _JOB_PROGRESS_LOCK:
+            _JOB_PROGRESS.pop(key, None)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -1732,6 +1976,8 @@ def run_ai_fill_job(
 
     total_items = len(candidates)
 
+    job_progress_state = _init_job_progress(job_id, total_items)
+
     runtime_cfg = config.get_ai_runtime_config()
 
     def _cancel_requested() -> bool:
@@ -1798,6 +2044,8 @@ def run_ai_fill_job(
         _emit_status(status_cb, phase="enrich", counts=counts_with_cost, total=total_items, done=0)
         _release_job_guard()
         conn.close()
+        _complete_job_progress(job_progress_state)
+        job_progress_state = None
         return {
             "counts": counts_with_cost,
             "pending_ids": [],
@@ -1884,6 +2132,8 @@ def run_ai_fill_job(
     else:
         remaining = candidates
 
+    _job_progress_set_total(job_progress_state, len(remaining))
+
     if not api_key:
         result_error = "missing_api_key"
         for pid in list(pending_set):
@@ -1907,6 +2157,8 @@ def run_ai_fill_job(
             )
         _release_job_guard()
         conn.close()
+        _complete_job_progress(job_progress_state)
+        job_progress_state = None
         return {
             "counts": counts_with_cost,
             "pending_ids": sorted(pending_set),
@@ -2054,6 +2306,8 @@ def run_ai_fill_job(
             done=done_val,
             message=f"IA columnas {done_val}/{total_items}",
         )
+        if job_progress_state is not None:
+            _job_progress_set_processed(job_progress_state, counts["ok"])
 
         if missing_ids:
             logger.warning("ai.batch.missing ids_sample=%s", missing_ids[:5])
@@ -2095,6 +2349,14 @@ def run_ai_fill_job(
                 continue
             pending_groups.append((chunk, 0, 0, False))
 
+        if job_progress_state is not None:
+            triage_total_est = 0
+            if TRIAGE_ENABLED:
+                triage_total_est = sum(
+                    1 for _, depth, _, adapted in pending_groups if depth == 0 and not adapted
+                )
+            _job_progress_set_triage_total(job_progress_state, triage_total_est)
+
         async def _execute_batches(batches: List[BatchRequest]) -> List[Dict[str, Any]]:
             semaphore = asyncio.Semaphore(max(1, AI_MAX_CONCURRENCY))
 
@@ -2122,8 +2384,10 @@ def run_ai_fill_job(
                         and batch.depth == 0
                         and not batch.adapted
                     )
+                    triage_attempted = False
 
                     if allow_triage:
+                        triage_attempted = True
                         triage_model_name = TRIAGE_MODEL or ""
                         triage_is_mini = triage_model_name.startswith("gpt-4o-mini")
                         if not triage_is_mini:
@@ -2210,13 +2474,16 @@ def run_ai_fill_job(
                                 exc,
                             )
                             fallback_candidates = list(batch.candidates)
-                            triage_result = None
-                            triage_usage = {}
-                            triage_duration = 0.0
-                            triage_raw_text = None
+                        triage_result = None
+                        triage_usage = {}
+                        triage_duration = 0.0
+                        triage_raw_text = None
 
                     if not allow_triage and TRIAGE_ENABLED:
                         triage_covered_total += 0
+
+                    if triage_attempted and job_progress_state is not None:
+                        _job_progress_mark_triage_done(job_progress_state)
 
                     if not fallback_candidates:
                         result_payload = triage_result or {
@@ -2545,6 +2812,8 @@ def run_ai_fill_job(
             total=total_items,
             done=counts["ok"] + counts["cached"],
         )
+        if job_progress_state is not None:
+            _job_progress_set_processed(job_progress_state, counts["ok"])
 
     wall_time = max(time.perf_counter() - start_ts, 1e-6)
     total_processed = counts.get("ok", 0) + counts.get("cached", 0)
@@ -2571,6 +2840,9 @@ def run_ai_fill_job(
         triage_covered_total,
         fallback_big_total,
     )
+
+    if job_progress_state is not None:
+        _job_progress_start_post(job_progress_state)
 
     result_error: Optional[str] = None
     if cancel_requested:
@@ -2760,6 +3032,9 @@ def run_ai_fill_job(
             comp_info,
         )
 
+    if job_progress_state is not None:
+        _job_progress_step_post(job_progress_state)
+
     for pid, rec in success_records.items():
         sig_hash = rec.get("sig_hash")
         updates = rec.get("updates", {})
@@ -2775,6 +3050,9 @@ def run_ai_fill_job(
                 competition_level=updates.get("competition_level"),
             )
     conn.commit()
+
+    if job_progress_state is not None:
+        _job_progress_step_post(job_progress_state)
 
     pending_ids = sorted(pending_set)
     done_val = counts["ok"] + counts["cached"]
@@ -2792,6 +3070,9 @@ def run_ai_fill_job(
         done=done_val,
         message=f"IA columnas {done_val}/{total_items}",
     )
+
+    if job_progress_state is not None:
+        _job_progress_step_post(job_progress_state)
 
     latency_p50 = _percentile(request_latencies, 0.5) if request_latencies else 0.0
     latency_p95 = _percentile(request_latencies, 0.95) if request_latencies else 0.0
@@ -2839,8 +3120,15 @@ def run_ai_fill_job(
             },
         )
 
+    if job_progress_state is not None:
+        _job_progress_step_post(job_progress_state)
+
     _release_job_guard()
     conn.close()
+    if job_progress_state is not None:
+        _job_progress_set_processed(job_progress_state, counts["ok"])
+    _complete_job_progress(job_progress_state)
+    job_progress_state = None
     return {
         "counts": counts_with_cost,
         "pending_ids": pending_ids,
