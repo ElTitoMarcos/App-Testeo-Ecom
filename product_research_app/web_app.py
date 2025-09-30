@@ -26,7 +26,7 @@ import io
 import re
 import logging
 import requests
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
 from email.parser import BytesParser
@@ -909,7 +909,10 @@ class _SilentWriter:
         return getattr(self._raw, name)
 
 
-class RequestHandler(BaseHTTPRequestHandler):
+from server.http_quiet import QuietHandlerMixin
+
+
+class RequestHandler(QuietHandlerMixin):
     server_version = "ProductResearchCopilot/1.0"
 
     def setup(self):
@@ -1002,6 +1005,11 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        if getattr(self, "path", "") == "/favicon.ico":
+            self.send_response(204)
+            self.send_header("Cache-Control", "max-age=3600")
+            self.end_headers()
+            return
         parsed = urlparse(self.path)
         path = parsed.path
         if path == "/" or path == "/index.html":
