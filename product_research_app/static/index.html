@@ -373,14 +373,19 @@ const saveIfDirty = window.saveIfDirty;
 window.fetchJson = fetchJson;
 window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
-// ==== Progreso y endpoints ====
-const ETA_SECONDS_PER_ITEM = 3.65;
 
-// === Progreso por ETA (3.5–3.8 s por producto) ===
+// ======= PROGRESO POR ETA (AJUSTADO) =======
 let etaTimer = null;
 let etaStart = 0;
 let etaTotalMs = 0;
 let etaLastPct = 0;
+let etaFinished = false;
+
+const ETA_MIN = 3.4;
+const ETA_MAX = 3.7;
+const ETA_DEFAULT = 3.55; // antes 3.65
+const ETA_SECONDS_PER_ITEM = ETA_DEFAULT;
+
 let etaTracker = null;
 
 function setEtaTracker(tracker) {
@@ -393,28 +398,33 @@ function syncEtaToTracker(pct) {
   try { etaTracker.step(frac); } catch (_) {}
 }
 
-function startEtaProgress(totalItems, secondsPerItem = ETA_SECONDS_PER_ITEM) {
+function startEtaProgress(totalItems, secondsPerItem = ETA_DEFAULT) {
   stopEtaProgress(false);
-  if (!Number.isFinite(totalItems) || totalItems <= 0) totalItems = 1;
+  etaFinished = false;
 
-  const spi = Math.max(3.5, Math.min(3.8, secondsPerItem));
+  if (!Number.isFinite(totalItems) || totalItems <= 0) totalItems = 1;
+  const spi = Math.max(ETA_MIN, Math.min(ETA_MAX, secondsPerItem));
+
   etaTotalMs = Math.max(500, Math.round(totalItems * spi * 1000));
   etaStart = Date.now();
   etaLastPct = 0;
 
   setProgressUI(0);
-  syncEtaToTracker(0);
 
+  // Intervalo más reactivo (150 ms) para suavidad visual
   etaTimer = setInterval(() => {
+    if (etaFinished) return; // ya se forzó a 100
+
     const elapsed = Date.now() - etaStart;
+    // Capamos al 99% hasta que el backend diga "done"
     const raw = (elapsed / etaTotalMs) * 100;
     const pct = Math.max(0, Math.min(99, Math.floor(raw)));
+
     if (pct > etaLastPct) {
       etaLastPct = pct;
       setProgressUI(pct);
-      syncEtaToTracker(pct);
     }
-  }, 200);
+  }, 150);
 }
 
 function stopEtaProgress(done) {
@@ -423,25 +433,132 @@ function stopEtaProgress(done) {
     etaTimer = null;
   }
   if (done) {
-    etaLastPct = 100;
-    setProgressUI(100);
-    syncEtaToTracker(100);
-  }
-  if (!etaTimer) {
-    etaStart = 0;
-    etaTotalMs = 0;
+    etaFinished = true;
+    setProgressUI(100);  // 100% sólo cuando hay "done" real
+  } else {
+    etaFinished = false;
   }
 }
 
-// Adapta los selectores a TU barra y TU etiqueta de porcentaje
+// ==== Señal universal de “job terminado” (llámala cuando el backend acabe) ====
+async function markBackendDone() {
+  if (etaFinished) return;
+  stopEtaProgress(true);
+  await refreshProductsTable(); // refresca la tabla automáticamente
+}
+
+// ==== Refresco robusto de la tabla (elige la vía que exista en tu proyecto) ====
+async function refreshProductsTable() {
+  try {
+    if (window.table && table.ajax && typeof table.ajax.reload === 'function') {
+      table.ajax.reload(null, false);
+      return;
+    }
+    if (typeof window.reloadProductsTable === 'function') {
+      await window.reloadProductsTable();
+      return;
+    }
+    if (typeof window.fetchProductsAndRender === 'function') {
+      await window.fetchProductsAndRender();
+      return;
+    }
+    if (typeof reloadTable === 'function') {
+      await reloadTable({ skipProgress: true });
+      return;
+    }
+    location.reload();
+  } catch (err) {
+    console.error('Error refrescando tabla:', err);
+    // último recurso
+    location.reload();
+  }
+}
+
+// ==== Pinta barra y % (ajusta selectores a los tuyos si hace falta) ====
 function setProgressUI(pct) {
-  const host = document.getElementById('progress-slot-global');
-  const bar = host?.querySelector('.progress-fill') || document.querySelector('.progress-fill');
+  // Ancho de la barra
+  const bar = document.querySelector('.progress-fill, #import-progress .bar, [role="progressbar"] .bar');
   if (bar) bar.style.width = pct + '%';
 
-  const label = host?.querySelector('.progress-percent') || document.querySelector('.progress-percent');
+  // Texto de porcentaje
+  const label = document.querySelector('.progress-percent, #import-progress .percent');
   if (label) label.textContent = pct + '%';
+
+  // Si tienes un texto superior tipo "Importando catálogo XX%"
+  const topLabel = document.querySelector('#top-import-label, .import-status-text');
+  if (topLabel) topLabel.textContent = pct + '%';
+
+  syncEtaToTracker(pct);
 }
+
+// ==== (Opcional, pero recomendado) Enlaza señales existentes a markBackendDone ====
+function wireJobDoneSignals({ jobId, sseUrl, pollUrl }) {
+  // 1) SSE si lo tienes disponible
+  if (sseUrl) {
+    try {
+      const es = new EventSource(sseUrl);
+      const close = () => { try { es.close(); } catch {} };
+
+      es.addEventListener('message', (e) => {
+        try {
+          const msg = JSON.parse(e.data);
+          if (isDoneMsg(msg)) {
+            close();
+            markBackendDone();
+          }
+        } catch {}
+      });
+
+      es.addEventListener('error', () => {
+        // si falla SSE, caemos a polling si lo hay
+        close();
+        if (pollUrl) startPolling(pollUrl);
+      });
+
+      return;
+    } catch {
+      // seguimos con polling si no hay SSE
+    }
+  }
+
+  // 2) Polling simple si no hay SSE
+  if (pollUrl) startPolling(pollUrl);
+
+  function startPolling(url) {
+    const iv = setInterval(async () => {
+      if (etaFinished) return clearInterval(iv);
+      try {
+        const r = await fetch(url, { cache: 'no-store' });
+        const j = await r.json();
+        if (isDoneMsg(j)) {
+          clearInterval(iv);
+          markBackendDone();
+        }
+      } catch (_) { /* ignoramos y seguimos */ }
+    }, 1200);
+  }
+
+  // Criterios muy permisivos de “done” (ajústalos si tienes claves exactas)
+  function isDoneMsg(m) {
+    const t = String(m?.type || '').toLowerCase();
+    const s = String(m?.status || '').toLowerCase();
+    if (s === 'done' || s === 'ok' || s === 'completed' || s === 'finished') return true;
+    if (t.includes('done') || t.includes('completed') || t.includes('finished')) return true;
+    if (m?.pending === 0 || m?.remaining === 0) return true;
+    if (typeof m?.message === 'string' && m.message.includes('ai.run done')) return true;
+    return false;
+  }
+}
+
+Object.assign(window, {
+  startEtaProgress,
+  stopEtaProgress,
+  markBackendDone,
+  wireJobDoneSignals,
+  refreshProductsTable,
+});
+
+// ==== Progreso y endpoints ====
 
 function pickEtaTotal(source) {
   if (!source || typeof source !== 'object') return null;
@@ -465,7 +582,7 @@ function pickEtaTotal(source) {
 }
 
 function ensureEtaFromSource(source, secondsPerItem = ETA_SECONDS_PER_ITEM) {
-  if (etaTimer) return false;
+  if (etaTimer || etaFinished) return false;
   const total = pickEtaTotal(source);
   if (Number.isFinite(total) && total > 0) {
     startEtaProgress(total, secondsPerItem);
@@ -572,8 +689,12 @@ async function followImportTask(taskId, tracker, {
     }
     const doneFlag = statusVal === 'done' || statusVal === 'completed' || statusVal === 'finished' || data.done;
     if (doneFlag) {
-      if (stopOnDone) stopEtaProgress(true);
-      await reloadTable({ skipProgress: true });
+      if (stopOnDone) {
+        await markBackendDone();
+      } else {
+        stopEtaProgress(false);
+        await reloadTable({ skipProgress: true });
+      }
       hideImportBanner();
       return data;
     }
@@ -661,9 +782,8 @@ async function importCatalog(file, {
         tracker.done();
         finalCleanupHandled = true;
       } else {
-        stopEtaProgress(true);
+        await markBackendDone();
         tracker.setStage('Completado');
-        await reloadTable({ skipProgress: true });
       }
       return lastResult;
     }
@@ -695,7 +815,7 @@ async function importCatalog(file, {
       tracker.done();
       finalCleanupHandled = true;
     } else {
-      stopEtaProgress(true);
+      await markBackendDone();
       tracker.setStage('Completado');
     }
     return lastResult;
@@ -795,7 +915,7 @@ async function runAIFillPhase({ tracker, aiStartUrl, aiStatusUrl, aiCancelUrl, i
           : `IA generando… (${safeDone}/${safeTot})`
         );
         if (done) {
-          stopEtaProgress(true);
+          await markBackendDone();
           tracker.setStage('Completado');
           finishedOk = true;
           break;
@@ -812,7 +932,9 @@ async function runAIFillPhase({ tracker, aiStartUrl, aiStatusUrl, aiCancelUrl, i
   hideCancelButton();
 
   // Auto-refresco de la tabla al terminar o cancelar
-  try { await reloadTable({ skipProgress: true }); } catch {}
+  if (!finishedOk) {
+    try { await reloadTable({ skipProgress: true }); } catch {}
+  }
 
   if (!finishedOk && !__cancelRequested) {
     stopEtaProgress(false);
