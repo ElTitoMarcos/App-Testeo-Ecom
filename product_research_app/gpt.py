@@ -43,6 +43,7 @@ from .prompts.registry import (
     is_json_only,
     normalize_task,
 )
+from .services import progress as progress_tracker
 from .services import winner_score as winner_calc
 
 logger = logging.getLogger(__name__)
@@ -854,6 +855,7 @@ async def _http_post_chat(
             data = response.json()
         except Exception as exc:
             raise OpenAIError(f"Invalid JSON response from OpenAI: {exc}") from exc
+        progress_tracker.notify_api_success()
         if AI_API_VERBOSE >= 2:
             usage = data.get("usage") if isinstance(data, dict) else None
             if isinstance(usage, dict):

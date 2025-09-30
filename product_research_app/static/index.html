@@ -375,7 +375,6 @@ window.groupsService = groupsService;
 const IMPORT_TASK_LS_KEY = 'last_import_task';
 // ==== Progreso y endpoints ====
 const PROGRESS_IMPORT_WEIGHT = 0.20;        // 20% archivo
-const PROGRESS_AI_WEIGHT     = 0.80;        // 80% IA
 
 // Dentro del 20% de import: ~30% subida + ~70% backend
 const IMPORT_UPLOAD_FRAC   = PROGRESS_IMPORT_WEIGHT * 0.30; // 0.06
@@ -496,6 +495,7 @@ async function importCatalog(file, {
   if (!file) throw new Error('Archivo no válido');
   const host = getGlobalProgressHost();
   const tracker = LoadingHelpers.start('Importando catálogo', { host });
+  let importTrackerClosed = false;
   tracker.setStage('Subiendo archivo…');
   showCancelButton(() => {
     __cancelRequested = true;
@@ -550,13 +550,19 @@ async function importCatalog(file, {
         toast.success(`Importados ${importedCount}`);
       }
       if (withAI) {
-        await runAIFillPhase({
-          tracker,
-          aiStartUrl, aiStatusUrl, aiCancelUrl,
-          importedCount
-        });
         tracker.done();
-        finalCleanupHandled = true;
+        importTrackerClosed = true;
+        const aiTracker = LoadingHelpers.start('IA generando…', { host });
+        try {
+          await runAIFillPhase({
+            tracker: aiTracker,
+            aiStartUrl, aiStatusUrl, aiCancelUrl,
+            importedCount
+          });
+          finalCleanupHandled = true;
+        } finally {
+          aiTracker.done();
+        }
       } else {
         tracker.step(1, 'Completado');
         await reloadTable({ skipProgress: true });
@@ -577,13 +583,19 @@ async function importCatalog(file, {
     }
     tracker.step(PROGRESS_IMPORT_WEIGHT, 'Archivo importado');
     if (withAI) {
-      await runAIFillPhase({
-        tracker,
-        aiStartUrl, aiStatusUrl, aiCancelUrl,
-        importedCount
-      });
       tracker.done();
-      finalCleanupHandled = true;
+      importTrackerClosed = true;
+      const aiTracker = LoadingHelpers.start('IA generando…', { host });
+      try {
+        await runAIFillPhase({
+          tracker: aiTracker,
+          aiStartUrl, aiStatusUrl, aiCancelUrl,
+          importedCount
+        });
+        finalCleanupHandled = true;
+      } finally {
+        aiTracker.done();
+      }
     } else {
       tracker.step(1, 'Completado');
     }
@@ -601,7 +613,7 @@ async function importCatalog(file, {
     localStorage.removeItem(IMPORT_TASK_LS_KEY);
     hideImportBanner();
     if (!finalCleanupHandled) {
-      tracker.done();
+      if (!importTrackerClosed) tracker.done();
       hideCancelButton();
       __cancelRequested = false;
     }
@@ -627,9 +639,8 @@ async function runAIFillPhase({ tracker, aiStartUrl, aiStatusUrl, aiCancelUrl, i
     throw e;
   }
 
-  const total     = Number(startData?.total || 0);
-  const etaMs     = Number(startData?.eta_ms || 0);
   __activeAIJobId = String(startData?.job_id || '');
+  const progressUrl = __activeAIJobId ? `/jobs/${encodeURIComponent(__activeAIJobId)}/progress` : '';
 
   // Botón cancelar (aborta XHR si quedara algo y pide cancelación del job IA)
   showCancelButton(async () => {
@@ -648,10 +659,8 @@ async function runAIFillPhase({ tracker, aiStartUrl, aiStatusUrl, aiCancelUrl, i
     } catch {}
   });
 
-  // 2) Poll + ETA suave
-  const startAt = Date.now();
-  const etaEnd  = etaMs > 0 ? startAt + etaMs : 0;
-  let processed = 0;
+  // 2) Poll progreso real
+  let lastStage = 'IA generando…';
 
   while (true) {
     if (__cancelRequested) {
@@ -659,38 +668,43 @@ async function runAIFillPhase({ tracker, aiStartUrl, aiStatusUrl, aiCancelUrl, i
       break;
     }
     try {
-      const r = await fetch(`${aiStatusUrl}?job_id=${encodeURIComponent(__activeAIJobId)}&t=${Date.now()}`, {
-        cache: 'no-store', __skipLoadingHook: true, __hostEl: getGlobalProgressHost()
-      });
-      if (r.ok) {
-        const data = await r.json();
-        processed = Number(data?.processed || processed);
-        const tot = Number(data?.total || total || 1);
-        const done = data?.status === 'done' || processed >= tot;
-        const aiFrac = Math.max(0, Math.min(1, processed / Math.max(1, tot)));
-        const combined = PROGRESS_IMPORT_WEIGHT + (aiFrac * PROGRESS_AI_WEIGHT);
-        tracker.step(Math.min(0.99, combined), 'IA generando…');
-        if (done) {
-          tracker.step(1, 'Completado');
-          break;
-        }
+      const url = progressUrl ? `${progressUrl}?t=${Date.now()}` : '';
+      if (!url) break;
+      const r = await fetch(url, { cache: 'no-store', __skipLoadingHook: true, __hostEl: getGlobalProgressHost() });
+      if (r.status === 404) {
+        tracker.step(1, 'Completado');
+        break;
       }
-    } catch {
-      // Red blip: usa ETA suave si el backend no responde
-      if (etaEnd > 0) {
-        const t = Date.now();
-        const elapsed = t - startAt;
-        const etaFrac = Math.max(0, Math.min(1, elapsed / etaMs));
-        const combined = PROGRESS_IMPORT_WEIGHT + (etaFrac * PROGRESS_AI_WEIGHT);
-        tracker.step(Math.min(0.99, combined), 'Estimando…');
+      if (!r.ok) throw new Error('Estado no disponible');
+      const data = await r.json();
+      const pct = Number(data?.pct ?? 0);
+      const frac = Math.max(0, Math.min(1, pct));
+      const status = String(data?.status || '').toLowerCase();
+      let stage = 'IA generando…';
+      if (status === 'canceled') stage = 'Cancelado';
+      else if (status === 'error') stage = 'Error';
+      else if (status === 'done' || frac >= 1) stage = 'Completado';
+      lastStage = stage;
+      tracker.step(frac, stage);
+      if (status === 'error' || data?.error) {
+        throw new Error(data?.error || 'Error IA');
       }
+      if (status === 'canceled') {
+        break;
+      }
+      if (status === 'done' || data?.done || frac >= 1) {
+        tracker.step(1, stage);
+        break;
+      }
+    } catch (err) {
+      const msg = err?.message || '';
+      if (msg === 'Error IA') {
+        throw err;
+      }
+      await sleep(700);
+      tracker.setStage(lastStage || 'IA generando…');
     }
-
-    // Hold al 99% si ya pasó el tiempo estimado y no terminó
-    if (etaEnd > 0 && Date.now() > etaEnd) {
-      tracker.step(0.99, 'Cerrando…');
-    }
-    await sleep(600);
+    await sleep(500);
   }
 
   __activeAIJobId = null;

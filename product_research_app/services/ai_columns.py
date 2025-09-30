@@ -27,6 +27,7 @@ from ..obs import log_partial_ko, log_recovered
 from ..ratelimit import async_decorrelated_jitter_sleep
 from ..utils.signature import compute_sig_hash
 from .desire_utils import cleanse, looks_like_product_desc
+from . import progress as progress_tracker
 from .prompt_templates import MISSING_ONLY_JSONL_PROMPT, STRICT_JSONL_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -1606,7 +1607,7 @@ def _emit_status(
 
 
 def run_ai_fill_job(
-    job_id: int,
+    job_id: int | str | None,
     product_ids: Sequence[int],
     *,
     microbatch: int = 32,
@@ -1616,7 +1617,12 @@ def run_ai_fill_job(
 ) -> Dict[str, Any]:
     start_ts = time.perf_counter()
     conn = _ensure_conn()
-    job_updates_enabled = job_id is not None and int(job_id) > 0
+    job_id_str = str(job_id).strip() if job_id is not None else ""
+    try:
+        job_int = int(job_id_str) if job_id_str else None
+    except (TypeError, ValueError):
+        job_int = None
+    job_updates_enabled = bool(job_int and job_int > 0)
     requested_ids: List[int] = []
     seen_ids: set[int] = set()
     for pid in product_ids:
@@ -1665,7 +1671,8 @@ def run_ai_fill_job(
                     "triage_covered": 0,
                     "fallback_big": 0,
                 }
-            _ACTIVE_JOB_KEYS[job_key] = int(job_id or 0)
+            stored_job_id = int(job_int) if job_int is not None else 0
+            _ACTIVE_JOB_KEYS[job_key] = stored_job_id
             registered_job = True
 
     def _release_job_guard() -> None:
@@ -1731,148 +1738,1088 @@ def run_ai_fill_job(
             )
 
     total_items = len(candidates)
-
-    runtime_cfg = config.get_ai_runtime_config()
-
-    def _cancel_requested() -> bool:
-        if cancel_checker is None:
-            return False
+    progress_job_id = job_id_str if job_id_str and job_id_str != "0" else None
+    job_progress: Optional[progress_tracker.JobProgress] = None
+    progress_token = None
+    job_completed = False
+    if progress_job_id:
         try:
-            return bool(cancel_checker())
-        except Exception:
-            logger.warning("ai.cancel_checker_failed", exc_info=True)
-            return False
-    if parallelism is None:
-        parallelism = int(runtime_cfg.get("parallelism", 8) or 8)
-    parallelism = max(1, parallelism)
+            job_progress = progress_tracker.ensure(progress_job_id, total_items)
+        except ValueError:
+            job_progress = None
+        else:
+            progress_token = progress_tracker.bind(progress_job_id)
 
-    cache_enabled = bool(runtime_cfg.get("cache_enabled", True))
-    cache_version = int(runtime_cfg.get("version", 1) or 1)
-    trunc_title = int(runtime_cfg.get("trunc_title", 180) or 180)
-    trunc_desc = int(runtime_cfg.get("trunc_desc", 800) or 800)
-
-    batch_cfg = config.get_ai_batch_config()
-    max_retries = int(batch_cfg.get("MAX_RETRIES", 3) or 3)
-
-    cost_cfg = config.get_ai_cost_config()
-    model = cost_cfg.get("model") or config.get_model()
-    env_model = os.environ.get("AI_MODEL")
-    if env_model:
-        model = env_model
-    cost_cap = cost_cfg.get("costCapUSD")
-    price_map = cost_cfg.get("prices", {}).get(model, {})
-    price_in = float(price_map.get("input", 0.0))
-    price_out = float(price_map.get("output", 0.0))
-    api_key = config.get_api_key() or os.environ.get("OPENAI_API_KEY")
-
-    if job_updates_enabled:
-        database.start_import_job_ai(conn, int(job_id), total_items)
-
-    counts: Dict[str, int] = {
-        "queued": total_items,
-        "sent": 0,
-        "ok": 0,
-        "ko": 0,
-        "cached": 0,
-        "retried": 0,
-    }
-    cost_spent = 0.0
-    pending_set: set[int] = {cand.id for cand in candidates}
-    cancel_requested = False
-    counts_with_cost: Dict[str, Any] = {**counts, "cost_spent_usd": cost_spent}
-
-    if job_updates_enabled:
-        database.set_import_job_ai_counts(conn, int(job_id), counts_with_cost, sorted(pending_set))
-        database.update_import_job_ai_progress(conn, int(job_id), 0)
-    _emit_status(status_cb, phase="enrich", counts=counts_with_cost, total=total_items, done=0)
-
-    applied_outputs: Dict[int, Dict[str, Any]] = {}
-    fail_reasons: Dict[int, str] = {}
-
-    if _cancel_requested():
-        cancel_requested = True
-
-    if total_items == 0:
-        if job_updates_enabled and skipped_existing:
-            database.set_import_job_ai_counts(conn, int(job_id), counts_with_cost, [])
-        _emit_status(status_cb, phase="enrich", counts=counts_with_cost, total=total_items, done=0)
-        _release_job_guard()
-        conn.close()
-        return {
-            "counts": counts_with_cost,
-            "pending_ids": [],
-            "error": None,
-            "ok": applied_outputs,
-            "ko": fail_reasons,
-            "skipped_existing": skipped_existing,
-            "total_requested": len(requested_ids),
-            "json_retry": 0,
-            "batch_adapted": 0,
-            "triage_covered": 0,
-            "fallback_big": 0,
+    try:
+        runtime_cfg = config.get_ai_runtime_config()
+    
+        def _cancel_requested() -> bool:
+            if cancel_checker is None:
+                return False
+            try:
+                return bool(cancel_checker())
+            except Exception:
+                logger.warning("ai.cancel_checker_failed", exc_info=True)
+                return False
+        if parallelism is None:
+            parallelism = int(runtime_cfg.get("parallelism", 8) or 8)
+        parallelism = max(1, parallelism)
+    
+        cache_enabled = bool(runtime_cfg.get("cache_enabled", True))
+        cache_version = int(runtime_cfg.get("version", 1) or 1)
+        trunc_title = int(runtime_cfg.get("trunc_title", 180) or 180)
+        trunc_desc = int(runtime_cfg.get("trunc_desc", 800) or 800)
+    
+        batch_cfg = config.get_ai_batch_config()
+        max_retries = int(batch_cfg.get("MAX_RETRIES", 3) or 3)
+    
+        cost_cfg = config.get_ai_cost_config()
+        model = cost_cfg.get("model") or config.get_model()
+        env_model = os.environ.get("AI_MODEL")
+        if env_model:
+            model = env_model
+        cost_cap = cost_cfg.get("costCapUSD")
+        price_map = cost_cfg.get("prices", {}).get(model, {})
+        price_in = float(price_map.get("input", 0.0))
+        price_out = float(price_map.get("output", 0.0))
+        api_key = config.get_api_key() or os.environ.get("OPENAI_API_KEY")
+    
+        if job_updates_enabled and job_int is not None:
+            database.start_import_job_ai(conn, job_int, total_items)
+    
+        counts: Dict[str, int] = {
+            "queued": total_items,
+            "sent": 0,
+            "ok": 0,
+            "ko": 0,
+            "cached": 0,
+            "retried": 0,
         }
-
-    candidate_map = {cand.id: cand for cand in candidates}
-
-    cache_rows: Dict[str, Any] = {}
-    if cache_enabled:
-        sig_hashes = [cand.sig_hash for cand in candidates if cand.sig_hash]
-        if sig_hashes:
-            cache_rows = database.get_ai_cache_entries(
-                conn,
-                sig_hashes,
-                model=model,
-                version=cache_version,
-            )
-
-    remaining: List[Candidate] = []
-    if cache_rows:
-        cached_updates: Dict[int, Dict[str, Any]] = {}
-        for cand in candidates:
-            cache_row = cache_rows.get(cand.sig_hash)
-            if not cache_row:
-                remaining.append(cand)
-                continue
-            cached_desire_raw = cache_row["desire"] if cache_row["desire"] is not None else ""
-            cached_title = str(cand.payload.get("name") or (cand.extra or {}).get("title") or "")
-            cached_desire = cleanse(str(cached_desire_raw or "").strip())
-            if not cached_desire:
-                cached_desire = str(cached_desire_raw or "").strip()
-            if len(cached_desire) < 280 or looks_like_product_desc(cached_desire, cached_title):
-                remaining.append(cand)
-                continue
-            update_payload = {
-                "desire": cached_desire,
-                "desire_magnitude": cache_row["desire_magnitude"],
-                "awareness_level": cache_row["awareness_level"],
-                "competition_level": cache_row["competition_level"],
+        cost_spent = 0.0
+        pending_set: set[int] = {cand.id for cand in candidates}
+        cancel_requested = False
+        counts_with_cost: Dict[str, Any] = {**counts, "cost_spent_usd": cost_spent}
+    
+        if job_updates_enabled and job_int is not None:
+            database.set_import_job_ai_counts(conn, job_int, counts_with_cost, sorted(pending_set))
+            database.update_import_job_ai_progress(conn, job_int, 0)
+        _emit_status(status_cb, phase="enrich", counts=counts_with_cost, total=total_items, done=0)
+    
+        applied_outputs: Dict[int, Dict[str, Any]] = {}
+        fail_reasons: Dict[int, str] = {}
+    
+        if _cancel_requested():
+            cancel_requested = True
+    
+        if total_items == 0:
+            if job_updates_enabled and job_int is not None and skipped_existing:
+                database.set_import_job_ai_counts(conn, job_int, counts_with_cost, [])
+            _emit_status(status_cb, phase="enrich", counts=counts_with_cost, total=total_items, done=0)
+            job_completed = True
+    job_completed = True
+    _release_job_guard()
+    conn.close()
+    return {
+                "counts": counts_with_cost,
+                "pending_ids": [],
+                "error": None,
+                "ok": applied_outputs,
+                "ko": fail_reasons,
+                "skipped_existing": skipped_existing,
+                "total_requested": len(requested_ids),
+                "json_retry": 0,
+                "batch_adapted": 0,
+                "triage_covered": 0,
+                "fallback_big": 0,
             }
-            desire_primary_cached = cache_row["desire_primary"] if "desire_primary" in cache_row.keys() else None
-            if desire_primary_cached is not None:
-                update_payload["desire_primary"] = desire_primary_cached
-            cached_updates[cand.id] = update_payload
-            applied_outputs[cand.id] = {k: v for k, v in update_payload.items() if v is not None}
-            if cand.sig_hash:
-                database.upsert_ai_cache_entry(
+    
+        candidate_map = {cand.id: cand for cand in candidates}
+    
+        cache_rows: Dict[str, Any] = {}
+        if cache_enabled:
+            sig_hashes = [cand.sig_hash for cand in candidates if cand.sig_hash]
+            if sig_hashes:
+                cache_rows = database.get_ai_cache_entries(
                     conn,
-                    cand.sig_hash,
+                    sig_hashes,
                     model=model,
                     version=cache_version,
-                    desire=update_payload.get("desire"),
-                    desire_magnitude=update_payload.get("desire_magnitude"),
-                    awareness_level=update_payload.get("awareness_level"),
-                    competition_level=update_payload.get("competition_level"),
                 )
-            pending_set.discard(cand.id)
-            counts["cached"] += 1
-        if cached_updates:
-            _apply_ai_updates(conn, cached_updates)
-        candidates = remaining
-        counts_with_cost = {**counts, "cost_spent_usd": cost_spent}
+    
+        remaining: List[Candidate] = []
+        if cache_rows:
+            cached_updates: Dict[int, Dict[str, Any]] = {}
+            for cand in candidates:
+                cache_row = cache_rows.get(cand.sig_hash)
+                if not cache_row:
+                    remaining.append(cand)
+                    continue
+                cached_desire_raw = cache_row["desire"] if cache_row["desire"] is not None else ""
+                cached_title = str(cand.payload.get("name") or (cand.extra or {}).get("title") or "")
+                cached_desire = cleanse(str(cached_desire_raw or "").strip())
+                if not cached_desire:
+                    cached_desire = str(cached_desire_raw or "").strip()
+                if len(cached_desire) < 280 or looks_like_product_desc(cached_desire, cached_title):
+                    remaining.append(cand)
+                    continue
+                update_payload = {
+                    "desire": cached_desire,
+                    "desire_magnitude": cache_row["desire_magnitude"],
+                    "awareness_level": cache_row["awareness_level"],
+                    "competition_level": cache_row["competition_level"],
+                }
+                desire_primary_cached = cache_row["desire_primary"] if "desire_primary" in cache_row.keys() else None
+                if desire_primary_cached is not None:
+                    update_payload["desire_primary"] = desire_primary_cached
+                cached_updates[cand.id] = update_payload
+                applied_outputs[cand.id] = {k: v for k, v in update_payload.items() if v is not None}
+                if cand.sig_hash:
+                    database.upsert_ai_cache_entry(
+                        conn,
+                        cand.sig_hash,
+                        model=model,
+                        version=cache_version,
+                        desire=update_payload.get("desire"),
+                        desire_magnitude=update_payload.get("desire_magnitude"),
+                        awareness_level=update_payload.get("awareness_level"),
+                        competition_level=update_payload.get("competition_level"),
+                    )
+                pending_set.discard(cand.id)
+                counts["cached"] += 1
+            if cached_updates:
+                _apply_ai_updates(conn, cached_updates)
+            candidates = remaining
+            counts_with_cost = {**counts, "cost_spent_usd": cost_spent}
+            done_val = counts["ok"] + counts["cached"]
+        if job_updates_enabled and job_int is not None:
+            database.update_import_job_ai_progress(conn, job_int, done_val)
+            database.set_import_job_ai_counts(conn, job_int, counts_with_cost, sorted(pending_set))
+            _emit_status(
+                status_cb,
+                phase="enrich",
+                counts=counts_with_cost,
+                total=total_items,
+                done=done_val,
+                message=f"IA columnas {done_val}/{total_items}",
+            )
+        else:
+            remaining = candidates
+    
+        if not api_key:
+            result_error = "missing_api_key"
+            for pid in list(pending_set):
+                fail_reasons[pid] = result_error
+            counts_with_cost = {**counts, "cost_spent_usd": cost_spent}
+        if job_updates_enabled and job_int is not None:
+            database.set_import_job_ai_counts(conn, job_int, counts_with_cost, sorted(pending_set))
+            database.set_import_job_ai_error(conn, job_int, result_error)
+            _emit_status(status_cb, phase="enrich", counts=counts_with_cost, total=total_items, done=counts["cached"], message="IA pendiente")
+            if fail_reasons:
+                _log_ko_event(
+                    "job_ko_summary",
+                    {str(pid): reason for pid, reason in fail_reasons.items()},
+                    job_id=job_id,
+                    candidate_lookup=candidate_map,
+                    extra={
+                        "result_error": result_error,
+                        "pending_total": len(pending_set),
+                        "sample_pending_ids": sorted(pending_set)[:5],
+                    },
+                )
+            _release_job_guard()
+            conn.close()
+            return {
+                "counts": counts_with_cost,
+                "pending_ids": sorted(pending_set),
+                "error": result_error,
+                "ok": applied_outputs,
+                "ko": fail_reasons,
+                "skipped_existing": skipped_existing,
+                "total_requested": len(requested_ids),
+                "json_retry": 0,
+                "batch_adapted": 0,
+                "triage_covered": 0,
+                "fallback_big": 0,
+            }
+    
+        desire_scores: List[Tuple[str, float]] = []
+        comp_scores: List[Tuple[str, float]] = []
+        success_records: Dict[int, Dict[str, Any]] = {}
+        request_latencies: List[float] = []
+        processed_batches = 0
+        json_retry_total = 0
+        batch_adaptations_total = 0
+        triage_covered_total = 0
+        fallback_big_total = 0
+    
+        def process_result(result: Dict[str, Any]) -> Dict[str, Any]:
+            nonlocal cost_spent, counts_with_cost, processed_batches
+            summary: Dict[str, Any] = {
+                "parsed_ids": [],
+                "missing_ids": [],
+                "ko_ids": [],
+                "status": "ok",
+                "candidates": result.get("candidates", []),
+                "req_id": result.get("req_id"),
+            }
+            candidates_list: List[Candidate] = result.get("candidates", [])
+            if result.get("skipped"):
+                for cand in candidates_list:
+                    pending_set.add(cand.id)
+                    fail_reasons.setdefault(cand.id, "cost_cap_reached")
+                summary["status"] = "skipped"
+                summary["pending_after"] = len(pending_set)
+                return summary
+    
+            processed_batches += 1
+            counts["sent"] += len(candidates_list)
+            retries = int(result.get("retries", 0) or 0)
+            counts["retried"] += retries
+    
+            duration = float(result.get("duration", 0.0) or 0.0)
+            if duration > 0:
+                request_latencies.append(duration)
+            usage = result.get("usage", {}) or {}
+            if usage:
+                cost_spent += _calculate_cost(usage, price_in, price_out)
+    
+            ok_map: Dict[str, Dict[str, Any]] = result.get("ok", {}) or {}
+            ko_map: Dict[str, str] = result.get("ko", {}) or {}
+    
+            pending_before = len(pending_set)
+            candidate_ids = [cand.id for cand in candidates_list]
+    
+            success_updates: Dict[int, Dict[str, Any]] = {}
+            for pid_str, payload in ok_map.items():
+                try:
+                    pid = int(pid_str)
+                except Exception:
+                    continue
+                success_updates[pid] = payload
+                pending_set.discard(pid)
+    
+            ko_ids: set[int] = set()
+            for pid_str, reason in ko_map.items():
+                try:
+                    pid = int(pid_str)
+                except Exception:
+                    continue
+                pending_set.add(pid)
+                fail_reasons[pid] = reason or "error"
+                ko_ids.add(pid)
+    
+            parsed_ids = list(success_updates.keys())
+            missing_ids = [
+                pid for pid in candidate_ids if pid not in success_updates and pid not in ko_ids
+            ]
+    
+            updated_rows = _apply_ai_updates(conn, success_updates)
+            if success_updates:
+                for pid, payload in success_updates.items():
+                    candidate = candidate_map.get(pid)
+                    sig_hash = candidate.sig_hash if candidate else ""
+                    success_records[pid] = {
+                        "sig_hash": sig_hash,
+                        "updates": payload.copy(),
+                    }
+                    parsed_desire = _parse_score(payload.get("desire_magnitude"))
+                    parsed_comp = _parse_score(payload.get("competition_level"))
+                    if parsed_desire is not None:
+                        desire_scores.append((str(pid), parsed_desire))
+                        success_records[pid]["_desire_score"] = parsed_desire
+                    if parsed_comp is not None:
+                        comp_scores.append((str(pid), parsed_comp))
+                        success_records[pid]["_competition_score"] = parsed_comp
+                    applied_outputs[pid] = {k: v for k, v in payload.items() if v is not None}
+    
+            counts["ok"] += len(success_updates)
+            counts["ko"] += len(ko_map)
+    
+            if ko_map:
+                _log_ko_event(
+                    "ko_diagnostics",
+                    ko_map,
+                    job_id=job_id,
+                    candidate_lookup=candidate_map,
+                    req_id=result.get("req_id"),
+                    extra={
+                        "pending_after_batch": len(pending_set),
+                        "retry_count": retries,
+                        "batch_duration_s": duration,
+                        "batch_size": len(candidates_list),
+                    },
+                )
+    
+            throughput = (len(candidates_list) / duration) if duration > 0 else 0.0
+            if job_updates_enabled and job_int is not None:
+                database.append_ai_job_metric(
+                    conn,
+                    job_int,
+                    processed_batches,
+                    len(candidates_list),
+                    duration * 1000.0,
+                    throughput,
+                    cached_hits=0,
+                )
+    
+            done_val = counts["ok"] + counts["cached"]
+            counts_with_cost = {**counts, "cost_spent_usd": cost_spent}
+            if job_updates_enabled:
+                if job_updates_enabled and job_int is not None:
+                    database.update_import_job_ai_progress(conn, job_int, done_val)
+                    database.set_import_job_ai_counts(conn, job_int, counts_with_cost, sorted(pending_set))
+            _emit_status(
+                status_cb,
+                phase="enrich",
+                counts=counts_with_cost,
+                total=total_items,
+                done=done_val,
+                message=f"IA columnas {done_val}/{total_items}",
+            )
+    
+            if missing_ids:
+                logger.warning("ai.batch.missing ids_sample=%s", missing_ids[:5])
+            if not parsed_ids:
+                raw_sample = str(result.get("raw_text") or "")[:200]
+                if raw_sample:
+                    logger.error("ai.parse.empty raw_sample=%s", raw_sample)
+    
+            if cost_cap is not None and cost_spent >= float(cost_cap):
+                summary["status"] = "skipped"
+                return summary
+            summary["parsed_ids"] = parsed_ids
+            summary["missing_ids"] = missing_ids
+            summary["ko_ids"] = list(ko_map.keys())
+            summary["pending_after"] = len(pending_set)
+            if result.get("error"):
+                summary["status"] = "error"
+            elif missing_ids or ko_map:
+                summary["status"] = "partial"
+            return summary
+    
+        if remaining:
+            pending_candidates = list(remaining)
+            max_batch_size = min(AI_MAX_PRODUCTS_PER_CALL, len(pending_candidates))
+            max_batch_size = max(AI_MIN_PRODUCTS_PER_CALL, max_batch_size)
+            max_batch_size = max(1, min(AI_BATCH_MAX_ITEMS, max_batch_size))
+            logger.info(
+                "ai.run start items_total=%d batch_init=%d concurrency_target=%d strict_json=%s",
+                total_items,
+                max_batch_size,
+                AI_MAX_CONCURRENCY,
+                STRICT_JSON_ENABLED,
+            )
+            req_counter = 0
+            pending_groups: Deque[Tuple[List[Candidate], int, int, bool]] = deque()
+        for start in range(0, len(pending_candidates), max_batch_size):
+            chunk = pending_candidates[start : start + max_batch_size]
+            if not chunk:
+                continue
+            pending_groups.append((chunk, 0, 0, False))
+        if job_progress:
+            if TRIAGE_ENABLED:
+                job_progress.plan_triage(len(pending_groups))
+            planned_calls = len(pending_groups)
+            if TRIAGE_ENABLED:
+                planned_calls += len(pending_groups)
+            job_progress.plan_api(planned_calls)
+    
+            async def _execute_batches(batches: List[BatchRequest]) -> List[Dict[str, Any]]:
+                semaphore = asyncio.Semaphore(max(1, AI_MAX_CONCURRENCY))
+    
+                async def _run_single(batch: BatchRequest) -> Dict[str, Any]:
+                    nonlocal triage_covered_total, fallback_big_total, cancel_requested
+                    async with semaphore:
+                        if cancel_requested or _cancel_requested():
+                            cancel_requested = True
+                            return {
+                                "status": "cancelled",
+                                "batch": batch,
+                                "result": None,
+                                "duration": 0.0,
+                                "error": None,
+                            }
+                        original_batch = batch
+                        triage_result: Optional[Dict[str, Any]] = None
+                        triage_usage: Dict[str, Any] = {}
+                        triage_duration = 0.0
+                        triage_raw_text: Optional[str] = None
+                        fallback_candidates: List[Candidate] = list(batch.candidates)
+                        allow_triage = (
+                            TRIAGE_ENABLED
+                            and batch.candidates
+                            and batch.depth == 0
+                            and not batch.adapted
+                        )
+    
+                    if allow_triage:
+                        try:
+                            triage_model_name = TRIAGE_MODEL or ""
+                            triage_is_mini = triage_model_name.startswith("gpt-4o-mini")
+                            if not triage_is_mini:
+                                triage_is_mini = triage_model_name.startswith("gpt-4o-mini-2024")
+                            triage_strict_json = False if triage_is_mini else True
+                            logger.info(
+                                "ai_columns.triage start req_id=%s model=%s items=%d confidence_min=%.2f strict_json=%s",
+                                batch.req_id,
+                                TRIAGE_MODEL,
+                                len(batch.candidates),
+                                TRIAGE_CONFIDENCE,
+                                triage_strict_json,
+                            )
+                            try:
+                                triage_payload = await _call_triage_batch(
+                                    batch,
+                                    api_key=api_key,
+                                    model=TRIAGE_MODEL,
+                                    strict_json=triage_strict_json,
+                                )
+                                triage_duration = float(
+                                    triage_payload.get("duration", 0.0) or 0.0
+                                )
+                                triage_usage = triage_payload.get("usage", {}) or {}
+                                triage_raw_text = triage_payload.get("raw_text")
+                                strict_map = triage_payload.get("strict_map") or {}
+                                accepted_candidates: List[Candidate] = []
+                                accepted_map: Dict[int, Dict[str, Any]] = {}
+                                fallback_candidates = []
+                                for cand in batch.candidates:
+                                    entry = strict_map.get(cand.id)
+                                    if not isinstance(entry, dict):
+                                        fallback_candidates.append(cand)
+                                        continue
+                                    confidence = _extract_confidence(entry)
+                                    if confidence is None or confidence < TRIAGE_CONFIDENCE:
+                                        fallback_candidates.append(cand)
+                                        continue
+                                    accepted_candidates.append(cand)
+                                    accepted_map[cand.id] = entry
+                                triage_covered = len(accepted_candidates)
+                                triage_covered_total += triage_covered
+                                logger.info(
+                                    "ai_columns.triage done req_id=%s accepted=%d fallback=%d duration=%.2f",
+                                    batch.req_id,
+                                    triage_covered,
+                                    len(fallback_candidates),
+                                    triage_duration,
+                                )
+                                if accepted_candidates:
+                                    accepted_batch = BatchRequest(
+                                        req_id=f"{batch.req_id}-triage",
+                                        candidates=accepted_candidates,
+                                        user_text=batch.user_text,
+                                        prompt_tokens_est=batch.prompt_tokens_est,
+                                        product_map=batch.product_map,
+                                        depth=batch.depth,
+                                        json_retry_count=0,
+                                        adapted=batch.adapted,
+                                        trunc_title=batch.trunc_title,
+                                        trunc_desc=batch.trunc_desc,
+                                    )
+                                    triage_ok, _ = await _finalize_batch_payload(
+                                        accepted_batch,
+                                        accepted_map,
+                                    )
+                                    triage_result = {
+                                        "req_id": accepted_batch.req_id,
+                                        "candidates": accepted_candidates,
+                                        "ok": triage_ok,
+                                        "ko": {},
+                                        "usage": triage_usage,
+                                        "duration": triage_duration,
+                                        "retries": 0,
+                                        "prompt_tokens_est": triage_payload.get(
+                                            "prompt_tokens_est", 0
+                                        ),
+                                        "raw_text": triage_raw_text,
+                                    }
+                            except Exception as exc:
+                                logger.warning(
+                                    "ai_columns.triage failed req_id=%s err=%s",
+                                    batch.req_id,
+                                    exc,
+                                )
+                                fallback_candidates = list(batch.candidates)
+                                triage_result = None
+                                triage_usage = {}
+                                triage_duration = 0.0
+                                triage_raw_text = None
+                        finally:
+                            if job_progress:
+                                job_progress.inc_triage()
+    
+                    if not allow_triage and TRIAGE_ENABLED:
+                        triage_covered_total += 0
+                        if job_progress:
+                            job_progress.inc_triage()
+    
+                        if not fallback_candidates:
+                            result_payload = triage_result or {
+                                "req_id": f"{batch.req_id}-triage",
+                                "candidates": batch.candidates,
+                                "ok": {},
+                                "ko": {},
+                                "usage": triage_usage,
+                                "duration": triage_duration,
+                                "retries": 0,
+                                "prompt_tokens_est": batch.prompt_tokens_est,
+                                "raw_text": triage_raw_text,
+                            }
+                            final_result = {
+                                "req_id": batch.req_id,
+                                "candidates": batch.candidates,
+                                "ok": result_payload.get("ok", {}),
+                                "ko": {},
+                                "usage": result_payload.get("usage", {}),
+                                "duration": result_payload.get("duration", triage_duration),
+                                "retries": 0,
+                                "prompt_tokens_est": result_payload.get(
+                                    "prompt_tokens_est", batch.prompt_tokens_est
+                                ),
+                                "raw_text": result_payload.get("raw_text"),
+                            }
+                            return {
+                                "status": "ok",
+                                "batch": batch,
+                                "result": final_result,
+                                "duration": float(final_result.get("duration", 0.0) or 0.0),
+                                "error": None,
+                            }
+    
+                        fallback_batch = _build_batch_request(
+                            f"{batch.req_id}-main",
+                            fallback_candidates,
+                            batch.trunc_title,
+                            batch.trunc_desc,
+                            depth=batch.depth,
+                            json_retry_count=batch.json_retry_count,
+                            adapted=batch.adapted,
+                        )
+    
+                        fallback_big_total += len(fallback_candidates)
+    
+                        logger.info(
+                            "ai_columns.batch start req_id=%s model=%s items=%d prompt_tokens_est=%d strict_json=%s batch_adapted=%s",
+                            fallback_batch.req_id,
+                            model,
+                            len(fallback_batch.candidates),
+                            fallback_batch.prompt_tokens_est,
+                            STRICT_JSON_ENABLED,
+                            fallback_batch.adapted,
+                        )
+                        start_local = time.perf_counter()
+                        try:
+                            result = await _call_batch_with_retries(
+                                fallback_batch,
+                                api_key=api_key,
+                                model=model,
+                                max_retries=max_retries,
+                            )
+                            duration = time.perf_counter() - start_local
+                            if isinstance(result, dict) and "duration" not in result:
+                                result["duration"] = duration
+                            triage_ok = triage_result.get("ok", {}) if triage_result else {}
+                            combined_ok: Dict[str, Dict[str, Any]] = {}
+                            combined_ok.update(triage_ok)
+                            combined_ok.update(result.get("ok", {}) or {})
+                            combined_ko = dict(result.get("ko", {}) or {})
+                            combined_usage = _merge_usage(
+                                triage_result.get("usage") if triage_result else {},
+                                result.get("usage", {}),
+                            )
+                            combined_duration = float(triage_duration) + float(
+                                result.get("duration", duration) or duration
+                            )
+                            combined_prompt = 0
+                            if triage_result:
+                                combined_prompt += int(
+                                    triage_result.get("prompt_tokens_est") or 0
+                                )
+                            combined_prompt += int(result.get("prompt_tokens_est") or 0)
+                            combined_result = {
+                                "req_id": batch.req_id,
+                                "candidates": list(batch.candidates),
+                                "ok": combined_ok,
+                                "ko": combined_ko,
+                                "usage": combined_usage,
+                                "duration": combined_duration,
+                                "retries": result.get("retries", 0),
+                                "prompt_tokens_est": combined_prompt or batch.prompt_tokens_est,
+                                "raw_text": result.get("raw_text")
+                                or (triage_result.get("raw_text") if triage_result else None),
+                            }
+                            return {
+                                "status": "ok",
+                                "batch": fallback_batch,
+                                "result": combined_result,
+                                "duration": combined_duration,
+                                "error": None,
+                            }
+                        except BatchAdaptationRequired as exc:
+                            duration = time.perf_counter() - start_local
+                            logger.warning(
+                                "ai_columns.batch split req_id=%s reason=%s duration=%.2f",
+                                fallback_batch.req_id,
+                                exc.reason,
+                                duration,
+                            )
+                            return {
+                                "status": "split",
+                                "batch": fallback_batch,
+                                "result": None,
+                                "duration": duration,
+                                "error": exc,
+                                "reason": exc.reason,
+                                "json_retry": 1 if exc.reason == "json_parse" else 0,
+                                "allow_split": exc.allow_split,
+                                "triage_result": triage_result,
+                            }
+                        except Exception as exc:
+                            duration = time.perf_counter() - start_local
+                            logger.exception(
+                                "ai_columns.batch exception req_id=%s",
+                                fallback_batch.req_id,
+                            )
+                            ko_payload = {str(c.id): str(exc) for c in fallback_batch.candidates}
+                            fallback = {
+                                "req_id": fallback_batch.req_id,
+                                "candidates": fallback_batch.candidates,
+                                "ok": {},
+                                "ko": ko_payload,
+                                "usage": {},
+                                "duration": duration,
+                                "error": str(exc),
+                            }
+                            return {
+                                "status": "error",
+                                "batch": fallback_batch,
+                                "result": fallback,
+                                "duration": duration,
+                                "error": exc,
+                                "triage_result": triage_result,
+                            }
+    
+                tasks = [asyncio.create_task(_run_single(batch)) for batch in batches]
+                gathered: List[Dict[str, Any]] = []
+                for coro in asyncio.as_completed(tasks):
+                    gathered.append(await coro)
+                return gathered
+    
+            while pending_groups:
+                batches: List[BatchRequest] = []
+                while pending_groups:
+                    if cancel_requested or _cancel_requested():
+                        cancel_requested = True
+                        pending_groups.clear()
+                        break
+                    chunk, depth, json_retry_count, adapted_flag = pending_groups.popleft()
+                    if not chunk:
+                        continue
+                    req_counter += 1
+                    batch = _build_batch_request(
+                        f"{req_counter:03d}",
+                        chunk,
+                        trunc_title,
+                        trunc_desc,
+                        depth=depth,
+                        json_retry_count=json_retry_count,
+                        adapted=adapted_flag,
+                    )
+                    if _should_downshift(batch):
+                        batch_adaptations_total += 1
+                        logger.info(
+                            "ai_columns.batch adapt_pre req_id=%s items=%d prompt_tokens_est=%d est_tokens=%d limit=%d",
+                            batch.req_id,
+                            len(batch.candidates),
+                            batch.prompt_tokens_est,
+                            _estimate_batch_tokens(batch),
+                            SAFE_CONTEXT_TOKENS,
+                        )
+                        if len(chunk) <= MIN_BATCH_SIZE:
+                            batch.adapted = True
+                            batches.append(batch)
+                            continue
+                        split_point = max(1, math.ceil(len(chunk) / 2))
+                        if split_point >= len(chunk):
+                            split_point = max(1, len(chunk) // 2)
+                        first = chunk[:split_point]
+                        second = chunk[split_point:]
+                        if second:
+                            pending_groups.appendleft((second, depth + 1, json_retry_count, True))
+                        if first:
+                            pending_groups.appendleft((first, depth + 1, json_retry_count, True))
+                        continue
+                    batches.append(batch)
+                if not batches:
+                    break
+    
+                if cancel_requested or _cancel_requested():
+                    cancel_requested = True
+                    break
+    
+                loop_results = asyncio.run(_execute_batches(batches))
+                made_progress = False
+                for entry in loop_results:
+                    if cancel_requested:
+                        break
+    
+                    status = entry.get("status")
+                    batch = entry.get("batch")
+                    if not batch:
+                        continue
+                    if status == "cancelled":
+                        cancel_requested = True
+                        pending_groups.clear()
+                        break
+                    triage_payload = entry.get("triage_result")
+                    if triage_payload:
+                        triage_summary = process_result(triage_payload)
+                        if triage_summary.get("parsed_ids"):
+                            made_progress = True
+                    if status == "split":
+                        json_retry_inc = int(entry.get("json_retry", 0) or 0)
+                        json_retry_total += json_retry_inc
+                        batch_adaptations_total += 1
+                        if len(batch.candidates) <= 1 or not entry.get("allow_split", True):
+                            fallback = entry.get("result")
+                            if isinstance(fallback, dict):
+                                summary = process_result(fallback)
+                                if summary.get("parsed_ids"):
+                                    made_progress = True
+                            continue
+                        split_point = max(1, math.ceil(len(batch.candidates) / 2))
+                        if split_point >= len(batch.candidates):
+                            split_point = max(1, len(batch.candidates) // 2)
+                        first = batch.candidates[:split_point]
+                        second = batch.candidates[split_point:]
+                        next_json_retry = batch.json_retry_count + json_retry_inc
+                        if second:
+                            pending_groups.appendleft((second, batch.depth + 1, next_json_retry, True))
+                        if first:
+                            pending_groups.appendleft((first, batch.depth + 1, next_json_retry, True))
+                        continue
+                    if status != "ok":
+                        exc = entry.get("error")
+                        logger.warning(
+                            "ai_columns.batch.retryable req_id=%s status=%s err=%s",
+                            batch.req_id,
+                            status,
+                            exc,
+                        )
+                        pending_groups.append(
+                            (list(batch.candidates), batch.depth + 1, batch.json_retry_count, True)
+                        )
+                        continue
+    
+                    result = entry.get("result") or {}
+                    summary = process_result(result)
+                    parsed_ids = {
+                        int(pid)
+                        for pid in summary.get("parsed_ids", [])
+                        if isinstance(pid, int)
+                    }
+                    missing_ids_list = summary.get("missing_ids", []) or []
+                    missing_ids: List[int] = []
+                    for mid in missing_ids_list:
+                        try:
+                            missing_ids.append(int(mid))
+                        except Exception:
+                            continue
+                    if parsed_ids:
+                        made_progress = True
+    
+                    logger.info(
+                        "ai_columns.request ok items=%d parsed=%d missing=%d pending=%d",
+                        len(batch.candidates),
+                        len(parsed_ids),
+                        len(missing_ids),
+                        len(pending_set),
+                    )
+    
+                    status_label = summary.get("status") or status or "ok"
+                    duration = float(entry.get("duration") or 0.0)
+                    logger.info(
+                        "ai_columns.batch end req_id=%s status=%s duration=%.2f parsed=%d missing=%d pending=%d batch_adapted=%s",
+                        batch.req_id,
+                        status_label,
+                        duration,
+                        len(parsed_ids),
+                        len(missing_ids),
+                        len(pending_set),
+                        batch.adapted,
+                    )
+    
+                    if missing_ids:
+                        missing_candidates = [
+                            candidate_map.get(pid)
+                            for pid in missing_ids
+                            if candidate_map.get(pid)
+                        ]
+                        if missing_candidates:
+                            pending_groups.append(
+                                (missing_candidates, batch.depth + 1, batch.json_retry_count, True)
+                            )
+    
+                    if cost_cap is not None and cost_spent >= float(cost_cap):
+                        pending_groups.clear()
+                        break
+    
+                if cancel_requested:
+                    break
+    
+                if not made_progress and not pending_groups:
+                    break
+        else:
+            counts_with_cost = {**counts, "cost_spent_usd": cost_spent}
+            if job_updates_enabled:
+                if job_updates_enabled and job_int is not None:
+                    database.set_import_job_ai_counts(conn, job_int, counts_with_cost, sorted(pending_set))
+            _emit_status(
+                status_cb,
+                phase="enrich",
+                counts=counts_with_cost,
+                total=total_items,
+                done=counts["ok"] + counts["cached"],
+            )
+    
+        wall_time = max(time.perf_counter() - start_ts, 1e-6)
+        total_processed = counts.get("ok", 0) + counts.get("cached", 0)
+        remaining_total = len(pending_set)
+        total_batches = processed_batches
+        total_latency = sum(request_latencies)
+        avg_concurrency = (total_latency / wall_time) if wall_time > 0 else 0.0
+        concurrency_eff = round(avg_concurrency, 2)
+        p50 = _quantile(request_latencies, 0.5) if request_latencies else 0.0
+        p95 = _quantile(request_latencies, 0.95) if request_latencies else 0.0
+        logger.info(
+            "ai.run done total=%d processed=%d remaining=%d concurrency_eff=%.2f concurrency_target=%d batches=%d p50=%.2f p95=%.2f batch_adapted=%d json_retry=%d strict_json=%s triage_covered=%d fallback_big=%d",
+            total_items,
+            total_processed,
+            remaining_total,
+            concurrency_eff,
+            AI_MAX_CONCURRENCY,
+            total_batches,
+            p50,
+            p95,
+            batch_adaptations_total,
+            json_retry_total,
+            STRICT_JSON_ENABLED,
+            triage_covered_total,
+            fallback_big_total,
+        )
+    
+        result_error: Optional[str] = None
+        if cancel_requested:
+            result_error = "cancelled"
+        if cost_cap is not None and cost_spent >= float(cost_cap):
+            result_error = "cost_cap_reached"
+    
+        cfg_calib = config.get_ai_calibration_config()
+        calibration_enabled = cfg_calib.get("enabled", True)
+        fallback_cfg = cfg_calib.get("fallback_percentiles", {}) or {}
+        fallback_desire = fallback_cfg.get("desire") or [0.33, 0.66]
+        fallback_comp = fallback_cfg.get("competition") or [0.33, 0.66]
+    
+        desire_info: Dict[str, Any] = {}
+        comp_info: Dict[str, Any] = {}
+        dist_desire: Dict[str, int] = {}
+        dist_comp: Dict[str, int] = {}
+    
+        if calibration_enabled and success_records:
+            wins = float(cfg_calib.get("winsorize_pct", 0.05) or 0.0)
+            min_low = float(cfg_calib.get("min_low_pct", 0.05) or 0.0)
+            min_med = float(cfg_calib.get("min_medium_pct", 0.05) or 0.0)
+            min_high = float(cfg_calib.get("min_high_pct", 0.05) or 0.0)
+    
+            weights_id = config.get_weights_version()
+            cached_entry = _get_cached_calibration(weights_id, model)
+            desire_thresholds = (cached_entry or {}).get("desire") or {
+                "q33": float(fallback_desire[0]),
+                "q67": float(fallback_desire[1]),
+                "fallback": True,
+            }
+            comp_thresholds = (cached_entry or {}).get("competition") or {
+                "q33": float(fallback_comp[0]),
+                "q67": float(fallback_comp[1]),
+                "fallback": True,
+            }
+    
+            if cached_entry is None:
+                began_tx = False
+                try:
+                    if not conn.in_transaction:
+                        conn.execute("BEGIN IMMEDIATE")
+                        began_tx = True
+                    if desire_scores:
+                        labels, dist_desire, desire_info = _classify_scores(
+                            desire_scores,
+                            winsorize_pct=wins,
+                            min_low_pct=min_low,
+                            min_medium_pct=min_med,
+                            min_high_pct=min_high,
+                        )
+                        for pid_str, label in labels.items():
+                            pid = int(pid_str)
+                            rec = success_records.get(pid)
+                            if rec and rec["updates"].get("desire_magnitude") != label:
+                                conn.execute(
+                                    "UPDATE products SET desire_magnitude=? WHERE id=?",
+                                    (label, pid),
+                                )
+                                rec["updates"]["desire_magnitude"] = label
+                                if pid in applied_outputs:
+                                    applied_outputs[pid]["desire_magnitude"] = label
+                    if comp_scores:
+                        labels, dist_comp, comp_info = _classify_scores(
+                            comp_scores,
+                            winsorize_pct=wins,
+                            min_low_pct=min_low,
+                            min_medium_pct=min_med,
+                            min_high_pct=min_high,
+                        )
+                        for pid_str, label in labels.items():
+                            pid = int(pid_str)
+                            rec = success_records.get(pid)
+                            if rec and rec["updates"].get("competition_level") != label:
+                                conn.execute(
+                                    "UPDATE products SET competition_level=? WHERE id=?",
+                                    (label, pid),
+                                )
+                                rec["updates"]["competition_level"] = label
+                                if pid in applied_outputs:
+                                    applied_outputs[pid]["competition_level"] = label
+                    if began_tx:
+                        conn.commit()
+                except Exception:
+                    if began_tx and conn.in_transaction:
+                        conn.rollback()
+                    raise
+    
+                cache_payload = {
+                    "created_at": datetime.utcnow().isoformat(),
+                    "desire": {
+                        "q33": float(desire_info.get("q33")) if desire_info.get("q33") is not None else float(desire_thresholds["q33"]),
+                        "q67": float(desire_info.get("q67")) if desire_info.get("q67") is not None else float(desire_thresholds["q67"]),
+                        "fallback": bool(desire_info.get("fallback")),
+                    },
+                    "competition": {
+                        "q33": float(comp_info.get("q33")) if comp_info.get("q33") is not None else float(comp_thresholds["q33"]),
+                        "q67": float(comp_info.get("q67")) if comp_info.get("q67") is not None else float(comp_thresholds["q67"]),
+                        "fallback": bool(comp_info.get("fallback")),
+                    },
+                }
+                _set_cached_calibration(weights_id, model, cache_payload)
+                if not desire_info:
+                    desire_info = {"fallback": bool(desire_thresholds.get("fallback"))}
+                else:
+                    desire_info.setdefault("fallback", bool(desire_info.get("fallback")))
+                if not comp_info:
+                    comp_info = {"fallback": bool(comp_thresholds.get("fallback"))}
+                else:
+                    comp_info.setdefault("fallback", bool(comp_info.get("fallback")))
+                desire_info["cached"] = False
+                comp_info["cached"] = False
+            else:
+                desire_info = {
+                    "cached": True,
+                    "fallback": bool(desire_thresholds.get("fallback")),
+                    "q33": desire_thresholds.get("q33"),
+                    "q67": desire_thresholds.get("q67"),
+                }
+                comp_info = {
+                    "cached": True,
+                    "fallback": bool(comp_thresholds.get("fallback")),
+                    "q33": comp_thresholds.get("q33"),
+                    "q67": comp_thresholds.get("q67"),
+                }
+                desire_labels: Dict[str, str] = {}
+                comp_labels: Dict[str, str] = {}
+                if desire_scores:
+                    desire_labels, dist_desire = _apply_thresholds_with_minimums(
+                        desire_scores,
+                        desire_thresholds,
+                        min_low_pct=min_low,
+                        min_medium_pct=min_med,
+                        min_high_pct=min_high,
+                    )
+                if comp_scores:
+                    comp_labels, dist_comp = _apply_thresholds_with_minimums(
+                        comp_scores,
+                        comp_thresholds,
+                        min_low_pct=min_low,
+                        min_medium_pct=min_med,
+                        min_high_pct=min_high,
+                    )
+                if desire_labels or comp_labels:
+                    began_tx = False
+                    try:
+                        if not conn.in_transaction:
+                            conn.execute("BEGIN IMMEDIATE")
+                            began_tx = True
+                        for pid_str, label in desire_labels.items():
+                            pid = int(pid_str)
+                            rec = success_records.get(pid)
+                            if rec and rec["updates"].get("desire_magnitude") != label:
+                                conn.execute(
+                                    "UPDATE products SET desire_magnitude=? WHERE id=?",
+                                    (label, pid),
+                                )
+                                rec["updates"]["desire_magnitude"] = label
+                                if pid in applied_outputs:
+                                    applied_outputs[pid]["desire_magnitude"] = label
+                        for pid_str, label in comp_labels.items():
+                            pid = int(pid_str)
+                            rec = success_records.get(pid)
+                            if rec and rec["updates"].get("competition_level") != label:
+                                conn.execute(
+                                    "UPDATE products SET competition_level=? WHERE id=?",
+                                    (label, pid),
+                                )
+                                rec["updates"]["competition_level"] = label
+                                if pid in applied_outputs:
+                                    applied_outputs[pid]["competition_level"] = label
+                        if began_tx:
+                            conn.commit()
+                    except Exception:
+                        if began_tx and conn.in_transaction:
+                            conn.rollback()
+                        raise
+    
+            logger.info(
+                "ai_calibration_desire: dist=%s info=%s",
+                dist_desire if desire_scores else {},
+                desire_info,
+            )
+            logger.info(
+                "ai_calibration_comp: dist=%s info=%s",
+                dist_comp if comp_scores else {},
+                comp_info,
+            )
+    
+        for pid, rec in success_records.items():
+            sig_hash = rec.get("sig_hash")
+            updates = rec.get("updates", {})
+            if sig_hash:
+                database.upsert_ai_cache_entry(
+                    conn,
+                    sig_hash,
+                    model=model,
+                    version=cache_version,
+                    desire=updates.get("desire"),
+                    desire_magnitude=updates.get("desire_magnitude"),
+                    awareness_level=updates.get("awareness_level"),
+                    competition_level=updates.get("competition_level"),
+                )
+        conn.commit()
+    
+        pending_ids = sorted(pending_set)
         done_val = counts["ok"] + counts["cached"]
-        if job_updates_enabled:
-            database.update_import_job_ai_progress(conn, int(job_id), done_val)
-            database.set_import_job_ai_counts(conn, int(job_id), counts_with_cost, sorted(pending_set))
+        counts_with_cost = {**counts, "cost_spent_usd": cost_spent}
+    if job_updates_enabled and job_int is not None:
+        database.update_import_job_ai_progress(conn, job_int, done_val)
+        database.set_import_job_ai_counts(conn, job_int, counts_with_cost, pending_ids)
+        if result_error:
+            database.set_import_job_ai_error(conn, job_int, result_error)
         _emit_status(
             status_cb,
             phase="enrich",
@@ -1881,18 +2828,38 @@ def run_ai_fill_job(
             done=done_val,
             message=f"IA columnas {done_val}/{total_items}",
         )
-    else:
-        remaining = candidates
-
-    if not api_key:
-        result_error = "missing_api_key"
-        for pid in list(pending_set):
-            fail_reasons[pid] = result_error
-        counts_with_cost = {**counts, "cost_spent_usd": cost_spent}
-        if job_updates_enabled:
-            database.set_import_job_ai_counts(conn, int(job_id), counts_with_cost, sorted(pending_set))
-            database.set_import_job_ai_error(conn, int(job_id), result_error)
-        _emit_status(status_cb, phase="enrich", counts=counts_with_cost, total=total_items, done=counts["cached"], message="IA pendiente")
+    
+        latency_p50 = _percentile(request_latencies, 0.5) if request_latencies else 0.0
+        latency_p95 = _percentile(request_latencies, 0.95) if request_latencies else 0.0
+    
+        processed_count = len(applied_outputs)
+        logger.info(
+            "ai.run done total=%d processed=%d remaining=%d batch_adapted=%d json_retry=%d triage_covered=%d fallback_big=%d",
+            total_items,
+            processed_count,
+            len(pending_ids),
+            batch_adaptations_total,
+            json_retry_total,
+            triage_covered_total,
+            fallback_big_total,
+        )
+    
+        logger.info(
+            "run_ai_fill_job: job=%s total=%d ok=%d cached=%d ko=%d cost=%.4f pending=%d error=%s duration=%.2fs latency_p50=%.2fs latency_p95=%.2fs requests=%d",
+            job_id,
+            total_items,
+            counts["ok"],
+            counts["cached"],
+            counts["ko"],
+            cost_spent,
+            len(pending_ids),
+            result_error,
+            time.perf_counter() - start_ts,
+            latency_p50,
+            latency_p95,
+            len(request_latencies),
+        )
+    
         if fail_reasons:
             _log_ko_event(
                 "job_ko_summary",
@@ -1901,963 +2868,36 @@ def run_ai_fill_job(
                 candidate_lookup=candidate_map,
                 extra={
                     "result_error": result_error,
-                    "pending_total": len(pending_set),
-                    "sample_pending_ids": sorted(pending_set)[:5],
+                    "pending_total": len(pending_ids),
+                    "sample_pending_ids": pending_ids[:5],
+                    "processed_total": counts["ok"] + counts["cached"],
+                    "cost_spent_usd": cost_spent,
                 },
             )
+    
         _release_job_guard()
         conn.close()
         return {
             "counts": counts_with_cost,
-            "pending_ids": sorted(pending_set),
+            "pending_ids": pending_ids,
             "error": result_error,
             "ok": applied_outputs,
             "ko": fail_reasons,
             "skipped_existing": skipped_existing,
             "total_requested": len(requested_ids),
-            "json_retry": 0,
-            "batch_adapted": 0,
-            "triage_covered": 0,
-            "fallback_big": 0,
-        }
-
-    desire_scores: List[Tuple[str, float]] = []
-    comp_scores: List[Tuple[str, float]] = []
-    success_records: Dict[int, Dict[str, Any]] = {}
-    request_latencies: List[float] = []
-    processed_batches = 0
-    json_retry_total = 0
-    batch_adaptations_total = 0
-    triage_covered_total = 0
-    fallback_big_total = 0
-
-    def process_result(result: Dict[str, Any]) -> Dict[str, Any]:
-        nonlocal cost_spent, counts_with_cost, processed_batches
-        summary: Dict[str, Any] = {
-            "parsed_ids": [],
-            "missing_ids": [],
-            "ko_ids": [],
-            "status": "ok",
-            "candidates": result.get("candidates", []),
-            "req_id": result.get("req_id"),
-        }
-        candidates_list: List[Candidate] = result.get("candidates", [])
-        if result.get("skipped"):
-            for cand in candidates_list:
-                pending_set.add(cand.id)
-                fail_reasons.setdefault(cand.id, "cost_cap_reached")
-            summary["status"] = "skipped"
-            summary["pending_after"] = len(pending_set)
-            return summary
-
-        processed_batches += 1
-        counts["sent"] += len(candidates_list)
-        retries = int(result.get("retries", 0) or 0)
-        counts["retried"] += retries
-
-        duration = float(result.get("duration", 0.0) or 0.0)
-        if duration > 0:
-            request_latencies.append(duration)
-        usage = result.get("usage", {}) or {}
-        if usage:
-            cost_spent += _calculate_cost(usage, price_in, price_out)
-
-        ok_map: Dict[str, Dict[str, Any]] = result.get("ok", {}) or {}
-        ko_map: Dict[str, str] = result.get("ko", {}) or {}
-
-        pending_before = len(pending_set)
-        candidate_ids = [cand.id for cand in candidates_list]
-
-        success_updates: Dict[int, Dict[str, Any]] = {}
-        for pid_str, payload in ok_map.items():
-            try:
-                pid = int(pid_str)
-            except Exception:
-                continue
-            success_updates[pid] = payload
-            pending_set.discard(pid)
-
-        ko_ids: set[int] = set()
-        for pid_str, reason in ko_map.items():
-            try:
-                pid = int(pid_str)
-            except Exception:
-                continue
-            pending_set.add(pid)
-            fail_reasons[pid] = reason or "error"
-            ko_ids.add(pid)
-
-        parsed_ids = list(success_updates.keys())
-        missing_ids = [
-            pid for pid in candidate_ids if pid not in success_updates and pid not in ko_ids
-        ]
-
-        updated_rows = _apply_ai_updates(conn, success_updates)
-        if success_updates:
-            for pid, payload in success_updates.items():
-                candidate = candidate_map.get(pid)
-                sig_hash = candidate.sig_hash if candidate else ""
-                success_records[pid] = {
-                    "sig_hash": sig_hash,
-                    "updates": payload.copy(),
-                }
-                parsed_desire = _parse_score(payload.get("desire_magnitude"))
-                parsed_comp = _parse_score(payload.get("competition_level"))
-                if parsed_desire is not None:
-                    desire_scores.append((str(pid), parsed_desire))
-                    success_records[pid]["_desire_score"] = parsed_desire
-                if parsed_comp is not None:
-                    comp_scores.append((str(pid), parsed_comp))
-                    success_records[pid]["_competition_score"] = parsed_comp
-                applied_outputs[pid] = {k: v for k, v in payload.items() if v is not None}
-
-        counts["ok"] += len(success_updates)
-        counts["ko"] += len(ko_map)
-
-        if ko_map:
-            _log_ko_event(
-                "ko_diagnostics",
-                ko_map,
-                job_id=job_id,
-                candidate_lookup=candidate_map,
-                req_id=result.get("req_id"),
-                extra={
-                    "pending_after_batch": len(pending_set),
-                    "retry_count": retries,
-                    "batch_duration_s": duration,
-                    "batch_size": len(candidates_list),
-                },
-            )
-
-        throughput = (len(candidates_list) / duration) if duration > 0 else 0.0
-        if job_updates_enabled:
-            database.append_ai_job_metric(
-                conn,
-                int(job_id),
-                processed_batches,
-                len(candidates_list),
-                duration * 1000.0,
-                throughput,
-                cached_hits=0,
-            )
-
-        done_val = counts["ok"] + counts["cached"]
-        counts_with_cost = {**counts, "cost_spent_usd": cost_spent}
-        if job_updates_enabled:
-            database.update_import_job_ai_progress(conn, int(job_id), done_val)
-            database.set_import_job_ai_counts(conn, int(job_id), counts_with_cost, sorted(pending_set))
-        _emit_status(
-            status_cb,
-            phase="enrich",
-            counts=counts_with_cost,
-            total=total_items,
-            done=done_val,
-            message=f"IA columnas {done_val}/{total_items}",
-        )
-
-        if missing_ids:
-            logger.warning("ai.batch.missing ids_sample=%s", missing_ids[:5])
-        if not parsed_ids:
-            raw_sample = str(result.get("raw_text") or "")[:200]
-            if raw_sample:
-                logger.error("ai.parse.empty raw_sample=%s", raw_sample)
-
-        if cost_cap is not None and cost_spent >= float(cost_cap):
-            summary["status"] = "skipped"
-            return summary
-        summary["parsed_ids"] = parsed_ids
-        summary["missing_ids"] = missing_ids
-        summary["ko_ids"] = list(ko_map.keys())
-        summary["pending_after"] = len(pending_set)
-        if result.get("error"):
-            summary["status"] = "error"
-        elif missing_ids or ko_map:
-            summary["status"] = "partial"
-        return summary
-
-    if remaining:
-        pending_candidates = list(remaining)
-        max_batch_size = min(AI_MAX_PRODUCTS_PER_CALL, len(pending_candidates))
-        max_batch_size = max(AI_MIN_PRODUCTS_PER_CALL, max_batch_size)
-        max_batch_size = max(1, min(AI_BATCH_MAX_ITEMS, max_batch_size))
-        logger.info(
-            "ai.run start items_total=%d batch_init=%d concurrency_target=%d strict_json=%s",
-            total_items,
-            max_batch_size,
-            AI_MAX_CONCURRENCY,
-            STRICT_JSON_ENABLED,
-        )
-        req_counter = 0
-        pending_groups: Deque[Tuple[List[Candidate], int, int, bool]] = deque()
-        for start in range(0, len(pending_candidates), max_batch_size):
-            chunk = pending_candidates[start : start + max_batch_size]
-            if not chunk:
-                continue
-            pending_groups.append((chunk, 0, 0, False))
-
-        async def _execute_batches(batches: List[BatchRequest]) -> List[Dict[str, Any]]:
-            semaphore = asyncio.Semaphore(max(1, AI_MAX_CONCURRENCY))
-
-            async def _run_single(batch: BatchRequest) -> Dict[str, Any]:
-                nonlocal triage_covered_total, fallback_big_total, cancel_requested
-                async with semaphore:
-                    if cancel_requested or _cancel_requested():
-                        cancel_requested = True
-                        return {
-                            "status": "cancelled",
-                            "batch": batch,
-                            "result": None,
-                            "duration": 0.0,
-                            "error": None,
-                        }
-                    original_batch = batch
-                    triage_result: Optional[Dict[str, Any]] = None
-                    triage_usage: Dict[str, Any] = {}
-                    triage_duration = 0.0
-                    triage_raw_text: Optional[str] = None
-                    fallback_candidates: List[Candidate] = list(batch.candidates)
-                    allow_triage = (
-                        TRIAGE_ENABLED
-                        and batch.candidates
-                        and batch.depth == 0
-                        and not batch.adapted
-                    )
-
-                    if allow_triage:
-                        triage_model_name = TRIAGE_MODEL or ""
-                        triage_is_mini = triage_model_name.startswith("gpt-4o-mini")
-                        if not triage_is_mini:
-                            triage_is_mini = triage_model_name.startswith("gpt-4o-mini-2024")
-                        triage_strict_json = False if triage_is_mini else True
-                        logger.info(
-                            "ai_columns.triage start req_id=%s model=%s items=%d confidence_min=%.2f strict_json=%s",
-                            batch.req_id,
-                            TRIAGE_MODEL,
-                            len(batch.candidates),
-                            TRIAGE_CONFIDENCE,
-                            triage_strict_json,
-                        )
-                        try:
-                            triage_payload = await _call_triage_batch(
-                                batch,
-                                api_key=api_key,
-                                model=TRIAGE_MODEL,
-                                strict_json=triage_strict_json,
-                            )
-                            triage_duration = float(
-                                triage_payload.get("duration", 0.0) or 0.0
-                            )
-                            triage_usage = triage_payload.get("usage", {}) or {}
-                            triage_raw_text = triage_payload.get("raw_text")
-                            strict_map = triage_payload.get("strict_map") or {}
-                            accepted_candidates: List[Candidate] = []
-                            accepted_map: Dict[int, Dict[str, Any]] = {}
-                            fallback_candidates = []
-                            for cand in batch.candidates:
-                                entry = strict_map.get(cand.id)
-                                if not isinstance(entry, dict):
-                                    fallback_candidates.append(cand)
-                                    continue
-                                confidence = _extract_confidence(entry)
-                                if confidence is None or confidence < TRIAGE_CONFIDENCE:
-                                    fallback_candidates.append(cand)
-                                    continue
-                                accepted_candidates.append(cand)
-                                accepted_map[cand.id] = entry
-                            triage_covered = len(accepted_candidates)
-                            triage_covered_total += triage_covered
-                            logger.info(
-                                "ai_columns.triage done req_id=%s accepted=%d fallback=%d duration=%.2f",
-                                batch.req_id,
-                                triage_covered,
-                                len(fallback_candidates),
-                                triage_duration,
-                            )
-                            if accepted_candidates:
-                                accepted_batch = BatchRequest(
-                                    req_id=f"{batch.req_id}-triage",
-                                    candidates=accepted_candidates,
-                                    user_text=batch.user_text,
-                                    prompt_tokens_est=batch.prompt_tokens_est,
-                                    product_map=batch.product_map,
-                                    depth=batch.depth,
-                                    json_retry_count=0,
-                                    adapted=batch.adapted,
-                                    trunc_title=batch.trunc_title,
-                                    trunc_desc=batch.trunc_desc,
-                                )
-                                triage_ok, _ = await _finalize_batch_payload(
-                                    accepted_batch,
-                                    accepted_map,
-                                )
-                                triage_result = {
-                                    "req_id": accepted_batch.req_id,
-                                    "candidates": accepted_candidates,
-                                    "ok": triage_ok,
-                                    "ko": {},
-                                    "usage": triage_usage,
-                                    "duration": triage_duration,
-                                    "retries": 0,
-                                    "prompt_tokens_est": triage_payload.get(
-                                        "prompt_tokens_est", 0
-                                    ),
-                                    "raw_text": triage_raw_text,
-                                }
-                        except Exception as exc:
-                            logger.warning(
-                                "ai_columns.triage failed req_id=%s err=%s",
-                                batch.req_id,
-                                exc,
-                            )
-                            fallback_candidates = list(batch.candidates)
-                            triage_result = None
-                            triage_usage = {}
-                            triage_duration = 0.0
-                            triage_raw_text = None
-
-                    if not allow_triage and TRIAGE_ENABLED:
-                        triage_covered_total += 0
-
-                    if not fallback_candidates:
-                        result_payload = triage_result or {
-                            "req_id": f"{batch.req_id}-triage",
-                            "candidates": batch.candidates,
-                            "ok": {},
-                            "ko": {},
-                            "usage": triage_usage,
-                            "duration": triage_duration,
-                            "retries": 0,
-                            "prompt_tokens_est": batch.prompt_tokens_est,
-                            "raw_text": triage_raw_text,
-                        }
-                        final_result = {
-                            "req_id": batch.req_id,
-                            "candidates": batch.candidates,
-                            "ok": result_payload.get("ok", {}),
-                            "ko": {},
-                            "usage": result_payload.get("usage", {}),
-                            "duration": result_payload.get("duration", triage_duration),
-                            "retries": 0,
-                            "prompt_tokens_est": result_payload.get(
-                                "prompt_tokens_est", batch.prompt_tokens_est
-                            ),
-                            "raw_text": result_payload.get("raw_text"),
-                        }
-                        return {
-                            "status": "ok",
-                            "batch": batch,
-                            "result": final_result,
-                            "duration": float(final_result.get("duration", 0.0) or 0.0),
-                            "error": None,
-                        }
-
-                    fallback_batch = _build_batch_request(
-                        f"{batch.req_id}-main",
-                        fallback_candidates,
-                        batch.trunc_title,
-                        batch.trunc_desc,
-                        depth=batch.depth,
-                        json_retry_count=batch.json_retry_count,
-                        adapted=batch.adapted,
-                    )
-
-                    fallback_big_total += len(fallback_candidates)
-
-                    logger.info(
-                        "ai_columns.batch start req_id=%s model=%s items=%d prompt_tokens_est=%d strict_json=%s batch_adapted=%s",
-                        fallback_batch.req_id,
-                        model,
-                        len(fallback_batch.candidates),
-                        fallback_batch.prompt_tokens_est,
-                        STRICT_JSON_ENABLED,
-                        fallback_batch.adapted,
-                    )
-                    start_local = time.perf_counter()
-                    try:
-                        result = await _call_batch_with_retries(
-                            fallback_batch,
-                            api_key=api_key,
-                            model=model,
-                            max_retries=max_retries,
-                        )
-                        duration = time.perf_counter() - start_local
-                        if isinstance(result, dict) and "duration" not in result:
-                            result["duration"] = duration
-                        triage_ok = triage_result.get("ok", {}) if triage_result else {}
-                        combined_ok: Dict[str, Dict[str, Any]] = {}
-                        combined_ok.update(triage_ok)
-                        combined_ok.update(result.get("ok", {}) or {})
-                        combined_ko = dict(result.get("ko", {}) or {})
-                        combined_usage = _merge_usage(
-                            triage_result.get("usage") if triage_result else {},
-                            result.get("usage", {}),
-                        )
-                        combined_duration = float(triage_duration) + float(
-                            result.get("duration", duration) or duration
-                        )
-                        combined_prompt = 0
-                        if triage_result:
-                            combined_prompt += int(
-                                triage_result.get("prompt_tokens_est") or 0
-                            )
-                        combined_prompt += int(result.get("prompt_tokens_est") or 0)
-                        combined_result = {
-                            "req_id": batch.req_id,
-                            "candidates": list(batch.candidates),
-                            "ok": combined_ok,
-                            "ko": combined_ko,
-                            "usage": combined_usage,
-                            "duration": combined_duration,
-                            "retries": result.get("retries", 0),
-                            "prompt_tokens_est": combined_prompt or batch.prompt_tokens_est,
-                            "raw_text": result.get("raw_text")
-                            or (triage_result.get("raw_text") if triage_result else None),
-                        }
-                        return {
-                            "status": "ok",
-                            "batch": fallback_batch,
-                            "result": combined_result,
-                            "duration": combined_duration,
-                            "error": None,
-                        }
-                    except BatchAdaptationRequired as exc:
-                        duration = time.perf_counter() - start_local
-                        logger.warning(
-                            "ai_columns.batch split req_id=%s reason=%s duration=%.2f",
-                            fallback_batch.req_id,
-                            exc.reason,
-                            duration,
-                        )
-                        return {
-                            "status": "split",
-                            "batch": fallback_batch,
-                            "result": None,
-                            "duration": duration,
-                            "error": exc,
-                            "reason": exc.reason,
-                            "json_retry": 1 if exc.reason == "json_parse" else 0,
-                            "allow_split": exc.allow_split,
-                            "triage_result": triage_result,
-                        }
-                    except Exception as exc:
-                        duration = time.perf_counter() - start_local
-                        logger.exception(
-                            "ai_columns.batch exception req_id=%s",
-                            fallback_batch.req_id,
-                        )
-                        ko_payload = {str(c.id): str(exc) for c in fallback_batch.candidates}
-                        fallback = {
-                            "req_id": fallback_batch.req_id,
-                            "candidates": fallback_batch.candidates,
-                            "ok": {},
-                            "ko": ko_payload,
-                            "usage": {},
-                            "duration": duration,
-                            "error": str(exc),
-                        }
-                        return {
-                            "status": "error",
-                            "batch": fallback_batch,
-                            "result": fallback,
-                            "duration": duration,
-                            "error": exc,
-                            "triage_result": triage_result,
-                        }
-
-            tasks = [asyncio.create_task(_run_single(batch)) for batch in batches]
-            gathered: List[Dict[str, Any]] = []
-            for coro in asyncio.as_completed(tasks):
-                gathered.append(await coro)
-            return gathered
-
-        while pending_groups:
-            batches: List[BatchRequest] = []
-            while pending_groups:
-                if cancel_requested or _cancel_requested():
-                    cancel_requested = True
-                    pending_groups.clear()
-                    break
-                chunk, depth, json_retry_count, adapted_flag = pending_groups.popleft()
-                if not chunk:
-                    continue
-                req_counter += 1
-                batch = _build_batch_request(
-                    f"{req_counter:03d}",
-                    chunk,
-                    trunc_title,
-                    trunc_desc,
-                    depth=depth,
-                    json_retry_count=json_retry_count,
-                    adapted=adapted_flag,
-                )
-                if _should_downshift(batch):
-                    batch_adaptations_total += 1
-                    logger.info(
-                        "ai_columns.batch adapt_pre req_id=%s items=%d prompt_tokens_est=%d est_tokens=%d limit=%d",
-                        batch.req_id,
-                        len(batch.candidates),
-                        batch.prompt_tokens_est,
-                        _estimate_batch_tokens(batch),
-                        SAFE_CONTEXT_TOKENS,
-                    )
-                    if len(chunk) <= MIN_BATCH_SIZE:
-                        batch.adapted = True
-                        batches.append(batch)
-                        continue
-                    split_point = max(1, math.ceil(len(chunk) / 2))
-                    if split_point >= len(chunk):
-                        split_point = max(1, len(chunk) // 2)
-                    first = chunk[:split_point]
-                    second = chunk[split_point:]
-                    if second:
-                        pending_groups.appendleft((second, depth + 1, json_retry_count, True))
-                    if first:
-                        pending_groups.appendleft((first, depth + 1, json_retry_count, True))
-                    continue
-                batches.append(batch)
-            if not batches:
-                break
-
-            if cancel_requested or _cancel_requested():
-                cancel_requested = True
-                break
-
-            loop_results = asyncio.run(_execute_batches(batches))
-            made_progress = False
-            for entry in loop_results:
-                if cancel_requested:
-                    break
-
-                status = entry.get("status")
-                batch = entry.get("batch")
-                if not batch:
-                    continue
-                if status == "cancelled":
-                    cancel_requested = True
-                    pending_groups.clear()
-                    break
-                triage_payload = entry.get("triage_result")
-                if triage_payload:
-                    triage_summary = process_result(triage_payload)
-                    if triage_summary.get("parsed_ids"):
-                        made_progress = True
-                if status == "split":
-                    json_retry_inc = int(entry.get("json_retry", 0) or 0)
-                    json_retry_total += json_retry_inc
-                    batch_adaptations_total += 1
-                    if len(batch.candidates) <= 1 or not entry.get("allow_split", True):
-                        fallback = entry.get("result")
-                        if isinstance(fallback, dict):
-                            summary = process_result(fallback)
-                            if summary.get("parsed_ids"):
-                                made_progress = True
-                        continue
-                    split_point = max(1, math.ceil(len(batch.candidates) / 2))
-                    if split_point >= len(batch.candidates):
-                        split_point = max(1, len(batch.candidates) // 2)
-                    first = batch.candidates[:split_point]
-                    second = batch.candidates[split_point:]
-                    next_json_retry = batch.json_retry_count + json_retry_inc
-                    if second:
-                        pending_groups.appendleft((second, batch.depth + 1, next_json_retry, True))
-                    if first:
-                        pending_groups.appendleft((first, batch.depth + 1, next_json_retry, True))
-                    continue
-                if status != "ok":
-                    exc = entry.get("error")
-                    logger.warning(
-                        "ai_columns.batch.retryable req_id=%s status=%s err=%s",
-                        batch.req_id,
-                        status,
-                        exc,
-                    )
-                    pending_groups.append(
-                        (list(batch.candidates), batch.depth + 1, batch.json_retry_count, True)
-                    )
-                    continue
-
-                result = entry.get("result") or {}
-                summary = process_result(result)
-                parsed_ids = {
-                    int(pid)
-                    for pid in summary.get("parsed_ids", [])
-                    if isinstance(pid, int)
-                }
-                missing_ids_list = summary.get("missing_ids", []) or []
-                missing_ids: List[int] = []
-                for mid in missing_ids_list:
-                    try:
-                        missing_ids.append(int(mid))
-                    except Exception:
-                        continue
-                if parsed_ids:
-                    made_progress = True
-
-                logger.info(
-                    "ai_columns.request ok items=%d parsed=%d missing=%d pending=%d",
-                    len(batch.candidates),
-                    len(parsed_ids),
-                    len(missing_ids),
-                    len(pending_set),
-                )
-
-                status_label = summary.get("status") or status or "ok"
-                duration = float(entry.get("duration") or 0.0)
-                logger.info(
-                    "ai_columns.batch end req_id=%s status=%s duration=%.2f parsed=%d missing=%d pending=%d batch_adapted=%s",
-                    batch.req_id,
-                    status_label,
-                    duration,
-                    len(parsed_ids),
-                    len(missing_ids),
-                    len(pending_set),
-                    batch.adapted,
-                )
-
-                if missing_ids:
-                    missing_candidates = [
-                        candidate_map.get(pid)
-                        for pid in missing_ids
-                        if candidate_map.get(pid)
-                    ]
-                    if missing_candidates:
-                        pending_groups.append(
-                            (missing_candidates, batch.depth + 1, batch.json_retry_count, True)
-                        )
-
-                if cost_cap is not None and cost_spent >= float(cost_cap):
-                    pending_groups.clear()
-                    break
-
-            if cancel_requested:
-                break
-
-            if not made_progress and not pending_groups:
-                break
-    else:
-        counts_with_cost = {**counts, "cost_spent_usd": cost_spent}
-        if job_updates_enabled:
-            database.set_import_job_ai_counts(conn, int(job_id), counts_with_cost, sorted(pending_set))
-        _emit_status(
-            status_cb,
-            phase="enrich",
-            counts=counts_with_cost,
-            total=total_items,
-            done=counts["ok"] + counts["cached"],
-        )
-
-    wall_time = max(time.perf_counter() - start_ts, 1e-6)
-    total_processed = counts.get("ok", 0) + counts.get("cached", 0)
-    remaining_total = len(pending_set)
-    total_batches = processed_batches
-    total_latency = sum(request_latencies)
-    avg_concurrency = (total_latency / wall_time) if wall_time > 0 else 0.0
-    concurrency_eff = round(avg_concurrency, 2)
-    p50 = _quantile(request_latencies, 0.5) if request_latencies else 0.0
-    p95 = _quantile(request_latencies, 0.95) if request_latencies else 0.0
-    logger.info(
-        "ai.run done total=%d processed=%d remaining=%d concurrency_eff=%.2f concurrency_target=%d batches=%d p50=%.2f p95=%.2f batch_adapted=%d json_retry=%d strict_json=%s triage_covered=%d fallback_big=%d",
-        total_items,
-        total_processed,
-        remaining_total,
-        concurrency_eff,
-        AI_MAX_CONCURRENCY,
-        total_batches,
-        p50,
-        p95,
-        batch_adaptations_total,
-        json_retry_total,
-        STRICT_JSON_ENABLED,
-        triage_covered_total,
-        fallback_big_total,
-    )
-
-    result_error: Optional[str] = None
-    if cancel_requested:
-        result_error = "cancelled"
-    if cost_cap is not None and cost_spent >= float(cost_cap):
-        result_error = "cost_cap_reached"
-
-    cfg_calib = config.get_ai_calibration_config()
-    calibration_enabled = cfg_calib.get("enabled", True)
-    fallback_cfg = cfg_calib.get("fallback_percentiles", {}) or {}
-    fallback_desire = fallback_cfg.get("desire") or [0.33, 0.66]
-    fallback_comp = fallback_cfg.get("competition") or [0.33, 0.66]
-
-    desire_info: Dict[str, Any] = {}
-    comp_info: Dict[str, Any] = {}
-    dist_desire: Dict[str, int] = {}
-    dist_comp: Dict[str, int] = {}
-
-    if calibration_enabled and success_records:
-        wins = float(cfg_calib.get("winsorize_pct", 0.05) or 0.0)
-        min_low = float(cfg_calib.get("min_low_pct", 0.05) or 0.0)
-        min_med = float(cfg_calib.get("min_medium_pct", 0.05) or 0.0)
-        min_high = float(cfg_calib.get("min_high_pct", 0.05) or 0.0)
-
-        weights_id = config.get_weights_version()
-        cached_entry = _get_cached_calibration(weights_id, model)
-        desire_thresholds = (cached_entry or {}).get("desire") or {
-            "q33": float(fallback_desire[0]),
-            "q67": float(fallback_desire[1]),
-            "fallback": True,
-        }
-        comp_thresholds = (cached_entry or {}).get("competition") or {
-            "q33": float(fallback_comp[0]),
-            "q67": float(fallback_comp[1]),
-            "fallback": True,
-        }
-
-        if cached_entry is None:
-            began_tx = False
-            try:
-                if not conn.in_transaction:
-                    conn.execute("BEGIN IMMEDIATE")
-                    began_tx = True
-                if desire_scores:
-                    labels, dist_desire, desire_info = _classify_scores(
-                        desire_scores,
-                        winsorize_pct=wins,
-                        min_low_pct=min_low,
-                        min_medium_pct=min_med,
-                        min_high_pct=min_high,
-                    )
-                    for pid_str, label in labels.items():
-                        pid = int(pid_str)
-                        rec = success_records.get(pid)
-                        if rec and rec["updates"].get("desire_magnitude") != label:
-                            conn.execute(
-                                "UPDATE products SET desire_magnitude=? WHERE id=?",
-                                (label, pid),
-                            )
-                            rec["updates"]["desire_magnitude"] = label
-                            if pid in applied_outputs:
-                                applied_outputs[pid]["desire_magnitude"] = label
-                if comp_scores:
-                    labels, dist_comp, comp_info = _classify_scores(
-                        comp_scores,
-                        winsorize_pct=wins,
-                        min_low_pct=min_low,
-                        min_medium_pct=min_med,
-                        min_high_pct=min_high,
-                    )
-                    for pid_str, label in labels.items():
-                        pid = int(pid_str)
-                        rec = success_records.get(pid)
-                        if rec and rec["updates"].get("competition_level") != label:
-                            conn.execute(
-                                "UPDATE products SET competition_level=? WHERE id=?",
-                                (label, pid),
-                            )
-                            rec["updates"]["competition_level"] = label
-                            if pid in applied_outputs:
-                                applied_outputs[pid]["competition_level"] = label
-                if began_tx:
-                    conn.commit()
-            except Exception:
-                if began_tx and conn.in_transaction:
-                    conn.rollback()
-                raise
-
-            cache_payload = {
-                "created_at": datetime.utcnow().isoformat(),
-                "desire": {
-                    "q33": float(desire_info.get("q33")) if desire_info.get("q33") is not None else float(desire_thresholds["q33"]),
-                    "q67": float(desire_info.get("q67")) if desire_info.get("q67") is not None else float(desire_thresholds["q67"]),
-                    "fallback": bool(desire_info.get("fallback")),
-                },
-                "competition": {
-                    "q33": float(comp_info.get("q33")) if comp_info.get("q33") is not None else float(comp_thresholds["q33"]),
-                    "q67": float(comp_info.get("q67")) if comp_info.get("q67") is not None else float(comp_thresholds["q67"]),
-                    "fallback": bool(comp_info.get("fallback")),
-                },
-            }
-            _set_cached_calibration(weights_id, model, cache_payload)
-            if not desire_info:
-                desire_info = {"fallback": bool(desire_thresholds.get("fallback"))}
-            else:
-                desire_info.setdefault("fallback", bool(desire_info.get("fallback")))
-            if not comp_info:
-                comp_info = {"fallback": bool(comp_thresholds.get("fallback"))}
-            else:
-                comp_info.setdefault("fallback", bool(comp_info.get("fallback")))
-            desire_info["cached"] = False
-            comp_info["cached"] = False
-        else:
-            desire_info = {
-                "cached": True,
-                "fallback": bool(desire_thresholds.get("fallback")),
-                "q33": desire_thresholds.get("q33"),
-                "q67": desire_thresholds.get("q67"),
-            }
-            comp_info = {
-                "cached": True,
-                "fallback": bool(comp_thresholds.get("fallback")),
-                "q33": comp_thresholds.get("q33"),
-                "q67": comp_thresholds.get("q67"),
-            }
-            desire_labels: Dict[str, str] = {}
-            comp_labels: Dict[str, str] = {}
-            if desire_scores:
-                desire_labels, dist_desire = _apply_thresholds_with_minimums(
-                    desire_scores,
-                    desire_thresholds,
-                    min_low_pct=min_low,
-                    min_medium_pct=min_med,
-                    min_high_pct=min_high,
-                )
-            if comp_scores:
-                comp_labels, dist_comp = _apply_thresholds_with_minimums(
-                    comp_scores,
-                    comp_thresholds,
-                    min_low_pct=min_low,
-                    min_medium_pct=min_med,
-                    min_high_pct=min_high,
-                )
-            if desire_labels or comp_labels:
-                began_tx = False
-                try:
-                    if not conn.in_transaction:
-                        conn.execute("BEGIN IMMEDIATE")
-                        began_tx = True
-                    for pid_str, label in desire_labels.items():
-                        pid = int(pid_str)
-                        rec = success_records.get(pid)
-                        if rec and rec["updates"].get("desire_magnitude") != label:
-                            conn.execute(
-                                "UPDATE products SET desire_magnitude=? WHERE id=?",
-                                (label, pid),
-                            )
-                            rec["updates"]["desire_magnitude"] = label
-                            if pid in applied_outputs:
-                                applied_outputs[pid]["desire_magnitude"] = label
-                    for pid_str, label in comp_labels.items():
-                        pid = int(pid_str)
-                        rec = success_records.get(pid)
-                        if rec and rec["updates"].get("competition_level") != label:
-                            conn.execute(
-                                "UPDATE products SET competition_level=? WHERE id=?",
-                                (label, pid),
-                            )
-                            rec["updates"]["competition_level"] = label
-                            if pid in applied_outputs:
-                                applied_outputs[pid]["competition_level"] = label
-                    if began_tx:
-                        conn.commit()
-                except Exception:
-                    if began_tx and conn.in_transaction:
-                        conn.rollback()
-                    raise
-
-        logger.info(
-            "ai_calibration_desire: dist=%s info=%s",
-            dist_desire if desire_scores else {},
-            desire_info,
-        )
-        logger.info(
-            "ai_calibration_comp: dist=%s info=%s",
-            dist_comp if comp_scores else {},
-            comp_info,
-        )
-
-    for pid, rec in success_records.items():
-        sig_hash = rec.get("sig_hash")
-        updates = rec.get("updates", {})
-        if sig_hash:
-            database.upsert_ai_cache_entry(
-                conn,
-                sig_hash,
-                model=model,
-                version=cache_version,
-                desire=updates.get("desire"),
-                desire_magnitude=updates.get("desire_magnitude"),
-                awareness_level=updates.get("awareness_level"),
-                competition_level=updates.get("competition_level"),
-            )
-    conn.commit()
-
-    pending_ids = sorted(pending_set)
-    done_val = counts["ok"] + counts["cached"]
-    counts_with_cost = {**counts, "cost_spent_usd": cost_spent}
-    if job_updates_enabled:
-        database.update_import_job_ai_progress(conn, int(job_id), done_val)
-        database.set_import_job_ai_counts(conn, int(job_id), counts_with_cost, pending_ids)
-        if result_error:
-            database.set_import_job_ai_error(conn, int(job_id), result_error)
-    _emit_status(
-        status_cb,
-        phase="enrich",
-        counts=counts_with_cost,
-        total=total_items,
-        done=done_val,
-        message=f"IA columnas {done_val}/{total_items}",
-    )
-
-    latency_p50 = _percentile(request_latencies, 0.5) if request_latencies else 0.0
-    latency_p95 = _percentile(request_latencies, 0.95) if request_latencies else 0.0
-
-    processed_count = len(applied_outputs)
-    logger.info(
-        "ai.run done total=%d processed=%d remaining=%d batch_adapted=%d json_retry=%d triage_covered=%d fallback_big=%d",
-        total_items,
-        processed_count,
-        len(pending_ids),
-        batch_adaptations_total,
-        json_retry_total,
-        triage_covered_total,
-        fallback_big_total,
-    )
-
-    logger.info(
-        "run_ai_fill_job: job=%s total=%d ok=%d cached=%d ko=%d cost=%.4f pending=%d error=%s duration=%.2fs latency_p50=%.2fs latency_p95=%.2fs requests=%d",
-        job_id,
-        total_items,
-        counts["ok"],
-        counts["cached"],
-        counts["ko"],
-        cost_spent,
-        len(pending_ids),
-        result_error,
-        time.perf_counter() - start_ts,
-        latency_p50,
-        latency_p95,
-        len(request_latencies),
-    )
-
-    if fail_reasons:
-        _log_ko_event(
-            "job_ko_summary",
-            {str(pid): reason for pid, reason in fail_reasons.items()},
-            job_id=job_id,
-            candidate_lookup=candidate_map,
-            extra={
-                "result_error": result_error,
-                "pending_total": len(pending_ids),
-                "sample_pending_ids": pending_ids[:5],
-                "processed_total": counts["ok"] + counts["cached"],
-                "cost_spent_usd": cost_spent,
+            "json_retry": json_retry_total,
+            "batch_adapted": batch_adaptations_total,
+            "metrics": {
+                "triage_covered": triage_covered_total,
+                "fallback_big": fallback_big_total,
             },
-        )
-
-    _release_job_guard()
-    conn.close()
-    return {
-        "counts": counts_with_cost,
-        "pending_ids": pending_ids,
-        "error": result_error,
-        "ok": applied_outputs,
-        "ko": fail_reasons,
-        "skipped_existing": skipped_existing,
-        "total_requested": len(requested_ids),
-        "json_retry": json_retry_total,
-        "batch_adapted": batch_adaptations_total,
-        "metrics": {
             "triage_covered": triage_covered_total,
             "fallback_big": fallback_big_total,
-        },
-        "triage_covered": triage_covered_total,
-        "fallback_big": fallback_big_total,
-    }
+        }
+    finally:
+        if job_progress and job_completed:
+            job_progress.mark_post()
+        progress_tracker.reset(progress_token)
 
 
 def recalc_desire_for_all(

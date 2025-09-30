@@ -56,6 +56,7 @@ from .prompts.registry import normalize_task
 from . import title_analyzer
 from . import product_enrichment
 from .sse import publish_progress
+from .services import progress as progress_tracker
 from .utils import sanitize_product_name
 from .utils.db import row_to_dict, rget
 
@@ -1018,6 +1019,36 @@ class RequestHandler(QuietHandlerMixin):
         if path.startswith("/static/"):
             rel = path[len("/static/") :]
             self._serve_static(rel)
+            return
+        if path.startswith("/jobs/") and path.endswith("/progress"):
+            parts = [p for p in path.strip("/").split("/") if p]
+            if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "progress":
+                job_id = parts[1]
+                tracker = progress_tracker.get(job_id)
+                pct = tracker.snapshot() if tracker else progress_tracker.snapshot(job_id)
+                pct_val = float(pct) if pct is not None else 0.0
+                job_state = AI_FILL_MANAGER.get_job(job_id)
+                status = (job_state or {}).get("status") or (
+                    "done" if tracker and tracker.post_done else "unknown"
+                )
+                total = int((job_state or {}).get("total") or 0)
+                processed = int((job_state or {}).get("processed") or 0)
+                remaining = int((job_state or {}).get("remaining") or max(total - processed, 0))
+                done_flag = bool(tracker and tracker.post_done)
+                if job_state and str(job_state.get("status", "")).lower() in {"done", "canceled", "error"}:
+                    done_flag = True
+                payload = {
+                    "job_id": job_id,
+                    "pct": round(pct_val, 4),
+                    "status": status,
+                    "total": total,
+                    "processed": processed,
+                    "remaining": remaining,
+                    "done": done_flag,
+                }
+                self.safe_write(lambda: self.send_json(payload))
+                return
+            self.safe_write(lambda: self.send_json({"error": "job_not_found"}, status=404))
             return
         if path == "/_ai_fill/status":
             params = parse_qs(parsed.query)

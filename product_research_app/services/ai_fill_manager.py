@@ -158,7 +158,7 @@ class AIFillJobManager:
 
         try:
             result = ai_columns.run_ai_fill_job(
-                job_id=None,
+                job_id=job_id,
                 product_ids=product_ids,
                 status_cb=status_cb,
                 cancel_checker=cancel_checker,
