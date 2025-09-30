@@ -503,11 +503,14 @@ def _schedule_post_import_tasks(
             done_ai = int(final_counts.get("ok", 0) + final_counts.get("cached", 0))
             _update_import_status(
                 task_key,
+                stage="scoring",
                 phase="winner",
                 ai_counts=final_counts,
                 ai_total=total_ai,
                 ai_done=done_ai,
                 ai_pending=pending_ids,
+                finished=False,
+                fill_finished=done_ai >= total_ai if total_ai else True,
                 message="Calculando Winner Score",
             )
             database.update_import_job_progress(conn, job_id, phase="winner")
@@ -524,6 +527,7 @@ def _schedule_post_import_tasks(
                 message="Completado",
                 state="done",
                 stage="done",
+                finished=True,
                 imported=rows_imported,
                 finished_at=time.time(),
                 phase="done",

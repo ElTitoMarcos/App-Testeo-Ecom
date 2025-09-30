@@ -1589,13 +1589,25 @@ def _emit_status(
 ) -> None:
     if callback is None:
         return
+
+    percent = 100 if total <= 0 else int(round((done / max(total, 1)) * 100))
+    percent = max(0, min(100, percent))
+    finished = total <= 0 or done >= total
+    remaining = max(total - done, 0)
+
     payload = {
         "phase": phase,
+        "stage": "ai_columns" if phase == "enrich" else phase,
         "ai_counts": counts,
         "ai_total": total,
         "ai_done": done,
-        "pct_ai": int(round((done / max(total, 1)) * 100)) if total else 100,
-        "state": "done",
+        "processed": done,
+        "total": total,
+        "remaining": remaining,
+        "percent": percent,
+        "pct_ai": percent,
+        "state": "done" if finished else "running",
+        "finished": finished,
     }
     if message:
         payload["message"] = message
@@ -1655,6 +1667,9 @@ def run_ai_fill_job(
                     "counts": empty_counts,
                     "pending_ids": requested_ids,
                     "error": "already_running",
+                    "status": "already_running",
+                    "accepted": False,
+                    "job_id": existing_job,
                     "ok": {},
                     "ko": {},
                     "skipped_existing": 0,
@@ -2845,6 +2860,7 @@ def run_ai_fill_job(
         "counts": counts_with_cost,
         "pending_ids": pending_ids,
         "error": result_error,
+        "job_id": job_id,
         "ok": applied_outputs,
         "ko": fail_reasons,
         "skipped_existing": skipped_existing,
