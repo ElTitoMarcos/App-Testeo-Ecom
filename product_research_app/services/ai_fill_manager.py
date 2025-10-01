@@ -9,6 +9,7 @@ from collections import defaultdict, deque
 from statistics import median
 from typing import Deque, Dict, List, Optional, Sequence
 
+from ..sse import publish_ai_event
 from . import ai_columns
 
 
@@ -21,6 +22,7 @@ class AIFillJobManager:
         self._jobs: Dict[str, Dict[str, object]] = {}
         self._history: Dict[int, Deque[float]] = defaultdict(deque)
         self._lock = threading.Lock()
+        self._last_job_id: Optional[str] = None
 
     # ---- Public API -------------------------------------------------
     def start_job(self, product_ids: Sequence[int]) -> Dict[str, object]:
@@ -45,9 +47,15 @@ class AIFillJobManager:
         }
         with self._lock:
             self._jobs[job_id] = state
+            self._last_job_id = job_id
 
+        snapshot = dict(state)
         if total == 0:
-            return dict(state)
+            self._emit_state(job_id, snapshot, event_type="ai.done")
+            publish_ai_event({"type": "products.reload"})
+            return snapshot
+
+        self._emit_state(job_id, snapshot)
 
         thread = threading.Thread(
             target=self._run_job,
@@ -55,11 +63,18 @@ class AIFillJobManager:
             daemon=True,
         )
         thread.start()
-        return dict(state)
+        return snapshot
 
     def get_job(self, job_id: str) -> Optional[Dict[str, object]]:
         with self._lock:
             state = self._jobs.get(job_id)
+            return dict(state) if state else None
+
+    def get_last_job(self) -> Optional[Dict[str, object]]:
+        with self._lock:
+            if not self._last_job_id:
+                return None
+            state = self._jobs.get(self._last_job_id)
             return dict(state) if state else None
 
     def cancel_job(self, job_id: str) -> bool:
@@ -113,6 +128,44 @@ class AIFillJobManager:
             while len(history) > HISTORY_LIMIT:
                 history.popleft()
 
+    def _emit_state(
+        self,
+        job_id: str,
+        state: Dict[str, object],
+        *,
+        event_type: str = "ai.progress",
+    ) -> None:
+        if not state:
+            return
+        total = int(state.get("total", 0) or 0)
+        processed = int(state.get("processed", 0) or 0)
+        remaining = int(state.get("remaining", total - processed) or 0)
+        pct_val = float(state.get("pct", 0.0) or 0.0)
+        status_val = str(state.get("status", "") or "").lower()
+        if total > 0:
+            progress = processed / max(total, 1)
+        else:
+            progress = 1.0 if status_val in {"done"} else 0.0
+        if progress <= 0 and pct_val:
+            progress = pct_val / 100.0
+        progress = max(0.0, min(1.0, progress))
+        payload: Dict[str, object] = {
+            "type": event_type,
+            "job_id": job_id,
+            "status": state.get("status"),
+            "total": total,
+            "processed": processed,
+            "remaining": max(0, remaining),
+            "progress": round(progress, 4),
+            "percent": round(progress * 100.0, 2),
+            "eta_ms": int(state.get("eta_ms", 0) or 0),
+            "updated_at": state.get("updated_at"),
+        }
+        error_val = state.get("error")
+        if error_val:
+            payload["error"] = str(error_val)
+        publish_ai_event(payload)
+
     def _update_state(
         self,
         job_id: str,
@@ -125,6 +178,7 @@ class AIFillJobManager:
             state = self._jobs.get(job_id)
             if not state:
                 return
+            prev_status = str(state.get("status", "") or "")
             total = int(state.get("total", 0))
             if processed is not None:
                 proc = max(0, min(total, int(processed)))
@@ -139,6 +193,20 @@ class AIFillJobManager:
             if error is not None:
                 state["error"] = error
             state["updated_at"] = self._now_ms()
+            snapshot = dict(state)
+            new_status = str(snapshot.get("status", "") or "")
+
+        self._emit_state(job_id, snapshot)
+
+        final_states = {"done", "canceled", "error"}
+        if new_status in final_states and new_status != prev_status:
+            if new_status == "error":
+                self._emit_state(job_id, snapshot, event_type="ai.error")
+            else:
+                self._emit_state(job_id, snapshot, event_type="ai.done")
+                if new_status == "done":
+                    publish_ai_event({"type": "products.reload"})
+
 
     def _run_job(self, job_id: str, product_ids: List[int], bucket: int) -> None:
         start_ms = self._now_ms()

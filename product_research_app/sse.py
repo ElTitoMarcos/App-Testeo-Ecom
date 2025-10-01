@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 sse_bp = Blueprint("sse", __name__)
 _clients: set[queue.Queue[str]] = set()
+_ai_clients: set[queue.Queue[str]] = set()
 _clients_lock = threading.Lock()
 
 
@@ -66,6 +67,42 @@ def publish_progress(payload: dict[str, Any]) -> None:
                 _clients.discard(q)
 
 
+def publish_ai_event(payload: dict[str, Any]) -> None:
+    """Broadcast AI-specific events to /events/ai subscribers."""
+
+    if not SSE_ENABLED:
+        return
+    try:
+        msg = json.dumps(payload, separators=(",", ":"), default=_json_default)
+    except TypeError:  # pragma: no cover - defensive fallback
+        logger.exception("Failed to encode AI SSE payload")
+        return
+    dead: list[queue.Queue[str]] = []
+    with _clients_lock:
+        targets = list(_ai_clients)
+    for q in targets:
+        try:
+            q.put_nowait(msg)
+        except queue.Full:
+            dead.append(q)
+    if dead:
+        with _clients_lock:
+            for q in dead:
+                _ai_clients.discard(q)
+
+
+def register_ai_queue() -> queue.Queue[str]:
+    client_queue: queue.Queue[str] = queue.Queue(maxsize=1000)
+    with _clients_lock:
+        _ai_clients.add(client_queue)
+    return client_queue
+
+
+def unregister_ai_queue(client_queue: queue.Queue[str]) -> None:
+    with _clients_lock:
+        _ai_clients.discard(client_queue)
+
+
 @sse_bp.route("/events")
 def events() -> Response:
     if not SSE_ENABLED:
@@ -86,5 +123,26 @@ def events() -> Response:
         finally:
             with _clients_lock:
                 _clients.discard(client_queue)
+
+    return Response(stream_with_context(gen()), headers=_headers())
+
+
+@sse_bp.route("/events/ai")
+def events_ai() -> Response:
+    if not SSE_ENABLED:
+        return Response("", status=204)
+    client_queue = register_ai_queue()
+
+    def gen():
+        try:
+            while True:
+                try:
+                    msg = client_queue.get(timeout=10)
+                except queue.Empty:
+                    yield ":keepalive\n\n"
+                else:
+                    yield f"data: {msg}\n\n"
+        finally:
+            unregister_ai_queue(client_queue)
 
     return Response(stream_with_context(gen()), headers=_headers())

@@ -25,8 +25,10 @@ import os
 import io
 import re
 import logging
+import queue
 import requests
 from http.server import HTTPServer
+from socketserver import ThreadingMixIn
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
 from email.parser import BytesParser
@@ -55,7 +57,7 @@ from . import gpt
 from .prompts.registry import normalize_task
 from . import title_analyzer
 from . import product_enrichment
-from .sse import publish_progress
+from .sse import publish_progress, register_ai_queue, unregister_ai_queue
 from .utils import sanitize_product_name
 from .utils.db import row_to_dict, rget
 
@@ -77,6 +79,10 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger(__name__)
+
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
 
 DEBUG = bool(os.environ.get("DEBUG"))
 
@@ -144,6 +150,21 @@ def _apply_weights_reset(existing: Dict[str, Any] | None = None) -> Dict[str, An
     except Exception as exc:  # pragma: no cover - defensive logging
         logger.warning("reset invalidate failed: %s", exc)
     return cfg
+
+
+def _ai_status_label(status: str) -> str:
+    value = (status or "").lower()
+    if value in {"running", "pending"}:
+        return "IA Generando..."
+    if value == "canceling":
+        return "Cancelando…"
+    if value == "canceled":
+        return "Cancelado"
+    if value == "error":
+        return "Error"
+    if value == "done":
+        return "Listo"
+    return "Listo"
 
 
 def _build_weights_payload(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -1019,6 +1040,30 @@ class RequestHandler(QuietHandlerMixin):
             rel = path[len("/static/") :]
             self._serve_static(rel)
             return
+        if path == "/events/ai":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            client_queue = register_ai_queue()
+            try:
+                while True:
+                    try:
+                        msg = client_queue.get(timeout=10)
+                    except queue.Empty:
+                        payload = b":keepalive\n\n"
+                    else:
+                        payload = f"data: {msg}\n\n".encode("utf-8")
+                    try:
+                        self.wfile.write(payload)
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError, ValueError):
+                        break
+            finally:
+                unregister_ai_queue(client_queue)
+            return
         if path == "/_ai_fill/status":
             params = parse_qs(parsed.query)
             job_id = params.get("job_id", [""])[0].strip()
@@ -1047,6 +1092,51 @@ class RequestHandler(QuietHandlerMixin):
                 "pct": round(pct, 2),
                 "eta_ms": eta_ms,
             }
+            self.safe_write(lambda: self.send_json(payload))
+            return
+        if path == "/api/ai/progress":
+            params = parse_qs(parsed.query)
+            job_id = params.get("job_id", [""])[0].strip()
+            job = (
+                AI_FILL_MANAGER.get_job(job_id)
+                if job_id
+                else AI_FILL_MANAGER.get_last_job()
+            )
+            if not job:
+                payload = {
+                    "status": "idle",
+                    "progress": 0.0,
+                    "percent": 0.0,
+                    "label": _ai_status_label("done"),
+                }
+            else:
+                total = int(job.get("total", 0) or 0)
+                processed = int(job.get("processed", 0) or 0)
+                remaining = max(total - processed, 0)
+                pct_val = float(job.get("pct", 0.0) or 0.0)
+                status_val = str(job.get("status", "") or "")
+                if total > 0:
+                    progress = processed / max(total, 1)
+                else:
+                    progress = pct_val / 100.0
+                    if status_val.lower() == "done":
+                        progress = 1.0
+                progress = max(0.0, min(1.0, progress))
+                payload = {
+                    "job_id": job.get("job_id"),
+                    "status": status_val,
+                    "total": total,
+                    "processed": processed,
+                    "remaining": remaining,
+                    "progress": round(progress, 4),
+                    "percent": round(progress * 100.0, 2),
+                    "eta_ms": int(job.get("eta_ms", 0) or 0),
+                    "label": _ai_status_label(status_val),
+                    "updated_at": job.get("updated_at"),
+                }
+                error_val = job.get("error")
+                if error_val:
+                    payload["error"] = str(error_val)
             self.safe_write(lambda: self.send_json(payload))
             return
         if path == "/api/log-path":
@@ -3504,7 +3594,7 @@ class RequestHandler(QuietHandlerMixin):
 def run(host: str = '127.0.0.1', port: int = 8000):
     ensure_db()
     resume_incomplete_imports()
-    httpd = HTTPServer((host, port), RequestHandler)
+    httpd = ThreadingHTTPServer((host, port), RequestHandler)
     print(f"Servidor iniciado en http://{host}:{port}")
     try:
         httpd.serve_forever()

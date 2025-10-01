@@ -654,6 +654,159 @@ let savedApiKeyLength = 0;
 const getGlobalProgressHost = () => document.querySelector('#progress-slot-global');
 const getActionHost = () => document.querySelector('#bottomBar') || getGlobalProgressHost();
 
+const AI_EVENTS_URL = '/events/ai';
+let __aiEventsInitialized = false;
+let __aiEventSource = null;
+let __aiPollTimer = null;
+let __aiLastMessageAt = 0;
+
+function __extractAiPercent(msg) {
+  if (!msg || typeof msg !== 'object') return null;
+  const fields = [msg.percent, msg.pct, msg.progress];
+  for (const field of fields) {
+    const num = Number(field);
+    if (Number.isFinite(num)) {
+      if (field === msg.progress) {
+        return Math.max(0, Math.min(100, num * 100));
+      }
+      return Math.max(0, Math.min(100, num));
+    }
+  }
+  const processed = Number(msg.processed);
+  const total = Number(msg.total);
+  if (Number.isFinite(processed) && Number.isFinite(total) && total > 0) {
+    return Math.max(0, Math.min(100, (processed / Math.max(total, 1)) * 100));
+  }
+  return null;
+}
+
+function __setAiStage(label) {
+  if (!label) return;
+  try {
+    if (window.__activeAITracker && typeof window.__activeAITracker.setStage === 'function') {
+      window.__activeAITracker.setStage(label);
+    } else {
+      const stageEl = document.querySelector('#progress-slot-global .progress-stage');
+      if (stageEl) stageEl.textContent = label;
+    }
+  } catch (_) {
+    // ignore
+  }
+}
+
+async function __triggerProductsReload() {
+  try {
+    if (typeof window.refreshProductsTable === 'function') {
+      await window.refreshProductsTable();
+      return;
+    }
+    if (typeof window.reloadTable === 'function') {
+      await window.reloadTable({ skipProgress: true });
+      return;
+    }
+  } catch (_) {
+    // continue to fallback
+  }
+  try {
+    if (typeof window.fetchProductsAndRender === 'function') {
+      await window.fetchProductsAndRender();
+      return;
+    }
+  } catch (_) {
+    // ignore and fallback to reload below
+  }
+  try {
+    location.reload();
+  } catch (_) {
+    // noop
+  }
+}
+
+function __handleAiEvent(msg) {
+  if (!msg || typeof msg !== 'object') return;
+  const type = String(msg.type || msg.event || '').toLowerCase();
+  if (!type) return;
+  __aiLastMessageAt = Date.now();
+  const pct = __extractAiPercent(msg);
+  if (Number.isFinite(pct) && typeof window.setProgressUI === 'function') {
+    window.setProgressUI(Math.round(pct));
+  }
+  const status = String(msg.status || '').toLowerCase();
+  if (type === 'ai.progress') {
+    if (status === 'canceling') {
+      __setAiStage('Cancelando…');
+    } else {
+      __setAiStage('IA generando…');
+    }
+  } else if (type === 'ai.done') {
+    if (status === 'canceled') {
+      __setAiStage('Cancelado');
+      if (typeof window.stopEtaProgress === 'function') window.stopEtaProgress(false);
+    } else {
+      __setAiStage('Completado');
+      if (typeof window.markBackendDone === 'function') window.markBackendDone();
+    }
+  } else if (type === 'ai.error') {
+    __setAiStage('Error');
+    if (typeof window.stopEtaProgress === 'function') window.stopEtaProgress(false);
+  }
+
+  if (type === 'products.reload' || type === 'products.updated' || (type === 'ai.done' && status === 'done')) {
+    __triggerProductsReload();
+  }
+}
+
+function __startAiPolling() {
+  if (__aiPollTimer) clearInterval(__aiPollTimer);
+  __aiPollTimer = window.setInterval(async () => {
+    if (Date.now() - __aiLastMessageAt < 4000) return;
+    try {
+      const resp = await fetch('/api/ai/progress', { cache: 'no-store', __skipLoadingHook: true });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (!data || typeof data !== 'object') return;
+      const status = String(data.status || '').toLowerCase();
+      let type = 'ai.progress';
+      if (status === 'error') type = 'ai.error';
+      else if (status === 'done' || status === 'canceled') type = 'ai.done';
+      __handleAiEvent({ ...data, type });
+    } catch (_) {
+      // ignore errors
+    }
+  }, 1500);
+}
+
+function setupAiEvents() {
+  if (__aiEventsInitialized) return;
+  __aiEventsInitialized = true;
+  __startAiPolling();
+  if (!window.EventSource) return;
+  try {
+    const es = new EventSource(AI_EVENTS_URL);
+    __aiEventSource = es;
+    es.onmessage = (event) => {
+      if (!event || typeof event.data !== 'string') return;
+      try {
+        const payload = JSON.parse(event.data);
+        __handleAiEvent(payload);
+      } catch (_) {
+        // ignore payload parse errors
+      }
+    };
+    es.onerror = () => {
+      __aiLastMessageAt = Date.now();
+    };
+  } catch (_) {
+    __aiEventSource = null;
+  }
+}
+
+if (document.readyState === 'loading') {
+  window.addEventListener('DOMContentLoaded', setupAiEvents);
+} else {
+  setupAiEvents();
+}
+
 function formatPrice(n) {
   const num = Number(n);
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 })
@@ -894,6 +1047,7 @@ async function importCatalog(file, {
 
 async function runAIFillPhase({ tracker, aiStartUrl, aiStatusUrl, aiCancelUrl, importedCount, secondsPerItem = ETA_SECONDS_PER_ITEM }) {
   // 1) Iniciar job IA
+  window.__activeAITracker = tracker || null;
   tracker.setStage('Preparando IA…');
   let startData;
   try {
@@ -909,6 +1063,7 @@ async function runAIFillPhase({ tracker, aiStartUrl, aiStatusUrl, aiCancelUrl, i
   } catch (e) {
     tracker.setStage('Error al iniciar IA');
     stopEtaProgress(false);
+    window.__activeAITracker = null;
     throw e;
   }
 
@@ -978,13 +1133,20 @@ async function runAIFillPhase({ tracker, aiStartUrl, aiStatusUrl, aiCancelUrl, i
         ensureEtaFromSource(data, secondsPerItem);
         processed = Number(data?.processed || processed);
         const tot = Number(data?.total || total || 1);
-        const done = data?.status === 'done' || processed >= tot;
-        const safeTot = Math.max(1, tot);
-        const safeDone = Math.min(processed, safeTot);
-        tracker.setStage(done
-          ? 'IA finalizando…'
-          : `IA generando… (${safeDone}/${safeTot})`
-        );
+        const statusNow = String(data?.status || '').toLowerCase();
+        const done = statusNow === 'done' || processed >= tot;
+        if (statusNow === 'canceling') {
+          tracker.setStage('Cancelando…');
+        } else if (done) {
+          tracker.setStage('IA finalizando…');
+        } else {
+          tracker.setStage('IA generando…');
+        }
+        if (statusNow === 'canceled') {
+          tracker.setStage('Cancelado');
+          stopEtaProgress(false);
+          break;
+        }
         if (done) {
           await markBackendDone();
           tracker.setStage('Completado');
@@ -1001,11 +1163,10 @@ async function runAIFillPhase({ tracker, aiStartUrl, aiStatusUrl, aiCancelUrl, i
 
   __activeAIJobId = null;
   hideCancelButton();
+  window.__activeAITracker = null;
 
   // Auto-refresco de la tabla al terminar o cancelar
-  if (!finishedOk) {
-    try { await reloadTable({ skipProgress: true }); } catch {}
-  }
+  try { await reloadTable({ skipProgress: true }); } catch {}
 
   if (!finishedOk && !__cancelRequested) {
     stopEtaProgress(false);

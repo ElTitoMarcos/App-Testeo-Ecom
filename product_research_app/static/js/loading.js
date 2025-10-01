@@ -354,14 +354,16 @@ export const LoadingHelpers = {
   startEtaProgress,
   stopEtaProgress,
   markBackendDone,
-  wireJobDoneSignals
+  wireJobDoneSignals,
+  setProgressUI
 };
 
 export {
   startEtaProgress,
   stopEtaProgress,
   markBackendDone,
-  wireJobDoneSignals
+  wireJobDoneSignals,
+  setProgressUI
 };
 
 if (typeof window !== 'undefined') {
@@ -369,7 +371,8 @@ if (typeof window !== 'undefined') {
     startEtaProgress,
     stopEtaProgress,
     markBackendDone,
-    wireJobDoneSignals
+    wireJobDoneSignals,
+    setProgressUI
   });
 }
 
