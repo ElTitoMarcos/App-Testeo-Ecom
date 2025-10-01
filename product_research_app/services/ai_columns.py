@@ -28,6 +28,7 @@ from ..ratelimit import async_decorrelated_jitter_sleep
 from ..utils.signature import compute_sig_hash
 from .desire_utils import cleanse, looks_like_product_desc
 from .prompt_templates import MISSING_ONLY_JSONL_PROMPT, STRICT_JSONL_PROMPT
+from .ai_progress import start_job, bump_processed, finish_job
 
 logger = logging.getLogger(__name__)
 
@@ -2087,6 +2088,8 @@ def run_ai_fill_job(
             AI_MAX_CONCURRENCY,
             STRICT_JSON_ENABLED,
         )
+        # Inicia estado de progreso (monotónico) por job
+        _job_id = start_job(total_items)
         req_counter = 0
         pending_groups: Deque[Tuple[List[Candidate], int, int, bool]] = deque()
         for start in range(0, len(pending_candidates), max_batch_size):
@@ -2514,6 +2517,12 @@ def run_ai_fill_job(
                     batch.adapted,
                 )
 
+                # Cuando un batch termina correctamente:
+                try:
+                    bump_processed(len(batch.candidates))
+                except Exception:
+                    pass
+
                 if missing_ids:
                     missing_candidates = [
                         candidate_map.get(pid)
@@ -2571,6 +2580,12 @@ def run_ai_fill_job(
         triage_covered_total,
         fallback_big_total,
     )
+
+    # Marca fin del job (progress = 1.0)
+    try:
+        finish_job()
+    except Exception:
+        pass
 
     result_error: Optional[str] = None
     if cancel_requested:

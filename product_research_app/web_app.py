@@ -49,6 +49,7 @@ from .services import winner_score as winner_calc
 from .services import trends_service
 from .services.config import get_default_winner_weights
 from .services.importer_fast import DEFAULT_BATCH_SIZE, fast_import, fast_import_records
+from .services.ai_progress import get_progress_payload
 from .services.ai_fill_manager import (
     MANAGER as AI_FILL_MANAGER,
     select_candidates as select_ai_candidates,
@@ -1095,48 +1096,8 @@ class RequestHandler(QuietHandlerMixin):
             self.safe_write(lambda: self.send_json(payload))
             return
         if path == "/api/ai/progress":
-            params = parse_qs(parsed.query)
-            job_id = params.get("job_id", [""])[0].strip()
-            job = (
-                AI_FILL_MANAGER.get_job(job_id)
-                if job_id
-                else AI_FILL_MANAGER.get_last_job()
-            )
-            if not job:
-                payload = {
-                    "status": "idle",
-                    "progress": 0.0,
-                    "percent": 0.0,
-                    "label": _ai_status_label("done"),
-                }
-            else:
-                total = int(job.get("total", 0) or 0)
-                processed = int(job.get("processed", 0) or 0)
-                remaining = max(total - processed, 0)
-                pct_val = float(job.get("pct", 0.0) or 0.0)
-                status_val = str(job.get("status", "") or "")
-                if total > 0:
-                    progress = processed / max(total, 1)
-                else:
-                    progress = pct_val / 100.0
-                    if status_val.lower() == "done":
-                        progress = 1.0
-                progress = max(0.0, min(1.0, progress))
-                payload = {
-                    "job_id": job.get("job_id"),
-                    "status": status_val,
-                    "total": total,
-                    "processed": processed,
-                    "remaining": remaining,
-                    "progress": round(progress, 4),
-                    "percent": round(progress * 100.0, 2),
-                    "eta_ms": int(job.get("eta_ms", 0) or 0),
-                    "label": _ai_status_label(status_val),
-                    "updated_at": job.get("updated_at"),
-                }
-                error_val = job.get("error")
-                if error_val:
-                    payload["error"] = str(error_val)
+            # Devuelve progreso monótono con job_id/status
+            payload = get_progress_payload()
             self.safe_write(lambda: self.send_json(payload))
             return
         if path == "/api/log-path":
