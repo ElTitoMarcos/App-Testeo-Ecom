@@ -402,3 +402,30 @@ AI_DEGRADE_FACTOR = float(os.getenv("PRAPP_AI_DEGRADE_FACTOR", "0.66"))
 # Límite superior de tokens de salida por request (tope blando; puede sobrescribirse dinámicamente)
 AI_MAX_OUTPUT_TOKENS = int(os.getenv("PRAPP_AI_MAX_OUTPUT_TOKENS", "2200"))
 
+AI_MODEL_MAIN = os.getenv("AI_MODEL_MAIN", "gpt-5-mini") or "gpt-5-mini"
+AI_MODEL_TRIAGE = os.getenv("AI_MODEL_TRIAGE", "gpt-5-nano") or "gpt-5-nano"
+try:
+    AI_TARGET_PROMPT_TOKENS = int(os.getenv("AI_TARGET_PROMPT_TOKENS", "4000") or "4000")
+except Exception:
+    AI_TARGET_PROMPT_TOKENS = 4000
+try:
+    AI_TPM_SOFT_LIMIT = float(os.getenv("AI_TPM_SOFT_LIMIT", "0.80") or "0.80")
+except Exception:
+    AI_TPM_SOFT_LIMIT = 0.80
+try:
+    AI_RPM_SOFT_LIMIT = float(os.getenv("AI_RPM_SOFT_LIMIT", "0.80") or "0.80")
+except Exception:
+    AI_RPM_SOFT_LIMIT = 0.80
+try:
+    AI_MIN_CONCURRENCY = int(os.getenv("AI_MIN_CONCURRENCY", "2") or "2")
+except Exception:
+    AI_MIN_CONCURRENCY = 2
+try:
+    AI_MAX_CONCURRENCY = int(os.getenv("AI_MAX_CONCURRENCY", "16") or "16")
+except Exception:
+    AI_MAX_CONCURRENCY = 16
+try:
+    AI_BACKOFF_BASE_MS = int(os.getenv("AI_BACKOFF_BASE_MS", "250") or "250")
+except Exception:
+    AI_BACKOFF_BASE_MS = 250
+

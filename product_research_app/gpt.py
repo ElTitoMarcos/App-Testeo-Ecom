@@ -29,13 +29,14 @@ import time
 import unicodedata
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import httpx
 import requests
 
 from . import database, config
-from .ratelimit import async_decorrelated_jitter_sleep, get_async_limiter
+from .ratelimit import async_decorrelated_jitter_sleep
+from .gpt_rate import rate_limiter
 from .prompts.registry import (
     get_json_schema,
     get_system_prompt,
@@ -330,7 +331,6 @@ async def call_gpt_async(
     overall_attempt = 0
     rate_attempts = 0
     server_attempts = 0
-    sleep_prev_rate = 0.0
     sleep_prev_server = 0.0
 
     while True:
@@ -376,28 +376,43 @@ async def call_gpt_async(
                     raise
 
                 retry_after = getattr(e, "retry_after", None)
-                if retry_after is None:
+                headers = getattr(resp, "headers", None) if resp is not None else None
+                reset_hint = None
+                if headers:
                     try:
-                        headers = getattr(resp, "headers", None) if resp is not None else None
-                        if headers:
-                            ra = headers.get("Retry-After") or headers.get("retry-after")
-                            if ra:
-                                retry_after = float(ra)
+                        rate_limiter.update_from_headers(headers)
                     except Exception:
-                        retry_after = None
+                        pass
+                    try:
+                        ra_raw = headers.get("Retry-After") or headers.get("retry-after")
+                        if ra_raw is not None and retry_after is None:
+                            retry_after = float(ra_raw)
+                    except Exception:
+                        retry_after = retry_after
+                    try:
+                        resets: list[float] = []
+                        for key in ("x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"):
+                            raw = headers.get(key) if headers else None
+                            if raw is None:
+                                continue
+                            val = float(raw)
+                            if val > 0:
+                                resets.append(val)
+                        if resets:
+                            reset_hint = min(resets)
+                    except Exception:
+                        reset_hint = reset_hint
 
-                wait_s = (
-                    retry_after
-                    if retry_after is not None
-                    else _extract_retry_after_seconds(msg) or sleep_prev_rate
-                )
-                sleep_prev_rate = await async_decorrelated_jitter_sleep(
-                    wait_s, BACKOFF_CAP
-                )
+                if retry_after is not None:
+                    wait_s = max(0.0, float(retry_after))
+                else:
+                    hint = reset_hint or _extract_retry_after_seconds(msg)
+                    wait_s = rate_limiter.backoff_on_429(rate_attempts, hint)
+                await asyncio.sleep(wait_s)
                 log.warning(
                     "gpt.call_gpt.retry_429 attempt=%s sleep=%.2fs",
                     rate_attempts,
-                    sleep_prev_rate,
+                    wait_s,
                 )
                 continue
 
@@ -794,7 +809,7 @@ async def _http_post_chat(
     stop: Optional[Any] = None,
     timeout: Optional[httpx.Timeout] = None,
     **kwargs,
-) -> Dict[str, Any]:
+) -> Tuple[Dict[str, Any], Mapping[str, str]]:
     """Execute the actual HTTP request to the OpenAI Chat Completions API."""
 
     api_key = api_key or config.get_api_key() or os.environ.get("OPENAI_API_KEY")
@@ -864,7 +879,7 @@ async def _http_post_chat(
                     usage.get("completion_tokens"),
                     usage.get("total_tokens"),
                 )
-        return data
+        return data, response.headers
 
     try:
         err = response.json()
@@ -878,6 +893,10 @@ async def _http_post_chat(
     retry_hint = _parse_retry_after_seconds(response, msg)
     if retry_hint is not None:
         setattr(error, "retry_after", retry_hint)
+    try:
+        rate_limiter.update_from_headers(response.headers)
+    except Exception:
+        pass
     if status == 429:
         pass
     elif 500 <= status < 600:
@@ -908,14 +927,50 @@ async def call_openai_chat_async(
     if AI_API_VERBOSE >= 2:
         logger.debug("gpt.pre model=%s est_tokens=%s", model, safe_tokens)
 
-    limiter = get_async_limiter()
-    async with limiter.async_guard(tokens=safe_tokens):
-        return await _http_post_chat(
+    budget_tokens = safe_tokens if safe_tokens > 0 else rate_limiter.tokens_per_req()
+    release_budget = await rate_limiter.acquire(budget_tokens)
+    try:
+        data, headers = await _http_post_chat(
             model=model,
             messages=messages,
             strict_json=strict_json,
             **kwargs,
         )
+    except Exception:
+        release_budget(False)
+        raise
+    release_budget(True)
+
+    usage = data.get("usage") if isinstance(data, dict) else None
+    prompt_used = 0
+    completion_used = 0
+    if isinstance(usage, dict):
+        try:
+            prompt_used = int(usage.get("prompt_tokens") or 0)
+        except Exception:
+            prompt_used = 0
+        try:
+            completion_used = int(usage.get("completion_tokens") or 0)
+        except Exception:
+            completion_used = 0
+        if completion_used <= 0:
+            try:
+                total_tokens = int(usage.get("total_tokens") or 0)
+                if total_tokens > 0 and prompt_used > 0 and total_tokens >= prompt_used:
+                    completion_used = total_tokens - prompt_used
+            except Exception:
+                completion_used = completion_used
+    if prompt_used <= 0 and safe_tokens > 0:
+        prompt_used = min(safe_tokens, budget_tokens)
+    try:
+        rate_limiter.record_tokens(prompt_used, completion_used)
+    except Exception:
+        pass
+    try:
+        rate_limiter.update_from_headers(headers)
+    except Exception:
+        pass
+    return data
 
 
 def call_openai_chat(
