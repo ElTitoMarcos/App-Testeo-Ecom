@@ -35,7 +35,10 @@ import httpx
 import requests
 
 from . import database, config
-from .ratelimit import async_decorrelated_jitter_sleep, get_async_limiter
+from product_research_app.utils.rate_limiter import (
+    async_decorrelated_jitter_sleep,
+    limiter as ai_rate_limiter,
+)
 from .prompts.registry import (
     get_json_schema,
     get_system_prompt,
@@ -908,8 +911,7 @@ async def call_openai_chat_async(
     if AI_API_VERBOSE >= 2:
         logger.debug("gpt.pre model=%s est_tokens=%s", model, safe_tokens)
 
-    limiter = get_async_limiter()
-    async with limiter.async_guard(tokens=safe_tokens):
+    async with ai_rate_limiter.reserve(tokens=safe_tokens, requests=1):
         return await _http_post_chat(
             model=model,
             messages=messages,

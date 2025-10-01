@@ -16,15 +16,19 @@ from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence
 
 from .. import config, database, gpt
 from ..config import (
+    AI_BATCH_TOKEN_BUDGET,
     AI_DEGRADE_FACTOR,
     AI_MAX_OUTPUT_TOKENS,
     AI_MAX_PRODUCTS_PER_CALL,
     AI_MIN_PRODUCTS_PER_CALL,
+    OPENAI_MAX_CONCURRENCY as CONFIG_MAX_CONCURRENCY,
+    OPENAI_HEADROOM as CONFIG_HEADROOM,
     get_ai_cost_config,
 )
 from ..ai.strict_jsonl import parse_jsonl_and_validate
 from ..obs import log_partial_ko, log_recovered
-from ..ratelimit import async_decorrelated_jitter_sleep
+from ..services.ai_client import estimate_tokens as llm_estimate_tokens, get_model_name
+from ..utils.rate_limiter import async_decorrelated_jitter_sleep
 from ..utils.signature import compute_sig_hash
 from .desire_utils import cleanse, looks_like_product_desc
 from .prompt_templates import MISSING_ONLY_JSONL_PROMPT, STRICT_JSONL_PROMPT
@@ -69,8 +73,8 @@ DEFAULT_BATCH_SIZE = max(8, _env_int("PRAPP_AI_COLUMNS_BATCH_SIZE", 32))
 MIN_BATCH_SIZE = 8
 MAX_RETRIES_MISSING = _env_int("PRAPP_AI_RETRIES_MISSING", 2)
 
-RAW_MAX_CONCURRENCY = max(1, _env_int("PRAPP_OPENAI_MAX_CONCURRENCY", 8))
-OPENAI_HEADROOM = max(0.1, min(0.99, _env_float("PRAPP_OPENAI_HEADROOM", 0.90)))
+RAW_MAX_CONCURRENCY = max(1, _env_int("PRAPP_OPENAI_MAX_CONCURRENCY", CONFIG_MAX_CONCURRENCY))
+OPENAI_HEADROOM = max(0.1, min(0.99, _env_float("PRAPP_OPENAI_HEADROOM", CONFIG_HEADROOM)))
 AI_MAX_CONCURRENCY = max(
     1,
     min(
@@ -86,7 +90,7 @@ SAFE_CONTEXT_TOKENS = max(4000, _env_int("PRAPP_OPENAI_CONTEXT_SAFE_TOKENS", 120
 StatusCallback = Callable[..., None]
 
 TRIAGE_ENABLED = _env_bool("PRAPP_AI_TRIAGE_ENABLED", True)
-TRIAGE_MODEL = os.getenv("PRAPP_AI_TRIAGE_MODEL", "gpt-4o-mini") or "gpt-4o-mini"
+TRIAGE_MODEL = os.getenv("PRAPP_AI_TRIAGE_MODEL") or get_model_name()
 TRIAGE_CONFIDENCE = max(0.0, min(1.0, _env_float("PRAPP_AI_TRIAGE_CONFIDENCE", 0.70)))
 
 AI_COST = get_ai_cost_config()
@@ -94,6 +98,11 @@ try:
     EST_OUT_PER_ITEM = int((AI_COST or {}).get("estTokensPerItemOut", 80))
 except Exception:
     EST_OUT_PER_ITEM = 80
+
+
+def _is_mini_model(name: str) -> bool:
+    lowered = (name or "").lower()
+    return "mini" in lowered or lowered.endswith("-small")
 
 
 def _persist_rows(rows: List[Dict[str, Any]]) -> None:
@@ -119,7 +128,7 @@ def _persist_rows(rows: List[Dict[str, Any]]) -> None:
 
 def _max_tokens_for_batch(batch_len: int) -> int:
     est = EST_OUT_PER_ITEM * max(1, batch_len) + 200
-    return min(max(800, est), max(800, AI_MAX_OUTPUT_TOKENS), 4000)
+    return max(32, min(AI_MAX_OUTPUT_TOKENS, max(800, est)))
 
 
 @dataclass
@@ -155,7 +164,10 @@ class BatchAdaptationRequired(Exception):
 def _estimate_batch_tokens(batch: BatchRequest) -> int:
     """Estimate total tokens (prompt + completion headroom) for a batch."""
 
-    completion_budget = len(batch.candidates) * MAX_TOKENS_PER_ITEM
+    completion_budget = min(
+        AI_MAX_OUTPUT_TOKENS,
+        len(batch.candidates) * MAX_TOKENS_PER_ITEM,
+    )
     return max(0, int(batch.prompt_tokens_est)) + completion_budget
 
 
@@ -458,10 +470,10 @@ def _join_bullets(value: Any, limit: int) -> str:
 
 
 def _estimate_tokens_from_text(*texts: str) -> int:
-    total_chars = sum(len(t) for t in texts if t)
-    if total_chars <= 0:
+    parts = [t for t in texts if t]
+    if not parts:
         return 0
-    return max(1, int(math.ceil(total_chars / 4)))
+    return max(0, llm_estimate_tokens(parts))
 
 
 def _build_product_payload(
@@ -557,6 +569,48 @@ def _build_batch_request(
         trunc_title=trunc_title,
         trunc_desc=trunc_desc,
     )
+
+
+def _group_candidates_by_tokens(
+    candidates: Sequence[Candidate],
+    trunc_title: int,
+    trunc_desc: int,
+    *,
+    budget: int,
+    max_items: int,
+) -> List[List[Candidate]]:
+    if budget <= 0:
+        return [list(candidates)] if candidates else []
+
+    grouped: List[List[Candidate]] = []
+    current: List[Candidate] = []
+
+    for cand in candidates:
+        tentative = current + [cand]
+        if max_items and len(tentative) > max_items and current:
+            grouped.append(current)
+            current = [cand]
+            tentative = list(current)
+        preview = _build_batch_request(
+            "preview",
+            tentative,
+            trunc_title,
+            trunc_desc,
+            depth=0,
+            json_retry_count=0,
+            adapted=False,
+        )
+        est_tokens = _estimate_batch_tokens(preview)
+        if current and est_tokens > budget:
+            grouped.append(current)
+            current = [cand]
+            continue
+        current = tentative
+
+    if current:
+        grouped.append(current)
+
+    return grouped
 
 
 def _extract_jsonl_payload(raw: Dict[str, Any]) -> str:
@@ -2089,11 +2143,16 @@ def run_ai_fill_job(
         )
         req_counter = 0
         pending_groups: Deque[Tuple[List[Candidate], int, int, bool]] = deque()
-        for start in range(0, len(pending_candidates), max_batch_size):
-            chunk = pending_candidates[start : start + max_batch_size]
-            if not chunk:
-                continue
-            pending_groups.append((chunk, 0, 0, False))
+        grouped = _group_candidates_by_tokens(
+            pending_candidates,
+            trunc_title,
+            trunc_desc,
+            budget=AI_BATCH_TOKEN_BUDGET,
+            max_items=max_batch_size,
+        )
+        for chunk in grouped:
+            if chunk:
+                pending_groups.append((list(chunk), 0, 0, False))
 
         async def _execute_batches(batches: List[BatchRequest]) -> List[Dict[str, Any]]:
             semaphore = asyncio.Semaphore(max(1, AI_MAX_CONCURRENCY))
@@ -2125,10 +2184,8 @@ def run_ai_fill_job(
 
                     if allow_triage:
                         triage_model_name = TRIAGE_MODEL or ""
-                        triage_is_mini = triage_model_name.startswith("gpt-4o-mini")
-                        if not triage_is_mini:
-                            triage_is_mini = triage_model_name.startswith("gpt-4o-mini-2024")
-                        triage_strict_json = False if triage_is_mini else True
+                        triage_is_mini = _is_mini_model(triage_model_name)
+                        triage_strict_json = not triage_is_mini
                         logger.info(
                             "ai_columns.triage start req_id=%s model=%s items=%d confidence_min=%.2f strict_json=%s",
                             batch.req_id,
