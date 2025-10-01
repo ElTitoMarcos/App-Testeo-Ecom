@@ -13,6 +13,22 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 
+def _get_env(name: str, default: str) -> str:
+    return os.getenv(name, default)
+
+
+# LLM defaults (overridable via entorno)
+OPENAI_MODEL = _get_env("PRAPP_OPENAI_MODEL", "gpt-5-mini")
+OPENAI_TPM = int(_get_env("PRAPP_OPENAI_TPM", "500000"))
+OPENAI_RPM = int(_get_env("PRAPP_OPENAI_RPM", "3000"))
+OPENAI_HEADROOM = float(_get_env("PRAPP_OPENAI_HEADROOM", "0.85"))
+OPENAI_MAX_CONCURRENCY = int(_get_env("PRAPP_OPENAI_MAX_CONCURRENCY", "4"))
+
+AI_CONTEXT_WINDOW = int(_get_env("PRAPP_AI_CONTEXT_WINDOW", "512000"))
+AI_MAX_OUTPUT_TOKENS = int(_get_env("PRAPP_AI_MAX_OUTPUT_TOKENS", "2048"))
+AI_BATCH_TOKEN_BUDGET = int(_get_env("PRAPP_AI_BATCH_TOKEN_BUDGET", "240000"))
+
+
 DEFAULT_WINNER_ORDER = [
     "awareness",
     "desire",
@@ -34,7 +50,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "TIME_LIMIT_SECONDS": 300,
     },
     "aiCost": {
-        "model": "gpt-4.1-mini",
+        "model": OPENAI_MODEL,
         "useBatchWhenCountGte": 300,
         "costCapUSD": 0.25,
         "estTokensPerItemIn": 300,
@@ -161,12 +177,12 @@ def get_api_key() -> Optional[str]:
 
 
 def get_model() -> str:
-    """Return the configured model or default to 'gpt-4o'."""
+    """Return the configured model or default to the environment override."""
 
     config = load_config()
     model = config.get("model")
     if not model:
-        return "gpt-4o"
+        return OPENAI_MODEL
     return model
 
 

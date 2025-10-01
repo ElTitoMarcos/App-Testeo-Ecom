@@ -26,6 +26,7 @@ import httpx
 from . import config, database
 from .db import get_db
 from .sse import publish_progress
+from .services.ai_client import get_model_name
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +138,7 @@ def determine_model() -> str:
             return str(model)
     except Exception:
         pass
-    return "gpt-4o-mini"
+    return get_model_name()
 
 
 def resolve_api_key() -> Optional[str]:

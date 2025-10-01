@@ -51,6 +51,7 @@ from .services.ai_fill_manager import (
     MANAGER as AI_FILL_MANAGER,
     select_candidates as select_ai_candidates,
 )
+from .services.ai_client import get_model_name
 from . import gpt
 from .prompts.registry import normalize_task
 from . import title_analyzer
@@ -1336,7 +1337,7 @@ class RequestHandler(QuietHandlerMixin):
             )
             key = cfg.get("api_key") or ""
             data = {
-                "model": cfg.get("model", "gpt-4o"),
+                "model": cfg.get("model", get_model_name()),
                 "weights": weights_map,
                 "winner_weights": weights_map,
                 "winner_order": list(cfg.get("winner_order", list(DEFAULT_ORDER_LIST))),
@@ -2792,7 +2793,7 @@ class RequestHandler(QuietHandlerMixin):
         try:
             payload = json.loads(body)
             product = payload.get("product")
-            model = payload.get("model") or "gpt-4o-mini-2024-07-18"
+            model = payload.get("model") or get_model_name()
         except Exception:
             self._set_json(400)
             self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
@@ -2824,7 +2825,7 @@ class RequestHandler(QuietHandlerMixin):
         try:
             payload = json.loads(body)
             items = payload.get("items")
-            model = payload.get("model") or "gpt-4o-mini-2024-07-18"
+            model = payload.get("model") or get_model_name()
             if not isinstance(items, list):
                 raise ValueError
         except Exception:
