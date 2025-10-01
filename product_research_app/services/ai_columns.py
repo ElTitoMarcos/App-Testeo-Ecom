@@ -25,10 +25,11 @@ from ..config import (
 from ..ai.strict_jsonl import parse_jsonl_and_validate
 from ..obs import log_partial_ko, log_recovered
 from ..ratelimit import async_decorrelated_jitter_sleep
+from ..gpt_rate import rate_limiter
 from ..utils.signature import compute_sig_hash
 from .desire_utils import cleanse, looks_like_product_desc
 from .prompt_templates import MISSING_ONLY_JSONL_PROMPT, STRICT_JSONL_PROMPT
-from .ai_progress import start_job, bump_processed, finish_job
+from .ai_progress import finish_job, record_batch, start_job
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,10 @@ DB_PATH = APP_DIR / "data.sqlite3"
 CALIBRATION_CACHE_FILE = APP_DIR / "ai_calibration_cache.json"
 
 AI_FIELDS = ("desire", "desire_magnitude", "awareness_level", "competition_level")
+
+MODEL_MAIN = os.getenv("AI_MODEL_MAIN", "gpt-5-mini") or "gpt-5-mini"
+MODEL_TRIAGE = os.getenv("AI_MODEL_TRIAGE", "gpt-5-nano") or "gpt-5-nano"
+TARGET_PROMPT = int(os.getenv("AI_TARGET_PROMPT_TOKENS", "4000") or "4000")
 
 
 _ACTIVE_JOB_LOCK = threading.Lock()
@@ -66,7 +71,6 @@ def _env_bool(name: str, default: bool) -> bool:
     return default
 
 
-DEFAULT_BATCH_SIZE = max(8, _env_int("PRAPP_AI_COLUMNS_BATCH_SIZE", 32))
 MIN_BATCH_SIZE = 8
 MAX_RETRIES_MISSING = _env_int("PRAPP_AI_RETRIES_MISSING", 2)
 
@@ -79,7 +83,6 @@ AI_MAX_CONCURRENCY = max(
         int(max(1, math.floor(RAW_MAX_CONCURRENCY * OPENAI_HEADROOM))),
     ),
 )
-AI_BATCH_MAX_ITEMS = _env_int("AI_BATCH_MAX_ITEMS", 16)
 
 STRICT_JSON_ENABLED = _env_bool("PRAPP_AI_COLUMNS_STRICT_JSON", True)
 MAX_TOKENS_PER_ITEM = max(32, _env_int("PRAPP_AI_COLUMNS_MAX_TOKENS_PER_ITEM", 128))
@@ -87,7 +90,7 @@ SAFE_CONTEXT_TOKENS = max(4000, _env_int("PRAPP_OPENAI_CONTEXT_SAFE_TOKENS", 120
 StatusCallback = Callable[..., None]
 
 TRIAGE_ENABLED = _env_bool("PRAPP_AI_TRIAGE_ENABLED", True)
-TRIAGE_MODEL = os.getenv("PRAPP_AI_TRIAGE_MODEL", "gpt-4o-mini") or "gpt-4o-mini"
+TRIAGE_MODEL = os.getenv("PRAPP_AI_TRIAGE_MODEL", MODEL_TRIAGE) or MODEL_TRIAGE
 TRIAGE_CONFIDENCE = max(0.0, min(1.0, _env_float("PRAPP_AI_TRIAGE_CONFIDENCE", 0.70)))
 
 AI_COST = get_ai_cost_config()
@@ -95,6 +98,41 @@ try:
     EST_OUT_PER_ITEM = int((AI_COST or {}).get("estTokensPerItemOut", 80))
 except Exception:
     EST_OUT_PER_ITEM = 80
+
+
+def estimate_tokens_per_item(item: Any) -> int:
+    if isinstance(item, dict):
+        name = str(item.get("name") or "")
+        category = str(item.get("category") or "")
+        features = str(item.get("features") or item.get("description") or "")
+    elif hasattr(item, "payload") and isinstance(item.payload, dict):
+        payload = item.payload
+        name = str(payload.get("name") or "")
+        category = str(payload.get("category") or "")
+        features = str(payload.get("features") or payload.get("description") or "")
+    else:
+        name = str(getattr(item, "name", "") or "")
+        category = str(getattr(item, "category", "") or "")
+        features = str(getattr(item, "features", "") or "")
+    text = f"{name}{category}{features}"
+    return max(60, len(text) // 4)
+
+
+def compute_batch_size(items: Sequence[Any]) -> int:
+    if not items:
+        return MIN_BATCH_SIZE
+    sample = list(items[:8]) if len(items) > 8 else list(items)
+    total = sum(estimate_tokens_per_item(item) for item in sample)
+    avg = int(total / max(1, len(sample)))
+    overhead = 600
+    try:
+        available = max(TARGET_PROMPT - overhead, MIN_BATCH_SIZE)
+    except Exception:
+        available = TARGET_PROMPT
+    if avg <= 0:
+        avg = 60
+    estimate = max(8, min(64, available // max(1, avg)))
+    return max(MIN_BATCH_SIZE, estimate)
 
 
 def _persist_rows(rows: List[Dict[str, Any]]) -> None:
@@ -1275,10 +1313,11 @@ async def _call_batch_with_retries(
                 model=model,
                 messages=messages,
                 api_key=api_key,
-                temperature=0.2,
+                temperature=0.0,
                 max_tokens=max_tokens,
                 estimated_tokens=tokens_est,
                 strict_json=STRICT_JSON_ENABLED,
+                top_p=0.1,
             )
         except gpt.OpenAIError as exc:
             duration = time.perf_counter() - start_ts
@@ -1300,9 +1339,40 @@ async def _call_batch_with_retries(
             try:
                 strict_map, raw_payload_text = _parse_strict_json_payload(raw, expected_ids)
             except ValueError as exc:
-                if batch.json_retry_count < 1 and len(batch.candidates) > 1:
-                    raise BatchAdaptationRequired("json_parse", str(exc), allow_split=True) from exc
-                return _error_payload(str(exc), duration, attempt)
+                if batch.json_retry_count < 1:
+                    logger.warning(
+                        "ai_columns.json_retry req_id=%s items=%d err=%s",
+                        batch.req_id,
+                        len(batch.candidates),
+                        exc,
+                    )
+                    batch = BatchRequest(
+                        req_id=batch.req_id,
+                        candidates=list(batch.candidates),
+                        user_text=batch.user_text,
+                        prompt_tokens_est=batch.prompt_tokens_est,
+                        product_map=batch.product_map,
+                        depth=batch.depth,
+                        json_retry_count=batch.json_retry_count + 1,
+                        adapted=batch.adapted,
+                        trunc_title=batch.trunc_title,
+                        trunc_desc=batch.trunc_desc,
+                    )
+                    continue
+                ko_payload = {
+                    str(cand.id): "post_normalization" for cand in batch.candidates
+                }
+                return {
+                    "req_id": batch.req_id,
+                    "candidates": list(batch.candidates),
+                    "ok": {},
+                    "ko": ko_payload,
+                    "usage": raw.get("usage", {}) or {},
+                    "duration": duration,
+                    "retries": attempt,
+                    "prompt_tokens_est": tokens_est,
+                    "raw_text": raw_payload_text,
+                }
         else:
             try:
                 jsonl_payload = _extract_jsonl_payload(raw)
@@ -1756,10 +1826,10 @@ def run_ai_fill_job(
     max_retries = int(batch_cfg.get("MAX_RETRIES", 3) or 3)
 
     cost_cfg = config.get_ai_cost_config()
-    model = cost_cfg.get("model") or config.get_model()
-    env_model = os.environ.get("AI_MODEL")
-    if env_model:
-        model = env_model
+    model = cost_cfg.get("model") or MODEL_MAIN or config.get_model()
+    legacy_model = os.environ.get("AI_MODEL")
+    if legacy_model:
+        model = legacy_model
     cost_cap = cost_cfg.get("costCapUSD")
     price_map = cost_cfg.get("prices", {}).get(model, {})
     price_in = float(price_map.get("input", 0.0))
@@ -1984,8 +2054,13 @@ def run_ai_fill_job(
                 pid = int(pid_str)
             except Exception:
                 continue
-            pending_set.add(pid)
-            fail_reasons[pid] = reason or "error"
+            normalized_reason = str(reason or "error")
+            final_failure = normalized_reason in {"post_normalization", "post_normalization_required"}
+            if final_failure:
+                pending_set.discard(pid)
+            else:
+                pending_set.add(pid)
+            fail_reasons[pid] = normalized_reason
             ko_ids.add(pid)
 
         parsed_ids = list(success_updates.keys())
@@ -2078,14 +2153,16 @@ def run_ai_fill_job(
 
     if remaining:
         pending_candidates = list(remaining)
-        max_batch_size = min(AI_MAX_PRODUCTS_PER_CALL, len(pending_candidates))
+        dynamic_batch = compute_batch_size(pending_candidates)
+        max_batch_size = min(dynamic_batch, AI_MAX_PRODUCTS_PER_CALL, len(pending_candidates))
         max_batch_size = max(AI_MIN_PRODUCTS_PER_CALL, max_batch_size)
-        max_batch_size = max(1, min(AI_BATCH_MAX_ITEMS, max_batch_size))
+        max_batch_size = max(1, max_batch_size)
+        initial_concurrency_target = max(1, rate_limiter.suggest_concurrency())
         logger.info(
             "ai.run start items_total=%d batch_init=%d concurrency_target=%d strict_json=%s",
             total_items,
             max_batch_size,
-            AI_MAX_CONCURRENCY,
+            initial_concurrency_target,
             STRICT_JSON_ENABLED,
         )
         # Inicia estado de progreso (monotónico) por job
@@ -2098,35 +2175,35 @@ def run_ai_fill_job(
                 continue
             pending_groups.append((chunk, 0, 0, False))
 
+        concurrency_target_dynamic = initial_concurrency_target
+
         async def _execute_batches(batches: List[BatchRequest]) -> List[Dict[str, Any]]:
-            semaphore = asyncio.Semaphore(max(1, AI_MAX_CONCURRENCY))
+            nonlocal triage_covered_total, fallback_big_total, cancel_requested, concurrency_target_dynamic
 
             async def _run_single(batch: BatchRequest) -> Dict[str, Any]:
-                nonlocal triage_covered_total, fallback_big_total, cancel_requested
-                async with semaphore:
-                    if cancel_requested or _cancel_requested():
-                        cancel_requested = True
-                        return {
-                            "status": "cancelled",
-                            "batch": batch,
-                            "result": None,
-                            "duration": 0.0,
-                            "error": None,
-                        }
-                    original_batch = batch
-                    triage_result: Optional[Dict[str, Any]] = None
-                    triage_usage: Dict[str, Any] = {}
-                    triage_duration = 0.0
-                    triage_raw_text: Optional[str] = None
-                    fallback_candidates: List[Candidate] = list(batch.candidates)
-                    allow_triage = (
-                        TRIAGE_ENABLED
-                        and batch.candidates
-                        and batch.depth == 0
-                        and not batch.adapted
-                    )
+                if cancel_requested or _cancel_requested():
+                    cancel_requested = True
+                    return {
+                        "status": "cancelled",
+                        "batch": batch,
+                        "result": None,
+                        "duration": 0.0,
+                        "error": None,
+                    }
+                original_batch = batch
+                triage_result: Optional[Dict[str, Any]] = None
+                triage_usage: Dict[str, Any] = {}
+                triage_duration = 0.0
+                triage_raw_text: Optional[str] = None
+                fallback_candidates: List[Candidate] = list(batch.candidates)
+                allow_triage = (
+                    TRIAGE_ENABLED
+                    and batch.candidates
+                    and batch.depth == 0
+                    and not batch.adapted
+                )
 
-                    if allow_triage:
+                if allow_triage:
                         triage_model_name = TRIAGE_MODEL or ""
                         triage_is_mini = triage_model_name.startswith("gpt-4o-mini")
                         if not triage_is_mini:
@@ -2218,160 +2295,198 @@ def run_ai_fill_job(
                             triage_duration = 0.0
                             triage_raw_text = None
 
-                    if not allow_triage and TRIAGE_ENABLED:
-                        triage_covered_total += 0
+                if not allow_triage and TRIAGE_ENABLED:
+                    triage_covered_total += 0
 
-                    if not fallback_candidates:
-                        result_payload = triage_result or {
-                            "req_id": f"{batch.req_id}-triage",
-                            "candidates": batch.candidates,
-                            "ok": {},
-                            "ko": {},
-                            "usage": triage_usage,
-                            "duration": triage_duration,
-                            "retries": 0,
-                            "prompt_tokens_est": batch.prompt_tokens_est,
-                            "raw_text": triage_raw_text,
-                        }
-                        final_result = {
-                            "req_id": batch.req_id,
-                            "candidates": batch.candidates,
-                            "ok": result_payload.get("ok", {}),
-                            "ko": {},
-                            "usage": result_payload.get("usage", {}),
-                            "duration": result_payload.get("duration", triage_duration),
-                            "retries": 0,
-                            "prompt_tokens_est": result_payload.get(
-                                "prompt_tokens_est", batch.prompt_tokens_est
-                            ),
-                            "raw_text": result_payload.get("raw_text"),
-                        }
-                        return {
-                            "status": "ok",
-                            "batch": batch,
-                            "result": final_result,
-                            "duration": float(final_result.get("duration", 0.0) or 0.0),
-                            "error": None,
-                        }
+                if not fallback_candidates:
+                    result_payload = triage_result or {
+                        "req_id": f"{batch.req_id}-triage",
+                        "candidates": batch.candidates,
+                        "ok": {},
+                        "ko": {},
+                        "usage": triage_usage,
+                        "duration": triage_duration,
+                        "retries": 0,
+                        "prompt_tokens_est": batch.prompt_tokens_est,
+                        "raw_text": triage_raw_text,
+                    }
+                    final_result = {
+                        "req_id": batch.req_id,
+                        "candidates": batch.candidates,
+                        "ok": result_payload.get("ok", {}),
+                        "ko": {},
+                        "usage": result_payload.get("usage", {}),
+                        "duration": result_payload.get("duration", triage_duration),
+                        "retries": 0,
+                        "prompt_tokens_est": result_payload.get(
+                            "prompt_tokens_est", batch.prompt_tokens_est
+                        ),
+                        "raw_text": result_payload.get("raw_text"),
+                    }
+                    return {
+                        "status": "ok",
+                        "batch": batch,
+                        "result": final_result,
+                        "duration": float(final_result.get("duration", 0.0) or 0.0),
+                        "error": None,
+                    }
 
-                    fallback_batch = _build_batch_request(
-                        f"{batch.req_id}-main",
-                        fallback_candidates,
-                        batch.trunc_title,
-                        batch.trunc_desc,
-                        depth=batch.depth,
-                        json_retry_count=batch.json_retry_count,
-                        adapted=batch.adapted,
+                fallback_batch = _build_batch_request(
+                    f"{batch.req_id}-main",
+                    fallback_candidates,
+                    batch.trunc_title,
+                    batch.trunc_desc,
+                    depth=batch.depth,
+                    json_retry_count=batch.json_retry_count,
+                    adapted=batch.adapted,
+                )
+
+                fallback_big_total += len(fallback_candidates)
+
+                logger.info(
+                    "ai_columns.batch start req_id=%s model=%s items=%d prompt_tokens_est=%d strict_json=%s batch_adapted=%s",
+                    fallback_batch.req_id,
+                    model,
+                    len(fallback_batch.candidates),
+                    fallback_batch.prompt_tokens_est,
+                    STRICT_JSON_ENABLED,
+                    fallback_batch.adapted,
+                )
+                start_local = time.perf_counter()
+                try:
+                    result = await _call_batch_with_retries(
+                        fallback_batch,
+                        api_key=api_key,
+                        model=model,
+                        max_retries=max_retries,
                     )
-
-                    fallback_big_total += len(fallback_candidates)
-
-                    logger.info(
-                        "ai_columns.batch start req_id=%s model=%s items=%d prompt_tokens_est=%d strict_json=%s batch_adapted=%s",
+                    duration = time.perf_counter() - start_local
+                    if isinstance(result, dict) and "duration" not in result:
+                        result["duration"] = duration
+                    triage_ok = triage_result.get("ok", {}) if triage_result else {}
+                    combined_ok: Dict[str, Dict[str, Any]] = {}
+                    combined_ok.update(triage_ok)
+                    combined_ok.update(result.get("ok", {}) or {})
+                    combined_ko = dict(result.get("ko", {}) or {})
+                    combined_usage = _merge_usage(
+                        triage_result.get("usage") if triage_result else {},
+                        result.get("usage", {}),
+                    )
+                    combined_duration = float(triage_duration) + float(
+                        result.get("duration", duration) or duration
+                    )
+                    combined_prompt = 0
+                    if triage_result:
+                        combined_prompt += int(
+                            triage_result.get("prompt_tokens_est") or 0
+                        )
+                    combined_prompt += int(result.get("prompt_tokens_est") or 0)
+                    combined_result = {
+                        "req_id": batch.req_id,
+                        "candidates": list(batch.candidates),
+                        "ok": combined_ok,
+                        "ko": combined_ko,
+                        "usage": combined_usage,
+                        "duration": combined_duration,
+                        "retries": result.get("retries", 0),
+                        "prompt_tokens_est": combined_prompt or batch.prompt_tokens_est,
+                        "raw_text": result.get("raw_text")
+                        or (triage_result.get("raw_text") if triage_result else None),
+                    }
+                    return {
+                        "status": "ok",
+                        "batch": fallback_batch,
+                        "result": combined_result,
+                        "duration": combined_duration,
+                        "error": None,
+                    }
+                except BatchAdaptationRequired as exc:
+                    duration = time.perf_counter() - start_local
+                    logger.warning(
+                        "ai_columns.batch split req_id=%s reason=%s duration=%.2f",
                         fallback_batch.req_id,
-                        model,
-                        len(fallback_batch.candidates),
-                        fallback_batch.prompt_tokens_est,
-                        STRICT_JSON_ENABLED,
-                        fallback_batch.adapted,
+                        exc.reason,
+                        duration,
                     )
-                    start_local = time.perf_counter()
-                    try:
-                        result = await _call_batch_with_retries(
-                            fallback_batch,
-                            api_key=api_key,
-                            model=model,
-                            max_retries=max_retries,
-                        )
-                        duration = time.perf_counter() - start_local
-                        if isinstance(result, dict) and "duration" not in result:
-                            result["duration"] = duration
-                        triage_ok = triage_result.get("ok", {}) if triage_result else {}
-                        combined_ok: Dict[str, Dict[str, Any]] = {}
-                        combined_ok.update(triage_ok)
-                        combined_ok.update(result.get("ok", {}) or {})
-                        combined_ko = dict(result.get("ko", {}) or {})
-                        combined_usage = _merge_usage(
-                            triage_result.get("usage") if triage_result else {},
-                            result.get("usage", {}),
-                        )
-                        combined_duration = float(triage_duration) + float(
-                            result.get("duration", duration) or duration
-                        )
-                        combined_prompt = 0
-                        if triage_result:
-                            combined_prompt += int(
-                                triage_result.get("prompt_tokens_est") or 0
-                            )
-                        combined_prompt += int(result.get("prompt_tokens_est") or 0)
-                        combined_result = {
-                            "req_id": batch.req_id,
-                            "candidates": list(batch.candidates),
-                            "ok": combined_ok,
-                            "ko": combined_ko,
-                            "usage": combined_usage,
-                            "duration": combined_duration,
-                            "retries": result.get("retries", 0),
-                            "prompt_tokens_est": combined_prompt or batch.prompt_tokens_est,
-                            "raw_text": result.get("raw_text")
-                            or (triage_result.get("raw_text") if triage_result else None),
-                        }
-                        return {
-                            "status": "ok",
-                            "batch": fallback_batch,
-                            "result": combined_result,
-                            "duration": combined_duration,
-                            "error": None,
-                        }
-                    except BatchAdaptationRequired as exc:
-                        duration = time.perf_counter() - start_local
-                        logger.warning(
-                            "ai_columns.batch split req_id=%s reason=%s duration=%.2f",
-                            fallback_batch.req_id,
-                            exc.reason,
-                            duration,
-                        )
-                        return {
-                            "status": "split",
-                            "batch": fallback_batch,
-                            "result": None,
-                            "duration": duration,
-                            "error": exc,
-                            "reason": exc.reason,
-                            "json_retry": 1 if exc.reason == "json_parse" else 0,
-                            "allow_split": exc.allow_split,
-                            "triage_result": triage_result,
-                        }
-                    except Exception as exc:
-                        duration = time.perf_counter() - start_local
-                        logger.exception(
-                            "ai_columns.batch exception req_id=%s",
-                            fallback_batch.req_id,
-                        )
-                        ko_payload = {str(c.id): str(exc) for c in fallback_batch.candidates}
-                        fallback = {
-                            "req_id": fallback_batch.req_id,
-                            "candidates": fallback_batch.candidates,
-                            "ok": {},
-                            "ko": ko_payload,
-                            "usage": {},
-                            "duration": duration,
-                            "error": str(exc),
-                        }
-                        return {
-                            "status": "error",
-                            "batch": fallback_batch,
-                            "result": fallback,
-                            "duration": duration,
-                            "error": exc,
-                            "triage_result": triage_result,
-                        }
+                    return {
+                        "status": "split",
+                        "batch": fallback_batch,
+                        "result": None,
+                        "duration": duration,
+                        "error": exc,
+                        "reason": exc.reason,
+                        "json_retry": 1 if exc.reason == "json_parse" else 0,
+                        "allow_split": exc.allow_split,
+                        "triage_result": triage_result,
+                    }
+                except Exception as exc:
+                    duration = time.perf_counter() - start_local
+                    logger.exception(
+                        "ai_columns.batch exception req_id=%s",
+                        fallback_batch.req_id,
+                    )
+                    ko_payload = {str(c.id): str(exc) for c in fallback_batch.candidates}
+                    fallback = {
+                        "req_id": fallback_batch.req_id,
+                        "candidates": fallback_batch.candidates,
+                        "ok": {},
+                        "ko": ko_payload,
+                        "usage": {},
+                        "duration": duration,
+                        "error": str(exc),
+                    }
+                    return {
+                        "status": "error",
+                        "batch": fallback_batch,
+                        "result": fallback,
+                        "duration": duration,
+                        "error": exc,
+                        "triage_result": triage_result,
+                    }
 
-            tasks = [asyncio.create_task(_run_single(batch)) for batch in batches]
-            gathered: List[Dict[str, Any]] = []
-            for coro in asyncio.as_completed(tasks):
-                gathered.append(await coro)
-            return gathered
+            pending_local: Deque[BatchRequest] = deque(batches)
+            active: Dict[asyncio.Task[Dict[str, Any]], BatchRequest] = {}
+            results: List[Dict[str, Any]] = []
+            last_adjust = 0.0
+            concurrency_target = max(1, concurrency_target_dynamic)
+
+            while pending_local or active:
+                now = time.monotonic()
+                if now - last_adjust >= 10.0:
+                    try:
+                        concurrency_target = max(1, rate_limiter.suggest_concurrency())
+                    except Exception:
+                        concurrency_target = max(1, AI_MAX_CONCURRENCY)
+                    concurrency_target_dynamic = concurrency_target
+                    last_adjust = now
+
+                while pending_local and len(active) < concurrency_target:
+                    batch = pending_local.popleft()
+                    task = asyncio.create_task(_run_single(batch))
+                    active[task] = batch
+
+                if not active:
+                    break
+
+                done, _ = await asyncio.wait(
+                    set(active.keys()), return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in done:
+                    batch_ref = active.pop(task, None)
+                    try:
+                        results.append(task.result())
+                    except Exception as exc:
+                        logger.exception("ai_columns.batch worker crashed", exc_info=True)
+                        results.append(
+                            {
+                                "status": "error",
+                                "batch": batch_ref,
+                                "result": None,
+                                "duration": 0.0,
+                                "error": exc,
+                            }
+                        )
+            return results
 
         while pending_groups:
             batches: List[BatchRequest] = []
@@ -2517,9 +2632,9 @@ def run_ai_fill_job(
                     batch.adapted,
                 )
 
-                # Cuando un batch termina correctamente:
+                # Cuando un batch termina correctamente o produce salida parcial
                 try:
-                    bump_processed(len(batch.candidates))
+                    record_batch(len(batch.candidates), duration)
                 except Exception:
                     pass
 
@@ -2570,7 +2685,7 @@ def run_ai_fill_job(
         total_processed,
         remaining_total,
         concurrency_eff,
-        AI_MAX_CONCURRENCY,
+        concurrency_target_dynamic,
         total_batches,
         p50,
         p95,
@@ -2581,17 +2696,21 @@ def run_ai_fill_job(
         fallback_big_total,
     )
 
-    # Marca fin del job (progress = 1.0)
-    try:
-        finish_job()
-    except Exception:
-        pass
-
     result_error: Optional[str] = None
     if cancel_requested:
         result_error = "cancelled"
     if cost_cap is not None and cost_spent >= float(cost_cap):
         result_error = "cost_cap_reached"
+
+    job_status = "done"
+    if cancel_requested or result_error:
+        job_status = "error"
+
+    # Marca fin del job (progress = 1.0)
+    try:
+        finish_job(job_status)
+    except Exception:
+        pass
 
     cfg_calib = config.get_ai_calibration_config()
     calibration_enabled = cfg_calib.get("enabled", True)
@@ -2988,7 +3107,7 @@ def _retry_missing_sync(model_client: Any, missing_ids: List[int]) -> Dict[int, 
 
 
 def fill_ai_columns_with_recovery(model_client: Any, product_ids: List[int]) -> Dict[int, Dict[str, Any]]:
-    batch_size = max(MIN_BATCH_SIZE, min(DEFAULT_BATCH_SIZE, len(product_ids) or MIN_BATCH_SIZE))
+    batch_size = compute_batch_size(product_ids)
     out: Dict[int, Dict[str, Any]] = {}
     consecutive_partial = 0
     index = 0
