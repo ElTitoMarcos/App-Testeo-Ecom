@@ -235,7 +235,7 @@ function createRailInHost(host) {
   rail.className = 'progress-rail';
   rail.innerHTML = `
     <div class="progress-fill"></div>
-    <span class="progress-meta"><span class="progress-title">Proceso</span><span class="progress-stage">Iniciando…</span></span>
+    <span class="progress-meta"><span class="progress-title">Proceso</span><span class="progress-stage">Iniciando…</span><span class="progress-eta" hidden></span></span>
     <span class="progress-percent">0%</span>
   `;
   host.appendChild(rail);
@@ -270,7 +270,8 @@ function getRailState(host) {
   const pctEl = rail.querySelector('.progress-percent');
   const titleEl = rail.querySelector('.progress-title');
   const stageEl = rail.querySelector('.progress-stage');
-  state = { rail, fill, pctEl, titleEl, stageEl, tasks: new Map(), hideTimer: null };
+  const etaEl = rail.querySelector('.progress-eta');
+  state = { rail, fill, pctEl, titleEl, stageEl, etaEl, tasks: new Map(), hideTimer: null };
   Rails.set(host, state);
   return state;
 }

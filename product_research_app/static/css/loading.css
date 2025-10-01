@@ -27,10 +27,17 @@
 
 .progress-meta {
   position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px; color: rgba(255,255,255,0.9); text-shadow: 0 1px 2px rgba(0,0,0,.25);
 }
 .progress-title { font-weight: 600; margin-right: 8px; }
 .progress-stage { opacity: .9; }
+.progress-eta {
+  opacity: .8;
+  font-variant-numeric: tabular-nums;
+}
 
 /* Modal: el slot está dentro del header del diálogo, así que no se difumina ni queda tapado */
 .modal .progress-slot { margin-top: 6px; }
