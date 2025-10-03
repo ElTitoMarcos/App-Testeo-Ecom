@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from product_research_app import gpt
 from product_research_app.prompts import registry
 
@@ -77,3 +79,15 @@ def test_prepare_params_with_schema_json_mode():
         == "object"
     )
     assert "temperature" not in payload
+
+
+def test_parse_json_content_from_fence():
+    text = "```json\n{\"foo\": 1}\n```"
+    parsed = gpt._parse_json_content(text)
+    assert parsed == {"foo": 1}
+
+
+def test_parse_json_content_empty_sets_attribute():
+    with pytest.raises(gpt.InvalidJSONError) as excinfo:
+        gpt._parse_json_content("")
+    assert getattr(excinfo.value, "sanitized_text", None) == ""

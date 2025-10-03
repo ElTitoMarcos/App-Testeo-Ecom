@@ -86,7 +86,15 @@ DEFAULT_BATCH_SIZE = max(8, _env_int("PRAPP_AI_COLUMNS_BATCH_SIZE", 48))
 MIN_BATCH_SIZE = 8
 MAX_RETRIES_MISSING = _env_int("PRAPP_AI_RETRIES_MISSING", 2)
 
-TOKENS_POR_ITEM_ESTIMADOS = max(64, _env_int("PRAPP_AI_COLUMNS_TOKENS_PER_ITEM", 96))
+TOKENS_POR_ITEM_ESTIMADOS = max(
+    32,
+    _env_int(
+        "PRAPP_AI_COLUMNS_TOKENS_PER_ITEM",
+        int(getattr(gpt, "TOKENS_POR_ITEM_ESTIMADOS", 220)),
+    ),
+)
+MAX_COMPLETION_TOKENS_JSON = getattr(gpt, "MAX_COMPLETION_TOKENS_JSON", 1200)
+MIN_COMPLETION_TOKENS_JSON = getattr(gpt, "MIN_COMPLETION_TOKENS_JSON", 700)
 TOKEN_BUDGET_MARGIN = 0.85
 
 RAW_MAX_CONCURRENCY = max(1, _env_int("PRAPP_OPENAI_MAX_CONCURRENCY", 4))
@@ -812,6 +820,16 @@ def _extract_finish_reason(raw: Mapping[str, Any]) -> Optional[str]:
             finish = choice0.get("finish_reason")
             if isinstance(finish, str) and finish:
                 return finish
+            finish_details = choice0.get("finish_details")
+            if isinstance(finish_details, Mapping):
+                detail_reason = finish_details.get("reason") or finish_details.get("type")
+                if isinstance(detail_reason, str) and detail_reason:
+                    return detail_reason
+            message_block = choice0.get("message")
+            if isinstance(message_block, Mapping):
+                inner_reason = message_block.get("finish_reason") or message_block.get("reason")
+                if isinstance(inner_reason, str) and inner_reason:
+                    return inner_reason
     return None
 
 
@@ -1470,10 +1488,12 @@ async def _call_batch_with_retries(
 
     attempt = 0
     backoff_prev = 0.0
+    max_tokens_override: Optional[int] = None
+    single_item_retry_used = False
     while True:
         attempt += 1
         tokens_est = batch.prompt_tokens_est
-        max_tokens = _max_tokens_for_batch(len(batch.candidates))
+        max_tokens = max_tokens_override or _max_tokens_for_batch(len(batch.candidates))
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": batch.user_text},
@@ -1507,13 +1527,52 @@ async def _call_batch_with_retries(
         strict_map: Dict[int, Dict[str, Any]] = {}
 
         finish_reason: Optional[str] = _extract_finish_reason(raw)
+        finish_reason_lower = (finish_reason or "").lower()
+        truncated_response = finish_reason_lower in {"length", "json_truncated"}
+
+        if truncated_response:
+            if len(batch.candidates) > 1 and STRICT_JSON_ENABLED:
+                raise BatchAdaptationRequired(
+                    "json_truncated", "Respuesta truncada por límite de tokens", allow_split=True
+                )
+            if len(batch.candidates) == 1:
+                if not single_item_retry_used:
+                    single_item_retry_used = True
+                    previous_max = max_tokens
+                    boosted = max(
+                        previous_max or 0,
+                        getattr(gpt, "MAX_COMPLETION_TOKENS_JSON", previous_max or 0),
+                    )
+                    max_tokens_override = boosted
+                    logger.info(
+                        "ai_columns.batch single_item_retry req_id=%s reason=%s prev_max=%s new_max=%s",
+                        batch.req_id,
+                        finish_reason_lower,
+                        previous_max,
+                        max_tokens_override,
+                    )
+                    duration = time.perf_counter() - start_ts
+                    continue
+                usage_map = raw.get("usage", {}) if isinstance(raw, Mapping) else {}
+                duration = time.perf_counter() - start_ts
+                detail_msg = (
+                    f"ko.json_truncated: respuesta truncada tras reintentos (finish_reason={finish_reason_lower})"
+                )
+                return _error_payload(
+                    detail_msg,
+                    duration,
+                    attempt,
+                    usage=usage_map if isinstance(usage_map, Mapping) else {},
+                    finish_reason=finish_reason,
+                )
+
         if STRICT_JSON_ENABLED:
             duration = time.perf_counter() - start_ts
             try:
                 strict_map, raw_payload_text = _parse_strict_json_payload(raw, expected_ids)
             except ValueError as exc:
                 if len(batch.candidates) > 1:
-                    if finish_reason == "length":
+                    if truncated_response:
                         raise BatchAdaptationRequired(
                             "json_truncated", str(exc), allow_split=True
                         ) from exc
@@ -1769,41 +1828,82 @@ async def _refine_desire_statement(
     draft_text: str,
 ) -> Optional[Dict[str, Any]]:
     context = _candidate_to_desire_context(candidate)
-    try:
-        result = await gpt.call_prompt_task_async(
-            "DESIRE",
-            context_json=context,
-            temperature=0,
-            extra_user=(
-                f"Borrador previo:\n{draft_text.strip()}\n\n" + DESIRE_REFINE_EXTRA_USER
-            ),
-            mode="refine_no_product",
-            max_tokens=450,
-            stop=None,
-        )
-    except gpt.OpenAIError as exc:
-        message = str(exc).lower()
-        if "status 429" in message:
-            logger.warning(
-                "ai_columns.refine.retry_exhausted id=%s err=%s",
-                candidate.id,
-                exc,
-            )
-        else:
-            logger.error(
-                "ai_columns.refine.failed id=%s",
-                candidate.id,
-                exc_info=True,
-            )
-        return None
-    except Exception:
-        logger.exception("desire refine call failed for id=%s", candidate.id)
-        return None
+    base_extra = (
+        f"Borrador previo:\n{draft_text.strip()}\n\n" + DESIRE_REFINE_EXTRA_USER
+    )
+    reduced_hint = (
+        "Responde exclusivamente con un objeto JSON que contenga las claves obligatorias "
+        "desire_statement, desire_primary y confidence. Utiliza cadenas vacías o null cuando no dispongas de datos y no añadas texto adicional."
+    )
 
-    content = result.get("content") if isinstance(result, dict) else None
-    if isinstance(content, dict):
-        return content
-    return None
+    attempts = 0
+    extra_suffix = ""
+    last_invalid: Optional[gpt.InvalidJSONError] = None
+
+    while attempts < 2:
+        attempts += 1
+        extra_user_payload = base_extra if not extra_suffix else f"{base_extra}\n\n{extra_suffix}"
+        try:
+            result = await gpt.call_prompt_task_async(
+                "DESIRE",
+                context_json=context,
+                temperature=0,
+                extra_user=extra_user_payload,
+                mode="refine_no_product",
+                max_tokens=MIN_COMPLETION_TOKENS_JSON,
+                stop=None,
+            )
+        except gpt.InvalidJSONError as exc:
+            last_invalid = exc
+            if attempts < 2:
+                extra_suffix = reduced_hint
+                continue
+            break
+        except gpt.OpenAIError as exc:
+            message = str(exc).lower()
+            if "status 429" in message:
+                logger.warning(
+                    "ai_columns.refine.retry_exhausted id=%s err=%s",
+                    candidate.id,
+                    exc,
+                )
+            else:
+                logger.error(
+                    "ai_columns.refine.failed id=%s",
+                    candidate.id,
+                    exc_info=True,
+                )
+            return None
+        except Exception:
+            logger.exception("desire refine call failed for id=%s", candidate.id)
+            return None
+
+        content = result.get("content") if isinstance(result, dict) else None
+        if isinstance(content, dict) and content:
+            return content
+        if isinstance(content, dict) and not content and attempts < 2:
+            extra_suffix = reduced_hint
+            last_invalid = gpt.InvalidJSONError("La respuesta JSON está vacía")
+            continue
+
+        if isinstance(content, dict):
+            break
+
+    fallback_statement = draft_text.strip() or ""
+    minimal_payload = {
+        "desire_statement": fallback_statement,
+        "desire_primary": None,
+        "desire_secondary": None,
+        "confidence": None,
+        "low_confidence": True,
+    }
+    if last_invalid:
+        logger.debug(
+            "ai_columns.refine.fallback_low_confidence id=%s reason=%s",
+            candidate.id,
+            last_invalid,
+        )
+    return minimal_payload
 
 
 def _emit_status(
@@ -2696,9 +2796,29 @@ def run_ai_fill_job(
                             if summary.get("parsed_ids"):
                                 made_progress = True
                         continue
-                    split_point = max(1, math.ceil(len(batch.candidates) / 2))
-                    if split_point >= len(batch.candidates):
-                        split_point = max(1, len(batch.candidates) // 2)
+                    reason = str(entry.get("reason") or "").lower()
+                    if reason in {"json_truncated", "length"}:
+                        safe_budget = int(MAX_COMPLETION_TOKENS_JSON * 0.9)
+                        max_items_by_tokens = max(
+                            1, safe_budget // max(1, TOKENS_POR_ITEM_ESTIMADOS)
+                        )
+                        target = max(1, len(batch.candidates) // 2)
+                        target = min(target, max_items_by_tokens)
+                        if target >= len(batch.candidates):
+                            target = max(1, len(batch.candidates) - 1)
+                        split_point = target
+                        logger.info(
+                            "ai_columns.batch adapt_truncation req_id=%s reason=%s size=%d split=%d budget_items=%d",
+                            batch.req_id,
+                            reason,
+                            len(batch.candidates),
+                            split_point,
+                            max_items_by_tokens,
+                        )
+                    else:
+                        split_point = max(1, math.ceil(len(batch.candidates) / 2))
+                        if split_point >= len(batch.candidates):
+                            split_point = max(1, len(batch.candidates) // 2)
                     first = batch.candidates[:split_point]
                     second = batch.candidates[split_point:]
                     next_json_retry = batch.json_retry_count + json_retry_inc

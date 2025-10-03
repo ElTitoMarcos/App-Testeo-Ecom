@@ -104,6 +104,7 @@ def test_microbatch_splits_until_single_item(monkeypatch):
         return None
 
     monkeypatch.setattr(ai_columns.gpt, "call_gpt_async", fake_call_gpt_async)
+
     monkeypatch.setattr(ai_columns, "_refine_desire_statement", fake_refine)
 
     async def run(batch_req: ai_columns.BatchRequest) -> Dict[str, Any]:
@@ -151,4 +152,99 @@ def test_microbatch_splits_until_single_item(monkeypatch):
     assert sorted(result["ok"].keys()) == ["101", "102"]
     assert result["ko"] == {}
     assert call_sizes == [2, 1, 1]
+
+
+def test_single_item_truncation_ups_max_tokens(monkeypatch):
+    candidate = ai_columns.Candidate(
+        id=501,
+        sig_hash="sig501",
+        payload={"name": "Prod 501"},
+        extra={"title": "Prod 501"},
+    )
+
+    batch = ai_columns._build_batch_request(
+        "solo-501",
+        [candidate],
+        trunc_title=120,
+        trunc_desc=240,
+    )
+
+    responses: List[Dict[str, Any]] = [
+        {
+            "choices": [
+                {
+                    "message": {"content": ""},
+                    "finish_reason": "length",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 600},
+        },
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": [
+                            {
+                                "type": "json",
+                                "json": {
+                                    "items": [
+                                        {
+                                            "id": 501,
+                                            "desire_statement": "Alta demanda",
+                                            "desire_magnitude": "High",
+                                            "competition_level": "Low",
+                                        }
+                                    ]
+                                },
+                            }
+                        ]
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 200},
+        },
+    ]
+
+    max_tokens_used: List[int] = []
+
+    async def fake_call_gpt_async(*, max_tokens: int | None = None, **kwargs):
+        max_tokens_used.append(max_tokens if max_tokens is not None else 0)
+        if not responses:
+            raise AssertionError("No quedan respuestas simuladas")
+        return responses.pop(0)
+
+    monkeypatch.setattr(ai_columns.gpt, "call_gpt_async", fake_call_gpt_async)
+
+    def fake_parse(raw: Dict[str, Any], expected_ids):
+        parsed = {
+            int(pid): {
+                "desire_statement": "Alta demanda",
+                "desire_magnitude": "High",
+                "competition_level": "Low",
+            }
+            for pid in expected_ids
+        }
+        return parsed, json.dumps({"items": []})
+
+    monkeypatch.setattr(ai_columns, "_parse_strict_json_payload", fake_parse)
+
+    async def fake_finalize(batch_req, strict_map):
+        return {str(candidate.id): {}}, {}
+
+    monkeypatch.setattr(ai_columns, "_finalize_batch_payload", fake_finalize)
+
+    result = asyncio.run(
+        ai_columns._call_batch_with_retries(
+            batch,
+            api_key="test",
+            model="gpt-test",
+            max_retries=0,
+        )
+    )
+
+    assert str(candidate.id) not in result.get("ko", {})
+    assert len(max_tokens_used) == 2
+    assert max_tokens_used[1] >= ai_columns.MAX_COMPLETION_TOKENS_JSON
+    assert min(max_tokens_used) >= ai_columns.MIN_COMPLETION_TOKENS_JSON
 

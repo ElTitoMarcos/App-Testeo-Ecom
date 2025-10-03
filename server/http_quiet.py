@@ -1,5 +1,6 @@
 from http.server import BaseHTTPRequestHandler
 import json
+import logging
 import os
 
 # Coma-separado por env; por defecto estas rutas se silencian
@@ -7,6 +8,22 @@ DEFAULT_QUIET = "/_ai_fill/status,/_import_status"
 QUIET_PATHS = tuple(
     p.strip() for p in os.getenv("PRAPP_HTTP_QUIET", DEFAULT_QUIET).split(",") if p.strip()
 )
+
+
+logger = logging.getLogger(__name__)
+
+
+def _raw_request_bytes(handler: BaseHTTPRequestHandler) -> bytes:
+    raw_line = getattr(handler, "raw_requestline", b"")
+    if isinstance(raw_line, memoryview):
+        raw_line = raw_line.tobytes()
+    if isinstance(raw_line, (bytes, bytearray)):
+        return bytes(raw_line)
+    return b""
+
+
+def _is_tls_client_hello(payload: bytes) -> bool:
+    return bool(payload and payload[0] == 0x16 and payload.startswith(b"\x16\x03\x01"))
 
 
 class QuietHandlerMixin(BaseHTTPRequestHandler):
@@ -38,19 +55,14 @@ class QuietHandlerMixin(BaseHTTPRequestHandler):
 
     # Ocultar “Bad request version …” de handshakes TLS erróneos
     def log_error(self, fmt, *args):
-        reqline = getattr(self, "requestline", "") or ""
-        raw_line = getattr(self, "raw_requestline", b"")
-        if isinstance(raw_line, memoryview):
-            raw_line = raw_line.tobytes()
-        first_byte = b""
-        if isinstance(raw_line, (bytes, bytearray)) and raw_line:
-            first_byte = raw_line[:1]
-        args_text = " ".join(str(arg) for arg in args) if args else ""
-        # Muchos clientes TLS empiezan por 0x16 0x03; aquí llega como bytes escapados
-        if (
-            ("Bad request version" in args_text)
-            and (first_byte == b"\x16" or reqline.startswith("\x16\x03"))
-        ):
+        raw_payload = _raw_request_bytes(self)
+        if _is_tls_client_hello(raw_payload):
+            client = getattr(self, "client_address", (None, None))
+            logger.debug(
+                "http_quiet: ClientHello TLS suprimido addr=%s payload_len=%d",
+                client,
+                len(raw_payload),
+            )
             return
         # También podemos ignorar 404 de favicon
         path = getattr(self, "path", "")

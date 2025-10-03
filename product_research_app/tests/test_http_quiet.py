@@ -35,6 +35,13 @@ def test_tls_client_hello_is_silenced():
     assert handler._records == []
 
 
+def test_tls_client_hello_without_bad_request_is_silenced():
+    handler = DummyQuietHandler()
+    handler.raw_requestline = b"\x16\x03\x01\x00"
+    handler.log_error("code %d", 400)
+    assert handler._records == []
+
+
 def test_regular_error_is_logged():
     handler = DummyQuietHandler()
     handler.requestline = "GET / HTTP/1.1"

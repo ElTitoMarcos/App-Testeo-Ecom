@@ -29,7 +29,7 @@ import time
 import unicodedata
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import httpx
 import requests
@@ -61,6 +61,28 @@ USE_RESPONSES = (
 )
 DEFAULT_MAX_COMP_TOKENS = int(
     os.getenv("PRAPP_OPENAI_DEFAULT_MAX_COMPLETION_TOKENS", "2048")
+)
+
+# JSON completion sizing hints (tuneable via env vars for coordinated micro-batching)
+TOKENS_POR_ITEM_ESTIMADOS = max(
+    32,
+    int(
+        os.getenv(
+            "PRAPP_GPT_TOKENS_POR_ITEM_ESTIMADOS",
+            os.getenv("PRAPP_AI_COLUMNS_TOKENS_PER_ITEM", "220"),
+        )
+    ),
+)
+MAX_COMPLETION_TOKENS_JSON = max(
+    TOKENS_POR_ITEM_ESTIMADOS,
+    int(os.getenv("PRAPP_GPT_MAX_COMPLETION_TOKENS_JSON", "1200")),
+)
+MIN_COMPLETION_TOKENS_JSON = max(
+    TOKENS_POR_ITEM_ESTIMADOS,
+    min(
+        MAX_COMPLETION_TOKENS_JSON,
+        int(os.getenv("PRAPP_GPT_MIN_COMPLETION_TOKENS_JSON", "700")),
+    ),
 )
 
 _REASONING_PREFIXES = ("gpt-5", "o1", "o3", "o4")
@@ -197,6 +219,75 @@ def _extract_first_json_block(text: str) -> Tuple[Any, str]:
     raise InvalidJSONError("No se encontró JSON válido en la respuesta")
 
 
+def _strip_json_fences(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = text.replace("\ufeff", "").strip()
+    pattern = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+    blocks = pattern.findall(cleaned)
+    if blocks:
+        cleaned = "\n".join(blocks).strip()
+    cleaned = re.sub(r"```+", "", cleaned)
+    return cleaned.strip()
+
+
+def _find_largest_balanced_json(text: str) -> Optional[str]:
+    best: Optional[str] = None
+    best_len = 0
+    length = len(text)
+    for start in range(length):
+        char = text[start]
+        if char not in "{[":
+            continue
+        stack: List[str] = []
+        in_string = False
+        escape = False
+        for index in range(start, length):
+            current = text[index]
+            if in_string:
+                if escape:
+                    escape = False
+                elif current == "\\":
+                    escape = True
+                elif current == '"':
+                    in_string = False
+                continue
+            if current == '"':
+                in_string = True
+                continue
+            if current in "{[":
+                stack.append("}" if current == "{" else "]")
+                continue
+            if current in "}]":
+                if not stack or stack[-1] != current:
+                    break
+                stack.pop()
+                if not stack:
+                    candidate = text[start : index + 1]
+                    if len(candidate) > best_len:
+                        try:
+                            json.loads(candidate)
+                        except json.JSONDecodeError:
+                            break
+                        best = candidate
+                        best_len = len(candidate)
+                    break
+    return best
+
+
+def _ensure_instruction(existing: str, addition: str) -> str:
+    addition = addition.strip()
+    if not addition:
+        return existing.strip()
+    existing_lines = [line.strip() for line in existing.splitlines() if line.strip()]
+    if addition in existing_lines:
+        return "\n".join(existing_lines)
+    if existing_lines:
+        existing_lines.append(addition)
+        return "\n".join(existing_lines)
+    return addition
+
+
 def _parse_message_content(raw: Dict[str, Any]) -> Tuple[Optional[Any], str]:
     choices = raw.get("choices") or []
     if not choices:
@@ -226,15 +317,43 @@ def _parse_message_content(raw: Dict[str, Any]) -> Tuple[Optional[Any], str]:
     return parsed_json, text
 
 
+def _extract_finish_reason(raw: Mapping[str, Any]) -> Optional[str]:
+    choices = raw.get("choices") if isinstance(raw, Mapping) else None
+    if isinstance(choices, list) and choices:
+        choice0 = choices[0]
+        if isinstance(choice0, Mapping):
+            finish = choice0.get("finish_reason")
+            if isinstance(finish, str) and finish:
+                return finish
+            finish_details = choice0.get("finish_details")
+            if isinstance(finish_details, Mapping):
+                detail_reason = finish_details.get("reason") or finish_details.get("type")
+                if isinstance(detail_reason, str) and detail_reason:
+                    return detail_reason
+            message_block = choice0.get("message")
+            if isinstance(message_block, Mapping):
+                inner_reason = message_block.get("finish_reason") or message_block.get("reason")
+                if isinstance(inner_reason, str) and inner_reason:
+                    return inner_reason
+    return None
+
+
 def _parse_json_content(text: str) -> Any:
-    if not text:
-        raise InvalidJSONError("La respuesta JSON está vacía")
+    sanitized = _strip_json_fences(text)
+    if not sanitized:
+        exc = InvalidJSONError("La respuesta JSON está vacía")
+        setattr(exc, "sanitized_text", "")
+        raise exc
     try:
-        obj = json.loads(text)
+        obj = json.loads(sanitized)
     except json.JSONDecodeError:
-        obj, remainder = _extract_first_json_block(text)
-        if remainder:
-            raise InvalidJSONError("La respuesta JSON contiene texto adicional")
+        candidate = _find_largest_balanced_json(sanitized)
+        if not candidate:
+            obj, remainder = _extract_first_json_block(sanitized)
+            if remainder:
+                raise InvalidJSONError("La respuesta JSON contiene texto adicional")
+        else:
+            obj = json.loads(candidate)
     if not isinstance(obj, (dict, list)):
         raise InvalidJSONError("La respuesta JSON debe ser un objeto o lista")
     return obj
@@ -738,51 +857,156 @@ async def call_prompt_task_async(
         raise OpenAIError("No hay API key configurada")
     model_name = model or config.get_model()
 
+    json_only_task = is_json_only(canonical)
     schema = get_json_schema(canonical)
     response_format: Optional[Dict[str, Any]] = None
-    if is_json_only(canonical) and schema:
+    if json_only_task and schema:
         response_format = {"type": "json_schema", "json_schema": schema}
 
-    default_max_tokens = 450 if canonical == "DESIRE" else None
+    default_max_tokens: Optional[int]
+    if json_only_task:
+        default_max_tokens = MIN_COMPLETION_TOKENS_JSON
+    elif canonical == "DESIRE":
+        default_max_tokens = 450
+    else:
+        default_max_tokens = None
+
     call_max_tokens = max_tokens if max_tokens is not None else default_max_tokens
 
-    prompt_text = _message_text(messages)
-    prompt_tokens_est = _estimate_tokens(prompt_text)
-    if call_max_tokens:
-        try:
-            prompt_tokens_est += int(call_max_tokens)
-        except Exception:
-            prompt_tokens_est += 0
+    initial_json_tokens: Optional[int] = None
+    if json_only_task:
+        base_tokens = call_max_tokens if call_max_tokens is not None else MIN_COMPLETION_TOKENS_JSON
+        base_tokens = max(MIN_COMPLETION_TOKENS_JSON, int(base_tokens))
+        base_tokens = min(MAX_COMPLETION_TOKENS_JSON, base_tokens)
+        initial_json_tokens = base_tokens
+        call_max_tokens = base_tokens
 
-    total_estimated = max(prompt_tokens_est, estimated_tokens)
+    system_extra = ""
+    user_extra = ""
+    attempts = 0
+    max_attempts = 3
+    empty_retry_used = False
+    trimmed_hint_added = False
+    last_error: Optional[Exception] = None
 
-    raw = await call_gpt_async(
-        model=model_name,
-        messages=messages,
-        api_key=api_key,
-        temperature=temperature,
-        response_format=response_format,
-        max_tokens=call_max_tokens,
-        stop=stop,
-        estimated_tokens=total_estimated,
-        strict_json=strict_json,
-        **kwargs,
-    )
+    while attempts < max_attempts:
+        attempts += 1
+        iter_messages = [dict(messages[0]), dict(messages[1])]
+        if len(messages) > 2:
+            iter_messages.extend(dict(msg) for msg in messages[2:])
 
-    parsed_json, text_content = _parse_message_content(raw)
-    if is_json_only(canonical):
-        content = parsed_json if parsed_json is not None else _parse_json_content(text_content)
-        if not isinstance(content, (dict, list)):
-            raise InvalidJSONError("La respuesta JSON debe ser un objeto o lista")
-    else:
-        if text_content:
-            content = text_content
-        elif parsed_json is not None:
-            content = json.dumps(parsed_json, ensure_ascii=False)
+        if system_extra:
+            sys_content = str(iter_messages[0].get("content", ""))
+            iter_messages[0]["content"] = (sys_content + "\n\n" + system_extra).strip()
+        if user_extra:
+            user_content = str(iter_messages[1].get("content", ""))
+            iter_messages[1]["content"] = (user_content + "\n\n" + user_extra).strip()
+
+        prompt_text = _message_text(iter_messages)
+        prompt_tokens_est = _estimate_tokens(prompt_text)
+        max_tokens_arg = call_max_tokens
+        if max_tokens_arg:
+            try:
+                prompt_tokens_est += int(max_tokens_arg)
+            except Exception:
+                pass
+        total_estimated = max(prompt_tokens_est, estimated_tokens)
+
+        raw = await call_gpt_async(
+            model=model_name,
+            messages=iter_messages,
+            api_key=api_key,
+            temperature=temperature,
+            response_format=response_format,
+            max_tokens=max_tokens_arg,
+            stop=stop,
+            estimated_tokens=total_estimated,
+            strict_json=strict_json,
+            **kwargs,
+        )
+
+        finish_reason = _extract_finish_reason(raw)
+        reason_lower = (finish_reason or "").lower()
+        truncated = json_only_task and reason_lower in {"length", "json_truncated"}
+
+        parsed_json, text_content = _parse_message_content(raw)
+        parse_exception: Optional[InvalidJSONError] = None
+        content: Any
+        if json_only_task:
+            if parsed_json is not None:
+                content = parsed_json
+            else:
+                try:
+                    content = _parse_json_content(text_content)
+                except InvalidJSONError as exc:
+                    parse_exception = exc
+                    content = None
+            parsed_is_empty = content in ({}, []) or content is None
+            sanitized_empty = bool(
+                parse_exception and getattr(parse_exception, "sanitized_text", None) == ""
+            )
+
+            if truncated:
+                last_error = InvalidJSONError(
+                    "La respuesta JSON quedó truncada antes de completarse"
+                )
+                if initial_json_tokens is not None:
+                    call_max_tokens = max(call_max_tokens or 0, initial_json_tokens)
+                if (call_max_tokens or 0) < MAX_COMPLETION_TOKENS_JSON:
+                    call_max_tokens = max(
+                        initial_json_tokens or MIN_COMPLETION_TOKENS_JSON,
+                        MAX_COMPLETION_TOKENS_JSON,
+                    )
+                if not trimmed_hint_added:
+                    user_extra = _ensure_instruction(user_extra, "Responde solo con las claves requeridas.")
+                    trimmed_hint_added = True
+                if attempts < max_attempts:
+                    continue
+                raise last_error
+
+            if parse_exception is not None:
+                if sanitized_empty and not empty_retry_used and attempts < max_attempts:
+                    system_extra = _ensure_instruction(
+                        system_extra,
+                        "DEVUELVE EXCLUSIVAMENTE JSON VÁLIDO sin texto adicional ni fences.",
+                    )
+                    user_extra = _ensure_instruction(
+                        user_extra,
+                        "Responde solo con las claves requeridas.",
+                    )
+                    empty_retry_used = True
+                    last_error = parse_exception
+                    continue
+                raise parse_exception
+
+            if parsed_is_empty and not empty_retry_used and attempts < max_attempts:
+                system_extra = _ensure_instruction(
+                    system_extra,
+                    "DEVUELVE EXCLUSIVAMENTE JSON VÁLIDO sin texto adicional ni fences.",
+                )
+                user_extra = _ensure_instruction(
+                    user_extra,
+                    "Responde solo con las claves requeridas.",
+                )
+                empty_retry_used = True
+                last_error = InvalidJSONError("La respuesta JSON está vacía tras el parseo")
+                continue
+
+            if not isinstance(content, (dict, list)):
+                raise InvalidJSONError("La respuesta JSON debe ser un objeto o lista")
         else:
-            content = ""
+            if text_content:
+                content = text_content
+            elif parsed_json is not None:
+                content = json.dumps(parsed_json, ensure_ascii=False)
+            else:
+                content = ""
 
-    return {"ok": True, "task": canonical, "content": content, "raw": raw}
+        return {"ok": True, "task": canonical, "content": content, "raw": raw}
+
+    if last_error:
+        raise last_error
+    raise InvalidJSONError("No se pudo obtener una respuesta JSON válida tras reintentos")
 
 
 def call_prompt_task(
