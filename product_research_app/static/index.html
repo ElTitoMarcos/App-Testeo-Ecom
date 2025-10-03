@@ -59,6 +59,9 @@ body.dark #pageSizeSelect { background:#1f2344; color:#eaeaea; border-color:#444
 .pager button { padding:4px 8px; border-radius:6px; line-height:1; }
 .pager .page-info { font-size:12px; opacity:0.85; min-width:72px; text-align:center; }
 .pager button[disabled] { opacity:0.5; cursor:not-allowed; }
+/* Oculta hasta reubicar en la barra inferior para evitar parpadeo */
+#pageControls { visibility:hidden; }
+body.pager-mounted #pageControls { visibility:visible; }
 
 #section-trends[hidden]{display:none;}
 #trendHeader{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin-bottom:16px;}
@@ -143,7 +146,7 @@ body.dark .skeleton{background:#333;}
     </div>
     <div id="searchRowRight">
       <div id="listMeta">0 resultados</div>
-      <!-- Controles de paginación -->
+      <!-- Controles de paginación (se crean aquí pero se moverán a la barra inferior al cargar) -->
       <div class="page-controls" id="pageControls">
         <label for="pageSizeSelect">Mostrar</label>
         <select id="pageSizeSelect" aria-label="Tamaño de página">
@@ -1754,36 +1757,73 @@ function sortBy(field, type) {
     updatePagerUI();
     updateResultsBadge();
 
-    const tid = localStorage.getItem(IMPORT_TASK_LS_KEY);
-  if (tid) {
-    toast.info('Reanudando importación previa…');
-    const host = getGlobalProgressHost();
-    const tracker = LoadingHelpers.start('Importando catálogo', { host });
-    setEtaTracker(tracker);
-    setProgressUI(0);
-    tracker.setStage('Reanudando…');
-    try {
-      const result = await followImportTask(tid, tracker, {
-        host,
-        secondsPerItem: ETA_SECONDS_PER_ITEM,
-      });
-      const importedCount = result?.imported ?? result?.rows_imported;
-      if (Number.isFinite(importedCount) && importedCount > 0) {
-        toast.success(`Importados ${importedCount}`);
+    // ——— Reubicar paginación a la derecha de “Columnas” en la barra inferior ———
+    function findButtonByText(text) {
+      const all = document.querySelectorAll('button, a, [role="button"], .btn');
+      for (const el of all) {
+        const t = (el.textContent || '').trim().toLowerCase();
+        if (t === text.toLowerCase() || t.includes(text.toLowerCase())) return el;
       }
-      tracker.setStage('Completado');
-    } catch (err) {
-      tracker.setStage('Error');
-      stopEtaProgress(false);
-      toast.error(err?.message || 'Error en importación');
-    } finally {
-      localStorage.removeItem(IMPORT_TASK_LS_KEY);
-      tracker.done();
-      hideImportBanner();
-      setEtaTracker(null);
+      return null;
     }
-  }
-};
+    function placePagerBottomRight(retries = 12) {
+      const pager = document.getElementById('pageControls');
+      if (!pager) return;
+      const columnasBtn = findButtonByText('Columnas');
+      if (columnasBtn && columnasBtn.parentElement) {
+        columnasBtn.insertAdjacentElement('afterend', pager);
+        pager.style.marginLeft = '12px';
+        pager.style.marginRight = '0';
+        document.body.classList.add('pager-mounted');
+        return;
+      }
+      const bars = document.querySelectorAll('#bottomBar, .bottom-bar, .bulk-actions, footer, .footer-actions');
+      for (const bar of bars) {
+        if (bar && /Exportar|seleccionados|Columnas/i.test(bar.textContent || '')) {
+          bar.appendChild(pager);
+          pager.style.marginLeft = 'auto';
+          document.body.classList.add('pager-mounted');
+          return;
+        }
+      }
+      if (retries > 0) {
+        setTimeout(() => placePagerBottomRight(retries - 1), 150);
+      } else {
+        document.body.classList.add('pager-mounted');
+      }
+    }
+    placePagerBottomRight();
+
+    const tid = localStorage.getItem(IMPORT_TASK_LS_KEY);
+    if (tid) {
+      toast.info('Reanudando importación previa…');
+      const host = getGlobalProgressHost();
+      const tracker = LoadingHelpers.start('Importando catálogo', { host });
+      setEtaTracker(tracker);
+      setProgressUI(0);
+      tracker.setStage('Reanudando…');
+      try {
+        const result = await followImportTask(tid, tracker, {
+          host,
+          secondsPerItem: ETA_SECONDS_PER_ITEM,
+        });
+        const importedCount = result?.imported ?? result?.rows_imported;
+        if (Number.isFinite(importedCount) && importedCount > 0) {
+          toast.success(`Importados ${importedCount}`);
+        }
+        tracker.setStage('Completado');
+      } catch (err) {
+        tracker.setStage('Error');
+        stopEtaProgress(false);
+        toast.error(err?.message || 'Error en importación');
+      } finally {
+        localStorage.removeItem(IMPORT_TASK_LS_KEY);
+        tracker.done();
+        hideImportBanner();
+        setEtaTracker(null);
+      }
+    }
+  };
 // Toggle config panel
 document.getElementById('configBtn').onclick = async () => {
   await openConfigModal();
