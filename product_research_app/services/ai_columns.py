@@ -810,7 +810,7 @@ def _recover_missing_sync(
                 messages=messages,
                 api_key=api_key,
                 temperature=0.2,
-                max_tokens=max_tokens,
+                max_output_tokens=max_tokens,
                 estimated_tokens=est_tokens,
             )
         except gpt.OpenAIError:
@@ -1329,7 +1329,7 @@ async def _call_batch_with_retries(
                 messages=messages,
                 api_key=api_key,
                 temperature=0.2,
-                max_tokens=max_tokens,
+                max_output_tokens=max_tokens,
                 estimated_tokens=tokens_est,
                 strict_json=STRICT_JSON_ENABLED,
             )
@@ -1439,7 +1439,7 @@ async def _call_triage_batch(
         messages=messages,
         api_key=api_key,
         temperature=0.2,
-        max_tokens=max_tokens,
+        max_output_tokens=max_tokens,
         estimated_tokens=tokens_est,
         strict_json=strict_json,
     )
@@ -1604,7 +1604,7 @@ async def _refine_desire_statement(
                 f"Borrador previo:\n{draft_text.strip()}\n\n" + DESIRE_REFINE_EXTRA_USER
             ),
             mode="refine_no_product",
-            max_tokens=450,
+            max_output_tokens=450,
             stop=None,
         )
     except gpt.OpenAIError as exc:
