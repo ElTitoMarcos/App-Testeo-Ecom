@@ -3,7 +3,17 @@ from __future__ import annotations
 import json
 from typing import Dict, Iterable, List, Set
 
-REQUIRED_FIELDS = ("desire", "desire_label", "desire_magnitude")
+REQUIRED_FIELDS = (
+    "desire",
+    "desire_reason",
+    "competition",
+    "competition_level",
+    "revenue",
+    "units_sold",
+    "price",
+    "oldness",
+    "rating",
+)
 
 
 def parse_jsonl_and_validate(text: str, expected_ids: Iterable[int]) -> Dict[int, dict]:

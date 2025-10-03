@@ -14,20 +14,30 @@ def score_item_schema():
         "properties": {
             "id": {"type": "integer"},
             "desire": {"type": "number", "minimum": 0, "maximum": 1},
-            "desire_label": {"type": "string", "minLength": 1},
-            "desire_magnitude": {
-                "type": "number",
-                "minimum": 0,
-                "maximum": 1,
-            },
+            "desire_reason": {"type": "string", "minLength": 1},
+            "competition": {"type": "number", "minimum": 0, "maximum": 1},
             "competition_level": {
-                "type": "number",
-                "minimum": 0,
-                "maximum": 1,
+                "type": "string",
+                "enum": ["low", "medium", "high"],
             },
-            "price": {"type": "number"},
+            "revenue": {"type": "number", "minimum": 0},
+            "units_sold": {"type": "number", "minimum": 0},
+            "price": {"type": "number", "minimum": 0},
+            "oldness": {"type": "number", "minimum": 0, "maximum": 1},
+            "rating": {"type": "number", "minimum": 0, "maximum": 5},
         },
-        "required": ["id", "desire", "desire_label", "desire_magnitude"],
+        "required": [
+            "id",
+            "desire",
+            "desire_reason",
+            "competition",
+            "competition_level",
+            "revenue",
+            "units_sold",
+            "price",
+            "oldness",
+            "rating",
+        ],
     }
 
 
@@ -97,12 +107,10 @@ def parse_triage(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def build_score_messages(batch: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     """Construye mensajes para puntuar productos."""
-    sys = (
-        "Eres un analista. Devuelve únicamente un objeto JSON con esta forma: {\"items\":[ ... ]}. "
-        "Nada de texto adicional, ni markdown. Cada objeto del array debe corresponder al producto solicitado en el mismo orden e incluir como mínimo: "
-        "id, desire, desire_label, desire_magnitude. Añade competition_level y price cuando puedas inferirlos. Prohibidas las explicaciones."
-    )
-    items = []
+    from .prompt_templates import STRICT_JSONL_PROMPT
+
+    ids = [p["id"] for p in batch]
+    items: List[Dict[str, Any]] = []
     for p in batch:
         items.append(
             {
@@ -112,12 +120,61 @@ def build_score_messages(batch: List[Dict[str, Any]]) -> List[Dict[str, str]]:
                 "desc": (p.get("description") or "")[:1200],
             }
         )
-    user = (
-        "Evalúa cada producto y devuelve únicamente un objeto JSON con clave items cuyo valor sea un array en el mismo orden. "
-        "Prohibido añadir comentarios o texto antes o después. Usa desire_magnitude entre 0 y 1 y etiqueta corta en desire_label. "
-        f"INPUT={json.dumps(items, ensure_ascii=False)}"
+    instruction = STRICT_JSONL_PROMPT(ids, tuple(AI_FIELDS))
+    user_content = instruction + json.dumps(items, ensure_ascii=False, indent=2)
+    sys_prompt = (
+        "Eres un motor determinista de transformación de datos. Devuelves SOLO JSON válido que cumpla exactamente el esquema indicado. No añades texto adicional."
     )
-    return [{"role": "system", "content": sys}, {"role": "user", "content": user}]
+    return [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_content}]
+
+
+def _bucket_from_fraction(score: float) -> str:
+    if score <= 0.33:
+        return "Low"
+    if score >= 0.67:
+        return "High"
+    return "Medium"
+
+
+def _awareness_from_fraction(score: float) -> str:
+    if score >= 0.85:
+        return "Most Aware"
+    if score >= 0.65:
+        return "Product-Aware"
+    if score >= 0.45:
+        return "Solution-Aware"
+    return "Problem-Aware"
+
+
+def _normalise_competition(label: str, score: float) -> str:
+    mapping = {
+        "low": "Low",
+        "bajo": "Low",
+        "medium": "Medium",
+        "medio": "Medium",
+        "med": "Medium",
+        "high": "High",
+        "alto": "High",
+    }
+    key = label.strip().lower()
+    if key in mapping:
+        return mapping[key]
+    return _bucket_from_fraction(score)
+
+
+def _coerce_fraction(value: Any) -> float:
+    if isinstance(value, (int, float)):
+        num = float(value)
+    else:
+        try:
+            num = float(str(value).strip())
+        except Exception:
+            raise ValueError("invalid fraction")
+    if num > 1:
+        num /= 100.0
+    if not 0.0 <= num <= 1.0:
+        raise ValueError("fraction out of range")
+    return num
 
 
 def parse_score(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -129,16 +186,39 @@ def parse_score(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
         txt = str(content)
     try:
         data = json.loads(txt)
-        assert isinstance(data, list)
-        rows = []
-        for x in data:
-            if not isinstance(x, dict) or "id" not in x:
+        if isinstance(data, dict):
+            items = data.get("items")
+        else:
+            items = data
+        if not isinstance(items, list):
+            return []
+        rows: List[Dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict) or "id" not in item:
                 continue
-            row = {"id": int(x["id"])}
-            for k in AI_FIELDS:
-                if k in x:
-                    row[k] = x[k]
-            rows.append(row)
+            try:
+                pid = int(item["id"])
+            except Exception:
+                continue
+            try:
+                desire_score = _coerce_fraction(item.get("desire"))
+                comp_score = _coerce_fraction(item.get("competition"))
+            except Exception:
+                continue
+            reason = str(item.get("desire_reason") or "").strip()
+            if not reason:
+                continue
+            comp_label_raw = str(item.get("competition_level") or "")
+            comp_label = _normalise_competition(comp_label_raw, comp_score)
+            rows.append(
+                {
+                    "id": pid,
+                    "desire": reason,
+                    "desire_magnitude": _bucket_from_fraction(desire_score),
+                    "awareness_level": _awareness_from_fraction(desire_score),
+                    "competition_level": comp_label,
+                }
+            )
         return rows
     except Exception:
         return []

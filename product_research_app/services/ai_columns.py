@@ -156,7 +156,7 @@ class BatchRequest:
     candidates: List[Candidate]
     user_text: str
     prompt_tokens_est: int
-    product_map: Dict[int, str]
+    product_map: Dict[int, Dict[str, Any]]
     depth: int = 0
     json_retry_count: int = 0
     adapted: bool = False
@@ -442,14 +442,7 @@ def _log_ko_event(
 
 
 SYSTEM_PROMPT = (
-    "Eres un analista de marketing. Devuelve únicamente un ARRAY JSON puro, sin comentarios, sin markdown y sin texto extra. "
-    "Cada elemento del array debe corresponder al producto solicitado, mantener el mismo orden e incluir como mínimo: "
-    "id, desire, desire_label y desire_magnitude (0 a 1). Añade competition_level (0 a 1) y price cuando puedas inferirlos. "
-    "Prohibidas las explicaciones o notas de ningún tipo."
-)
-USER_INSTRUCTION = (
-    "Analiza los siguientes productos y responde exclusivamente con un ARRAY JSON siguiendo el formato indicado. "
-    "No añadas texto antes o después."
+    "Eres un motor determinista de transformación de datos. Devuelves SOLO JSON válido que cumpla exactamente el esquema indicado. No añades texto adicional."
 )
 
 def _truncate_text(value: Any, limit: int) -> str:
@@ -493,7 +486,7 @@ def _build_product_payload(
 ) -> Dict[str, Any]:
     payload = candidate.payload
     extra = candidate.extra or {}
-    product: Dict[str, Any] = {"id": str(candidate.id)}
+    product: Dict[str, Any] = {"id": int(candidate.id)}
 
     title = _truncate_text(payload.get("name"), trunc_title)
     if title:
@@ -555,17 +548,16 @@ def _build_batch_request(
     json_retry_count: int = 0,
     adapted: bool = False,
 ) -> BatchRequest:
-    product_lines: List[str] = []
-    product_map: Dict[int, str] = {}
+    products: List[Dict[str, Any]] = []
+    product_map: Dict[int, Dict[str, Any]] = {}
     for cand in candidates:
         product_payload = _build_product_payload(cand, trunc_title, trunc_desc)
-        line = json.dumps(product_payload, ensure_ascii=False, separators=(",", ":"))
-        product_lines.append(line)
-        product_map[cand.id] = line
+        products.append(product_payload)
+        product_map[cand.id] = product_payload
     ids = [cand.id for cand in candidates]
     instruction = STRICT_JSONL_PROMPT(ids, AI_FIELDS)
-    user_parts = [instruction, USER_INSTRUCTION, "### PRODUCTOS", *product_lines]
-    user_text = "\n".join(part for part in user_parts if part)
+    products_json = json.dumps(products, ensure_ascii=False, indent=2)
+    user_text = instruction + products_json
     prompt_tokens_est = _estimate_tokens_from_text(SYSTEM_PROMPT, user_text) + len(candidates) * 8
     return BatchRequest(
         req_id=req_id,
@@ -637,6 +629,126 @@ def _parse_jsonl_loose(text: str) -> Dict[int, Dict[str, Any]]:
     return result
 
 
+def _coerce_fraction(value: Any, *, label: str) -> float:
+    fraction = _score01_to_percent(value, label=label) / 100.0
+    if not 0.0 <= fraction <= 1.0:
+        raise ValueError(f"{label} fuera de rango (0-1)")
+    return float(fraction)
+
+
+def _coerce_non_negative(value: Any, *, label: str) -> float:
+    try:
+        num = float(value)
+    except Exception as exc:
+        raise ValueError(f"{label} debe ser numérico") from exc
+    if num < 0:
+        raise ValueError(f"{label} debe ser >=0")
+    return float(num)
+
+
+def _coerce_rating(value: Any) -> float:
+    try:
+        num = float(value)
+    except Exception as exc:
+        raise ValueError("rating debe ser numérico") from exc
+    if num < 0 or num > 5:
+        raise ValueError("rating fuera de rango (0-5)")
+    return float(num)
+
+
+def _normalize_ai_item(
+    item: Mapping[str, Any], *, product_id: int
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    if not isinstance(item, Mapping):
+        raise ValueError("Cada elemento debe ser un objeto JSON")
+
+    desire_score = _coerce_fraction(item.get("desire"), label="desire")
+    competition_score = _coerce_fraction(item.get("competition"), label="competition")
+    oldness_score = _coerce_fraction(item.get("oldness"), label="oldness")
+    revenue_val = _coerce_non_negative(item.get("revenue"), label="revenue")
+    units_val = _coerce_non_negative(item.get("units_sold"), label="units_sold")
+    price_val = _coerce_non_negative(item.get("price"), label="price")
+    rating_val = _coerce_rating(item.get("rating"))
+
+    reason_raw = item.get("desire_reason")
+    if not isinstance(reason_raw, str) or not reason_raw.strip():
+        raise ValueError("desire_reason debe ser string no vacío")
+    reason_clean = cleanse(reason_raw).strip()
+    if not reason_clean:
+        reason_clean = reason_raw.strip()
+
+    comp_level_raw = str(item.get("competition_level") or "").strip()
+    competition_pct = competition_score * 100.0
+    comp_bucket = _normalize_tri_bucket(comp_level_raw, competition_pct)
+    if comp_bucket is None:
+        comp_bucket = _tri_label_from_percent(competition_pct)
+
+    desire_pct = desire_score * 100.0
+    desire_bucket = _tri_label_from_percent(desire_pct)
+    awareness = _awareness_from_desire_pct(desire_pct)
+
+    audit_payload: Dict[str, Any] = {
+        "desire_score": round(desire_score, 4),
+        "competition_score": round(competition_score, 4),
+        "competition_level_input": comp_level_raw,
+        "revenue": round(revenue_val, 4),
+        "units_sold": round(units_val, 4),
+        "price": round(price_val, 4),
+        "oldness": round(oldness_score, 4),
+        "rating": round(rating_val, 4),
+        "confidence": 1.0,
+    }
+
+    serialisable_item: Dict[str, Any] = {
+        "id": int(product_id),
+        "desire": round(desire_score, 2),
+        "desire_reason": reason_clean,
+        "competition": round(competition_score, 2),
+        "competition_level": (comp_bucket or "Medium").lower(),
+        "revenue": round(revenue_val, 2),
+        "units_sold": round(units_val, 2),
+        "price": round(price_val, 2),
+        "oldness": round(oldness_score, 2),
+        "rating": round(rating_val, 2),
+    }
+
+    normalized: Dict[str, Any] = {
+        "product_id": int(product_id),
+        "desire": reason_clean,
+        "desire_statement": reason_clean,
+        "desire_magnitude": desire_bucket,
+        "awareness_level": awareness,
+        "competition_level": comp_bucket,
+        "_audit": audit_payload,
+    }
+
+    return normalized, serialisable_item
+
+
+def _coerce_ai_payload(entry: Mapping[str, Any], product_id: int) -> Dict[str, Any]:
+    if not isinstance(entry, Mapping):
+        raise ValueError("Respuesta AI inválida")
+    if {
+        "desire_statement",
+        "desire_magnitude",
+        "competition_level",
+    }.issubset(set(entry.keys())):
+        payload = dict(entry)
+        payload.setdefault("product_id", product_id)
+        return payload
+    normalized, _ = _normalize_ai_item(entry, product_id=product_id)
+    return normalized
+
+
+def _normalize_response_map(raw_map: Mapping[int, Mapping[str, Any]]) -> Dict[int, Dict[str, Any]]:
+    normalized: Dict[int, Dict[str, Any]] = {}
+    for pid, payload in raw_map.items():
+        try:
+            normalized[int(pid)] = _coerce_ai_payload(payload, int(pid))
+        except Exception:
+            continue
+    return normalized
+
 def _score01_to_percent(value: Any, *, label: str) -> float:
     if isinstance(value, (int, float)):
         num = float(value)
@@ -704,9 +816,13 @@ def _usage_summary(usage: Any) -> str:
 
 def _build_missing_prompt(batch: BatchRequest, missing_ids: List[int]) -> str:
     prompt = MISSING_ONLY_JSONL_PROMPT(missing_ids, AI_FIELDS)
-    product_lines = [batch.product_map.get(pid, "") for pid in missing_ids]
-    body = "\n".join(line for line in product_lines if line)
-    return "\n".join(part for part in (prompt, "### PRODUCTOS", body) if part)
+    products = [
+        batch.product_map.get(pid)
+        for pid in missing_ids
+        if pid in batch.product_map and batch.product_map.get(pid)
+    ]
+    products_json = json.dumps(products, ensure_ascii=False, indent=2)
+    return prompt + products_json
 
 
 def _parse_strict_json_payload(
@@ -766,7 +882,7 @@ def _parse_strict_json_payload(
     serialisable: List[Dict[str, Any]] = []
     expected_iter = [int(pid) for pid in expected_ids]
     for expected_pid, item in zip(expected_iter, payload_list):
-        if not isinstance(item, dict):
+        if not isinstance(item, Mapping):
             raise ValueError("Cada elemento del array debe ser un objeto JSON")
         actual_id = item.get("id", expected_pid)
         try:
@@ -777,67 +893,13 @@ def _parse_strict_json_payload(
             raise ValueError(
                 f"ID inesperado: respuesta={actual_pid} esperado={expected_pid}"
             )
-        desire_raw = item.get("desire")
-        if not isinstance(desire_raw, str) or not desire_raw.strip():
-            raise ValueError("desire debe ser string no vacío")
-        desire_label_raw = item.get("desire_label")
-        if not isinstance(desire_label_raw, str) or not desire_label_raw.strip():
-            raise ValueError("desire_label debe ser string no vacío")
-        desire_pct = _score01_to_percent(
-            item.get("desire_magnitude"), label="desire_magnitude"
-        )
-        comp_pct: Optional[float] = None
-        comp_value = item.get("competition_level")
-        if comp_value is not None:
-            comp_pct = _score01_to_percent(comp_value, label="competition_level")
-        price_val = item.get("price")
-        price_num: Optional[float] = None
-        if price_val is not None:
-            try:
-                price_num = float(price_val)
-            except Exception:
-                price_num = None
-        confidence = _coerce_confidence(
-            item.get("confidence"), required=require_confidence
-        )
-        desire_text = cleanse(desire_raw).strip()
-        if not desire_text:
-            desire_text = desire_raw.strip()
-        desire_bucket = _normalize_tri_bucket(desire_label_raw, desire_pct) or "Medium"
-        comp_bucket = _normalize_tri_bucket(item.get("competition_label"), comp_pct)
-        awareness = _awareness_from_desire_pct(desire_pct)
-        audit_payload: Dict[str, Any] = {
-            "desire_pct": round(desire_pct, 4),
-            "desire_label_raw": desire_label_raw.strip(),
-        }
-        if comp_pct is not None:
-            audit_payload["competition_pct"] = round(comp_pct, 4)
-        if price_num is not None:
-            audit_payload["price"] = price_num
-        if confidence is not None:
-            audit_payload["confidence"] = confidence
-        serialisable_item: Dict[str, Any] = {
-            "id": actual_pid,
-            "desire": desire_text,
-            "desire_label": desire_bucket,
-            "desire_magnitude": round(desire_pct / 100.0, 4),
-        }
-        if comp_pct is not None:
-            serialisable_item["competition_level"] = round(comp_pct / 100.0, 4)
-        if price_num is not None:
-            serialisable_item["price"] = price_num
-        serialisable.append(serialisable_item)
-        result[actual_pid] = {
-            "product_id": actual_pid,
-            "desire": desire_text,
-            "desire_statement": desire_text,
-            "desire_magnitude": desire_bucket,
-            "awareness_level": awareness,
-            "competition_level": comp_bucket,
-            "_audit": audit_payload,
-        }
+        normalized_entry, serial_item = _normalize_ai_item(item, product_id=actual_pid)
+        serialisable.append(serial_item)
+        result[actual_pid] = normalized_entry
     if raw_text is None:
-        raw_text = json.dumps(serialisable, ensure_ascii=False, separators=(",", ":"))
+        raw_text = json.dumps(
+            {"items": serialisable}, ensure_ascii=False, separators=(",", ":")
+        )
     return result, raw_text
 
 
@@ -912,11 +974,15 @@ async def _finalize_batch_payload(
     for cand in batch.candidates:
         pid = str(cand.id)
         entry = data_map.get(pid)
-        if not isinstance(entry, dict):
+        if not isinstance(entry, Mapping):
             if pid not in ko:
                 ko[pid] = "missing"
             continue
-        desire_payload = dict(entry)
+        try:
+            desire_payload = _coerce_ai_payload(entry, cand.id)
+        except ValueError as exc:
+            ko[pid] = str(exc)
+            continue
         draft_raw = str(
             desire_payload.get("desire_statement")
             or desire_payload.get("desire")
@@ -1546,9 +1612,10 @@ async def _call_triage_batch(
             raw_payload_text = None
         if raw_payload_text:
             try:
-                strict_map = parse_jsonl_and_validate(raw_payload_text, expected_ids)
+                parsed_map = parse_jsonl_and_validate(raw_payload_text, expected_ids)
             except ValueError:
-                strict_map = _parse_jsonl_loose(raw_payload_text)
+                parsed_map = _parse_jsonl_loose(raw_payload_text)
+            strict_map = _normalize_response_map(parsed_map)
         else:
             strict_map = {}
     usage = raw.get("usage", {}) or {}
