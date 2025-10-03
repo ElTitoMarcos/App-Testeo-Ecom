@@ -3,7 +3,28 @@ import pytest
 from product_research_app.prompts import registry
 
 
-@pytest.mark.parametrize("task", ["A", "B", "C", "D", "E", "E_auto"])
+@pytest.mark.parametrize(
+    "task",
+    [
+        "A",
+        "B",
+        "C",
+        "D",
+        "E",
+        "E_auto",
+        "DESIRE",
+        "todo-terreno",
+        "refactor",
+        "bug_fix",
+        "unit_tests",
+        "docstrings",
+        "migration",
+        "api-endpoint",
+        "sql_query",
+        "cli-tool",
+        "json_report",
+    ],
+)
 def test_prompts_available(task: str) -> None:
     system_prompt = registry.get_system_prompt(task)
     assert system_prompt == registry.PROMPT_MASTER_V3_SYSTEM
@@ -15,7 +36,22 @@ def test_prompts_available(task: str) -> None:
 def test_json_only_flags() -> None:
     assert registry.is_json_only("B") is True
     assert registry.is_json_only("E_auto") is True
-    for task in ["A", "C", "D", "E"]:
+    assert registry.is_json_only("JSON_REPORT") is True
+    for task in [
+        "A",
+        "C",
+        "D",
+        "E",
+        "TODO_TERRENO",
+        "REFACTOR",
+        "BUGFIX",
+        "UNIT_TESTS",
+        "DOCSTRINGS",
+        "MIGRATION",
+        "API_ENDPOINT",
+        "SQL_QUERY",
+        "CLI_TOOL",
+    ]:
         assert registry.is_json_only(task) is False
 
 
@@ -45,3 +81,17 @@ def test_json_schema_task_e_auto() -> None:
     assert {"aprobado", "revisar", "descartar"} == set(status_enum)
     signals = item_schema["properties"]["signals"]
     assert signals["type"] == "array"
+
+
+def test_json_schema_task_json_report() -> None:
+    schema = registry.get_json_schema("JSON_REPORT")
+    assert schema is not None
+    props = schema["schema"]["properties"]
+    assert props["items"]["type"] == "array"
+    item_schema = props["items"]["items"]
+    required = set(item_schema["required"])
+    assert required == {"id", "score", "reason"}
+    score = item_schema["properties"]["score"]
+    assert score["minimum"] == 0
+    assert score["maximum"] == 1
+    assert score["multipleOf"] == 0.01
