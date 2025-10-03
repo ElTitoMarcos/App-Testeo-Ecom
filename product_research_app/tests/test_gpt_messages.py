@@ -49,4 +49,8 @@ def test_prepare_params_with_schema_json_mode():
     )
     assert payload["response_format"]["type"] == "json_schema"
     assert payload["response_format"]["json_schema"] == schema
+    assert (
+        payload["response_format"]["json_schema"]["schema"]["type"]
+        == "object"
+    )
     assert "temperature" not in payload
