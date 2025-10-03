@@ -716,13 +716,20 @@ def _parse_strict_json_payload(
     require_confidence: bool = False,
 ) -> Tuple[Dict[int, Dict[str, Any]], str]:
     parsed_json, text_content = gpt._parse_message_content(raw)
-    payload_list: Optional[List[Any]] = None
-    if isinstance(parsed_json, list):
-        payload_list = list(parsed_json)
-    elif isinstance(parsed_json, dict):
-        maybe = parsed_json.get("results")
-        if isinstance(maybe, list):
-            payload_list = list(maybe)
+
+    def _extract_payload(obj: Any) -> Optional[List[Any]]:
+        if isinstance(obj, list):
+            return list(obj)
+        if isinstance(obj, dict):
+            items = obj.get("items")
+            if isinstance(items, list):
+                return list(items)
+            maybe_results = obj.get("results")
+            if isinstance(maybe_results, list):
+                return list(maybe_results)
+        return None
+
+    payload_list: Optional[List[Any]] = _extract_payload(parsed_json)
     raw_text: Optional[str] = None
     usage = raw.get("usage", {}) or {}
     finish_reason = _extract_finish_reason(raw)
@@ -745,9 +752,9 @@ def _parse_strict_json_payload(
             loaded = json.loads(source_text)
         except Exception as exc:
             raise ValueError("Respuesta no es JSON válido") from exc
-        if not isinstance(loaded, list):
+        payload_list = _extract_payload(loaded)
+        if payload_list is None:
             raise ValueError("Se esperaba un array JSON")
-        payload_list = list(loaded)
         raw_text = source_text
     if payload_list is None:
         raise ValueError("Respuesta sin array JSON")

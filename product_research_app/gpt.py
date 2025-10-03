@@ -983,13 +983,26 @@ def prepare_params(
     if stop is not None:
         payload["stop"] = stop
 
-    if response_format is not None:
-        payload["response_format"] = response_format
-
     if max_tokens is not None and "max_tokens" not in extra_kwargs:
         extra_kwargs["max_tokens"] = max_tokens
 
     json_schema = extra_kwargs.pop("json_schema", None)
+
+    if strict_json:
+        if json_schema:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": json_schema,
+            }
+        else:
+            payload["response_format"] = {"type": "json_object"}
+    elif json_schema:
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": json_schema,
+        }
+    elif response_format is not None:
+        payload["response_format"] = response_format
 
     token_keys = ("max_tokens", "max_completion_tokens", "max_output_tokens")
     for token_key in token_keys:
@@ -1014,20 +1027,6 @@ def prepare_params(
             value = extra_kwargs.pop(key)
             if value is not None:
                 payload[key] = value
-
-    if strict_json:
-        if json_schema:
-            payload["response_format"] = {
-                "type": "json_schema",
-                "json_schema": json_schema,
-            }
-        elif "response_format" not in payload:
-            payload["response_format"] = {"type": "json_object"}
-    elif json_schema and "response_format" not in payload:
-        payload["response_format"] = {
-            "type": "json_schema",
-            "json_schema": json_schema,
-        }
 
     _apply_token_limit_param(model, payload)
     _strip_unsupported_sampling(model, payload)
@@ -1106,13 +1105,25 @@ async def _http_post_chat(
                 )
         return data
 
+    detail_text: Optional[str] = None
     try:
         err = response.json()
-        msg = err.get("error", {}).get("message", response.text)
+        error_block = err.get("error", {}) if isinstance(err, dict) else {}
+        if isinstance(error_block, dict):
+            msg = error_block.get("message", response.text)
+            raw_detail = error_block.get("detail")
+            if raw_detail:
+                detail_text = str(raw_detail)
+        else:
+            msg = response.text
     except Exception:
+        err = None
         msg = response.text
     status = int(response.status_code)
-    message = f"OpenAI API returned status {status}: {msg}"
+    if status == 400 and detail_text:
+        message = f"OpenAI API returned status {status}: {msg} (detail: {detail_text})"
+    else:
+        message = f"OpenAI API returned status {status}: {msg}"
     error = OpenAIError(message)
     setattr(error, "response", response)
     retry_hint = _parse_retry_after_seconds(response, msg)
