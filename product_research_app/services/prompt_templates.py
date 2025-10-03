@@ -10,14 +10,13 @@ def _ids_to_text(ids: Iterable[int]) -> str:
 def STRICT_JSONL_PROMPT(ids: Iterable[int], fields: Tuple[str, ...]) -> str:
     ids_text = _ids_to_text(ids)
     example = (
-        "[{\"aw\":\"Medium\",\"aw_m\":55,\"d\":\"Beneficio principal\",\"d_m\":72,\"c\":\"Low\",\"c_m\":18,\"confidence\":0.9}]"
+        "[{\"id\":101,\"desire\":\"Resumen del deseo\",\"desire_label\":\"High\",\"desire_magnitude\":0.88,\"competition_level\":0.32}]"
     )
     return (
-        "Formato obligatorio: devuelve un único array JSON con un objeto por producto solicitado.\n"
-        "No añadas texto extra, comentarios ni encabezados.\n"
+        "Devuelve únicamente un ARRAY JSON. Sin comentarios, sin markdown, sin texto antes o después.\n"
         f"IDs solicitados (orden estricto): [{ids_text}]\n"
-        "Mantén el mismo orden en el array. Cada objeto debe contener únicamente las claves aw, aw_m, d, d_m, c, c_m, confidence.\n"
-        "aw y c deben ser Low|Medium|High. aw_m, d_m y c_m son enteros 0-100. confidence es un número entre 0 y 1.\n"
+        "Mantén el mismo orden en el array. Cada objeto debe incluir al menos id, desire, desire_label, desire_magnitude.\n"
+        "Añade competition_level (0-1) y price cuando puedas inferirlos. Prohibidas las explicaciones.\n"
         "Ejemplo de salida válida:\n"
         f"{example}"
     )
@@ -26,13 +25,13 @@ def STRICT_JSONL_PROMPT(ids: Iterable[int], fields: Tuple[str, ...]) -> str:
 def MISSING_ONLY_JSONL_PROMPT(ids: Iterable[int], fields: Tuple[str, ...]) -> str:
     ids_text = _ids_to_text(ids)
     example = (
-        "[{\"aw\":\"High\",\"aw_m\":80,\"d\":\"Nueva respuesta\",\"d_m\":64,\"c\":\"Medium\",\"c_m\":45,\"confidence\":0.82}]"
+        "[{\"id\":42,\"desire\":\"Nuevo resumen\",\"desire_label\":\"Medium\",\"desire_magnitude\":0.55,\"competition_level\":0.61}]"
     )
     return (
-        "Reintento: devuelve únicamente un array JSON para los IDs faltantes indicados.\n"
-        "No repitas IDs ya completados ni añadas explicaciones.\n"
+        "Reintento: devuelve únicamente un ARRAY JSON para los IDs faltantes indicados.\n"
+        "No repitas IDs ya completados ni añadas explicaciones ni comentarios.\n"
         f"IDs pendientes (mismo orden): [{ids_text}]\n"
-        "Cada objeto debe incluir solo aw, aw_m, d, d_m, c, c_m, confidence con el mismo formato estricto.\n"
+        "Cada objeto debe incluir al menos id, desire, desire_label, desire_magnitude (0-1). Añade competition_level y price si puedes.\n"
         "Ejemplo de salida esperada:\n"
         f"{example}"
     )

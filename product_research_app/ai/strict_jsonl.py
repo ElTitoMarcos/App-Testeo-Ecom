@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Dict, Iterable, List, Set
 
-REQUIRED_FIELDS = ("desire", "desire_magnitude", "awareness_level", "competition_level")
+REQUIRED_FIELDS = ("desire", "desire_label", "desire_magnitude")
 
 
 def parse_jsonl_and_validate(text: str, expected_ids: Iterable[int]) -> Dict[int, dict]:
@@ -38,15 +38,23 @@ def parse_jsonl_and_validate(text: str, expected_ids: Iterable[int]) -> Dict[int
             obj = json.loads(ln)
         except Exception as e:  # pragma: no cover - defensive path
             raise ValueError(f"Invalid JSON on line {i}: {e}") from e
-        if "product_id" not in obj:
+        pid = obj.get("product_id")
+        if pid is None:
+            pid = obj.get("id")
+        if pid is None:
             raise ValueError(f"Missing product_id on line {i}")
-        pid = obj["product_id"]
         if pid in result:
             raise ValueError(f"Duplicated product_id {pid} on line {i}")
         for key in REQUIRED_FIELDS:
             if key not in obj:
                 raise ValueError(f"Missing required field '{key}' for product_id={pid}")
-        result[pid] = obj
+        try:
+            pid_int = int(pid)
+        except Exception as exc:
+            raise ValueError(f"Invalid product_id on line {i}: {pid}") from exc
+        obj.setdefault("id", pid_int)
+        obj["product_id"] = pid_int
+        result[pid_int] = obj
 
     exp_set: Set[int] = set(exp)
     got_set: Set[int] = set(result.keys())

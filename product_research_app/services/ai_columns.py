@@ -27,6 +27,7 @@ from ..obs import log_partial_ko, log_recovered
 from ..ratelimit import async_decorrelated_jitter_sleep
 from ..utils.signature import compute_sig_hash
 from .desire_utils import cleanse, looks_like_product_desc
+from . import ai_prompts
 from .prompt_templates import MISSING_ONLY_JSONL_PROMPT, STRICT_JSONL_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,22 @@ DB_PATH = APP_DIR / "data.sqlite3"
 CALIBRATION_CACHE_FILE = APP_DIR / "ai_calibration_cache.json"
 
 AI_FIELDS = ("desire", "desire_magnitude", "awareness_level", "competition_level")
+
+_BUCKET_ALIASES = {
+    "low": "Low",
+    "bajo": "Low",
+    "baja": "Low",
+    "medio": "Medium",
+    "media": "Medium",
+    "medium": "Medium",
+    "mid": "Medium",
+    "average": "Medium",
+    "alto": "High",
+    "alta": "High",
+    "high": "High",
+    "muy alto": "High",
+    "muyalta": "High",
+}
 
 
 _ACTIVE_JOB_LOCK = threading.Lock()
@@ -425,15 +442,14 @@ def _log_ko_event(
 
 
 SYSTEM_PROMPT = (
-    "Eres un analista de marketing. Devuelve exclusivamente un array JSON. "
-    "Cada elemento debe corresponder al producto solicitado en el mismo orden y contener exactamente las claves: "
-    "aw, aw_m, d, d_m, c, c_m, confidence. No añadas notas ni texto adicional. "
-    "aw y c deben ser 'Low', 'Medium' o 'High'. aw_m, d_m y c_m son números entre 0 y 100. "
-    "confidence es un número entre 0 y 1 (por ejemplo 0.87)."
+    "Eres un analista de marketing. Devuelve únicamente un ARRAY JSON puro, sin comentarios, sin markdown y sin texto extra. "
+    "Cada elemento del array debe corresponder al producto solicitado, mantener el mismo orden e incluir como mínimo: "
+    "id, desire, desire_label y desire_magnitude (0 a 1). Añade competition_level (0 a 1) y price cuando puedas inferirlos. "
+    "Prohibidas las explicaciones o notas de ningún tipo."
 )
 USER_INSTRUCTION = (
-    "Analiza los siguientes productos y responde únicamente con un array JSON siguiendo el formato indicado. "
-    "El número de objetos debe coincidir con los product_id solicitados y mantener el mismo orden."
+    "Analiza los siguientes productos y responde exclusivamente con un ARRAY JSON siguiendo el formato indicado. "
+    "No añadas texto antes o después."
 )
 
 def _truncate_text(value: Any, limit: int) -> str:
@@ -614,9 +630,76 @@ def _parse_jsonl_loose(text: str) -> Dict[int, Dict[str, Any]]:
         except Exception:
             continue
         pid = obj.get("product_id")
+        if pid is None:
+            pid = obj.get("id")
         if isinstance(pid, int):
             result[pid] = obj
     return result
+
+
+def _score01_to_percent(value: Any, *, label: str) -> float:
+    if isinstance(value, (int, float)):
+        num = float(value)
+    elif isinstance(value, str):
+        try:
+            num = float(value.strip())
+        except Exception as exc:
+            raise ValueError(f"{label} debe ser numérico") from exc
+    else:
+        raise ValueError(f"{label} debe ser numérico")
+    if 0.0 <= num <= 1.0:
+        return float(num) * 100.0
+    if 0.0 <= num <= 100.0:
+        return float(num)
+    raise ValueError(f"{label} fuera de rango (0-1)")
+
+
+def _normalize_tri_bucket(label: Optional[str], fallback_pct: Optional[float]) -> Optional[str]:
+    if isinstance(label, str) and label.strip():
+        mapped = _BUCKET_ALIASES.get(label.strip().lower())
+        if mapped:
+            return mapped
+    if fallback_pct is None:
+        return "Medium" if isinstance(label, str) and label.strip() else None
+    try:
+        return _tri_label_from_percent(float(fallback_pct))
+    except Exception:
+        return "Medium"
+
+
+def _awareness_from_desire_pct(score_pct: float) -> str:
+    pct = float(max(0.0, min(100.0, score_pct)))
+    if pct >= 85.0:
+        return "Most Aware"
+    if pct >= 65.0:
+        return "Product-Aware"
+    if pct >= 45.0:
+        return "Solution-Aware"
+    return "Problem-Aware"
+
+
+def _extract_finish_reason(raw: Mapping[str, Any]) -> Optional[str]:
+    choices = raw.get("choices") if isinstance(raw, Mapping) else None
+    if isinstance(choices, list) and choices:
+        choice0 = choices[0]
+        if isinstance(choice0, Mapping):
+            finish = choice0.get("finish_reason")
+            if isinstance(finish, str) and finish:
+                return finish
+    return None
+
+
+def _usage_summary(usage: Any) -> str:
+    if not isinstance(usage, Mapping):
+        return ""
+    keys = ("prompt_tokens", "completion_tokens", "total_tokens")
+    parts: List[str] = []
+    for key in keys:
+        value = usage.get(key)
+        if value is None:
+            continue
+        parts.append(f"{key}={value}")
+    return " ".join(parts)
 
 
 def _build_missing_prompt(batch: BatchRequest, missing_ids: List[int]) -> str:
@@ -641,6 +724,8 @@ def _parse_strict_json_payload(
         if isinstance(maybe, list):
             payload_list = list(maybe)
     raw_text: Optional[str] = None
+    usage = raw.get("usage", {}) or {}
+    finish_reason = _extract_finish_reason(raw)
     if payload_list is None:
         source_text = text_content
         if not source_text and parsed_json is not None:
@@ -649,7 +734,13 @@ def _parse_strict_json_payload(
             except Exception:
                 source_text = None
         if not source_text:
-            raise ValueError("Respuesta vacía o sin JSON")
+            if finish_reason and finish_reason != "stop":
+                usage_hint = _usage_summary(usage)
+                extra = f" {usage_hint}" if usage_hint else ""
+                raise ValueError(
+                    f"Salida sin JSON (finish_reason={finish_reason}{extra})"
+                )
+            raise ValueError("Respuesta sin JSON")
         try:
             loaded = json.loads(source_text)
         except Exception as exc:
@@ -666,62 +757,78 @@ def _parse_strict_json_payload(
         )
     result: Dict[int, Dict[str, Any]] = {}
     serialisable: List[Dict[str, Any]] = []
-    for pid, item in zip(expected_ids, payload_list):
+    expected_iter = [int(pid) for pid in expected_ids]
+    for expected_pid, item in zip(expected_iter, payload_list):
         if not isinstance(item, dict):
             raise ValueError("Cada elemento del array debe ser un objeto JSON")
-        aw_raw = item.get("aw")
-        c_raw = item.get("c")
-        d_raw = item.get("d")
-        aw_score = _coerce_percent(item.get("aw_m"), label="aw_m")
-        desire_score = _coerce_percent(item.get("d_m"), label="d_m")
-        comp_score = _coerce_percent(item.get("c_m"), label="c_m")
-        confidence = _coerce_confidence(item.get("confidence"), required=require_confidence)
-        if not isinstance(aw_raw, str):
-            raise ValueError("aw debe ser string")
-        if not isinstance(c_raw, str):
-            raise ValueError("c debe ser string")
-        if not isinstance(d_raw, (str, type(None))):
-            raise ValueError("d debe ser string")
-        aw_label = aw_raw.strip().title()
-        comp_label = c_raw.strip().title()
-        if aw_label not in {"Low", "Medium", "High"}:
-            raise ValueError("aw fuera de rango")
-        if comp_label not in {"Low", "Medium", "High"}:
-            raise ValueError("c fuera de rango")
-        desire_text = cleanse(d_raw or "").strip()
-        if not desire_text and isinstance(d_raw, str):
-            desire_text = d_raw.strip()
-        desire_label = _tri_label_from_percent(desire_score)
-        comp_level = _tri_label_from_percent(comp_score)
-        awareness = _map_awareness_bucket(aw_label, aw_score)
-        audit_payload = {
-            "aw_bucket": aw_label,
-            "aw_pct": aw_score,
-            "desire_pct": desire_score,
-            "competition_pct": comp_score,
+        actual_id = item.get("id", expected_pid)
+        try:
+            actual_pid = int(actual_id)
+        except Exception as exc:
+            raise ValueError("id debe ser entero") from exc
+        if actual_pid != int(expected_pid):
+            raise ValueError(
+                f"ID inesperado: respuesta={actual_pid} esperado={expected_pid}"
+            )
+        desire_raw = item.get("desire")
+        if not isinstance(desire_raw, str) or not desire_raw.strip():
+            raise ValueError("desire debe ser string no vacío")
+        desire_label_raw = item.get("desire_label")
+        if not isinstance(desire_label_raw, str) or not desire_label_raw.strip():
+            raise ValueError("desire_label debe ser string no vacío")
+        desire_pct = _score01_to_percent(
+            item.get("desire_magnitude"), label="desire_magnitude"
+        )
+        comp_pct: Optional[float] = None
+        comp_value = item.get("competition_level")
+        if comp_value is not None:
+            comp_pct = _score01_to_percent(comp_value, label="competition_level")
+        price_val = item.get("price")
+        price_num: Optional[float] = None
+        if price_val is not None:
+            try:
+                price_num = float(price_val)
+            except Exception:
+                price_num = None
+        confidence = _coerce_confidence(
+            item.get("confidence"), required=require_confidence
+        )
+        desire_text = cleanse(desire_raw).strip()
+        if not desire_text:
+            desire_text = desire_raw.strip()
+        desire_bucket = _normalize_tri_bucket(desire_label_raw, desire_pct) or "Medium"
+        comp_bucket = _normalize_tri_bucket(item.get("competition_label"), comp_pct)
+        awareness = _awareness_from_desire_pct(desire_pct)
+        audit_payload: Dict[str, Any] = {
+            "desire_pct": round(desire_pct, 4),
+            "desire_label_raw": desire_label_raw.strip(),
         }
+        if comp_pct is not None:
+            audit_payload["competition_pct"] = round(comp_pct, 4)
+        if price_num is not None:
+            audit_payload["price"] = price_num
         if confidence is not None:
             audit_payload["confidence"] = confidence
-        result[int(pid)] = {
-            "product_id": int(pid),
+        serialisable_item: Dict[str, Any] = {
+            "id": actual_pid,
+            "desire": desire_text,
+            "desire_label": desire_bucket,
+            "desire_magnitude": round(desire_pct / 100.0, 4),
+        }
+        if comp_pct is not None:
+            serialisable_item["competition_level"] = round(comp_pct / 100.0, 4)
+        if price_num is not None:
+            serialisable_item["price"] = price_num
+        serialisable.append(serialisable_item)
+        result[actual_pid] = {
+            "product_id": actual_pid,
             "desire": desire_text,
             "desire_statement": desire_text,
-            "desire_magnitude": desire_label,
+            "desire_magnitude": desire_bucket,
             "awareness_level": awareness,
-            "competition_level": comp_level,
+            "competition_level": comp_bucket,
             "_audit": audit_payload,
         }
-        serialisable.append(
-            {
-                "aw": aw_label,
-                "aw_m": aw_score,
-                "d": desire_text,
-                "d_m": desire_score,
-                "c": comp_label,
-                "c_m": comp_score,
-                **({"confidence": confidence} if confidence is not None else {}),
-            }
-        )
     if raw_text is None:
         raw_text = json.dumps(serialisable, ensure_ascii=False, separators=(",", ":"))
     return result, raw_text
@@ -1250,19 +1357,29 @@ async def _call_batch_with_retries(
     model: str,
     max_retries: int,
 ) -> Dict[str, Any]:
-    def _error_payload(error_message: str, duration: float, retries: int) -> Dict[str, Any]:
-        return {
+    def _error_payload(
+        error_message: str,
+        duration: float,
+        retries: int,
+        *,
+        usage: Optional[Mapping[str, Any]] = None,
+        finish_reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
             "req_id": batch.req_id,
             "candidates": batch.candidates,
             "ok": {},
             "ko": {str(cand.id): error_message for cand in batch.candidates},
-            "usage": {},
+            "usage": dict(usage or {}),
             "duration": duration,
             "retries": retries,
             "error": error_message,
             "prompt_tokens_est": batch.prompt_tokens_est,
             "raw_text": None,
         }
+        if finish_reason:
+            payload["finish_reason"] = finish_reason
+        return payload
 
     attempt = 0
     backoff_prev = 0.0
@@ -1276,6 +1393,7 @@ async def _call_batch_with_retries(
         ]
         start_ts = time.perf_counter()
         try:
+            schema = ai_prompts.build_score_json_schema() if STRICT_JSON_ENABLED else None
             raw = await gpt.call_gpt_async(
                 model=model,
                 messages=messages,
@@ -1284,6 +1402,7 @@ async def _call_batch_with_retries(
                 max_tokens=max_tokens,
                 estimated_tokens=tokens_est,
                 strict_json=STRICT_JSON_ENABLED,
+                json_schema=schema,
             )
         except gpt.OpenAIError as exc:
             duration = time.perf_counter() - start_ts
@@ -1307,7 +1426,15 @@ async def _call_batch_with_retries(
             except ValueError as exc:
                 if batch.json_retry_count < 1 and len(batch.candidates) > 1:
                     raise BatchAdaptationRequired("json_parse", str(exc), allow_split=True) from exc
-                return _error_payload(str(exc), duration, attempt)
+                finish_reason = _extract_finish_reason(raw)
+                usage_map = raw.get("usage", {}) if isinstance(raw, Mapping) else {}
+                return _error_payload(
+                    str(exc),
+                    duration,
+                    attempt,
+                    usage=usage_map if isinstance(usage_map, Mapping) else {},
+                    finish_reason=finish_reason,
+                )
         else:
             try:
                 jsonl_payload = _extract_jsonl_payload(raw)

@@ -37,3 +37,16 @@ def test_build_messages_task_b():
     json_block = user_payload.split("### AGGREGATES\n", 1)[1]
     parsed = json.loads(json_block)
     assert parsed == aggregates
+
+
+def test_prepare_params_with_schema_json_mode():
+    schema = {"name": "demo", "schema": {"type": "object"}, "strict": True}
+    payload = gpt.prepare_params(
+        model="gpt-5-mini",
+        messages=[{"role": "system", "content": "hola"}],
+        strict_json=True,
+        json_schema=schema,
+    )
+    assert payload["response_format"]["type"] == "json_schema"
+    assert payload["response_format"]["json_schema"] == schema
+    assert "temperature" not in payload

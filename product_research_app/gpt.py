@@ -957,6 +957,89 @@ def extract_products_from_image(
         return []
 
 
+def prepare_params(
+    *,
+    model: str,
+    messages: List[Dict[str, Any]],
+    strict_json: bool = True,
+    response_format: Optional[Dict[str, Any]] = None,
+    temperature: float = 0.2,
+    max_tokens: Optional[int] = None,
+    stop: Optional[Any] = None,
+    **kwargs,
+) -> Dict[str, Any]:
+    extra_kwargs = dict(kwargs)
+    payload: Dict[str, Any] = {"model": model}
+
+    if USE_RESPONSES:
+        payload["input"] = _messages_to_responses_input(messages)
+    else:
+        payload["messages"] = messages
+
+    temp_value = extra_kwargs.pop("temperature", temperature)
+    if temp_value is not None:
+        payload["temperature"] = temp_value
+
+    if stop is not None:
+        payload["stop"] = stop
+
+    if response_format is not None:
+        payload["response_format"] = response_format
+
+    if max_tokens is not None and "max_tokens" not in extra_kwargs:
+        extra_kwargs["max_tokens"] = max_tokens
+
+    json_schema = extra_kwargs.pop("json_schema", None)
+
+    token_keys = ("max_tokens", "max_completion_tokens", "max_output_tokens")
+    for token_key in token_keys:
+        if token_key in extra_kwargs:
+            value = extra_kwargs.pop(token_key)
+            if value is not None:
+                payload[token_key] = value
+
+    optional_payload_keys = (
+        "top_p",
+        "frequency_penalty",
+        "presence_penalty",
+        "logit_bias",
+        "user",
+        "seed",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+    )
+    for key in optional_payload_keys:
+        if key in extra_kwargs:
+            value = extra_kwargs.pop(key)
+            if value is not None:
+                payload[key] = value
+
+    if strict_json:
+        if json_schema:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": json_schema,
+            }
+        elif "response_format" not in payload:
+            payload["response_format"] = {"type": "json_object"}
+    elif json_schema and "response_format" not in payload:
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": json_schema,
+        }
+
+    _apply_token_limit_param(model, payload)
+    _strip_unsupported_sampling(model, payload)
+
+    if extra_kwargs:
+        for key, value in list(extra_kwargs.items()):
+            if value is not None and key != "timeout":
+                payload[key] = value
+
+    return payload
+
+
 async def _http_post_chat(
     *,
     model: str,
@@ -985,57 +1068,20 @@ async def _http_post_chat(
     }
 
     extra_kwargs = dict(kwargs)
-    if max_tokens is not None and "max_tokens" not in extra_kwargs:
-        extra_kwargs["max_tokens"] = max_tokens
-
-    payload: Dict[str, Any] = {"model": model, "temperature": temperature}
-    if USE_RESPONSES:
-        payload["input"] = _messages_to_responses_input(messages)
-    else:
-        payload["messages"] = messages
-    if stop is not None:
-        payload["stop"] = stop
-    if response_format is not None:
-        payload["response_format"] = response_format
-
-    token_keys = ("max_tokens", "max_completion_tokens", "max_output_tokens")
-    for token_key in token_keys:
-        if token_key in extra_kwargs:
-            value = extra_kwargs.pop(token_key)
-            if value is not None:
-                payload[token_key] = value
-
-    optional_payload_keys = (
-        "top_p",
-        "frequency_penalty",
-        "presence_penalty",
-        "logit_bias",
-        "user",
-        "seed",
-        "tools",
-        "tool_choice",
-        "parallel_tool_calls",
+    timeout_override = extra_kwargs.pop("timeout", None)
+    payload = prepare_params(
+        model=model,
+        messages=messages,
+        strict_json=strict_json,
+        response_format=response_format,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        stop=stop,
+        **extra_kwargs,
     )
-    for key in optional_payload_keys:
-        if key in extra_kwargs:
-            value = extra_kwargs.pop(key)
-            if value is not None:
-                payload[key] = value
 
-    if strict_json and "response_format" not in payload and response_format is None:
-        payload["response_format"] = {"type": "json_object"}
-
-    _apply_token_limit_param(model, payload)
-    _strip_unsupported_sampling(model, payload)
-
-    if extra_kwargs:
-        # Cualquier resto explícito se envía dentro del payload si no es None.
-        for key, value in list(extra_kwargs.items()):
-            if value is not None:
-                payload[key] = value
-
-    timeout = timeout or httpx.Timeout(60.0, connect=10.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    timeout_value = timeout_override or timeout or httpx.Timeout(60.0, connect=10.0)
+    async with httpx.AsyncClient(timeout=timeout_value) as client:
         try:
             response = await client.post(url, headers=headers, json=payload)
         except httpx.HTTPError as exc:
@@ -1589,6 +1635,15 @@ def generate_batch_columns(api_key: str, model: str, items: List[Dict[str, Any]]
     )
     duration = time.time() - start
     usage = resp.get("usage", {})
+    finish_reason: Optional[str] = None
+    try:
+        choices = resp.get("choices") if isinstance(resp, dict) else None
+        if isinstance(choices, list) and choices:
+            choice0 = choices[0]
+            if isinstance(choice0, dict):
+                finish_reason = choice0.get("finish_reason")
+    except Exception:
+        finish_reason = None
 
     try:
         raw = resp["choices"][0]["message"]["content"].strip()
@@ -1598,10 +1653,16 @@ def generate_batch_columns(api_key: str, model: str, items: List[Dict[str, Any]]
         data = json.loads(raw)
     except Exception as exc:
         logger.error("Respuesta IA no es JSON: %s", resp)
-        raise InvalidJSONError("Respuesta IA no es JSON") from exc
+        err = InvalidJSONError("Respuesta IA no es JSON")
+        setattr(err, "finish_reason", finish_reason)
+        setattr(err, "usage", usage)
+        raise err from exc
 
     if not isinstance(data, dict):
-        raise InvalidJSONError("Respuesta IA no es JSON")
+        err = InvalidJSONError("Respuesta IA no es JSON")
+        setattr(err, "finish_reason", finish_reason)
+        setattr(err, "usage", usage)
+        raise err
 
     ok: Dict[str, Dict[str, Any]] = {}
     ko: Dict[str, str] = {}
