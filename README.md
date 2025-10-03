@@ -38,4 +38,6 @@ Logs tagged `ai_columns.request` are useful to verify concurrency in smoke tests
 
 ## Troubleshooting
 
+- Modelos de razonamiento (`gpt-5*`, `o1`, `o3`, `o4`) rechazan parámetros de muestreo como `temperature`, `top_p`, penalizaciones, `logprobs`, `logit_bias` y `n`. El wrapper los elimina automáticamente antes de llamar a la API; revisa los logs `gpt.param stripped` si necesitas confirmarlo.
+- Usa siempre `max_completion_tokens` (Chat Completions) o `max_output_tokens` (Responses) para fijar el límite efectivo; el wrapper indica en los logs qué parámetro aplica.
 - Mensajes code 400, Bad request version ('JJ…') pueden aparecer si algún cliente intenta TLS contra el puerto HTTP. No afectan al pipeline.
