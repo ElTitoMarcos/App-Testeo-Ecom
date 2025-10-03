@@ -65,12 +65,12 @@ def _env_bool(name: str, default: bool) -> bool:
     return default
 
 
-DEFAULT_BATCH_SIZE = max(8, _env_int("PRAPP_AI_COLUMNS_BATCH_SIZE", 32))
+DEFAULT_BATCH_SIZE = max(8, _env_int("PRAPP_AI_COLUMNS_BATCH_SIZE", 48))
 MIN_BATCH_SIZE = 8
 MAX_RETRIES_MISSING = _env_int("PRAPP_AI_RETRIES_MISSING", 2)
 
-RAW_MAX_CONCURRENCY = max(1, _env_int("PRAPP_OPENAI_MAX_CONCURRENCY", 8))
-OPENAI_HEADROOM = max(0.1, min(0.99, _env_float("PRAPP_OPENAI_HEADROOM", 0.90)))
+RAW_MAX_CONCURRENCY = max(1, _env_int("PRAPP_OPENAI_MAX_CONCURRENCY", 32))
+OPENAI_HEADROOM = max(0.1, min(0.99, _env_float("PRAPP_OPENAI_HEADROOM", 0.98)))
 AI_MAX_CONCURRENCY = max(
     1,
     min(
@@ -78,15 +78,18 @@ AI_MAX_CONCURRENCY = max(
         int(max(1, math.floor(RAW_MAX_CONCURRENCY * OPENAI_HEADROOM))),
     ),
 )
-AI_BATCH_MAX_ITEMS = _env_int("AI_BATCH_MAX_ITEMS", 16)
+AI_BATCH_MAX_ITEMS = _env_int("AI_BATCH_MAX_ITEMS", 48)
+TPM_SOFT_CAP = _env_int("PRAPP_OPENAI_TPM", 500000)
+RPM_SOFT_CAP = _env_int("PRAPP_OPENAI_RPM", 6000)
+TPD_SOFT_CAP = _env_int("PRAPP_OPENAI_TPD", 5_000_000)
 
 STRICT_JSON_ENABLED = _env_bool("PRAPP_AI_COLUMNS_STRICT_JSON", True)
 MAX_TOKENS_PER_ITEM = max(32, _env_int("PRAPP_AI_COLUMNS_MAX_TOKENS_PER_ITEM", 128))
-SAFE_CONTEXT_TOKENS = max(4000, _env_int("PRAPP_OPENAI_CONTEXT_SAFE_TOKENS", 120000))
+SAFE_CONTEXT_TOKENS = max(4000, _env_int("PRAPP_OPENAI_CONTEXT_SAFE_TOKENS", 180000))
 StatusCallback = Callable[..., None]
 
 TRIAGE_ENABLED = _env_bool("PRAPP_AI_TRIAGE_ENABLED", True)
-TRIAGE_MODEL = os.getenv("PRAPP_AI_TRIAGE_MODEL", "gpt-4o-mini") or "gpt-4o-mini"
+TRIAGE_MODEL = os.getenv("PRAPP_AI_TRIAGE_MODEL", "gpt-5-mini") or "gpt-5-mini"
 TRIAGE_CONFIDENCE = max(0.0, min(1.0, _env_float("PRAPP_AI_TRIAGE_CONFIDENCE", 0.70)))
 
 AI_COST = get_ai_cost_config()
@@ -119,7 +122,7 @@ def _persist_rows(rows: List[Dict[str, Any]]) -> None:
 
 def _max_tokens_for_batch(batch_len: int) -> int:
     est = EST_OUT_PER_ITEM * max(1, batch_len) + 200
-    return min(max(800, est), max(800, AI_MAX_OUTPUT_TOKENS), 4000)
+    return min(max(800, est), max(800, AI_MAX_OUTPUT_TOKENS), 6000)
 
 
 @dataclass
@@ -247,7 +250,10 @@ def _classify_ko_reason(reason: Optional[str]) -> Dict[str, Any]:
             "remote.rate_limited",
             "OpenAI rejected the request due to rate limiting.",
             retryable=True,
-            remediation="Reduce concurrency or request smaller batches, then retry once the rate limit window clears.",
+            remediation=(
+                "Inspect recent usage against the 500k TPM / 5M TPD GPT-5 Mini quota. "
+                "Retry once the window clears and only dial down concurrency if the provider continues throttling."
+            ),
         )
 
     if "timeout" in lowered or "timed out" in lowered:
@@ -1285,7 +1291,7 @@ async def _call_batch_with_retries(
             if reason and len(batch.candidates) > 1:
                 raise BatchAdaptationRequired(reason, str(exc), allow_split=True) from exc
             if attempt <= max_retries:
-                backoff_prev = await async_decorrelated_jitter_sleep(backoff_prev or 0.5, 10.0)
+                backoff_prev = await async_decorrelated_jitter_sleep(backoff_prev or 0.2, 3.0)
                 continue
             return _error_payload(str(exc), duration, attempt)
 
@@ -1308,7 +1314,7 @@ async def _call_batch_with_retries(
             except gpt.InvalidJSONError as exc:
                 duration = time.perf_counter() - start_ts
                 if attempt <= max_retries:
-                    backoff_prev = await async_decorrelated_jitter_sleep(backoff_prev or 0.5, 10.0)
+                    backoff_prev = await async_decorrelated_jitter_sleep(backoff_prev or 0.2, 3.0)
                     continue
                 return _error_payload(str(exc), duration, attempt)
 
@@ -2081,11 +2087,14 @@ def run_ai_fill_job(
         max_batch_size = max(AI_MIN_PRODUCTS_PER_CALL, max_batch_size)
         max_batch_size = max(1, min(AI_BATCH_MAX_ITEMS, max_batch_size))
         logger.info(
-            "ai.run start items_total=%d batch_init=%d concurrency_target=%d strict_json=%s",
+            "ai.run start items_total=%d batch_init=%d concurrency_target=%d strict_json=%s tpm_cap=%d rpm_cap=%d tpd_cap=%d",
             total_items,
             max_batch_size,
             AI_MAX_CONCURRENCY,
             STRICT_JSON_ENABLED,
+            TPM_SOFT_CAP,
+            RPM_SOFT_CAP,
+            TPD_SOFT_CAP,
         )
         req_counter = 0
         pending_groups: Deque[Tuple[List[Candidate], int, int, bool]] = deque()
@@ -2125,9 +2134,9 @@ def run_ai_fill_job(
 
                     if allow_triage:
                         triage_model_name = TRIAGE_MODEL or ""
-                        triage_is_mini = triage_model_name.startswith("gpt-4o-mini")
+                        triage_is_mini = triage_model_name.startswith("gpt-5-mini")
                         if not triage_is_mini:
-                            triage_is_mini = triage_model_name.startswith("gpt-4o-mini-2024")
+                            triage_is_mini = triage_model_name.startswith("gpt-5-mini-")
                         triage_strict_json = False if triage_is_mini else True
                         logger.info(
                             "ai_columns.triage start req_id=%s model=%s items=%d confidence_min=%.2f strict_json=%s",
@@ -2556,7 +2565,7 @@ def run_ai_fill_job(
     p50 = _quantile(request_latencies, 0.5) if request_latencies else 0.0
     p95 = _quantile(request_latencies, 0.95) if request_latencies else 0.0
     logger.info(
-        "ai.run done total=%d processed=%d remaining=%d concurrency_eff=%.2f concurrency_target=%d batches=%d p50=%.2f p95=%.2f batch_adapted=%d json_retry=%d strict_json=%s triage_covered=%d fallback_big=%d",
+        "ai.run done total=%d processed=%d remaining=%d concurrency_eff=%.2f concurrency_target=%d batches=%d p50=%.2f p95=%.2f batch_adapted=%d json_retry=%d strict_json=%s triage_covered=%d fallback_big=%d tpm_cap=%d rpm_cap=%d tpd_cap=%d",
         total_items,
         total_processed,
         remaining_total,
@@ -2570,6 +2579,9 @@ def run_ai_fill_job(
         STRICT_JSON_ENABLED,
         triage_covered_total,
         fallback_big_total,
+        TPM_SOFT_CAP,
+        RPM_SOFT_CAP,
+        TPD_SOFT_CAP,
     )
 
     result_error: Optional[str] = None

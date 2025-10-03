@@ -10,10 +10,10 @@ def _env_float(name, default):
     try: return float(os.getenv(name, default))
     except: return default
 
-_TPM = _env_int("PRAPP_OPENAI_TPM", 30000)
-_RPM = _env_int("PRAPP_OPENAI_RPM", 3000)
-_HEADROOM = _env_float("PRAPP_OPENAI_HEADROOM", 0.90)
-_MAX_CONC = _env_int("PRAPP_OPENAI_MAX_CONCURRENCY", 8)
+_TPM = _env_int("PRAPP_OPENAI_TPM", 500000)
+_RPM = _env_int("PRAPP_OPENAI_RPM", 6000)
+_HEADROOM = _env_float("PRAPP_OPENAI_HEADROOM", 0.98)
+_MAX_CONC = _env_int("PRAPP_OPENAI_MAX_CONCURRENCY", 32)
 
 # Efectivo tras aplicar headroom
 _EFF_TPM = max(1, int(_TPM * _HEADROOM))
@@ -41,7 +41,7 @@ class _TokenBucket:
                 # esperar lo justo para acumular lo que falta
                 deficit = amount - self.tokens
                 rate_per_s = (self.capacity / 60.0)
-                sleep_s = max(deficit / rate_per_s, 0.01)
+                sleep_s = max(deficit / rate_per_s, 0.005)
                 # liberar el lock para no bloquear a quienes vengan a recargar/consultar
                 self.lock.release()
                 try:
@@ -77,7 +77,7 @@ def decorrelated_jitter_sleep(prev: float, cap: float) -> float:
     """
     Backoff con "decorrelated jitter" (AWS). Devuelve el sleep usado.
     """
-    base = 0.3
+    base = 0.05
     prev = max(0.0, float(prev or 0.0))
     cap = max(base, float(cap or base))
     next_sleep = min(cap, random.uniform(base, prev * 3 if prev > 0 else 1.0))
@@ -108,7 +108,7 @@ class AsyncTokenBucket:
             while self.tokens < n:
                 await self._refill()
                 if self.tokens < n:
-                    await asyncio.sleep(0.2)
+                    await asyncio.sleep(0.05)
             self.tokens -= n
 
 
@@ -138,7 +138,7 @@ def get_async_limiter() -> AsyncRateLimiter:
 
 
 async def async_decorrelated_jitter_sleep(prev: float, cap: float) -> float:
-    base = 0.3
+    base = 0.05
     prev = max(0.0, float(prev or 0.0))
     cap = max(base, float(cap or base))
     next_sleep = min(cap, random.uniform(base, prev * 3 if prev > 0 else 1.0))

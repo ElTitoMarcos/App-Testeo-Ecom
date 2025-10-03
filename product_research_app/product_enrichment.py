@@ -36,13 +36,13 @@ def _emit_enrich_progress(job_id: int, **payload: Any) -> None:
     publish_progress({"event": "enrich", "job_id": job_id, **payload})
 
 
-DEFAULT_BATCH_SIZE = int(os.getenv("ENRICH_BATCH_SIZE", "20"))
-DEFAULT_CONCURRENCY = int(os.getenv("ENRICH_CONCURRENCY", "12"))
-TARGET_INPUT_TOKENS = int(os.getenv("ENRICH_TARGET_INPUT_TOKENS", "6000"))
-MIN_BATCH_SIZE = int(os.getenv("ENRICH_MIN_BATCH_SIZE", "10"))
-MAX_BATCH_SIZE = int(os.getenv("ENRICH_MAX_BATCH_SIZE", "30"))
-MIN_CONCURRENCY = int(os.getenv("ENRICH_MIN_CONCURRENCY", "8"))
-MAX_CONCURRENCY = int(os.getenv("ENRICH_MAX_CONCURRENCY", "16"))
+DEFAULT_BATCH_SIZE = int(os.getenv("ENRICH_BATCH_SIZE", "40"))
+DEFAULT_CONCURRENCY = int(os.getenv("ENRICH_CONCURRENCY", "20"))
+TARGET_INPUT_TOKENS = int(os.getenv("ENRICH_TARGET_INPUT_TOKENS", "12000"))
+MIN_BATCH_SIZE = int(os.getenv("ENRICH_MIN_BATCH_SIZE", "12"))
+MAX_BATCH_SIZE = int(os.getenv("ENRICH_MAX_BATCH_SIZE", "60"))
+MIN_CONCURRENCY = int(os.getenv("ENRICH_MIN_CONCURRENCY", "12"))
+MAX_CONCURRENCY = int(os.getenv("ENRICH_MAX_CONCURRENCY", "24"))
 MAX_RETRIES = int(os.getenv("ENRICH_MAX_RETRIES", "5"))
 CACHE_MAX_AGE_DAYS = int(os.getenv("ENRICH_CACHE_TTL_DAYS", "30"))
 DEFAULT_MAX_REQUESTS = int(os.getenv("ENRICH_MAX_REQUESTS", "0"))
@@ -137,7 +137,7 @@ def determine_model() -> str:
             return str(model)
     except Exception:
         pass
-    return "gpt-4o-mini"
+    return "gpt-5-mini"
 
 
 def resolve_api_key() -> Optional[str]:
@@ -226,7 +226,7 @@ async def call_ai(
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     attempt = 0
-    backoff = 1.0
+    backoff = 0.3
     last_error: Optional[Exception] = None
     while attempt < MAX_RETRIES:
         try:
@@ -235,7 +235,7 @@ async def call_ai(
                 retry = _retry_after_seconds(response.headers.get("Retry-After")) or backoff
                 logger.warning("AI 429 throttled; sleeping %.2fs", retry)
                 await asyncio.sleep(retry)
-                backoff = min(backoff * 2, 30.0)
+                backoff = min(backoff * 1.5, 5.0)
                 attempt += 1
                 continue
             response.raise_for_status()
@@ -253,7 +253,7 @@ async def call_ai(
             last_error = exc
             logger.warning("AI request error (attempt %d): %s", attempt + 1, exc)
         await asyncio.sleep(backoff)
-        backoff = min(backoff * 2, 30.0)
+        backoff = min(backoff * 1.5, 5.0)
         attempt += 1
     raise RuntimeError(f"AI request failed after {MAX_RETRIES} attempts: {last_error}")
 
