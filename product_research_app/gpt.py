@@ -90,6 +90,33 @@ async def _post_json_async(
         )
 
 
+_DEFAULT_TEMPERATURE_ONLY = re.compile(r"^(gpt-5-mini)", re.IGNORECASE)
+
+
+def _sanitize_temperature(model: str, temperature: Optional[float]) -> Optional[float]:
+    """Return the temperature value that should be sent to the API.
+
+    Some newer models (like ``gpt-5-mini``) currently reject any explicit
+    ``temperature`` value other than the default (``1``).  When we detect one
+    of those models and the caller asked for a different value we simply omit
+    the parameter so that the platform fallback applies instead of raising a
+    ``400`` error.
+    """
+
+    if temperature is None:
+        return None
+
+    if _DEFAULT_TEMPERATURE_ONLY.match(model or "") and temperature not in (1, 1.0):
+        logger.warning(
+            "gpt.temperature adjusted to default for model=%s requested=%s",
+            model,
+            temperature,
+        )
+        return None
+
+    return temperature
+
+
 def _to_chat_payload(
     *,
     model: str,
@@ -103,8 +130,11 @@ def _to_chat_payload(
     payload: Dict[str, Any] = {
         "model": model,
         "messages": messages,
-        "temperature": temperature,
     }
+
+    sanitized_temperature = _sanitize_temperature(model, temperature)
+    if sanitized_temperature is not None:
+        payload["temperature"] = sanitized_temperature
 
     # JSON mode si lo piden
     if strict_json:
