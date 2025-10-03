@@ -39,8 +39,18 @@ class QuietHandlerMixin(BaseHTTPRequestHandler):
     # Ocultar “Bad request version …” de handshakes TLS erróneos
     def log_error(self, fmt, *args):
         reqline = getattr(self, "requestline", "") or ""
+        raw_line = getattr(self, "raw_requestline", b"")
+        if isinstance(raw_line, memoryview):
+            raw_line = raw_line.tobytes()
+        first_byte = b""
+        if isinstance(raw_line, (bytes, bytearray)) and raw_line:
+            first_byte = raw_line[:1]
+        args_text = " ".join(str(arg) for arg in args) if args else ""
         # Muchos clientes TLS empiezan por 0x16 0x03; aquí llega como bytes escapados
-        if "Bad request version" in fmt and reqline.startswith("\x16\x03"):
+        if (
+            ("Bad request version" in args_text)
+            and (first_byte == b"\x16" or reqline.startswith("\x16\x03"))
+        ):
             return
         # También podemos ignorar 404 de favicon
         path = getattr(self, "path", "")

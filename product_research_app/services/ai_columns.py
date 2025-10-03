@@ -86,6 +86,9 @@ DEFAULT_BATCH_SIZE = max(8, _env_int("PRAPP_AI_COLUMNS_BATCH_SIZE", 48))
 MIN_BATCH_SIZE = 8
 MAX_RETRIES_MISSING = _env_int("PRAPP_AI_RETRIES_MISSING", 2)
 
+TOKENS_POR_ITEM_ESTIMADOS = max(64, _env_int("PRAPP_AI_COLUMNS_TOKENS_PER_ITEM", 96))
+TOKEN_BUDGET_MARGIN = 0.85
+
 RAW_MAX_CONCURRENCY = max(1, _env_int("PRAPP_OPENAI_MAX_CONCURRENCY", 4))
 OPENAI_HEADROOM = max(0.1, min(0.99, _env_float("PRAPP_OPENAI_HEADROOM", 0.98)))
 AI_MAX_CONCURRENCY = max(
@@ -287,6 +290,17 @@ def _classify_ko_reason(reason: Optional[str]) -> Dict[str, Any]:
             "A network or TLS problem prevented the AI response.",
             retryable=True,
             remediation="Check network connectivity to the AI provider and retry once connectivity is restored.",
+        )
+
+    if "finish_reason=length" in lowered or "json_truncated" in lowered:
+        return _payload(
+            "ko.json_truncated",
+            "La respuesta de la IA se truncó antes de completar el JSON requerido.",
+            retryable=True,
+            remediation=(
+                "Reduce el tamaño del batch para este conjunto de productos y vuelve a lanzar la tarea; "
+                "el truncado indica que se agotó el presupuesto de tokens de salida."
+            ),
         )
 
     if "invalid" in lowered and "json" in lowered:
@@ -1492,14 +1506,21 @@ async def _call_batch_with_retries(
         raw_payload_text: Optional[str] = None
         strict_map: Dict[int, Dict[str, Any]] = {}
 
+        finish_reason: Optional[str] = _extract_finish_reason(raw)
         if STRICT_JSON_ENABLED:
             duration = time.perf_counter() - start_ts
             try:
                 strict_map, raw_payload_text = _parse_strict_json_payload(raw, expected_ids)
             except ValueError as exc:
-                if batch.json_retry_count < 1 and len(batch.candidates) > 1:
-                    raise BatchAdaptationRequired("json_parse", str(exc), allow_split=True) from exc
-                finish_reason = _extract_finish_reason(raw)
+                if len(batch.candidates) > 1:
+                    if finish_reason == "length":
+                        raise BatchAdaptationRequired(
+                            "json_truncated", str(exc), allow_split=True
+                        ) from exc
+                    if batch.json_retry_count < 1:
+                        raise BatchAdaptationRequired(
+                            "json_parse", str(exc), allow_split=True
+                        ) from exc
                 usage_map = raw.get("usage", {}) if isinstance(raw, Mapping) else {}
                 return _error_payload(
                     str(exc),
@@ -2292,6 +2313,14 @@ def run_ai_fill_job(
         max_batch_size = min(AI_MAX_PRODUCTS_PER_CALL, len(pending_candidates))
         max_batch_size = max(AI_MIN_PRODUCTS_PER_CALL, max_batch_size)
         max_batch_size = max(1, min(AI_BATCH_MAX_ITEMS, max_batch_size))
+        try:
+            raw_token_limit = int(AI_MAX_OUTPUT_TOKENS)
+        except Exception:
+            raw_token_limit = 0
+        if raw_token_limit > 0:
+            safe_budget = int(max(1, raw_token_limit) * TOKEN_BUDGET_MARGIN)
+            max_items_by_tokens = max(1, safe_budget // TOKENS_POR_ITEM_ESTIMADOS)
+            max_batch_size = max(1, min(max_batch_size, max_items_by_tokens))
         logger.info(
             "ai.run start items_total=%d batch_init=%d concurrency_target=%d strict_json=%s tpm_cap=%d rpm_cap=%d tpd_cap=%d",
             total_items,
