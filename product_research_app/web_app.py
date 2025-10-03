@@ -1336,7 +1336,7 @@ class RequestHandler(QuietHandlerMixin):
             )
             key = cfg.get("api_key") or ""
             data = {
-                "model": cfg.get("model", "gpt-4o"),
+                "model": cfg.get("model", "gpt-5-mini"),
                 "weights": weights_map,
                 "winner_weights": weights_map,
                 "winner_order": list(cfg.get("winner_order", list(DEFAULT_ORDER_LIST))),
@@ -2792,7 +2792,7 @@ class RequestHandler(QuietHandlerMixin):
         try:
             payload = json.loads(body)
             product = payload.get("product")
-            model = payload.get("model") or "gpt-4o-mini-2024-07-18"
+            model = payload.get("model") or "gpt-5-mini"
         except Exception:
             self._set_json(400)
             self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
@@ -2824,7 +2824,7 @@ class RequestHandler(QuietHandlerMixin):
         try:
             payload = json.loads(body)
             items = payload.get("items")
-            model = payload.get("model") or "gpt-4o-mini-2024-07-18"
+            model = payload.get("model") or "gpt-5-mini"
             if not isinstance(items, list):
                 raise ValueError
         except Exception:

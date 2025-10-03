@@ -1,5 +1,5 @@
 const EC_BATCH_SIZE = 10;
-const EC_MODEL = "gpt-4o-mini-2024-07-18";
+const EC_MODEL = "gpt-5-mini";
 
 function getAllFilteredRows() {
   if (typeof window.getAllFilteredRows === 'function') {

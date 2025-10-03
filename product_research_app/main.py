@@ -466,7 +466,7 @@ def configure_api() -> None:
     if not api_key:
         print("API Key vacía. No se guardó.")
         return
-    model = prompt_user("Nombre del modelo de OpenAI a usar (ej. gpt-4o): ").strip() or "gpt-4o"
+    model = prompt_user("Nombre del modelo de OpenAI a usar (ej. gpt-5-mini): ").strip() or "gpt-5-mini"
     cfg = config.load_config()
     cfg["api_key"] = api_key
     cfg["model"] = model

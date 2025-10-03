@@ -13,8 +13,8 @@ from product_research_app.utils import cache as ai_cache
 
 log = logging.getLogger(__name__)
 
-_MICRO = int(os.getenv("PRAPP_AI_MICROBATCH", "12"))
-_CONC = int(os.getenv("PRAPP_OPENAI_MAX_CONCURRENCY", "3"))
+_MICRO = int(os.getenv("PRAPP_AI_MICROBATCH", "24"))
+_CONC = int(os.getenv("PRAPP_OPENAI_MAX_CONCURRENCY", "12"))
 _TWO_STAGE = os.getenv("PRAPP_AI_TWO_STAGE", "1") not in ("0", "false", "False")
 _USE_CACHE = os.getenv("PRAPP_AI_CACHE", "1") not in ("0", "false", "False")
 _CACHE_VER = os.getenv("PRAPP_AI_CACHE_VERSION", "v1")

@@ -5,7 +5,7 @@ This module wraps calls to the OpenAI chat completion endpoint using the
 requests library.  It constructs prompts based on the Breakthrough Advertising
 framework for product evaluation and returns structured scores and
 justifications.  The user must supply a valid API key and choose which
-model to call (for example, ``gpt-4o``, ``gpt-4`` or future ``gpt-5``).  The
+model to call (for example, ``gpt-5-mini`` or ``gpt-4``).  The
 calls are synchronous; if network errors occur the caller is responsible
 for retrying or handling the exception.
 
@@ -246,7 +246,7 @@ def build_messages(
 
 MAX_429 = int(os.getenv("PRAPP_OPENAI_MAX_RETRIES_429", "6"))
 MAX_5XX = int(os.getenv("PRAPP_OPENAI_MAX_RETRIES_5XX", "4"))
-BACKOFF_CAP = float(os.getenv("PRAPP_OPENAI_BACKOFF_CAP_S", "8"))
+BACKOFF_CAP = float(os.getenv("PRAPP_OPENAI_BACKOFF_CAP_S", "3"))
 
 
 def _normalize_token_kwargs(estimated_tokens: int, kwargs: Dict[str, Any]) -> int:
@@ -693,7 +693,7 @@ def extract_products_from_image(
 
     Args:
         api_key: Your OpenAI API key.
-        model: The vision‑capable model to call (e.g. "gpt-4o").
+        model: The vision‑capable model to call (e.g. "gpt-5-mini").
         image_path: Path to the image file on disk.
         instructions: Optional custom instructions for the model.  If omitted,
             a default Spanish instruction will be used.
@@ -1678,7 +1678,7 @@ def simplify_product_names(api_key: str, model: str, names: List[str], *, temper
 
     Args:
         api_key: OpenAI API key.
-        model: Model identifier, e.g. "gpt-4o".
+        model: Model identifier, e.g. "gpt-5-mini".
         names: List of full product names to simplify.
         temperature: Temperature parameter for the model.
 

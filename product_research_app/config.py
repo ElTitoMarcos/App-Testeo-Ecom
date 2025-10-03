@@ -28,14 +28,14 @@ DEFAULT_WINNER_ORDER = [
 DEFAULT_CONFIG: Dict[str, Any] = {
     "autoFillIAOnImport": True,
     "aiBatch": {
-        "BATCH_SIZE": 10,
-        "MAX_CONCURRENCY": 2,
+        "BATCH_SIZE": 16,
+        "MAX_CONCURRENCY": 6,
         "MAX_RETRIES": 3,
         "TIME_LIMIT_SECONDS": 300,
     },
     "aiCost": {
-        "model": "gpt-4.1-mini",
-        "useBatchWhenCountGte": 300,
+        "model": "gpt-5-mini",
+        "useBatchWhenCountGte": 150,
         "costCapUSD": 0.25,
         "estTokensPerItemIn": 300,
         "estTokensPerItemOut": 80,
@@ -53,12 +53,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         },
     },
     "ai": {
-        "parallelism": 8,
-        "microbatch": 12,
+        "parallelism": 24,
+        "microbatch": 24,
         "cache_enabled": True,
         "version": 1,
-        "tpm_limit": None,
-        "rpm_limit": 150,
+        "tpm_limit": 450000,
+        "rpm_limit": 600,
         "timeout": 45,
         "trunc_title": 180,
         "trunc_desc": 800,
@@ -161,12 +161,12 @@ def get_api_key() -> Optional[str]:
 
 
 def get_model() -> str:
-    """Return the configured model or default to 'gpt-4o'."""
+    """Return the configured model or default to 'gpt-5-mini'."""
 
     config = load_config()
     model = config.get("model")
     if not model:
-        return "gpt-4o"
+        return "gpt-5-mini"
     return model
 
 
@@ -260,7 +260,7 @@ def get_ai_runtime_config() -> Dict[str, Any]:
         base["trunc_desc"] = env_trunc_desc
 
     cpu_parallel = max(1, (os.cpu_count() or 1) * 2)
-    default_parallel = min(8, cpu_parallel)
+    default_parallel = min(24, cpu_parallel)
     try:
         parallel = int(base.get("parallelism") or 0)
     except Exception:
@@ -396,9 +396,9 @@ def get_weights_version() -> int:
         return int(cfg.get("weightsUpdatedAt", 0))
     except Exception:
         return 0
-AI_MAX_PRODUCTS_PER_CALL = int(os.getenv("PRAPP_AI_MAX_PRODUCTS_PER_CALL", "30"))
+AI_MAX_PRODUCTS_PER_CALL = int(os.getenv("PRAPP_AI_MAX_PRODUCTS_PER_CALL", "60"))
 AI_MIN_PRODUCTS_PER_CALL = int(os.getenv("PRAPP_AI_MIN_PRODUCTS_PER_CALL", "8"))
-AI_DEGRADE_FACTOR = float(os.getenv("PRAPP_AI_DEGRADE_FACTOR", "0.66"))
+AI_DEGRADE_FACTOR = float(os.getenv("PRAPP_AI_DEGRADE_FACTOR", "0.85"))
 # Límite superior de tokens de salida por request (tope blando; puede sobrescribirse dinámicamente)
-AI_MAX_OUTPUT_TOKENS = int(os.getenv("PRAPP_AI_MAX_OUTPUT_TOKENS", "2200"))
+AI_MAX_OUTPUT_TOKENS = int(os.getenv("PRAPP_AI_MAX_OUTPUT_TOKENS", "6000"))
 
