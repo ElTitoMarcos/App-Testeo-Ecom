@@ -35,3 +35,7 @@ run_ai_fill_job: job=42 total=100 ok=92 cached=8 ko=0 cost=0.2150 pending=0 erro
 ```
 
 Logs tagged `ai_columns.request` are useful to verify concurrency in smoke tests: with the GPT-5 Mini defaults you should see the system happily running a few dozen overlapping requests for 100 products without tripping the new 500k TPM / 5M TPD allowances. The start/end summary logs also emit `tpm_cap`, `rpm_cap` and `tpd_cap` fields so alerting rules can be updated around the higher quotas.
+
+## Troubleshooting
+
+- Mensajes code 400, Bad request version ('JJ…') pueden aparecer si algún cliente intenta TLS contra el puerto HTTP. No afectan al pipeline.

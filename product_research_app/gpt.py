@@ -54,6 +54,17 @@ DB_PATH = APP_DIR / "data.sqlite3"
 AI_API_VERBOSE = int(os.getenv("PRAPP_AI_API_VERBOSE", "0"))
 LIMIT_NEAR_FRAC = float(os.getenv("PRAPP_AI_LIMIT_NEAR_FRAC", "0.90"))
 
+OPENAI_BASE = os.getenv("OPENAI_BASE", "https://api.openai.com")
+USE_RESPONSES = (
+    os.getenv("PRAPP_OPENAI_USE_RESPONSES", "0").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+DEFAULT_MAX_COMP_TOKENS = int(
+    os.getenv("PRAPP_OPENAI_DEFAULT_MAX_COMPLETION_TOKENS", "2048")
+)
+
+_REASONING_PREFIXES = ("gpt-5", "o1", "o3", "o4")
+
 # Cache for baseline arrays recalculated every 10 minutes
 _BASELINE_CACHE: Dict[str, Any] = {"ts": 0, "data": None}
 
@@ -271,6 +282,140 @@ def _ensure_no_dup_tokens(kwargs: Dict[str, Any]) -> None:
 
     kwargs.pop("tokens_estimate", None)
     kwargs.pop("estimated_tokens", None)
+
+
+def _token_param_name(model: str, use_responses: bool) -> str:
+    """Resolve the correct token limit parameter name for the given model."""
+
+    if use_responses:
+        return "max_output_tokens"
+    model_name = model or ""
+    if model_name.startswith(_REASONING_PREFIXES):
+        return "max_completion_tokens"
+    return "max_tokens"
+
+
+def _apply_token_limit_param(model: str, payload: Dict[str, Any]) -> None:
+    """Normalize token limit parameters according to model and endpoint."""
+
+    incoming_max_tokens = payload.pop("max_tokens", None)
+    incoming_max_completion = payload.pop("max_completion_tokens", None)
+    incoming_max_output = payload.pop("max_output_tokens", None)
+
+    final_name = _token_param_name(model, USE_RESPONSES)
+    chosen: Any = None
+    if final_name == "max_output_tokens":
+        chosen = (
+            incoming_max_output
+            if incoming_max_output is not None
+            else incoming_max_completion
+            if incoming_max_completion is not None
+            else incoming_max_tokens
+        )
+    elif final_name == "max_completion_tokens":
+        chosen = (
+            incoming_max_completion
+            if incoming_max_completion is not None
+            else incoming_max_output
+            if incoming_max_output is not None
+            else incoming_max_tokens
+        )
+    else:
+        chosen = (
+            incoming_max_tokens
+            if incoming_max_tokens is not None
+            else incoming_max_completion
+            if incoming_max_completion is not None
+            else incoming_max_output
+        )
+
+    if chosen is None:
+        chosen = DEFAULT_MAX_COMP_TOKENS
+
+    try:
+        payload[final_name] = int(chosen)
+    except Exception:
+        payload[final_name] = DEFAULT_MAX_COMP_TOKENS
+    logger.info(
+        "gpt.param applied model=%s endpoint=%s token_param=%s value=%s",
+        model,
+        "responses" if USE_RESPONSES else "chat.completions",
+        final_name,
+        payload[final_name],
+    )
+
+
+def _messages_to_responses_input(messages: List[Dict[str, Any]]) -> Any:
+    """Convert chat-style messages to Responses API input format."""
+
+    if not messages:
+        return ""
+
+    formatted: List[Dict[str, Any]] = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        entry: Dict[str, Any] = {
+            "role": msg.get("role") or "user",
+        }
+        if "name" in msg:
+            entry["name"] = msg["name"]
+        content = msg.get("content")
+        if content is None:
+            entry["content"] = ""
+        else:
+            entry["content"] = content
+        formatted.append(entry)
+
+    return formatted or ""
+
+
+def _normalize_responses_output(data: Dict[str, Any]) -> None:
+    """Map Responses API payloads into a chat-completions-like shape."""
+
+    if not isinstance(data, dict) or data.get("choices"):
+        return
+
+    outputs: Any = data.get("output") or data.get("outputs")
+    if not outputs and isinstance(data.get("response"), dict):
+        outputs = data["response"].get("output") or data["response"].get("outputs")
+
+    if not outputs:
+        return
+    if not isinstance(outputs, list):
+        outputs = [outputs]
+
+    choices: List[Dict[str, Any]] = []
+    for item in outputs:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role") or "assistant"
+        content = item.get("content")
+        text_content = ""
+        if isinstance(content, str):
+            text_content = content
+        elif isinstance(content, list):
+            parts: List[str] = []
+            for part in content:
+                if isinstance(part, dict):
+                    text = part.get("text")
+                    if text is None and "output_text" in part:
+                        text = part.get("output_text")
+                    if text is not None:
+                        parts.append(str(text))
+                elif part is not None:
+                    parts.append(str(part))
+            text_content = "\n".join(p for p in parts if p)
+        elif content is None:
+            text_content = ""
+        else:
+            text_content = str(content)
+
+        message_payload = {"role": role, "content": text_content}
+        choices.append({"message": message_payload})
+
+    if choices:
+        data["choices"] = choices
 
 # Si no existe en este módulo, definimos un fallback para tipar el except
 try:  # pragma: no cover - protección en tiempo de ejecución
@@ -801,23 +946,34 @@ async def _http_post_chat(
     if not api_key:
         raise OpenAIError("No hay API key configurada")
 
-    url = "https://api.openai.com/v1/chat/completions"
+    base_url = OPENAI_BASE.rstrip("/") or "https://api.openai.com"
+    endpoint_path = "/v1/responses" if USE_RESPONSES else "/v1/chat/completions"
+    url = f"{base_url}{endpoint_path}"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
 
-    payload: Dict[str, Any] = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-    }
-    if max_tokens is not None:
-        payload["max_tokens"] = int(max_tokens)
+    extra_kwargs = dict(kwargs)
+    if max_tokens is not None and "max_tokens" not in extra_kwargs:
+        extra_kwargs["max_tokens"] = max_tokens
+
+    payload: Dict[str, Any] = {"model": model, "temperature": temperature}
+    if USE_RESPONSES:
+        payload["input"] = _messages_to_responses_input(messages)
+    else:
+        payload["messages"] = messages
     if stop is not None:
         payload["stop"] = stop
     if response_format is not None:
         payload["response_format"] = response_format
+
+    token_keys = ("max_tokens", "max_completion_tokens", "max_output_tokens")
+    for token_key in token_keys:
+        if token_key in extra_kwargs:
+            value = extra_kwargs.pop(token_key)
+            if value is not None:
+                payload[token_key] = value
 
     optional_payload_keys = (
         "top_p",
@@ -831,14 +987,19 @@ async def _http_post_chat(
         "parallel_tool_calls",
     )
     for key in optional_payload_keys:
-        if key in kwargs:
-            value = kwargs.pop(key)
+        if key in extra_kwargs:
+            value = extra_kwargs.pop(key)
             if value is not None:
                 payload[key] = value
 
-    if kwargs:
+    if strict_json and "response_format" not in payload and response_format is None:
+        payload["response_format"] = {"type": "json_object"}
+
+    _apply_token_limit_param(model, payload)
+
+    if extra_kwargs:
         # Cualquier resto explícito se envía dentro del payload si no es None.
-        for key, value in list(kwargs.items()):
+        for key, value in list(extra_kwargs.items()):
             if value is not None:
                 payload[key] = value
 
@@ -854,6 +1015,8 @@ async def _http_post_chat(
             data = response.json()
         except Exception as exc:
             raise OpenAIError(f"Invalid JSON response from OpenAI: {exc}") from exc
+        if USE_RESPONSES and isinstance(data, dict):
+            _normalize_responses_output(data)
         if AI_API_VERBOSE >= 2:
             usage = data.get("usage") if isinstance(data, dict) else None
             if isinstance(usage, dict):
