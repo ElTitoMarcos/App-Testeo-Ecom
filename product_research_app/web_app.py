@@ -58,6 +58,7 @@ from . import product_enrichment
 from .sse import publish_progress
 from .utils import sanitize_product_name
 from .utils.db import row_to_dict, rget
+from .services.serializers import serialize_product_row
 
 WINNER_SCORE_FIELDS = list(winner_calc.FEATURE_MAP.keys())
 
@@ -368,6 +369,136 @@ def _ensure_desire(product: Dict[str, Any], extras: Dict[str, Any]) -> str:
         if product_id is not None:
             _DESIRE_MISSING_STATE[product_id] = False
     return desire_val
+
+
+def _load_extra_dict(raw_extra: Any) -> Dict[str, Any]:
+    if isinstance(raw_extra, dict):
+        extra_dict = dict(raw_extra)
+    else:
+        try:
+            extra_dict = json.loads(raw_extra) if raw_extra else {}
+        except Exception:
+            extra_dict = {}
+    if "rating" in extra_dict and "Product Rating" not in extra_dict:
+        extra_dict["Product Rating"] = extra_dict["rating"]
+    if "units_sold" in extra_dict and "Item Sold" not in extra_dict:
+        extra_dict["Item Sold"] = extra_dict["units_sold"]
+    if "revenue" in extra_dict and "Revenue($)" not in extra_dict:
+        extra_dict["Revenue($)"] = extra_dict["revenue"]
+    if "conversion_rate" in extra_dict and "Creator Conversion Ratio" not in extra_dict:
+        extra_dict["Creator Conversion Ratio"] = extra_dict["conversion_rate"]
+    if "launch_date" in extra_dict and "Launch Date" not in extra_dict:
+        extra_dict["Launch Date"] = extra_dict["launch_date"]
+    return extra_dict
+
+
+def _value_from_sources(product: Dict[str, Any], extra: Dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        val = rget(product, key)
+        if val not in (None, ""):
+            return val
+        if isinstance(extra, dict):
+            if key in extra and extra[key] not in (None, ""):
+                return extra[key]
+            lower_key = key.lower()
+            for e_key, e_val in extra.items():
+                if isinstance(e_key, str) and e_key.lower() == lower_key and e_val not in (None, ""):
+                    return e_val
+    return None
+
+
+def _serialize_product_for_response(
+    product_row: Dict[str, Any] | sqlite3.Row,
+    *,
+    extra_dict: Optional[Dict[str, Any]] = None,
+    winner_score: Any = None,
+    breakdown: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    product = row_to_dict(product_row) if not isinstance(product_row, dict) else dict(product_row)
+    extras = _load_extra_dict(extra_dict if extra_dict is not None else rget(product, "extra"))
+
+    desire_db = rget(product, "desire")
+    if desire_db in (None, ""):
+        desire_db = _ensure_desire(product, extras)
+    desire_val = (desire_db or "").strip() or None
+
+    score_value = winner_score if winner_score is not None else rget(product, "winner_score")
+
+    date_range_val = _value_from_sources(
+        product,
+        extras,
+        "date_range",
+        "rango_fechas",
+        "Date Range",
+        "Date range",
+        "Rango Fechas",
+        "dateRange",
+        "rangoFechas",
+    )
+
+    first_seen_val = _value_from_sources(
+        product,
+        extras,
+        "first_seen",
+        "first_seen_at",
+        "first_date",
+        "first_seen_date",
+        "firstSeen",
+        "firstSeenAt",
+        "First Seen",
+        "First seen",
+        "First Date",
+    )
+    last_seen_val = _value_from_sources(
+        product,
+        extras,
+        "last_seen",
+        "last_seen_at",
+        "last_date",
+        "last_seen_date",
+        "lastSeen",
+        "lastSeenAt",
+        "Last Seen",
+        "Last seen",
+        "Last Date",
+    )
+
+    payload: Dict[str, Any] = {
+        "id": rget(product, "id"),
+        "name": sanitize_product_name(rget(product, "name")),
+        "category": rget(product, "category"),
+        "price": rget(product, "price"),
+        "image_url": rget(product, "image_url"),
+        "desire": desire_val,
+        "desire_magnitude": rget(product, "desire_magnitude"),
+        "awareness_level": rget(product, "awareness_level"),
+        "competition_level": rget(product, "competition_level"),
+        "winner_score": score_value,
+        "extras": extras,
+        "date_range": date_range_val,
+        "rango_fechas": date_range_val,
+        "rating": extras.get("rating"),
+        "units_sold": extras.get("units_sold"),
+        "revenue": extras.get("revenue"),
+        "conversion_rate": extras.get("conversion_rate"),
+        "launch_date": extras.get("launch_date"),
+    }
+
+    if first_seen_val is not None:
+        payload["first_seen"] = first_seen_val
+    if last_seen_val is not None:
+        payload["last_seen"] = last_seen_val
+    if breakdown is not None:
+        payload["winner_score_breakdown"] = breakdown
+
+    price_val = payload.get("price")
+    if price_val is not None:
+        try:
+            payload["price_display"] = round(float(price_val), 2)
+        except Exception:
+            payload["price_display"] = price_val
+
+    return serialize_product_row(payload)
 
 
 def parse_xlsx(binary: bytes):
@@ -1260,58 +1391,47 @@ class RequestHandler(QuietHandlerMixin):
             )
             return
         if path in ("/products", "/api/products"):
-            # Return a list of products including extra metadata for UI display
             conn = ensure_db()
-            rows = []
-            for p_row in database.list_products(conn):
-                p = row_to_dict(p_row)
-                extra = rget(p, "extra", {})
+            qs = parse_qs(parsed.query)
+            group_raw = qs.get("group_id", [None])[0]
+            fetch_scores = False
+            products_rows: List[sqlite3.Row]
+            if group_raw not in (None, "", "-1"):
                 try:
-                    extra_dict = json.loads(extra) if isinstance(extra, str) else (extra or {})
-                except Exception:
-                    extra_dict = {}
-                if 'rating' in extra_dict and 'Product Rating' not in extra_dict:
-                    extra_dict['Product Rating'] = extra_dict['rating']
-                if 'units_sold' in extra_dict and 'Item Sold' not in extra_dict:
-                    extra_dict['Item Sold'] = extra_dict['units_sold']
-                if 'revenue' in extra_dict and 'Revenue($)' not in extra_dict:
-                    extra_dict['Revenue($)'] = extra_dict['revenue']
-                score_value = rget(p, "winner_score")
-                dr = rget(p, "date_range")
-                if dr is None:
-                    dr = extra_dict.get("date_range")
-                price_val = rget(p, "price")
-                desire_db = rget(p, "desire")
-                if desire_db in (None, ""):
-                    desire_db = _ensure_desire(p, extra_dict)
-                desire_val = (desire_db or "").strip() or None
-                row = {
-                    "id": rget(p, "id"),
-                    "name": sanitize_product_name(rget(p, "name")),
-                    "category": rget(p, "category"),
-                    "price": price_val,
-                    "image_url": rget(p, "image_url"),
-                    "desire": desire_val,
-                    "desire_magnitude": rget(p, "desire_magnitude"),
-                    "awareness_level": rget(p, "awareness_level"),
-                    "competition_level": rget(p, "competition_level"),
-                    "rating": extra_dict.get("rating"),
-                    "units_sold": extra_dict.get("units_sold"),
-                    "revenue": extra_dict.get("revenue"),
-                    "conversion_rate": extra_dict.get("conversion_rate"),
-                    "launch_date": extra_dict.get("launch_date"),
-                    "date_range": dr or "",
-                    "extras": extra_dict,
-                }
-                if price_val is not None:
-                    try:
-                        row["price_display"] = round(float(price_val), 2)
-                    except Exception:
-                        row["price_display"] = price_val
-                row["winner_score"] = score_value
-                rows.append(row)
+                    group_id = int(group_raw)
+                except (TypeError, ValueError):
+                    self._set_json(400)
+                    self.wfile.write(json.dumps({"error": "invalid_group_id"}).encode("utf-8"))
+                    return
+                products_rows = list(database.get_products_in_list(conn, group_id))
+                fetch_scores = True
+            else:
+                products_rows = list(database.list_products(conn))
+
+            payload: List[Dict[str, Any]] = []
+            for p_row in products_rows:
+                breakdown_data: Optional[Dict[str, Any]] = None
+                score_override = None
+                if fetch_scores:
+                    scores = database.get_scores_for_product(conn, p_row["id"])
+                    if scores:
+                        score_dict = row_to_dict(scores[0])
+                        score_override = rget(score_dict, "winner_score")
+                        try:
+                            raw_breakdown = rget(score_dict, "winner_score_breakdown")
+                            breakdown_data = json.loads(raw_breakdown or "{}")
+                        except Exception:
+                            breakdown_data = {}
+                payload.append(
+                    _serialize_product_for_response(
+                        p_row,
+                        winner_score=score_override,
+                        breakdown=breakdown_data,
+                    )
+                )
+
             self._set_json()
-            self.wfile.write(json.dumps(rows).encode("utf-8"))
+            self.wfile.write(json.dumps(payload).encode("utf-8"))
             return
         if path == "/config":
             # return stored configuration (without exposing the API key)
@@ -1404,38 +1524,24 @@ class RequestHandler(QuietHandlerMixin):
                 prods = database.get_products_in_list(conn, lid)
                 rows = []
                 for p in prods:
+                    breakdown_data: Optional[Dict[str, Any]] = None
+                    score_value = None
                     scores = database.get_scores_for_product(conn, p["id"])
-                    score = scores[0] if scores else None
-                    extra = p["extra"] if "extra" in p.keys() else {}
-                    try:
-                        extra_dict = json.loads(extra) if isinstance(extra, str) else (extra or {})
-                    except Exception:
-                        extra_dict = {}
-                    p_dict = row_to_dict(p)
-                    desire_val = _ensure_desire(p_dict, extra_dict)
-                    score_dict = row_to_dict(score)
-                    score_value = rget(score_dict, "winner_score")
-                    breakdown_data = {}
-                    if score_dict:
+                    if scores:
+                        score_dict = row_to_dict(scores[0])
+                        score_value = rget(score_dict, "winner_score")
                         try:
                             raw_breakdown = rget(score_dict, "winner_score_breakdown")
                             breakdown_data = json.loads(raw_breakdown or "{}")
                         except Exception:
                             breakdown_data = {}
-                    row = {
-                        "id": p["id"],
-                        "name": sanitize_product_name(p["name"]),
-                        "category": p["category"],
-                        "price": p["price"],
-                        "image_url": p["image_url"],
-                        "desire": desire_val,
-                        "desire_magnitude": rget(p_dict, "desire_magnitude"),
-                        "extras": extra_dict,
-                    }
-                    row["winner_score"] = score_value
-                    if score_dict:
-                        row["winner_score_breakdown"] = breakdown_data
-                    rows.append(row)
+                    rows.append(
+                        _serialize_product_for_response(
+                            p,
+                            winner_score=score_value,
+                            breakdown=breakdown_data,
+                        )
+                    )
                 self._set_json()
                 self.wfile.write(json.dumps(rows).encode("utf-8"))
                 return
@@ -1986,12 +2092,12 @@ class RequestHandler(QuietHandlerMixin):
                 competition_level=data.get("competition_level"),
                 extra=data.get("extras"),
             )
-            product = row_to_dict(database.get_product(conn, pid))
-            try:
-                extra_dict = json.loads(rget(product, "extra") or "{}")
-            except Exception:
-                extra_dict = {}
-            product["desire"] = _ensure_desire(product, extra_dict)
+            product_row = database.get_product(conn, pid)
+            if not product_row:
+                self._set_json(404)
+                self.wfile.write(json.dumps({"error": "not_found"}).encode('utf-8'))
+                return
+            product = _serialize_product_for_response(product_row)
             self._set_json()
             self.wfile.write(json.dumps(product).encode('utf-8'))
             return
@@ -2026,16 +2132,9 @@ class RequestHandler(QuietHandlerMixin):
                 data.pop("price", None)
             conn = ensure_db()
             database.update_product(conn, pid, **data)
-            product = row_to_dict(database.get_product(conn, pid))
-            if product:
-                try:
-                    extra_dict = json.loads(rget(product, "extra") or "{}")
-                except Exception:
-                    extra_dict = {}
-                desire_db = rget(product, "desire")
-                if desire_db in (None, ""):
-                    desire_db = _ensure_desire(product, extra_dict)
-                product["desire"] = (desire_db or "").strip() or None
+            product_row = database.get_product(conn, pid)
+            if product_row:
+                product = _serialize_product_for_response(product_row)
                 self._set_json()
                 self.wfile.write(json.dumps(product).encode('utf-8'))
             else:
@@ -2098,7 +2197,12 @@ class RequestHandler(QuietHandlerMixin):
             fields = {k: v for k, v in data.items() if k in allowed}
             if fields:
                 database.update_product(conn, pid, **fields)
-            product = row_to_dict(database.get_product(conn, pid))
+            product_row = database.get_product(conn, pid)
+            if not product_row:
+                self._set_json(404)
+                self.wfile.write(json.dumps({"error": "Not found"}).encode('utf-8'))
+                return
+            product = _serialize_product_for_response(product_row)
             self._set_json()
             self.wfile.write(json.dumps(product).encode('utf-8'))
             return

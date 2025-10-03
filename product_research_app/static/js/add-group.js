@@ -39,6 +39,7 @@ import * as groupsService from './groups-service.js';
           toast.success(`${ids.length} añadidos a ${groupName}`);
           hide();
           loadLists();
+          document.dispatchEvent(new CustomEvent('group-item-added', { detail: { group_id: id } }));
         }catch(err){ console.error(err); toast.error('Error al añadir al grupo'); }
       });
     });

@@ -1064,6 +1064,31 @@ let sortField = null;
 let sortDir = 1;
 let sortType = 'string';
 
+const LS_KEY_GROUP_ID = 'prapp.currentGroupId';
+const LS_KEY_GROUP_NAME = 'prapp.currentGroupName';
+
+function getCurrentGroupId(){
+  const v = localStorage.getItem(LS_KEY_GROUP_ID);
+  return v && v !== 'null' && v !== 'undefined' ? v : null;
+}
+function setCurrentGroup(id, name){
+  if (id) {
+    localStorage.setItem(LS_KEY_GROUP_ID, String(id));
+    if (name) localStorage.setItem(LS_KEY_GROUP_NAME, String(name));
+  } else {
+    localStorage.removeItem(LS_KEY_GROUP_ID);
+    localStorage.removeItem(LS_KEY_GROUP_NAME);
+  }
+}
+
+let currentGroupFilter = -1;
+const __storedGroupId = getCurrentGroupId();
+if (__storedGroupId !== null) {
+  const parsed = Number(__storedGroupId);
+  if (Number.isFinite(parsed)) currentGroupFilter = parsed;
+}
+window.currentGroupFilter = currentGroupFilter;
+
 // ——— Estado de paginación ———
 const LS_KEY_PAGE_SIZE = 'prapp.pageSize';
 const LS_KEY_PAGE_NUM = 'prapp.currentPage';
@@ -1387,8 +1412,16 @@ function isTrending(name) {
 
 async function fetchProducts(options = {}) {
   const prevSel = new Set(selection);
-  const fetchOpts = options && options.skipProgress ? { __skipLoadingHook: true } : undefined;
-  const data = await fetchJson('/products', fetchOpts);
+  const opts = options || {};
+  const fetchOpts = {};
+  if (opts.skipProgress) fetchOpts.__skipLoadingHook = true;
+  if (opts.host) fetchOpts.__hostEl = opts.host;
+  const override = Object.prototype.hasOwnProperty.call(opts, 'groupId') ? opts.groupId : getCurrentGroupId();
+  const gid = override !== null && override !== undefined && override !== '' && override !== '-1'
+    ? override
+    : null;
+  const url = gid ? `/products?group_id=${encodeURIComponent(gid)}` : '/products';
+  const data = await fetchJson(url, Object.keys(fetchOpts).length ? fetchOpts : undefined);
   if(data.length && data[0].desire !== undefined && window.ensureColumnVisible){
     ensureColumnVisible('desire');
   }
@@ -1415,6 +1448,53 @@ async function fetchProducts(options = {}) {
 window.fetchProducts = fetchProducts;
 async function reloadTable(options){ await fetchProducts(options); }
 async function reloadRows(ids, options){ await fetchProducts(options); }
+
+function handleGroupChange(detail, options = {}) {
+  const opts = options || {};
+  const hasId = detail && detail.id !== undefined && detail.id !== null && detail.id !== '';
+  const idStr = hasId ? String(detail.id) : null;
+  const name = hasId ? (detail.name || '') : '';
+  if (hasId) {
+    setCurrentGroup(idStr, name);
+    const parsed = Number(idStr);
+    currentGroupFilter = Number.isFinite(parsed) ? parsed : idStr;
+  } else {
+    setCurrentGroup(null, null);
+    currentGroupFilter = -1;
+  }
+  window.currentGroupFilter = currentGroupFilter;
+  selection.clear();
+  const fetchParams = {
+    skipProgress: Boolean(opts.skipProgress),
+    host: opts.host || null,
+    groupId: idStr,
+  };
+  const promise = fetchProducts(fetchParams).then(() => {
+    if (opts.skipLists) return null;
+    return loadLists();
+  });
+  return promise;
+}
+
+document.addEventListener('group-changed', (e) => {
+  if (!e) return;
+  const detail = e.detail;
+  const opts = detail && typeof detail === 'object' && detail.options ? detail.options : (e.__options || {});
+  const normalized = detail && typeof detail === 'object' && detail.id !== undefined && detail.id !== null
+    ? { id: detail.id, name: detail.name || '' }
+    : null;
+  const promise = handleGroupChange(normalized, opts || {});
+  e.__handledPromise = promise;
+});
+
+document.addEventListener('group-item-added', (e) => {
+  const active = getCurrentGroupId();
+  if (!active) return;
+  const addedTo = e && e.detail && e.detail.group_id;
+  if (addedTo != null && String(addedTo) === String(active)) {
+    fetchProducts({ skipProgress: true, groupId: active });
+  }
+});
 
 function renderTable() {
   const headerRow = document.getElementById('headerRow');
@@ -1514,6 +1594,12 @@ function renderTable() {
         value = item[key];
       } else {
         value = item.extras ? item.extras[key] : '';
+      }
+      if (value == null) {
+        if (key === 'rango_fechas') value = item['date_range'];
+        if (key === 'date_range') value = item['rango_fechas'];
+        if (key === 'awareness_level') value = item['ai_awareness_level'];
+        if (key === 'competition_level') value = item['ai_competition_level'];
       }
       if (col.render) {
         try { td.textContent = col.render(item); } catch (e) { td.textContent = ''; }
@@ -2321,7 +2407,6 @@ document.getElementById('btnGenWinner').onclick = async () => {
 };
 
 // -------- Group management --------
-let currentGroupFilter = -1; // -1 indicates all products
 
 async function loadLists() {
   try {
@@ -2342,10 +2427,19 @@ async function loadLists() {
       select.appendChild(opt);
     });
 
-    select.value = currentGroupFilter.toString();
+    const stored = getCurrentGroupId();
+    let targetValue = '-1';
+    if (stored !== null) targetValue = String(stored);
+    else if (currentGroupFilter !== -1 && currentGroupFilter !== null) targetValue = String(currentGroupFilter);
+    const hasOption = Array.from(select.options).some(opt => String(opt.value) === targetValue);
+    select.value = hasOption ? targetValue : '-1';
     select.onchange = (e) => {
-      const id = parseInt(e.target.value);
-      applyGroupFilter(id);
+      const raw = e.target.value;
+      const idVal = raw === '-1' ? null : raw;
+      const name = e.target.selectedOptions?.[0]?.textContent || '';
+      const event = new CustomEvent('group-changed', { detail: idVal ? { id: idVal, name } : null });
+      event.__options = { skipLists: true };
+      document.dispatchEvent(event);
     };
   } catch(err) {
     console.error(err);
@@ -2355,26 +2449,26 @@ async function loadLists() {
 window.loadLists = loadLists;
 document.addEventListener('groups-updated', () => loadLists());
 
-async function applyGroupFilter(id, { skipProgress = false, host = null } = {}){
-  if(id === -1){
-    // load all products
-    currentGroupFilter = -1;
-    fetchProducts();
-    // refresh lists to update active styling
-    loadLists();
-    return;
+async function applyGroupFilter(id, { skipProgress = false, host = null, skipLists = false } = {}){
+  const select = document.getElementById('groupSelect');
+  const targetValue = id === -1 || id === null ? '-1' : String(id);
+  if (select && String(select.value) !== targetValue) {
+    select.value = targetValue;
   }
-  try{
-    currentGroupFilter = id;
-    const fetchOpts = skipProgress ? { __skipLoadingHook: true, __hostEl: host } : (host ? { __hostEl: host } : undefined);
-    const data = await fetchJson('/list/' + id, fetchOpts);
-    allProducts = data;
-    window.allProducts = allProducts;
-    selection.clear();
-    renderTable();
-    // refresh lists to highlight active group
-    loadLists();
-  } catch(err){ console.error(err); toast.error('Error al cargar lista'); }
+  let name = '';
+  if (select) {
+    const opt = select.selectedOptions?.[0];
+    name = opt ? (opt.textContent || '') : '';
+  } else {
+    const lists = window.listCache || [];
+    const match = lists.find(g => String(g.id) === String(id));
+    if (match) name = match.name || '';
+  }
+  const detail = targetValue === '-1' ? null : { id: targetValue, name };
+  const event = new CustomEvent('group-changed', { detail });
+  event.__options = { skipProgress, host, skipLists };
+  document.dispatchEvent(event);
+  return event.__handledPromise || handleGroupChange(detail, { skipProgress, host, skipLists });
 }
 
 // create list button
@@ -2389,8 +2483,31 @@ document.getElementById('createListBtn').onclick = async () => {
 };
 
 // load lists on page load
-window.addEventListener('DOMContentLoaded', () => {
-  loadLists();
+window.addEventListener('DOMContentLoaded', async () => {
+  await loadLists();
+  const stored = getCurrentGroupId();
+  if (stored !== null) {
+    const select = document.getElementById('groupSelect');
+    let name = '';
+    let hasOption = false;
+    if (select) {
+      const opt = Array.from(select.options).find(o => String(o.value) === String(stored));
+      if (opt) {
+        name = opt.textContent || '';
+        hasOption = true;
+      }
+    }
+    if (hasOption) {
+      await handleGroupChange({ id: stored, name }, { skipLists: true });
+    } else {
+      setCurrentGroup(null, null);
+      currentGroupFilter = -1;
+      window.currentGroupFilter = currentGroupFilter;
+      await fetchProducts();
+    }
+  } else {
+    await fetchProducts();
+  }
 });
 window.renderTable = renderTable;
 window.parseDate = parseDate;
