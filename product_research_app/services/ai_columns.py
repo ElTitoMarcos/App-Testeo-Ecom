@@ -69,7 +69,7 @@ DEFAULT_BATCH_SIZE = max(8, _env_int("PRAPP_AI_COLUMNS_BATCH_SIZE", 48))
 MIN_BATCH_SIZE = 8
 MAX_RETRIES_MISSING = _env_int("PRAPP_AI_RETRIES_MISSING", 2)
 
-RAW_MAX_CONCURRENCY = max(1, _env_int("PRAPP_OPENAI_MAX_CONCURRENCY", 32))
+RAW_MAX_CONCURRENCY = max(1, _env_int("PRAPP_OPENAI_MAX_CONCURRENCY", 4))
 OPENAI_HEADROOM = max(0.1, min(0.99, _env_float("PRAPP_OPENAI_HEADROOM", 0.98)))
 AI_MAX_CONCURRENCY = max(
     1,
@@ -1738,6 +1738,9 @@ def run_ai_fill_job(
 
     total_items = len(candidates)
 
+    raw_concurrency_target = min(total_items, AI_MAX_CONCURRENCY)
+    effective_concurrency = max(1, raw_concurrency_target) if raw_concurrency_target else 1
+
     runtime_cfg = config.get_ai_runtime_config()
 
     def _cancel_requested() -> bool:
@@ -2083,6 +2086,8 @@ def run_ai_fill_job(
 
     if remaining:
         pending_candidates = list(remaining)
+        raw_concurrency_target = min(len(pending_candidates), AI_MAX_CONCURRENCY)
+        effective_concurrency = max(1, raw_concurrency_target) if raw_concurrency_target else 1
         max_batch_size = min(AI_MAX_PRODUCTS_PER_CALL, len(pending_candidates))
         max_batch_size = max(AI_MIN_PRODUCTS_PER_CALL, max_batch_size)
         max_batch_size = max(1, min(AI_BATCH_MAX_ITEMS, max_batch_size))
@@ -2090,7 +2095,7 @@ def run_ai_fill_job(
             "ai.run start items_total=%d batch_init=%d concurrency_target=%d strict_json=%s tpm_cap=%d rpm_cap=%d tpd_cap=%d",
             total_items,
             max_batch_size,
-            AI_MAX_CONCURRENCY,
+            raw_concurrency_target,
             STRICT_JSON_ENABLED,
             TPM_SOFT_CAP,
             RPM_SOFT_CAP,
@@ -2105,7 +2110,7 @@ def run_ai_fill_job(
             pending_groups.append((chunk, 0, 0, False))
 
         async def _execute_batches(batches: List[BatchRequest]) -> List[Dict[str, Any]]:
-            semaphore = asyncio.Semaphore(max(1, AI_MAX_CONCURRENCY))
+            semaphore = asyncio.Semaphore(max(1, effective_concurrency))
 
             async def _run_single(batch: BatchRequest) -> Dict[str, Any]:
                 nonlocal triage_covered_total, fallback_big_total, cancel_requested
@@ -2570,7 +2575,7 @@ def run_ai_fill_job(
         total_processed,
         remaining_total,
         concurrency_eff,
-        AI_MAX_CONCURRENCY,
+        raw_concurrency_target,
         total_batches,
         p50,
         p95,
