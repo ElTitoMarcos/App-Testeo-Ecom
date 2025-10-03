@@ -69,8 +69,20 @@ async function processBatch(items) {
   });
   if (!res.ok) {
     let msg = res.statusText;
-    try { const err = await res.json(); if (err.error) msg = err.error; } catch {}
-    throw new Error(msg);
+    let detail = '';
+    try {
+      const err = await res.json();
+      if (err && typeof err === 'object') {
+        if (err.error) msg = err.error;
+        const extras = [];
+        if (err.finish_reason) extras.push(`finish_reason=${err.finish_reason}`);
+        if (err.usage) {
+          try { extras.push(`usage=${JSON.stringify(err.usage)}`); } catch {}
+        }
+        if (extras.length) detail = ` (${extras.join(' ')})`;
+      }
+    } catch {}
+    throw new Error(`${msg}${detail}`);
   }
   const data = await res.json();
   let ok = 0;

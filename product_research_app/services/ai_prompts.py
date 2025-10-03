@@ -6,6 +6,36 @@ from typing import Any, Dict, List
 AI_FIELDS = ["desire", "desire_magnitude", "awareness_level", "competition_level"]
 
 
+# NUEVO
+def score_item_schema():
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "id": {"type": "integer"},
+            "desire": {"type": "string", "minLength": 1},
+            "desire_label": {"type": "string", "minLength": 1},
+            "desire_magnitude": {"type": "number", "minimum": 0, "maximum": 1},
+            "competition_level": {"type": "number", "minimum": 0, "maximum": 1},
+            "price": {"type": "number"},
+        },
+        "required": ["id", "desire", "desire_label", "desire_magnitude"],
+    }
+
+
+# NUEVO
+def build_score_json_schema():
+    return {
+        "name": "score_batch",
+        "schema": {
+            "type": "array",
+            "items": score_item_schema(),
+            "minItems": 1,
+        },
+        "strict": True,
+    }
+
+
 def build_triage_messages(batch: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     """Construye mensajes para decidir si un producto requiere puntuación completa."""
     sys = (
@@ -53,8 +83,9 @@ def parse_triage(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
 def build_score_messages(batch: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     """Construye mensajes para puntuar productos."""
     sys = (
-        "Eres un analista. Devuelve SOLO JSON válido. Sin texto extra. "
-        "Campos: id, desire (etiqueta corta), desire_magnitude(0..100), awareness_level(0..100), competition_level(0..100)."
+        "Eres un analista. La ÚNICA salida válida es un ARRAY JSON sin comentarios, sin markdown ni texto adicional. "
+        "Cada objeto del array debe corresponder al producto solicitado en el mismo orden e incluir como mínimo: "
+        "id, desire, desire_label, desire_magnitude. Añade competition_level y price cuando puedas inferirlos. Prohibidas las explicaciones."
     )
     items = []
     for p in batch:
@@ -67,8 +98,8 @@ def build_score_messages(batch: List[Dict[str, Any]]) -> List[Dict[str, str]]:
             }
         )
     user = (
-        "Evalúa cada producto y responde JSON estricto (array). "
-        "No expliques nada. Valores numéricos enteros 0..100. "
+        "Evalúa cada producto y devuelve únicamente un ARRAY JSON. "
+        "Nada de comentarios ni texto antes o después. Usa desire_magnitude entre 0 y 1 y etiqueta corta en desire_label. "
         f"INPUT={json.dumps(items, ensure_ascii=False)}"
     )
     return [{"role": "system", "content": sys}, {"role": "user", "content": user}]

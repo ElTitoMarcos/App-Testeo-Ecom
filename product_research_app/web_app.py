@@ -2811,9 +2811,16 @@ class RequestHandler(QuietHandlerMixin):
             logger.info("/api/ba/insights tokens=%s duration=%.2fs", usage.get('total_tokens'), duration)
             self._set_json()
             self.wfile.write(json.dumps({"grid_updates": grid_updates}).encode('utf-8'))
-        except gpt.InvalidJSONError:
+        except gpt.InvalidJSONError as exc:
             self._set_json(502)
-            self.wfile.write(json.dumps({"error": "Respuesta IA no es JSON"}).encode('utf-8'))
+            payload = {"error": str(exc) or "Respuesta IA no es JSON"}
+            finish_reason = getattr(exc, "finish_reason", None)
+            if finish_reason:
+                payload["finish_reason"] = finish_reason
+            usage_payload = getattr(exc, "usage", None)
+            if usage_payload:
+                payload["usage"] = usage_payload
+            self.wfile.write(json.dumps(payload).encode('utf-8'))
         except Exception:
             self._set_json(503)
             self.wfile.write(json.dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
@@ -2842,9 +2849,16 @@ class RequestHandler(QuietHandlerMixin):
             logger.info("/api/ia/batch-columns tokens=%s duration=%.2fs", usage.get('total_tokens'), duration)
             self._set_json()
             self.wfile.write(json.dumps({"ok": ok, "ko": ko}).encode('utf-8'))
-        except gpt.InvalidJSONError:
+        except gpt.InvalidJSONError as exc:
             self._set_json(502)
-            self.wfile.write(json.dumps({"error": "Respuesta IA no es JSON"}).encode('utf-8'))
+            payload = {"error": str(exc) or "Respuesta IA no es JSON"}
+            finish_reason = getattr(exc, "finish_reason", None)
+            if finish_reason:
+                payload["finish_reason"] = finish_reason
+            usage_payload = getattr(exc, "usage", None)
+            if usage_payload:
+                payload["usage"] = usage_payload
+            self.wfile.write(json.dumps(payload).encode('utf-8'))
         except Exception:
             self._set_json(503)
             self.wfile.write(json.dumps({"error": "OpenAI no disponible"}).encode('utf-8'))
