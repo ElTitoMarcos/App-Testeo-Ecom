@@ -50,6 +50,16 @@ body.dark pre { background:#2e315f; }
 /* Weight slider styling */
 .field-label { display:block; margin-top:10px; font-weight:600; }
 
+/* ——— Paginación ——— */
+.page-controls { display:flex; align-items:center; gap:8px; margin-left:8px; }
+.page-controls label { font-size:12px; opacity:0.9; }
+#pageSizeSelect { padding:4px 8px; border-radius:6px; border:1px solid #ccc; }
+body.dark #pageSizeSelect { background:#1f2344; color:#eaeaea; border-color:#444; }
+.pager { display:flex; align-items:center; gap:6px; margin-left:10px; }
+.pager button { padding:4px 8px; border-radius:6px; line-height:1; }
+.pager .page-info { font-size:12px; opacity:0.85; min-width:72px; text-align:center; }
+.pager button[disabled] { opacity:0.5; cursor:not-allowed; }
+
 #section-trends[hidden]{display:none;}
 #trendHeader{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin-bottom:16px;}
 .kpi-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:20px;}
@@ -133,6 +143,23 @@ body.dark .skeleton{background:#333;}
     </div>
     <div id="searchRowRight">
       <div id="listMeta">0 resultados</div>
+      <!-- Controles de paginación -->
+      <div class="page-controls" id="pageControls">
+        <label for="pageSizeSelect">Mostrar</label>
+        <select id="pageSizeSelect" aria-label="Tamaño de página">
+          <option value="10">10</option>
+          <option value="50" selected>50</option>
+          <option value="100">100</option>
+          <option value="0">Todos</option>
+        </select>
+        <div class="pager" aria-label="Paginación de tabla">
+          <button id="firstPage" title="Primera">«</button>
+          <button id="prevPage"  title="Anterior">‹</button>
+          <span class="page-info" id="pageInfo">Página 1/1</span>
+          <button id="nextPage"  title="Siguiente">›</button>
+          <button id="lastPage"  title="Última">»</button>
+        </div>
+      </div>
     </div>
   </div>
 </header>
@@ -1034,6 +1061,67 @@ let sortField = null;
 let sortDir = 1;
 let sortType = 'string';
 
+// ——— Estado de paginación ———
+const LS_KEY_PAGE_SIZE = 'prapp.pageSize';
+const LS_KEY_PAGE_NUM = 'prapp.currentPage';
+let pageSize = Number(localStorage.getItem(LS_KEY_PAGE_SIZE) || 50);
+if (![10, 50, 100, 0].includes(pageSize)) pageSize = 50;
+let currentPage = Number(localStorage.getItem(LS_KEY_PAGE_NUM) || 1);
+if (!Number.isFinite(currentPage) || currentPage < 1) currentPage = 1;
+
+function totalPages() {
+  if (!Array.isArray(products)) return 1;
+  if (pageSize <= 0) return 1;
+  return Math.max(1, Math.ceil(products.length / pageSize));
+}
+
+function clampPage() {
+  const tp = totalPages();
+  let updated = false;
+  if (currentPage > tp) { currentPage = tp; updated = true; }
+  if (currentPage < 1) { currentPage = 1; updated = true; }
+  if (updated) localStorage.setItem(LS_KEY_PAGE_NUM, String(currentPage));
+}
+
+function getPagedProducts() {
+  if (pageSize <= 0) return products;
+  const start = (currentPage - 1) * pageSize;
+  const end = start + pageSize;
+  return products.slice(start, end);
+}
+
+function goToPage(n) {
+  currentPage = Math.max(1, Math.min(totalPages(), Number(n) || 1));
+  localStorage.setItem(LS_KEY_PAGE_NUM, String(currentPage));
+  renderTable();
+}
+
+function setPageSize(n) {
+  pageSize = Number(n);
+  if (![10, 50, 100, 0].includes(pageSize)) pageSize = 50;
+  localStorage.setItem(LS_KEY_PAGE_SIZE, String(pageSize));
+  currentPage = 1;
+  localStorage.setItem(LS_KEY_PAGE_NUM, '1');
+  renderTable();
+}
+
+function updatePagerUI() {
+  const tp = totalPages();
+  clampPage();
+  const info = document.getElementById('pageInfo');
+  if (info) info.textContent = `Página ${currentPage}/${tp}`;
+  const first = document.getElementById('firstPage');
+  const prev = document.getElementById('prevPage');
+  const next = document.getElementById('nextPage');
+  const last = document.getElementById('lastPage');
+  const atFirst = currentPage <= 1;
+  const atLast = currentPage >= tp;
+  [first, prev].forEach(b => b && (b.disabled = atFirst));
+  [next, last].forEach(b => b && (b.disabled = atLast));
+  const sel = document.getElementById('pageSizeSelect');
+  if (sel && String(sel.value) !== String(pageSize)) sel.value = String(pageSize);
+}
+
 function ensureAppState(){
   window.appState = window.appState || {};
   return window.appState;
@@ -1046,11 +1134,28 @@ function getActiveFilters(){
   state.filters = filters;
   return filters;
 }
-function updateResultsBadge(total) {
+function updateResultsBadge(total, opts = {}) {
   const meta = document.getElementById('listMeta');
   if (!meta) return;
-  const count = typeof total === 'number' ? total : (Array.isArray(products) ? products.length : 0);
-  meta.textContent = `${count} resultados`;
+  const totalCount = Array.isArray(products) ? products.length : 0;
+  const count = typeof total === 'number' ? total : totalCount;
+  const hasPaging = pageSize > 0;
+  const emptyOverride = typeof total === 'number' && total <= 0;
+  const start = (!hasPaging || totalCount === 0 || emptyOverride) ? 0 : ((currentPage - 1) * pageSize) + 1;
+  let end = (!hasPaging || totalCount === 0) ? totalCount : Math.min(totalCount, currentPage * pageSize);
+  if (typeof total === 'number' && hasPaging) {
+    if (total <= 0) {
+      end = 0;
+    } else {
+      end = Math.min(start + total - 1, totalCount);
+    }
+  }
+  const rangeBase = totalCount || (typeof total === 'number' ? total : 0);
+  const skipRange = opts && opts.skipRange;
+  const range = (!skipRange && hasPaging)
+    ? (rangeBase ? ` • mostrando ${start}–${Math.max(end, start)}` : ' • mostrando 0–0')
+    : '';
+  meta.textContent = `${count} resultados${range}`;
 }
 
 window.updateResultsBadge = updateResultsBadge;
@@ -1060,6 +1165,9 @@ const gridRoot = document.getElementById('productTable');
 
 document.addEventListener('filters-changed', (e) => {
   if (e && e.detail) ensureAppState().filters = e.detail;
+  // Reinicia a página 1 cuando cambian filtros
+  currentPage = 1;
+  localStorage.setItem(LS_KEY_PAGE_NUM, '1');
   selection.clear();
   renderTable();
 });
@@ -1283,6 +1391,9 @@ async function fetchProducts(options = {}) {
   }
   allProducts = data;
   preprocessProducts(allProducts);
+  // Al recargar datos, vuelve a página 1
+  currentPage = 1;
+  localStorage.setItem(LS_KEY_PAGE_NUM, '1');
   allProducts.sort((a,b)=> (Number(a.id)||0) - (Number(b.id)||0));
   sortField = 'id';
   sortDir = 1;
@@ -1342,14 +1453,17 @@ function renderTable() {
   }
   // Clear body
   tbody.innerHTML = '';
-  const visibleProducts = Array.isArray(products) ? [...products] : [];
-  window.__visibleProducts = visibleProducts;
-  window.__allProducts = baseList && baseList.length ? baseList : visibleProducts;
+  // Paginación: restringimos a página actual
+  clampPage();
+  const pageProducts = Array.isArray(products) ? getPagedProducts() : [];
+  window.__pageProducts = pageProducts;
+  window.__visibleProducts = products;
+  window.__allProducts = baseList && baseList.length ? baseList : pageProducts;
   document.dispatchEvent(new CustomEvent('visible-products-changed', {
-    detail: { count: visibleProducts.length }
+    detail: { count: products.length }
   }));
   // Render rows
-  products.forEach(item => {
+  pageProducts.forEach(item => {
     const tr = document.createElement('tr');
     if (item.isDuplicate) {
       tr.classList.add('is-duplicate');
@@ -1560,8 +1674,9 @@ function renderTable() {
     tr.appendChild(tdDel);
     tbody.appendChild(tr);
   });
-  currentPageIds = products.map(p => String(p.id));
-  updateResultsBadge(currentPageIds.length);
+  currentPageIds = pageProducts.map(p => String(p.id));
+  updateResultsBadge();
+  updatePagerUI();
   if (window.refreshColumns) window.refreshColumns();
   if (window.applyColumnVisibility) window.applyColumnVisibility();
   updateMasterState();
@@ -1616,12 +1731,30 @@ function sortBy(field, type) {
   renderTable();
 }
 
-document.getElementById('refreshBtn').onclick = fetchProducts;
-window.onload = async () => {
-  await ensureApiKey();
-  await loadConfig();
-  await fetchProducts();
-  const tid = localStorage.getItem(IMPORT_TASK_LS_KEY);
+  document.getElementById('refreshBtn').onclick = fetchProducts;
+  window.onload = async () => {
+    await ensureApiKey();
+    await loadConfig();
+    await fetchProducts();
+
+    // Inicializa controles de paginación
+    const ps = document.getElementById('pageSizeSelect');
+    if (ps) {
+      ps.value = String(pageSize);
+      ps.onchange = (e) => setPageSize(e.target.value);
+    }
+    const first = document.getElementById('firstPage');
+    const prev = document.getElementById('prevPage');
+    const next = document.getElementById('nextPage');
+    const last = document.getElementById('lastPage');
+    if (first) first.onclick = () => goToPage(1);
+    if (prev) prev.onclick = () => goToPage(currentPage - 1);
+    if (next) next.onclick = () => goToPage(currentPage + 1);
+    if (last) last.onclick = () => goToPage(totalPages());
+    updatePagerUI();
+    updateResultsBadge();
+
+    const tid = localStorage.getItem(IMPORT_TASK_LS_KEY);
   if (tid) {
     toast.info('Reanudando importación previa…');
     const host = getGlobalProgressHost();
@@ -1746,7 +1879,7 @@ document.getElementById('searchBtn').onclick = () => {
     row.style.display = match ? '' : 'none';
     if (match) visible++;
   });
-  updateResultsBadge(visible);
+  updateResultsBadge(visible, { skipRange: true });
 };
 const gptField = document.getElementById('gptPrompt');
 const sendPromptBtn = document.getElementById('sendPrompt');
