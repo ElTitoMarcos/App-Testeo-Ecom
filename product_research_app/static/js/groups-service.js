@@ -39,8 +39,17 @@ export async function deleteGroup(id, opts = {}) {
     if (window.currentGroupFilter === id) {
       const next = mode === 'move' && targetGroupId ? targetGroupId : -1;
       window.currentGroupFilter = next;
-      if (next === -1 && window.fetchProducts) await window.fetchProducts();
-      else if (window.applyGroupFilter) await window.applyGroupFilter(next);
+      if (next === -1) {
+        try {
+          localStorage.removeItem('prapp.currentGroupId');
+          localStorage.removeItem('prapp.currentGroupName');
+        } catch (e) {}
+      }
+      if (window.applyGroupFilter) {
+        await window.applyGroupFilter(next, { skipProgress: true });
+      } else if (next === -1 && window.fetchProducts) {
+        await window.fetchProducts({ skipProgress: true, groupId: null });
+      }
     }
     document.dispatchEvent(new CustomEvent('groups-updated'));
   } finally {
