@@ -64,6 +64,16 @@ DEFAULT_MAX_COMP_TOKENS = int(
 )
 
 _REASONING_PREFIXES = ("gpt-5", "o1", "o3", "o4")
+_SAMPLING_KEYS = (
+    "temperature",
+    "top_p",
+    "presence_penalty",
+    "frequency_penalty",
+    "logprobs",
+    "top_logprobs",
+    "logit_bias",
+    "n",
+)
 
 # Cache for baseline arrays recalculated every 10 minutes
 _BASELINE_CACHE: Dict[str, Any] = {"ts": 0, "data": None}
@@ -343,6 +353,26 @@ def _apply_token_limit_param(model: str, payload: Dict[str, Any]) -> None:
         final_name,
         payload[final_name],
     )
+
+
+def _strip_unsupported_sampling(model: str, payload: Dict[str, Any]) -> None:
+    """Elimina parámetros de muestreo no soportados por modelos de razonamiento."""
+
+    if not (model or "").startswith(_REASONING_PREFIXES):
+        return
+
+    removed: List[str] = []
+    for key in _SAMPLING_KEYS:
+        if key in payload:
+            payload.pop(key, None)
+            removed.append(key)
+
+    if removed:
+        logger.info(
+            "gpt.param stripped for reasoning model=%s removed=%s",
+            model,
+            ",".join(removed),
+        )
 
 
 def _messages_to_responses_input(messages: List[Dict[str, Any]]) -> Any:
@@ -996,6 +1026,7 @@ async def _http_post_chat(
         payload["response_format"] = {"type": "json_object"}
 
     _apply_token_limit_param(model, payload)
+    _strip_unsupported_sampling(model, payload)
 
     if extra_kwargs:
         # Cualquier resto explícito se envía dentro del payload si no es None.
