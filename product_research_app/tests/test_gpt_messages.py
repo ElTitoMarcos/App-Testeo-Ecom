@@ -39,6 +39,29 @@ def test_build_messages_task_b():
     assert parsed == aggregates
 
 
+def test_build_messages_task_todo_terreno_request_section():
+    request = {
+        "lenguaje": "Python",
+        "objetivo": "sumar números",
+        "version": "3.11",
+        "entrada": "Dos enteros",
+    }
+    messages = gpt.build_messages("todo-terreno", context_json=request)
+    assert messages[0]["content"] == registry.PROMPT_MASTER_V3_SYSTEM
+    user_payload = messages[1]["content"]
+    assert user_payload.startswith(registry.PROMPT_TODO_TERRENO)
+    assert "### REQUEST" in user_payload
+    json_block = user_payload.split("### REQUEST\n", 1)[1]
+    parsed = json.loads(json_block)
+    assert parsed == request
+
+
+def test_normalize_task_aliases():
+    assert registry.normalize_task("api-endpoint") == "API_ENDPOINT"
+    assert registry.normalize_task("bug_fix") == "BUGFIX"
+    assert registry.normalize_task("json") == "JSON_REPORT"
+
+
 def test_prepare_params_with_schema_json_mode():
     schema = {"name": "demo", "schema": {"type": "object"}, "strict": True}
     payload = gpt.prepare_params(

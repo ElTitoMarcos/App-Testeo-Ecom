@@ -101,6 +101,20 @@ STOPWORDS = {
 }
 
 
+_REQUEST_SECTION_TASKS = {
+    "TODO_TERRENO",
+    "REFACTOR",
+    "BUGFIX",
+    "UNIT_TESTS",
+    "DOCSTRINGS",
+    "MIGRATION",
+    "API_ENDPOINT",
+    "SQL_QUERY",
+    "CLI_TOOL",
+    "JSON_REPORT",
+}
+
+
 class OpenAIError(Exception):
     """Custom exception for OpenAI API errors."""
     pass
@@ -252,6 +266,8 @@ def build_messages(
         sections.append("### AGGREGATES\n" + _dumps_payload(aggregates))
     elif canonical == "E_auto":
         sections.append("### DATA\n" + _dumps_payload(data))
+    elif canonical in _REQUEST_SECTION_TASKS:
+        sections.append("### REQUEST\n" + _dumps_payload(context_json))
 
     if mode:
         sections.append(f"### MODE\n{mode}")
