@@ -361,6 +361,7 @@ async def call_gpt_async(
     messages: List[Dict[str, Any]],
     estimated_tokens: int = 0,
     strict_json: bool = True,
+    max_completion_tokens: Optional[int] = None,
     **kwargs,
 ) -> Dict[str, Any]:
     """Asynchronous version of :func:`call_gpt` with retries and backoff."""
@@ -387,6 +388,9 @@ async def call_gpt_async(
             tokens_est = max(tokens_est, int(alias_value or 0))
         except Exception:
             pass
+    if max_completion_tokens is not None:
+        kwargs.setdefault("max_completion_tokens", max_completion_tokens)
+
     _ensure_no_dup_tokens(kwargs)
     kwargs, _ = _prepare_model_kwargs(model, kwargs, default_temperature=0.2)
 
@@ -515,6 +519,7 @@ def call_gpt(
     messages: List[Dict[str, Any]],
     estimated_tokens: int = 0,
     strict_json: bool = True,
+    max_completion_tokens: Optional[int] = None,
     **kwargs,
 ) -> Dict[str, Any]:
     """Synchronous wrapper around :func:`call_gpt_async`."""
@@ -537,6 +542,7 @@ def call_gpt(
             messages=messages,
             estimated_tokens=estimated_tokens,
             strict_json=strict_json,
+            max_completion_tokens=max_completion_tokens,
             **kwargs,
         )
     )
@@ -565,7 +571,7 @@ async def call_prompt_task_async(
     context_json: Optional[Dict[str, Any]] = None,
     aggregates: Optional[Dict[str, Any]] = None,
     data: Optional[Dict[str, Any]] = None,
-    temperature: float = 0,
+    temperature: Optional[float] = None,
     *,
     extra_user: Optional[str] = None,
     mode: Optional[str] = None,
@@ -575,6 +581,7 @@ async def call_prompt_task_async(
     messages: Optional[List[Dict[str, Any]]] = None,
     estimated_tokens: int = 0,
     strict_json: bool = True,
+    max_completion_tokens: Optional[int] = None,
     **kwargs,
 ) -> Dict[str, Any]:
     """Ruta principal para ejecutar tareas de Prompt Maestro."""
@@ -584,12 +591,15 @@ async def call_prompt_task_async(
 
     if messages is not None:
         model_name = model or config.get_model()
+        send_kwargs = dict(kwargs)
+        if max_completion_tokens is not None:
+            send_kwargs.setdefault("max_completion_tokens", max_completion_tokens)
         return await call_gpt_async(
             model=model_name,
             messages=messages,
             estimated_tokens=estimated_tokens,
             strict_json=strict_json,
-            **kwargs,
+            **send_kwargs,
         )
 
     try:
@@ -617,10 +627,23 @@ async def call_prompt_task_async(
 
     default_max_tokens = 450 if canonical == "DESIRE" else None
     call_max_tokens = max_tokens if max_tokens is not None else default_max_tokens
+    call_max_completion = max_completion_tokens
+
+    extra_completion = kwargs.pop("max_completion_tokens", None)
+    if call_max_completion is None and extra_completion is not None:
+        call_max_completion = extra_completion
+
+    if call_max_completion is not None and max_tokens is None:
+        call_max_tokens = None
 
     prompt_text = _message_text(messages)
     prompt_tokens_est = _estimate_tokens(prompt_text)
-    if call_max_tokens:
+    if call_max_completion is not None:
+        try:
+            prompt_tokens_est += int(call_max_completion)
+        except Exception:
+            prompt_tokens_est += 0
+    elif call_max_tokens:
         try:
             prompt_tokens_est += int(call_max_tokens)
         except Exception:
@@ -628,17 +651,32 @@ async def call_prompt_task_async(
 
     total_estimated = max(prompt_tokens_est, estimated_tokens)
 
+    model_key = (model_name or "").lower()
+    temperature_arg: Optional[float]
+    if temperature is not None:
+        temperature_arg = temperature
+    elif model_key.startswith("gpt-5"):
+        temperature_arg = None
+    else:
+        temperature_arg = 0
+
+    call_kwargs = dict(kwargs)
+    if temperature_arg is not None:
+        call_kwargs["temperature"] = temperature_arg
+    if call_max_tokens is not None:
+        call_kwargs["max_tokens"] = call_max_tokens
+    if call_max_completion is not None:
+        call_kwargs["max_completion_tokens"] = call_max_completion
+
     raw = await call_gpt_async(
         model=model_name,
         messages=messages,
         api_key=api_key,
-        temperature=temperature,
         response_format=response_format,
-        max_tokens=call_max_tokens,
         stop=stop,
         estimated_tokens=total_estimated,
         strict_json=strict_json,
-        **kwargs,
+        **call_kwargs,
     )
 
     parsed_json, text_content = _parse_message_content(raw)
@@ -662,7 +700,7 @@ def call_prompt_task(
     context_json: Optional[Dict[str, Any]] = None,
     aggregates: Optional[Dict[str, Any]] = None,
     data: Optional[Dict[str, Any]] = None,
-    temperature: float = 0,
+    temperature: Optional[float] = None,
     *,
     extra_user: Optional[str] = None,
     mode: Optional[str] = None,
@@ -672,6 +710,7 @@ def call_prompt_task(
     messages: Optional[List[Dict[str, Any]]] = None,
     estimated_tokens: int = 0,
     strict_json: bool = True,
+    max_completion_tokens: Optional[int] = None,
     **kwargs,
 ) -> Dict[str, Any]:
     """Wrapper síncrono para :func:`call_prompt_task_async`."""
@@ -703,6 +742,7 @@ def call_prompt_task(
             messages=messages,
             estimated_tokens=estimated_tokens,
             strict_json=strict_json,
+            max_completion_tokens=max_completion_tokens,
             **kwargs,
         )
     )
@@ -854,6 +894,7 @@ async def _http_post_chat(
     temperature: Optional[float] = None,
     response_format: Optional[Dict[str, Any]] = None,
     max_tokens: Optional[int] = None,
+    max_completion_tokens: Optional[int] = None,
     stop: Optional[Any] = None,
     timeout: Optional[httpx.Timeout] = None,
     **kwargs,
@@ -870,14 +911,30 @@ async def _http_post_chat(
         "Content-Type": "application/json",
     }
 
+    extra_completion = kwargs.pop("max_completion_tokens", None)
+    if max_completion_tokens is None and extra_completion is not None:
+        max_completion_tokens = extra_completion
+
+    extra_max_tokens = kwargs.pop("max_tokens", None)
+    if max_tokens is None and extra_max_tokens is not None:
+        max_tokens = extra_max_tokens
+
     payload: Dict[str, Any] = {
         "model": model,
         "messages": messages,
     }
     if temperature is not None:
         payload["temperature"] = temperature
-    if max_tokens is not None:
-        payload["max_tokens"] = int(max_tokens)
+    if max_completion_tokens is not None:
+        try:
+            payload["max_completion_tokens"] = int(max_completion_tokens)
+        except Exception:
+            payload["max_completion_tokens"] = max_completion_tokens
+    elif max_tokens is not None:
+        try:
+            payload["max_tokens"] = int(max_tokens)
+        except Exception:
+            payload["max_tokens"] = max_tokens
     if stop is not None:
         payload["stop"] = stop
     if response_format is not None:
