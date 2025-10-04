@@ -282,7 +282,7 @@ def _prepare_model_kwargs(
     """Normaliza parámetros dependiendo del modelo seleccionado."""
 
     limits = config.get_model_limits(model)
-    supports_extra = bool(limits.get("supported_extra_params", True))
+    supports_extra = bool(limits.get("supports_extra_params", True))
     normalized = dict(kwargs)
 
     if supports_extra:
@@ -309,32 +309,30 @@ def _prepare_model_kwargs(
 
 def _sanitize_payload_for_model(payload: Dict[str, Any], model_name: str) -> Dict[str, Any]:
     limits = config.get_model_limits(model_name)
-    supports_extra = bool(limits.get("supported_extra_params", True))
+    supports_extra = bool(limits.get("supports_extra_params", True))
+
+    sanitized = {key: value for key, value in payload.items() if value is not None}
 
     if supports_extra:
-        if "max_completion_tokens" in payload and "max_tokens" not in payload:
-            payload["max_tokens"] = payload.pop("max_completion_tokens")
-    else:
-        for key in [
-            "temperature",
-            "top_p",
-            "frequency_penalty",
-            "presence_penalty",
-            "logit_bias",
-            "logprobs",
-            "top_logprobs",
-        ]:
-            payload.pop(key, None)
-        if "max_tokens" in payload and "max_completion_tokens" not in payload:
-            payload["max_completion_tokens"] = payload.pop("max_tokens")
-        else:
-            payload.pop("max_tokens", None)
+        if "max_completion_tokens" in sanitized and "max_tokens" not in sanitized:
+            sanitized["max_tokens"] = sanitized.pop("max_completion_tokens")
+        return sanitized
 
-    for key in list(payload.keys()):
-        if payload[key] is None:
-            payload.pop(key)
+    for key in [
+        "temperature",
+        "top_p",
+        "frequency_penalty",
+        "presence_penalty",
+        "logit_bias",
+        "logprobs",
+        "top_logprobs",
+    ]:
+        sanitized.pop(key, None)
 
-    return payload
+    if "max_tokens" in sanitized:
+        sanitized["max_completion_tokens"] = sanitized.pop("max_tokens")
+
+    return sanitized
 
 # Si no existe en este módulo, definimos un fallback para tipar el except
 try:  # pragma: no cover - protección en tiempo de ejecución

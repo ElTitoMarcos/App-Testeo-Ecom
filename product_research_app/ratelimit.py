@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import os, time, threading, random
 from contextlib import asynccontextmanager, contextmanager
-from typing import Optional
+from typing import Dict, Optional
+
+from . import config
 
 
 def _env_int(name, default):
@@ -32,7 +34,8 @@ _eff_conc = 1
 _tokens_bucket: "_TokenBucket"
 _requests_bucket: "_TokenBucket"
 _conc_sem: threading.BoundedSemaphore
-_async_limiter: "AsyncRateLimiter"
+_ASYNC_LIMIT_SNAPSHOT: Dict[str, int] = {"tpm": 1, "rpm": 1, "conc": 1}
+_LIMITERS: Dict[asyncio.AbstractEventLoop, "AsyncRateLimiter"] = {}
 
 _UPDATE_LOCK = threading.Lock()
 
@@ -144,11 +147,6 @@ class AsyncRateLimiter:
             yield
         finally:
             self.conc.release()
-
-
-_async_limiter = AsyncRateLimiter(1, 1, 1)
-
-
 def update_runtime_limits(
     tpm: Optional[int] = None,
     rpm: Optional[int] = None,
@@ -157,7 +155,7 @@ def update_runtime_limits(
     max_conc: Optional[int] = None,
 ) -> None:
     global _TPM, _RPM, _HEADROOM, _MAX_CONC, _EFF_TPM, _EFF_RPM, _eff_conc
-    global _tokens_bucket, _requests_bucket, _conc_sem, _async_limiter
+    global _tokens_bucket, _requests_bucket, _conc_sem, _ASYNC_LIMIT_SNAPSHOT, _LIMITERS
 
     with _UPDATE_LOCK:
         if tpm is not None:
@@ -181,11 +179,23 @@ def update_runtime_limits(
         _requests_bucket = _TokenBucket(_EFF_RPM)
         _eff_conc = max(1, min(_MAX_CONC, int(max(1, _MAX_CONC * _HEADROOM))))
         _conc_sem = threading.BoundedSemaphore(_eff_conc)
-        _async_limiter = AsyncRateLimiter(_EFF_TPM, _EFF_RPM, _eff_conc)
+        _ASYNC_LIMIT_SNAPSHOT = {"tpm": _EFF_TPM, "rpm": _EFF_RPM, "conc": _eff_conc}
+        _LIMITERS.clear()
 
 
 def get_async_limiter() -> AsyncRateLimiter:
-    return _async_limiter
+    loop = asyncio.get_running_loop()
+    limiter = _LIMITERS.get(loop)
+    if limiter is None:
+        model_name = _current_model()
+        limits = config.get_model_limits(model_name)
+        snapshot = dict(_ASYNC_LIMIT_SNAPSHOT)
+        tpm = snapshot.get("tpm") or limits.get("tpm") or 1
+        rpm = snapshot.get("rpm") or limits.get("rpm") or 1
+        conc = snapshot.get("conc") or 1
+        limiter = AsyncRateLimiter(max(1, int(tpm)), max(1, int(rpm)), max(1, int(conc)))
+        _LIMITERS[loop] = limiter
+    return limiter
 
 
 async def async_decorrelated_jitter_sleep(prev: float, cap: float) -> float:
@@ -195,6 +205,19 @@ async def async_decorrelated_jitter_sleep(prev: float, cap: float) -> float:
     next_sleep = min(cap, random.uniform(base, prev * 3 if prev > 0 else 1.0))
     await asyncio.sleep(next_sleep)
     return next_sleep
+
+
+def _current_model() -> str:
+    env_model = os.environ.get("AI_MODEL") or os.environ.get("PRAPP_AI_MODEL")
+    if env_model:
+        return env_model
+    try:
+        return config.get_active_model()
+    except Exception:
+        try:
+            return config.get_model()
+        except Exception:
+            return getattr(config, "DEFAULT_MODEL", "gpt-5-mini")
 
 
 # Inicializa los buckets con los valores actuales del entorno.

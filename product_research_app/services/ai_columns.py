@@ -65,7 +65,13 @@ def _env_bool(name: str, default: bool) -> bool:
     return default
 
 
-DEFAULT_BATCH_SIZE = max(8, _env_int("PRAPP_AI_COLUMNS_BATCH_SIZE", 32))
+_ACTIVE_MODEL = os.environ.get("AI_MODEL") or os.environ.get("PRAPP_AI_MODEL") or config.get_model()
+_ACTIVE_LIMITS = config.get_model_limits(_ACTIVE_MODEL)
+_ACTIVE_CONTEXT = int(_ACTIVE_LIMITS.get("context") or 120_000)
+_DEFAULT_SAFE_CONTEXT = max(4000, int(min(_ACTIVE_CONTEXT * 0.95, 380_000)))
+_IS_GPT5 = "gpt-5-mini" in (_ACTIVE_MODEL or "").lower()
+
+DEFAULT_BATCH_SIZE = max(8, _env_int("PRAPP_AI_COLUMNS_BATCH_SIZE", 64 if _IS_GPT5 else 32))
 MIN_BATCH_SIZE = 8
 MAX_RETRIES_MISSING = _env_int("PRAPP_AI_RETRIES_MISSING", 2)
 
@@ -78,15 +84,15 @@ AI_MAX_CONCURRENCY = max(
         int(max(1, math.floor(RAW_MAX_CONCURRENCY * OPENAI_HEADROOM))),
     ),
 )
-AI_BATCH_MAX_ITEMS = _env_int("AI_BATCH_MAX_ITEMS", 16)
+AI_BATCH_MAX_ITEMS = max(1, _env_int("AI_BATCH_MAX_ITEMS", 64 if _IS_GPT5 else 16))
 
 STRICT_JSON_ENABLED = _env_bool("PRAPP_AI_COLUMNS_STRICT_JSON", True)
 MAX_TOKENS_PER_ITEM = max(32, _env_int("PRAPP_AI_COLUMNS_MAX_TOKENS_PER_ITEM", 128))
-SAFE_CONTEXT_TOKENS = max(4000, _env_int("PRAPP_OPENAI_CONTEXT_SAFE_TOKENS", 120000))
+SAFE_CONTEXT_TOKENS = max(4000, _env_int("PRAPP_OPENAI_CONTEXT_SAFE_TOKENS", _DEFAULT_SAFE_CONTEXT))
 StatusCallback = Callable[..., None]
 
 TRIAGE_ENABLED = _env_bool("PRAPP_AI_TRIAGE_ENABLED", True)
-TRIAGE_MODEL = os.getenv("PRAPP_AI_TRIAGE_MODEL", "gpt-4o-mini") or "gpt-4o-mini"
+TRIAGE_MODEL = os.getenv("PRAPP_AI_TRIAGE_MODEL", "gpt-5-mini") or "gpt-5-mini"
 TRIAGE_CONFIDENCE = max(0.0, min(1.0, _env_float("PRAPP_AI_TRIAGE_CONFIDENCE", 0.70)))
 
 AI_COST = get_ai_cost_config()
@@ -115,7 +121,7 @@ def _resolve_safe_context_tokens(model_name: str, context_window: int) -> int:
             return max(4000, int(override))
         except Exception:
             pass
-    computed = int(min(context_window * 0.9, 380_000))
+    computed = int(min(context_window * 0.95, 380_000))
     return max(4000, computed)
 
 

@@ -31,31 +31,31 @@ DEFAULT_MODEL = "gpt-5-mini"
 MODEL_LIMITS: Dict[str, Dict[str, Any]] = {
     "gpt-3.5-turbo": {
         "tpm": 40_000,
-        "rpm": 3_500,
-        "tpd": 200_000,
+        "rpm": 200,
         "context": 16_000,
-        "supported_extra_params": True,
+        "supports_extra_params": True,
+        "default_timeout": 45.0,
     },
     "gpt-4": {
         "tpm": 40_000,
         "rpm": 200,
-        "tpd": 90_000,
         "context": 32_000,
-        "supported_extra_params": True,
+        "supports_extra_params": True,
+        "default_timeout": 60.0,
     },
     "gpt-4o": {
         "tpm": 30_000,
-        "rpm": 150,
-        "tpd": 90_000,
+        "rpm": 200,
         "context": 128_000,
-        "supported_extra_params": True,
+        "supports_extra_params": True,
+        "default_timeout": 60.0,
     },
     "gpt-5-mini": {
         "tpm": 500_000,
         "rpm": 500,
-        "tpd": 5_000_000,
         "context": 400_000,
-        "supported_extra_params": False,
+        "supports_extra_params": False,
+        "default_timeout": 90.0,
     },
 }
 
@@ -223,11 +223,20 @@ def get_model_limits(model_name: Optional[str]) -> Dict[str, Any]:
 def get_model() -> str:
     """Return the configured model or default to :data:`DEFAULT_MODEL`."""
 
-    config = load_config()
-    model = config.get("model")
+    cfg = load_config()
+    model: Optional[str] = cfg.get("model")
     if not model:
-        return DEFAULT_MODEL
-    return str(model)
+        ai_cost = cfg.get("aiCost")
+        if isinstance(ai_cost, dict):
+            model = ai_cost.get("model")
+    return _canonical_model_key(model)
+
+
+def get_active_model() -> str:
+    env_model = os.environ.get("AI_MODEL") or os.environ.get("PRAPP_AI_MODEL")
+    if env_model:
+        return _canonical_model_key(env_model)
+    return get_model()
 
 
 def get_ai_batch_config() -> Dict[str, Any]:
@@ -305,9 +314,13 @@ def get_ai_runtime_config() -> Dict[str, Any]:
     cfg = load_config()
     base = DEFAULT_CONFIG["ai"].copy()
     user = cfg.get("ai", {})
+    user_dict: Dict[str, Any] = {}
+    user_keys: set[str] = set()
     if isinstance(user, dict):
+        user_dict = user
         for k, v in user.items():
             base[k] = v
+            user_keys.add(k)
 
     def _env_int(name: str) -> Optional[int]:
         raw = os.environ.get(name)
@@ -347,20 +360,27 @@ def get_ai_runtime_config() -> Dict[str, Any]:
     if env_tpm is not None:
         base["tpm_limit"] = env_tpm
 
+    configured_model: Optional[str] = cfg.get("model")
+    if not configured_model:
+        ai_cost_cfg = cfg.get("aiCost")
+        if isinstance(ai_cost_cfg, dict):
+            configured_model = ai_cost_cfg.get("model")
     env_model = os.environ.get("AI_MODEL")
-    configured_model = cfg.get("model") or DEFAULT_MODEL
-    active_model = env_model or configured_model
+    active_model = _canonical_model_key(env_model or configured_model)
     limits = apply_model_rate_limits(active_model, tpm=env_tpm, rpm=env_rpm)
 
     canonical_model = _canonical_model_key(active_model)
 
-    if env_rpm is None:
+    if env_rpm is None and ("rpm_limit" not in user_keys or user_dict.get("rpm_limit") in (None, 0)):
         base["rpm_limit"] = limits.get("rpm")
-    if env_tpm is None:
+    if env_tpm is None and ("tpm_limit" not in user_keys or user_dict.get("tpm_limit") in (None, 0)):
         base["tpm_limit"] = limits.get("tpm")
 
-    if env_micro is None and canonical_model == "gpt-5-mini":
+    if env_micro is None and "microbatch" not in user_keys and canonical_model == "gpt-5-mini":
         base["microbatch"] = max(base.get("microbatch", 0) or 0, 64)
+
+    if env_timeout is None and "timeout" not in user_keys:
+        base["timeout"] = limits.get("default_timeout", base.get("timeout"))
 
     env_trunc_title = _env_int("AI_TRUNC_TITLE")
     if env_trunc_title is not None:
