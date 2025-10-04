@@ -26,9 +26,41 @@ except Exception as e:
 
 from product_research_app.utils.json_extract import coerce_json, message_parts_to_text
 
-_client = OpenAI()
 _RAW_DIR = Path("./logs/ai_raw")
 _RAW_DIR.mkdir(parents=True, exist_ok=True)
+
+PLACEHOLDERS = {"tu_openai", "your_openai_api_key", "your_openai_key", "xxxxx", "abc123"}
+
+
+def _get_api_key() -> str:
+    key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    if not key or key.lower() in PLACEHOLDERS:
+        hint = f"{key[:6]}…" if key else "(vacía)"
+        raise RuntimeError(
+            "OPENAI_API_KEY no está configurada correctamente (valor actual: "
+            f"{hint}).\nAsegúrate de establecer la clave REAL antes de llamar al LLM.\n"
+            "Si la pones desde la UI, vuelve a lanzar el job tras guardar la clave."
+        )
+    return key
+
+
+def _make_client() -> OpenAI:
+    api_key = _get_api_key()
+    kwargs: Dict[str, Any] = {"api_key": api_key}
+
+    base_url = (os.getenv("OPENAI_BASE_URL") or "").strip()
+    if base_url:
+        kwargs["base_url"] = base_url
+
+    organization = (os.getenv("OPENAI_ORG") or "").strip()
+    if organization:
+        kwargs["organization"] = organization
+
+    project = (os.getenv("OPENAI_PROJECT") or "").strip()
+    if project:
+        kwargs["project"] = project
+
+    return OpenAI(**kwargs)
 
 
 def _dump_raw(prefix: str, payload: Dict[str, Any], resp: Dict[str, Any]) -> str:
@@ -88,7 +120,8 @@ def chat_json(
         if delay:
             time.sleep(delay)
         try:
-            response = _client.chat.completions.create(**payload, timeout=timeout)
+            client = _make_client()
+            response = client.chat.completions.create(**payload, timeout=timeout)
             response_dict = json.loads(response.model_dump_json())
             _dump_raw(f"chat_{req_id or 'noid'}", payload, response_dict)
 
