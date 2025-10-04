@@ -137,7 +137,7 @@ def determine_model() -> str:
             return str(model)
     except Exception:
         pass
-    return "gpt-4o-mini"
+    return config.DEFAULT_MODEL
 
 
 def resolve_api_key() -> Optional[str]:

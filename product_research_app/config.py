@@ -10,7 +10,7 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 DEFAULT_WINNER_ORDER = [
@@ -25,6 +25,41 @@ DEFAULT_WINNER_ORDER = [
 ]
 
 
+DEFAULT_MODEL = "gpt-5-mini"
+
+
+MODEL_LIMITS: Dict[str, Dict[str, Any]] = {
+    "gpt-3.5-turbo": {
+        "tpm": 40_000,
+        "rpm": 3_500,
+        "tpd": 200_000,
+        "context": 16_000,
+        "supported_extra_params": True,
+    },
+    "gpt-4": {
+        "tpm": 40_000,
+        "rpm": 200,
+        "tpd": 90_000,
+        "context": 32_000,
+        "supported_extra_params": True,
+    },
+    "gpt-4o": {
+        "tpm": 30_000,
+        "rpm": 150,
+        "tpd": 90_000,
+        "context": 128_000,
+        "supported_extra_params": True,
+    },
+    "gpt-5-mini": {
+        "tpm": 500_000,
+        "rpm": 500,
+        "tpd": 5_000_000,
+        "context": 400_000,
+        "supported_extra_params": False,
+    },
+}
+
+
 DEFAULT_CONFIG: Dict[str, Any] = {
     "autoFillIAOnImport": True,
     "aiBatch": {
@@ -34,7 +69,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "TIME_LIMIT_SECONDS": 300,
     },
     "aiCost": {
-        "model": "gpt-4.1-mini",
+        "model": DEFAULT_MODEL,
         "useBatchWhenCountGte": 300,
         "costCapUSD": 0.25,
         "estTokensPerItemIn": 300,
@@ -160,14 +195,39 @@ def get_api_key() -> Optional[str]:
     return config.get("api_key")
 
 
+def _canonical_model_key(model_name: Optional[str]) -> str:
+    raw = str(model_name or "").strip()
+    if not raw:
+        return DEFAULT_MODEL
+    if raw in MODEL_LIMITS:
+        return raw
+    lowered = raw.lower()
+    for key in MODEL_LIMITS:
+        if lowered.startswith(key.lower()):
+            return key
+    return raw
+
+
+def get_available_models() -> List[str]:
+    return list(MODEL_LIMITS.keys())
+
+
+def get_model_limits(model_name: Optional[str]) -> Dict[str, Any]:
+    canonical = _canonical_model_key(model_name)
+    limits = MODEL_LIMITS.get(canonical)
+    if limits is None:
+        limits = MODEL_LIMITS[DEFAULT_MODEL]
+    return dict(limits)
+
+
 def get_model() -> str:
-    """Return the configured model or default to 'gpt-4o'."""
+    """Return the configured model or default to :data:`DEFAULT_MODEL`."""
 
     config = load_config()
     model = config.get("model")
     if not model:
-        return "gpt-4o"
-    return model
+        return DEFAULT_MODEL
+    return str(model)
 
 
 def get_ai_batch_config() -> Dict[str, Any]:
@@ -203,6 +263,42 @@ def get_ai_calibration_config() -> Dict[str, Any]:
         else:
             base[k] = v
     return base
+
+
+_LAST_APPLIED_LIMITS: Dict[str, Any] = {"model": None, "tpm": None, "rpm": None}
+
+
+def apply_model_rate_limits(model_name: str, *, tpm: Optional[int] = None, rpm: Optional[int] = None) -> Dict[str, Any]:
+    limits = get_model_limits(model_name)
+    effective_tpm = int(tpm if tpm is not None else limits.get("tpm", 0) or 0)
+    effective_rpm = int(rpm if rpm is not None else limits.get("rpm", 0) or 0)
+
+    global _LAST_APPLIED_LIMITS
+    canonical = _canonical_model_key(model_name)
+    if (
+        _LAST_APPLIED_LIMITS.get("model") == canonical
+        and _LAST_APPLIED_LIMITS.get("tpm") == effective_tpm
+        and _LAST_APPLIED_LIMITS.get("rpm") == effective_rpm
+    ):
+        return limits
+
+    _LAST_APPLIED_LIMITS = {"model": canonical, "tpm": effective_tpm, "rpm": effective_rpm}
+
+    if effective_tpm > 0:
+        os.environ["PRAPP_OPENAI_TPM"] = str(effective_tpm)
+    if effective_rpm > 0:
+        os.environ["PRAPP_OPENAI_RPM"] = str(effective_rpm)
+
+    try:
+        from . import ratelimit
+
+        ratelimit.update_runtime_limits(effective_tpm, effective_rpm)
+    except Exception:
+        # Si la inicialización ocurre antes de que ratelimit esté disponible,
+        # simplemente devolvemos los límites; los buckets se reconstruirán más tarde.
+        pass
+
+    return limits
 
 
 def get_ai_runtime_config() -> Dict[str, Any]:
@@ -251,6 +347,21 @@ def get_ai_runtime_config() -> Dict[str, Any]:
     if env_tpm is not None:
         base["tpm_limit"] = env_tpm
 
+    env_model = os.environ.get("AI_MODEL")
+    configured_model = cfg.get("model") or DEFAULT_MODEL
+    active_model = env_model or configured_model
+    limits = apply_model_rate_limits(active_model, tpm=env_tpm, rpm=env_rpm)
+
+    canonical_model = _canonical_model_key(active_model)
+
+    if env_rpm is None:
+        base["rpm_limit"] = limits.get("rpm")
+    if env_tpm is None:
+        base["tpm_limit"] = limits.get("tpm")
+
+    if env_micro is None and canonical_model == "gpt-5-mini":
+        base["microbatch"] = max(base.get("microbatch", 0) or 0, 64)
+
     env_trunc_title = _env_int("AI_TRUNC_TITLE")
     if env_trunc_title is not None:
         base["trunc_title"] = env_trunc_title
@@ -285,20 +396,26 @@ def get_ai_runtime_config() -> Dict[str, Any]:
 
     tpm_limit = base.get("tpm_limit")
     if tpm_limit is None:
-        base["tpm_limit"] = None
+        base["tpm_limit"] = limits.get("tpm")
     else:
         try:
             limit_val = int(tpm_limit)
         except Exception:
-            base["tpm_limit"] = None
+            base["tpm_limit"] = limits.get("tpm")
         else:
-            base["tpm_limit"] = max(0, limit_val) or None
+            if limit_val <= 0:
+                base["tpm_limit"] = None
+            else:
+                base["tpm_limit"] = limit_val
 
     try:
-        rpm_val = int(base.get("rpm_limit", DEFAULT_CONFIG["ai"].get("rpm_limit", 0)))
+        rpm_val = int(base.get("rpm_limit", 0))
     except Exception:
-        rpm_val = DEFAULT_CONFIG["ai"].get("rpm_limit", 0)
-    base["rpm_limit"] = max(0, rpm_val) or None
+        rpm_val = 0
+    if rpm_val <= 0:
+        base["rpm_limit"] = None
+    else:
+        base["rpm_limit"] = rpm_val
 
     try:
         timeout_val = float(base.get("timeout", DEFAULT_CONFIG["ai"].get("timeout", 45)))
