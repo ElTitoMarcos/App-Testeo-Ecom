@@ -1933,7 +1933,7 @@ class RequestHandler(QuietHandlerMixin):
             body = self.rfile.read(length).decode('utf-8')
             try:
                 data = json.loads(body)
-                key = str(data.get("api_key", "")).strip()
+                key = str((data.get("key") or data.get("api_key") or "")).strip()
             except Exception:
                 self._set_json(400)
                 self.wfile.write(json.dumps({"ok": False, "has_key": False, "error": "invalid_json"}).encode('utf-8'))
@@ -1953,6 +1953,16 @@ class RequestHandler(QuietHandlerMixin):
             except Exception as exc:
                 self._set_json(400)
                 self.wfile.write(json.dumps({"ok": False, "has_key": False, "error": str(exc)}).encode('utf-8'))
+                return
+            try:
+                os.environ["OPENAI_API_KEY"] = key
+                secrets_dir = Path("product_research_app/.secrets")
+                secrets_dir.mkdir(parents=True, exist_ok=True)
+                key_path = secrets_dir / "openai.key"
+                key_path.write_text(key, encoding="utf-8")
+            except Exception as exc:
+                self._set_json(500)
+                self.wfile.write(json.dumps({"ok": False, "has_key": False, "error": f"persist_failed: {exc}"}).encode('utf-8'))
                 return
             cfg = config.load_config()
             cfg["api_key"] = key

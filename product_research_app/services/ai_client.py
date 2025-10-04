@@ -29,17 +29,45 @@ from product_research_app.utils.json_extract import coerce_json, message_parts_t
 _RAW_DIR = Path("./logs/ai_raw")
 _RAW_DIR.mkdir(parents=True, exist_ok=True)
 
-PLACEHOLDERS = {"tu_openai", "your_openai_api_key", "your_openai_key", "xxxxx", "abc123"}
+PLACEHOLDERS = {"tu_openai", "tu_openai_api_key", "your_openai_api_key", "your_openai_key", "xxxxx", "abc123"}
 
 
 def _get_api_key() -> str:
+    """
+    Fuentes por orden:
+      1) Var de entorno OPENAI_API_KEY
+      2) Módulo opcional product_research_app.services.secrets.get('openai_api_key')
+      3) Fichero PRAPP_API_KEY_FILE (por defecto product_research_app/.secrets/openai.key)
+    """
+
     key = (os.getenv("OPENAI_API_KEY") or "").strip()
+
+    if not key or key.lower() in PLACEHOLDERS:
+        try:
+            from product_research_app.services import secrets as pr_secrets  # type: ignore
+
+            candidate = pr_secrets.get("openai_api_key")
+            if candidate:
+                key = str(candidate).strip()
+        except Exception:
+            pass
+
+    if not key or key.lower() in PLACEHOLDERS:
+        path = (os.getenv("PRAPP_API_KEY_FILE") or "product_research_app/.secrets/openai.key").strip()
+        try:
+            with open(path, "r", encoding="utf-8") as handler:
+                candidate = handler.read().strip()
+                if candidate:
+                    key = candidate
+        except Exception:
+            pass
+
     if not key or key.lower() in PLACEHOLDERS:
         hint = f"{key[:6]}…" if key else "(vacía)"
         raise RuntimeError(
             "OPENAI_API_KEY no está configurada correctamente (valor actual: "
-            f"{hint}).\nAsegúrate de establecer la clave REAL antes de llamar al LLM.\n"
-            "Si la pones desde la UI, vuelve a lanzar el job tras guardar la clave."
+            f"{hint}).\nGuárdala desde la UI, define la variable de entorno o coloca la clave en "
+            "product_research_app/.secrets/openai.key (cambia la ruta con PRAPP_API_KEY_FILE)."
         )
     return key
 
