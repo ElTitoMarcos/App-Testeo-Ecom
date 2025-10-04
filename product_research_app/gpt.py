@@ -272,6 +272,70 @@ def _ensure_no_dup_tokens(kwargs: Dict[str, Any]) -> None:
     kwargs.pop("tokens_estimate", None)
     kwargs.pop("estimated_tokens", None)
 
+
+def _prepare_model_kwargs(
+    model: str,
+    kwargs: Dict[str, Any],
+    *,
+    default_temperature: Optional[float] = 0.2,
+) -> Tuple[Dict[str, Any], bool]:
+    """Normaliza parámetros dependiendo del modelo seleccionado."""
+
+    limits = config.get_model_limits(model)
+    supports_extra = bool(limits.get("supported_extra_params", True))
+    normalized = dict(kwargs)
+
+    if supports_extra:
+        if "temperature" not in normalized and default_temperature is not None:
+            normalized["temperature"] = default_temperature
+        if "max_completion_tokens" in normalized and "max_tokens" not in normalized:
+            normalized["max_tokens"] = normalized.pop("max_completion_tokens")
+    else:
+        for key in [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "logit_bias",
+            "logprobs",
+            "top_logprobs",
+        ]:
+            normalized.pop(key, None)
+        if "max_tokens" in normalized and "max_completion_tokens" not in normalized:
+            normalized["max_completion_tokens"] = normalized.pop("max_tokens")
+
+    return normalized, supports_extra
+
+
+def _sanitize_payload_for_model(payload: Dict[str, Any], model_name: str) -> Dict[str, Any]:
+    limits = config.get_model_limits(model_name)
+    supports_extra = bool(limits.get("supported_extra_params", True))
+
+    if supports_extra:
+        if "max_completion_tokens" in payload and "max_tokens" not in payload:
+            payload["max_tokens"] = payload.pop("max_completion_tokens")
+    else:
+        for key in [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "logit_bias",
+            "logprobs",
+            "top_logprobs",
+        ]:
+            payload.pop(key, None)
+        if "max_tokens" in payload and "max_completion_tokens" not in payload:
+            payload["max_completion_tokens"] = payload.pop("max_tokens")
+        else:
+            payload.pop("max_tokens", None)
+
+    for key in list(payload.keys()):
+        if payload[key] is None:
+            payload.pop(key)
+
+    return payload
+
 # Si no existe en este módulo, definimos un fallback para tipar el except
 try:  # pragma: no cover - protección en tiempo de ejecución
     OpenAIError  # type: ignore[name-defined]
@@ -326,6 +390,7 @@ async def call_gpt_async(
         except Exception:
             pass
     _ensure_no_dup_tokens(kwargs)
+    kwargs, _ = _prepare_model_kwargs(model, kwargs, default_temperature=0.2)
 
     overall_attempt = 0
     rate_attempts = 0
@@ -788,7 +853,7 @@ async def _http_post_chat(
     messages: List[Dict[str, Any]],
     strict_json: bool = True,
     api_key: Optional[str] = None,
-    temperature: float = 0.2,
+    temperature: Optional[float] = None,
     response_format: Optional[Dict[str, Any]] = None,
     max_tokens: Optional[int] = None,
     stop: Optional[Any] = None,
@@ -810,8 +875,9 @@ async def _http_post_chat(
     payload: Dict[str, Any] = {
         "model": model,
         "messages": messages,
-        "temperature": temperature,
     }
+    if temperature is not None:
+        payload["temperature"] = temperature
     if max_tokens is not None:
         payload["max_tokens"] = int(max_tokens)
     if stop is not None:
@@ -841,6 +907,8 @@ async def _http_post_chat(
         for key, value in list(kwargs.items()):
             if value is not None:
                 payload[key] = value
+
+    payload = _sanitize_payload_for_model(payload, model)
 
     timeout = timeout or httpx.Timeout(60.0, connect=10.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -898,6 +966,7 @@ async def call_openai_chat_async(
     """Asynchronously send a chat completion request to the OpenAI API."""
 
     _ensure_no_dup_tokens(kwargs)
+    kwargs, _ = _prepare_model_kwargs(model, kwargs, default_temperature=0.2)
 
     safe_tokens = 0
     try:

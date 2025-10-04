@@ -96,6 +96,114 @@ except Exception:
     EST_OUT_PER_ITEM = 80
 
 
+@dataclass(frozen=True)
+class ColumnModelLimits:
+    model_name: str
+    safe_context_tokens: int
+    degrade_threshold: int
+    max_tokens_per_item: int
+    max_batch_items: int
+    max_products_per_call: int
+    default_batch_size: int
+    completion_cap: int
+
+
+def _resolve_safe_context_tokens(model_name: str, context_window: int) -> int:
+    override = os.getenv("PRAPP_OPENAI_CONTEXT_SAFE_TOKENS")
+    if override:
+        try:
+            return max(4000, int(override))
+        except Exception:
+            pass
+    computed = int(min(context_window * 0.9, 380_000))
+    return max(4000, computed)
+
+
+def _resolve_max_tokens_per_item(model_name: str, context_window: int) -> int:
+    if os.getenv("PRAPP_AI_COLUMNS_MAX_TOKENS_PER_ITEM"):
+        return MAX_TOKENS_PER_ITEM
+    lowered = (model_name or "").lower()
+    if "gpt-5-mini" in lowered or context_window >= 300_000:
+        return max(MAX_TOKENS_PER_ITEM, 256)
+    return MAX_TOKENS_PER_ITEM
+
+
+def _resolve_max_batch_items(model_name: str) -> int:
+    if os.getenv("AI_BATCH_MAX_ITEMS"):
+        return max(1, AI_BATCH_MAX_ITEMS)
+    if "gpt-5-mini" in (model_name or "").lower():
+        return max(1, max(AI_BATCH_MAX_ITEMS, 64))
+    return max(1, AI_BATCH_MAX_ITEMS)
+
+
+def _resolve_default_batch_size(model_name: str) -> int:
+    if os.getenv("PRAPP_AI_COLUMNS_BATCH_SIZE"):
+        return max(MIN_BATCH_SIZE, DEFAULT_BATCH_SIZE)
+    if "gpt-5-mini" in (model_name or "").lower():
+        return max(MIN_BATCH_SIZE, max(DEFAULT_BATCH_SIZE, 64))
+    return max(MIN_BATCH_SIZE, DEFAULT_BATCH_SIZE)
+
+
+def _resolve_max_products_per_call(model_name: str) -> int:
+    if os.getenv("PRAPP_AI_MAX_PRODUCTS_PER_CALL"):
+        return max(1, AI_MAX_PRODUCTS_PER_CALL)
+    if "gpt-5-mini" in (model_name or "").lower():
+        return max(1, max(AI_MAX_PRODUCTS_PER_CALL, 64))
+    return max(1, AI_MAX_PRODUCTS_PER_CALL)
+
+
+def _resolve_completion_cap(model_name: str, safe_tokens: int, context_window: int) -> int:
+    if context_window >= 300_000 or "gpt-5-mini" in (model_name or "").lower():
+        ceiling = 8_000
+    elif context_window >= 120_000:
+        ceiling = 6_000
+    else:
+        ceiling = 4_000
+    proportional = int(safe_tokens * 0.05)
+    if proportional <= 0:
+        proportional = ceiling
+    cap = min(ceiling, proportional)
+    return max(800, cap)
+
+
+def _resolve_degrade_threshold(safe_tokens: int, context_window: int, model_name: str) -> int:
+    lowered = (model_name or "").lower()
+    if context_window >= 300_000 or "gpt-5-mini" in lowered:
+        ratio = max(AI_DEGRADE_FACTOR, 0.95)
+    elif context_window >= 120_000:
+        ratio = max(AI_DEGRADE_FACTOR, 0.90)
+    else:
+        ratio = max(AI_DEGRADE_FACTOR, 1.0 - (4000.0 / max(context_window, 4000)))
+    threshold = int(safe_tokens * ratio)
+    lower_bound = int(safe_tokens * 0.5)
+    upper_bound = max(lower_bound, safe_tokens)
+    return max(lower_bound, min(upper_bound, threshold))
+
+
+def _compute_column_limits(model_name: str) -> ColumnModelLimits:
+    model_limits = config.get_model_limits(model_name)
+    context_window = int(model_limits.get("context") or SAFE_CONTEXT_TOKENS)
+    if context_window <= 0:
+        context_window = SAFE_CONTEXT_TOKENS
+    safe_tokens = _resolve_safe_context_tokens(model_name, context_window)
+    max_tokens_item = _resolve_max_tokens_per_item(model_name, context_window)
+    max_batch_items = _resolve_max_batch_items(model_name)
+    max_products_per_call = _resolve_max_products_per_call(model_name)
+    default_batch = _resolve_default_batch_size(model_name)
+    completion_cap = _resolve_completion_cap(model_name, safe_tokens, context_window)
+    degrade_threshold = _resolve_degrade_threshold(safe_tokens, context_window, model_name)
+    return ColumnModelLimits(
+        model_name=model_name,
+        safe_context_tokens=safe_tokens,
+        degrade_threshold=degrade_threshold,
+        max_tokens_per_item=max_tokens_item,
+        max_batch_items=max_batch_items,
+        max_products_per_call=max_products_per_call,
+        default_batch_size=default_batch,
+        completion_cap=completion_cap,
+    )
+
+
 def _persist_rows(rows: List[Dict[str, Any]]) -> None:
     """Actualiza columnas de IA en la tabla product."""
 
@@ -117,9 +225,18 @@ def _persist_rows(rows: List[Dict[str, Any]]) -> None:
     conn.commit()
 
 
-def _max_tokens_for_batch(batch_len: int) -> int:
+def _max_tokens_for_batch(
+    batch_len: int,
+    *,
+    max_tokens_per_item: int,
+    completion_cap: int,
+) -> int:
     est = EST_OUT_PER_ITEM * max(1, batch_len) + 200
-    return min(max(800, est), max(800, AI_MAX_OUTPUT_TOKENS), 4000)
+    per_item_cap = max_tokens_per_item * max(1, batch_len)
+    base = max(800, est, per_item_cap)
+    configured_cap = max(800, AI_MAX_OUTPUT_TOKENS)
+    cap = max(800, completion_cap)
+    return min(base, configured_cap, cap)
 
 
 @dataclass
@@ -152,18 +269,25 @@ class BatchAdaptationRequired(Exception):
         self.allow_split = allow_split
 
 
-def _estimate_batch_tokens(batch: BatchRequest) -> int:
+def _estimate_batch_tokens(batch: BatchRequest, max_tokens_per_item: int) -> int:
     """Estimate total tokens (prompt + completion headroom) for a batch."""
 
-    completion_budget = len(batch.candidates) * MAX_TOKENS_PER_ITEM
+    completion_budget = len(batch.candidates) * max_tokens_per_item
     return max(0, int(batch.prompt_tokens_est)) + completion_budget
 
 
-def _should_downshift(batch: BatchRequest) -> bool:
+def _should_downshift(
+    batch: BatchRequest,
+    *,
+    safe_context_tokens: int,
+    degrade_threshold: int,
+    max_tokens_per_item: int,
+) -> bool:
     if len(batch.candidates) <= MIN_BATCH_SIZE:
         return False
-    estimated = _estimate_batch_tokens(batch)
-    return estimated >= SAFE_CONTEXT_TOKENS
+    estimated = _estimate_batch_tokens(batch, max_tokens_per_item)
+    threshold = min(safe_context_tokens, degrade_threshold)
+    return estimated >= threshold
 
 
 def _detect_adaptation_reason(exc: Exception) -> Optional[str]:
@@ -732,6 +856,7 @@ def _recover_missing_sync(
     api_key: str,
     model: str,
     missing_ids: List[int],
+    limits: ColumnModelLimits,
 ) -> Tuple[Dict[int, Dict[str, Any]], int]:
     retries_used = 0
     recovered: Dict[int, Dict[str, Any]] = {}
@@ -745,7 +870,11 @@ def _recover_missing_sync(
             200,
             int(batch.prompt_tokens_est * len(to_fill) / max(1, len(batch.candidates))),
         )
-        max_tokens = _max_tokens_for_batch(len(to_fill))
+        max_tokens = _max_tokens_for_batch(
+            len(to_fill),
+            max_tokens_per_item=limits.max_tokens_per_item,
+            completion_cap=limits.completion_cap,
+        )
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt_text},
@@ -1243,6 +1372,7 @@ async def _call_batch_with_retries(
     api_key: str,
     model: str,
     max_retries: int,
+    limits: ColumnModelLimits,
 ) -> Dict[str, Any]:
     def _error_payload(error_message: str, duration: float, retries: int) -> Dict[str, Any]:
         return {
@@ -1263,7 +1393,11 @@ async def _call_batch_with_retries(
     while True:
         attempt += 1
         tokens_est = batch.prompt_tokens_est
-        max_tokens = _max_tokens_for_batch(len(batch.candidates))
+        max_tokens = _max_tokens_for_batch(
+            len(batch.candidates),
+            max_tokens_per_item=limits.max_tokens_per_item,
+            completion_cap=limits.completion_cap,
+        )
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": batch.user_text},
@@ -1334,6 +1468,7 @@ async def _call_batch_with_retries(
                         api_key,
                         model,
                         missing_ids,
+                        column_limits,
                     )
                 combined = {**partial_map, **recovered_payload}
                 pending_after = [pid for pid in expected_ids if pid not in combined]
@@ -1372,9 +1507,14 @@ async def _call_triage_batch(
     api_key: str,
     model: str,
     strict_json: bool,
+    limits: ColumnModelLimits,
 ) -> Dict[str, Any]:
     tokens_est = batch.prompt_tokens_est
-    max_tokens = _max_tokens_for_batch(len(batch.candidates))
+    max_tokens = _max_tokens_for_batch(
+        len(batch.candidates),
+        max_tokens_per_item=limits.max_tokens_per_item,
+        completion_cap=limits.completion_cap,
+    )
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": batch.user_text},
@@ -1759,6 +1899,7 @@ def run_ai_fill_job(
     env_model = os.environ.get("AI_MODEL")
     if env_model:
         model = env_model
+    column_limits = _compute_column_limits(model)
     cost_cap = cost_cfg.get("costCapUSD")
     price_map = cost_cfg.get("prices", {}).get(model, {})
     price_in = float(price_map.get("input", 0.0))
@@ -2077,9 +2218,9 @@ def run_ai_fill_job(
 
     if remaining:
         pending_candidates = list(remaining)
-        max_batch_size = min(AI_MAX_PRODUCTS_PER_CALL, len(pending_candidates))
+        max_batch_size = min(column_limits.max_products_per_call, len(pending_candidates))
         max_batch_size = max(AI_MIN_PRODUCTS_PER_CALL, max_batch_size)
-        max_batch_size = max(1, min(AI_BATCH_MAX_ITEMS, max_batch_size))
+        max_batch_size = max(1, min(column_limits.max_batch_items, max_batch_size))
         logger.info(
             "ai.run start items_total=%d batch_init=%d concurrency_target=%d strict_json=%s",
             total_items,
@@ -2143,6 +2284,7 @@ def run_ai_fill_job(
                                 api_key=api_key,
                                 model=TRIAGE_MODEL,
                                 strict_json=triage_strict_json,
+                                limits=column_limits,
                             )
                             triage_duration = float(
                                 triage_payload.get("duration", 0.0) or 0.0
@@ -2279,6 +2421,7 @@ def run_ai_fill_job(
                             api_key=api_key,
                             model=model,
                             max_retries=max_retries,
+                            limits=column_limits,
                         )
                         duration = time.perf_counter() - start_local
                         if isinstance(result, dict) and "duration" not in result:
@@ -2390,15 +2533,22 @@ def run_ai_fill_job(
                     json_retry_count=json_retry_count,
                     adapted=adapted_flag,
                 )
-                if _should_downshift(batch):
+                if _should_downshift(
+                    batch,
+                    safe_context_tokens=column_limits.safe_context_tokens,
+                    degrade_threshold=column_limits.degrade_threshold,
+                    max_tokens_per_item=column_limits.max_tokens_per_item,
+                ):
                     batch_adaptations_total += 1
                     logger.info(
                         "ai_columns.batch adapt_pre req_id=%s items=%d prompt_tokens_est=%d est_tokens=%d limit=%d",
                         batch.req_id,
                         len(batch.candidates),
                         batch.prompt_tokens_est,
-                        _estimate_batch_tokens(batch),
-                        SAFE_CONTEXT_TOKENS,
+                        _estimate_batch_tokens(
+                            batch, column_limits.max_tokens_per_item
+                        ),
+                        column_limits.safe_context_tokens,
                     )
                     if len(chunk) <= MIN_BATCH_SIZE:
                         batch.adapted = True
@@ -2905,6 +3055,14 @@ def recalc_desire_for_all(
     if not pending:
         return 0
 
+    cost_cfg_local = config.get_ai_cost_config()
+    model_name = os.environ.get("AI_MODEL") or (
+        cost_cfg_local.get("model") if isinstance(cost_cfg_local, dict) else None
+    )
+    if not model_name:
+        model_name = config.get_model()
+    column_limits = _compute_column_limits(model_name)
+
     processed = 0
     for start in range(0, len(pending), batch_size):
         chunk = pending[start : start + batch_size]
@@ -2913,7 +3071,7 @@ def recalc_desire_for_all(
         run_ai_fill_job(
             job_id=None,
             product_ids=chunk,
-            microbatch=batch_size,
+            microbatch=column_limits.default_batch_size,
             parallelism=parallel,
             status_cb=None,
         )
@@ -2973,7 +3131,17 @@ def _retry_missing_sync(model_client: Any, missing_ids: List[int]) -> Dict[int, 
 
 
 def fill_ai_columns_with_recovery(model_client: Any, product_ids: List[int]) -> Dict[int, Dict[str, Any]]:
-    batch_size = max(MIN_BATCH_SIZE, min(DEFAULT_BATCH_SIZE, len(product_ids) or MIN_BATCH_SIZE))
+    cost_cfg_local = config.get_ai_cost_config()
+    model_name = os.environ.get("AI_MODEL") or (
+        cost_cfg_local.get("model") if isinstance(cost_cfg_local, dict) else None
+    )
+    if not model_name:
+        model_name = config.get_model()
+    column_limits = _compute_column_limits(model_name)
+    batch_size = max(
+        MIN_BATCH_SIZE,
+        min(column_limits.default_batch_size, len(product_ids) or MIN_BATCH_SIZE),
+    )
     out: Dict[int, Dict[str, Any]] = {}
     consecutive_partial = 0
     index = 0

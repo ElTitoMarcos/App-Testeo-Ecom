@@ -1,23 +1,40 @@
 from __future__ import annotations
+
 import asyncio
 import os, time, threading, random
-from contextlib import contextmanager, asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+from typing import Optional
+
 
 def _env_int(name, default):
-    try: return int(os.getenv(name, default))
-    except: return default
+    try:
+        return int(os.getenv(name, default))
+    except Exception:
+        return default
+
+
 def _env_float(name, default):
-    try: return float(os.getenv(name, default))
-    except: return default
+    try:
+        return float(os.getenv(name, default))
+    except Exception:
+        return default
 
-_TPM = _env_int("PRAPP_OPENAI_TPM", 30000)
-_RPM = _env_int("PRAPP_OPENAI_RPM", 3000)
-_HEADROOM = _env_float("PRAPP_OPENAI_HEADROOM", 0.90)
-_MAX_CONC = _env_int("PRAPP_OPENAI_MAX_CONCURRENCY", 8)
 
-# Efectivo tras aplicar headroom
-_EFF_TPM = max(1, int(_TPM * _HEADROOM))
-_EFF_RPM = max(1, int(_RPM * _HEADROOM))
+_TPM = max(1, _env_int("PRAPP_OPENAI_TPM", 30000))
+_RPM = max(1, _env_int("PRAPP_OPENAI_RPM", 3000))
+_HEADROOM = max(0.1, min(0.99, _env_float("PRAPP_OPENAI_HEADROOM", 0.90)))
+_MAX_CONC = max(1, _env_int("PRAPP_OPENAI_MAX_CONCURRENCY", 8))
+
+_EFF_TPM = 1
+_EFF_RPM = 1
+_eff_conc = 1
+
+_tokens_bucket: "_TokenBucket"
+_requests_bucket: "_TokenBucket"
+_conc_sem: threading.BoundedSemaphore
+_async_limiter: "AsyncRateLimiter"
+
+_UPDATE_LOCK = threading.Lock()
 
 class _TokenBucket:
     def __init__(self, capacity_per_min: int):
@@ -50,12 +67,11 @@ class _TokenBucket:
                     self.lock.acquire()
 
 # buckets globales
-_tokens_bucket = _TokenBucket(_EFF_TPM)
-_requests_bucket = _TokenBucket(_EFF_RPM)
+_tokens_bucket = _TokenBucket(1)
+_requests_bucket = _TokenBucket(1)
 
 # semáforo global para capar concurrencia
-_eff_conc = max(1, min(_MAX_CONC, int(max(1, _MAX_CONC * _HEADROOM))))
-_conc_sem = threading.BoundedSemaphore(_eff_conc)
+_conc_sem = threading.BoundedSemaphore(1)
 
 @contextmanager
 def reserve(estimated_tokens: int):
@@ -130,7 +146,42 @@ class AsyncRateLimiter:
             self.conc.release()
 
 
-_async_limiter = AsyncRateLimiter(_EFF_TPM, _EFF_RPM, _eff_conc)
+_async_limiter = AsyncRateLimiter(1, 1, 1)
+
+
+def update_runtime_limits(
+    tpm: Optional[int] = None,
+    rpm: Optional[int] = None,
+    *,
+    headroom: Optional[float] = None,
+    max_conc: Optional[int] = None,
+) -> None:
+    global _TPM, _RPM, _HEADROOM, _MAX_CONC, _EFF_TPM, _EFF_RPM, _eff_conc
+    global _tokens_bucket, _requests_bucket, _conc_sem, _async_limiter
+
+    with _UPDATE_LOCK:
+        if tpm is not None:
+            _TPM = max(1, int(tpm))
+        if rpm is not None:
+            _RPM = max(1, int(rpm))
+        if headroom is not None:
+            try:
+                _HEADROOM = max(0.1, min(0.99, float(headroom)))
+            except Exception:
+                pass
+        if max_conc is not None:
+            try:
+                _MAX_CONC = max(1, int(max_conc))
+            except Exception:
+                pass
+
+        _EFF_TPM = max(1, int(_TPM * _HEADROOM))
+        _EFF_RPM = max(1, int(_RPM * _HEADROOM))
+        _tokens_bucket = _TokenBucket(_EFF_TPM)
+        _requests_bucket = _TokenBucket(_EFF_RPM)
+        _eff_conc = max(1, min(_MAX_CONC, int(max(1, _MAX_CONC * _HEADROOM))))
+        _conc_sem = threading.BoundedSemaphore(_eff_conc)
+        _async_limiter = AsyncRateLimiter(_EFF_TPM, _EFF_RPM, _eff_conc)
 
 
 def get_async_limiter() -> AsyncRateLimiter:
@@ -144,3 +195,7 @@ async def async_decorrelated_jitter_sleep(prev: float, cap: float) -> float:
     next_sleep = min(cap, random.uniform(base, prev * 3 if prev > 0 else 1.0))
     await asyncio.sleep(next_sleep)
     return next_sleep
+
+
+# Inicializa los buckets con los valores actuales del entorno.
+update_runtime_limits(_TPM, _RPM, headroom=_HEADROOM, max_conc=_MAX_CONC)

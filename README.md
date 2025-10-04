@@ -6,14 +6,14 @@ The AI enrichment flow now uses configurable micro-batching and parallel HTTP ca
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `AI_MODEL` | `gpt-4o-mini` | Override the chat completion model used for column filling. |
+| `AI_MODEL` | `gpt-5-mini` | Override the chat completion model used for column filling. |
 | `AI_MICROBATCH` | `12` | Number of products per request. Requests are further reduced automatically if the token estimate would exceed `AI_TPM`. |
 | `AI_PARALLELISM` | `8` | Maximum concurrent requests sent to the model. |
 | `AI_TRUNC_TITLE` | `180` | Character cap applied to product titles before building the prompt. |
 | `AI_TRUNC_DESC` | `800` | Character cap for descriptions and bullet lists in the prompt. |
 | `AI_TIMEOUT` | `45` | Total HTTP timeout (seconds) per OpenAI request. |
-| `AI_RPM` | `150` | Soft limit for requests per minute enforced via an async semaphore. Set to `0` to disable. |
-| `AI_TPM` | `80000` | Soft limit for prompt tokens per minute; batches are truncated when the estimated prompt would exceed this value. |
+| `AI_RPM` | model-specific | Soft limit for requests per minute enforced via an async semaphore. Defaults to the active model's published rate limit (e.g. 500 RPM for `gpt-5-mini`, 150 RPM for `gpt-4o`). |
+| `AI_TPM` | model-specific | Soft limit for prompt tokens per minute; when unset it tracks the active model's tokens-per-minute limit (500k TPM for `gpt-5-mini`, 30k for `gpt-4o`). |
 
 All variables also exist under `config["ai"]` so they can be persisted in `product_research_app/config.json` when running locally.
 
@@ -33,3 +33,29 @@ run_ai_fill_job: job=42 total=100 ok=92 cached=8 ko=0 cost=0.2150 pending=0 erro
 ```
 
 Logs tagged `ai_columns.request` are useful to verify concurrency in smoke tests: you should see eight or nine overlapping requests for 100 products with the defaults.
+
+## GPT-5 Mini runtime profile
+
+`gpt-5-mini` is now the default model for enrichment flows. The runtime automatically applies the published capacity limits for each supported model. For `gpt-5-mini` this means:
+
+* 500k prompt tokens per minute and 5M tokens per day.
+* Up to ~400k context tokens (the job runner keeps a 10% safety margin, capping batches at 360k prompt+completion tokens unless you override `PRAPP_OPENAI_CONTEXT_SAFE_TOKENS`).
+* Extra sampling parameters such as `temperature`, `top_p`, or penalties are ignored to comply with the reasoning API. Completion budgets use `max_completion_tokens` instead of `max_tokens` automatically.
+
+Because of the larger context window the batcher increases its defaults when `gpt-5-mini` is active: micro-batches grow to 64 items, the per-item completion budget doubles to 256 tokens, and the per-request completion cap rises to 8,000 tokens. Models with smaller context windows keep the previous limits.
+
+### Recommended `.env` overrides
+
+You can customise the runtime via environment variables. A sample configuration tuned for `gpt-5-mini` looks like this:
+
+```env
+# Límites para GPT-5-Mini
+AI_MODEL=gpt-5-mini
+AI_TPM=500000
+AI_RPM=500
+AI_MICROBATCH=64
+PRAPP_OPENAI_CONTEXT_SAFE_TOKENS=380000
+PRAPP_AI_COLUMNS_MAX_TOKENS_PER_ITEM=256
+```
+
+Adjust these numbers based on the access tier in your OpenAI account.
