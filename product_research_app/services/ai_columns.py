@@ -21,6 +21,7 @@ from ..config import (
     AI_MAX_PRODUCTS_PER_CALL,
     AI_MIN_PRODUCTS_PER_CALL,
     get_ai_cost_config,
+    get_model,
 )
 from ..ai.strict_jsonl import parse_jsonl_and_validate
 from ..obs import log_partial_ko, log_recovered
@@ -1687,18 +1688,24 @@ async def _refine_desire_statement(
     draft_text: str,
 ) -> Optional[Dict[str, Any]]:
     context = _candidate_to_desire_context(candidate)
+    current_model = get_model()
     try:
-        result = await gpt.call_prompt_task_async(
-            "DESIRE",
-            context_json=context,
-            temperature=0,
-            extra_user=(
+        base_args = {
+            "task": "DESIRE",
+            "context_json": context,
+            "extra_user": (
                 f"Borrador previo:\n{draft_text.strip()}\n\n" + DESIRE_REFINE_EXTRA_USER
             ),
-            mode="refine_no_product",
-            max_tokens=450,
-            stop=None,
-        )
+            "mode": "refine_no_product",
+            "stop": None,
+        }
+        if isinstance(current_model, str) and current_model.lower().startswith("gpt-5"):
+            call_args = dict(base_args)
+            call_args["max_completion_tokens"] = 450
+        else:
+            call_args = dict(base_args)
+            call_args.update({"temperature": 0, "max_tokens": 450})
+        result = await gpt.call_prompt_task_async(**call_args)
     except gpt.OpenAIError as exc:
         message = str(exc).lower()
         if "status 429" in message:
@@ -1713,6 +1720,12 @@ async def _refine_desire_statement(
                 candidate.id,
                 exc_info=True,
             )
+        return None
+    except gpt.InvalidJSONError:
+        logger.error(
+            "ai_columns.refine.failed id=%s: respuesta JSON vacía",
+            candidate.id,
+        )
         return None
     except Exception:
         logger.exception("desire refine call failed for id=%s", candidate.id)

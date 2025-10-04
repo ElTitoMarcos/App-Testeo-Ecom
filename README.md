@@ -7,6 +7,7 @@ The AI enrichment flow now uses configurable micro-batching and parallel HTTP ca
 | Variable | Default | Description |
 | --- | --- | --- |
 | `AI_MODEL` | `gpt-5-mini` | Override the chat completion model used for column filling. |
+| `PRAPP_AI_TRIAGE_MODEL` | `gpt-5-mini` | Model used by the quick triage phase; set it to `gpt-5-mini` to keep reasoning quality consistent end-to-end. |
 | `AI_MICROBATCH` | `12` | Number of products per request. Requests are further reduced automatically if the token estimate would exceed `AI_TPM`. |
 | `AI_PARALLELISM` | `8` | Maximum concurrent requests sent to the model. |
 | `AI_TRUNC_TITLE` | `180` | Character cap applied to product titles before building the prompt. |
@@ -51,6 +52,7 @@ You can customise the runtime via environment variables. A sample configuration 
 ```env
 # Límites para GPT-5-Mini
 AI_MODEL=gpt-5-mini
+PRAPP_AI_TRIAGE_MODEL=gpt-5-mini
 AI_TPM=500000
 AI_RPM=500
 AI_MICROBATCH=64
@@ -59,3 +61,5 @@ PRAPP_AI_COLUMNS_MAX_TOKENS_PER_ITEM=256
 ```
 
 Adjust these numbers based on the access tier in your OpenAI account.
+
+Make sure the cost estimator is aligned with the active reasoning model. In `product_research_app/config.json`, set `aiCost.model` to `gpt-5-mini` (or update the persisted configuration through the UI) so that projected spend reflects the GPT-5 Mini rates.
