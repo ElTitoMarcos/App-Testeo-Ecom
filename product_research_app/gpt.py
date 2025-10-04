@@ -169,6 +169,8 @@ def _parse_message_content(raw: Dict[str, Any]) -> Tuple[Optional[Any], str]:
     message = choices[0].get("message", {}) or {}
     content = message.get("content", "")
     parsed_json: Optional[Any] = None
+    if "parsed" in message:
+        parsed_json = message.get("parsed")
     text_parts: List[str] = []
     if isinstance(content, str):
         text_parts.append(content)
@@ -187,6 +189,11 @@ def _parse_message_content(raw: Dict[str, Any]) -> Tuple[Optional[Any], str]:
             parsed_json = content.get("json")
         if "text" in content:
             text_parts.append(str(content.get("text", "")))
+    if parsed_json is None and "json" in message:
+        parsed_json = message.get("json")
+    refusal = message.get("refusal")
+    if refusal:
+        text_parts.append(str(refusal))
     text = "\n".join(part for part in text_parts if part).strip()
     return parsed_json, text
 
