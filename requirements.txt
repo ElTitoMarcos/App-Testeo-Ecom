@@ -5,3 +5,5 @@ Pillow
 openpyxl
 httpx
 pandas
+# OpenAI Python SDK v1 (necesario para `from openai import OpenAI`)
+openai>=1.45.0,<2

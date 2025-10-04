@@ -14,7 +14,15 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from openai import OpenAI
+try:
+    from openai import OpenAI
+except Exception as e:
+    # Mensaje explícito cuando falta la lib o está rota
+    raise RuntimeError(
+        "El paquete 'openai' no está instalado o es incompatible.\n"
+        "Instálalo/actualízalo y vuelve a ejecutar:\n"
+        "  .\\.venv\\Scripts\\pip install --upgrade \"openai>=1.45.0,<2\""
+    ) from e
 
 from product_research_app.utils.json_extract import coerce_json, message_parts_to_text
 
