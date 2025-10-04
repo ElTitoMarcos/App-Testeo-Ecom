@@ -29,6 +29,7 @@ from ..ratelimit import async_decorrelated_jitter_sleep
 from ..utils.signature import compute_sig_hash
 from .desire_utils import cleanse, looks_like_product_desc
 from .prompt_templates import MISSING_ONLY_JSONL_PROMPT, STRICT_JSONL_PROMPT
+from .ai_client import chat_json
 
 logger = logging.getLogger(__name__)
 
@@ -405,6 +406,14 @@ def _classify_ko_reason(reason: Optional[str]) -> Dict[str, Any]:
             remediation="Inspect the AI response format; adjust the prompt or enable retries with smaller batches.",
         )
 
+    if "empty_or_nonjson" in lowered or "respuesta vacía" in lowered:
+        return _payload(
+            "ko.empty_or_nonjson",
+            "The model returned an empty payload or did not respect the JSON contract.",
+            retryable=True,
+            remediation="Check the raw dump for the offending request and retry with a fresh run.",
+        )
+
     if "unauthorized" in lowered or "401" in lowered:
         return _payload(
             "auth.unauthorized",
@@ -774,7 +783,7 @@ def _parse_strict_json_payload(
             except Exception:
                 source_text = None
         if not source_text:
-            raise ValueError("Respuesta vacía o sin JSON")
+            raise ValueError("empty_or_nonjson")
         try:
             loaded = json.loads(source_text)
         except Exception as exc:
@@ -887,15 +896,39 @@ def _recover_missing_sync(
             {"role": "user", "content": prompt_text},
         ]
         try:
-            raw = gpt.call_gpt(
+            parsed_json, raw = chat_json(
                 model=model,
                 messages=messages,
-                api_key=api_key,
-                temperature=0.2,
+                json_schema={
+                    "name": "ai_columns_missing",
+                    "schema": {
+                        "anyOf": [
+                            {"type": "array", "items": {"type": "object"}},
+                            {"type": "object"},
+                        ]
+                    },
+                },
                 max_tokens=max_tokens,
-                estimated_tokens=est_tokens,
+                temperature=0.2,
+                top_p=1.0,
+                seed=random.randint(0, 10_000),
+                req_id=batch.req_id,
             )
-        except gpt.OpenAIError:
+            if parsed_json is not None:
+                try:
+                    content = json.dumps(parsed_json, ensure_ascii=False)
+                    raw.setdefault("choices", [{}])[0].setdefault("message", {})["content"] = content
+                except Exception:
+                    pass
+        except ValueError as exc:
+            if str(exc) == "empty_or_nonjson":
+                if warning_prefix:
+                    break
+                warning_prefix = "Tu respuesta no cumplió JSONL. Repite solo JSONL."
+                retries_used += 1
+                continue
+            break
+        except Exception:
             break
         try:
             text = _extract_jsonl_payload(raw)
@@ -1411,16 +1444,37 @@ async def _call_batch_with_retries(
         ]
         start_ts = time.perf_counter()
         try:
-            raw = await gpt.call_gpt_async(
+            parsed_json, raw = await asyncio.to_thread(
+                chat_json,
                 model=model,
                 messages=messages,
-                api_key=api_key,
-                temperature=0.2,
+                json_schema={
+                    "name": "ai_columns_payload",
+                    "schema": {
+                        "anyOf": [
+                            {"type": "array", "items": {"type": "object"}},
+                            {"type": "object"},
+                        ]
+                    },
+                }
+                if STRICT_JSON_ENABLED
+                else None,
                 max_tokens=max_tokens,
-                estimated_tokens=tokens_est,
-                strict_json=STRICT_JSON_ENABLED,
+                temperature=0.2,
+                top_p=1.0,
+                seed=7,
+                req_id=batch.req_id,
             )
-        except gpt.OpenAIError as exc:
+        except ValueError as exc:
+            duration = time.perf_counter() - start_ts
+            err_text = str(exc) or "empty_or_nonjson"
+            if err_text == "empty_or_nonjson":
+                return _error_payload("ko.empty_or_nonjson", duration, attempt)
+            if attempt <= max_retries:
+                backoff_prev = await async_decorrelated_jitter_sleep(backoff_prev or 0.5, 10.0)
+                continue
+            return _error_payload(err_text, duration, attempt)
+        except Exception as exc:
             duration = time.perf_counter() - start_ts
             reason = _detect_adaptation_reason(exc)
             if reason and len(batch.candidates) > 1:
@@ -1429,6 +1483,16 @@ async def _call_batch_with_retries(
                 backoff_prev = await async_decorrelated_jitter_sleep(backoff_prev or 0.5, 10.0)
                 continue
             return _error_payload(str(exc), duration, attempt)
+
+        if parsed_json is not None and STRICT_JSON_ENABLED:
+            try:
+                # Normalizamos para que el parser clásico pueda reutilizarlo si es dict/list.
+                message = raw.get("choices", [{}])[0].get("message", {})
+                if message is not None:
+                    content = json.dumps(parsed_json, ensure_ascii=False)
+                    raw["choices"][0]["message"]["content"] = content
+            except Exception:
+                pass
 
         expected_ids = [cand.id for cand in batch.candidates]
         retries_missing_used = 0
@@ -1527,15 +1591,52 @@ async def _call_triage_batch(
         {"role": "user", "content": batch.user_text},
     ]
     start_ts = time.perf_counter()
-    raw = await gpt.call_gpt_async(
-        model=model,
-        messages=messages,
-        api_key=api_key,
-        temperature=0.2,
-        max_tokens=max_tokens,
-        estimated_tokens=tokens_est,
-        strict_json=strict_json,
-    )
+    try:
+        parsed_json, raw = await asyncio.to_thread(
+            chat_json,
+            model=model,
+            messages=messages,
+            json_schema={
+                "name": "ai_columns_triage",
+                "schema": {
+                    "anyOf": [
+                        {"type": "array", "items": {"type": "object"}},
+                        {"type": "object"},
+                    ]
+                },
+            }
+            if strict_json
+            else None,
+            max_tokens=max_tokens,
+            temperature=0.2,
+            top_p=1.0,
+            seed=7,
+            req_id=batch.req_id,
+        )
+    except ValueError as exc:
+        duration = time.perf_counter() - start_ts
+        err_text = str(exc) or "empty_or_nonjson"
+        if err_text == "empty_or_nonjson":
+            return {
+                "req_id": batch.req_id,
+                "candidates": batch.candidates,
+                "ok": {},
+                "ko": {str(cand.id): "ko.empty_or_nonjson" for cand in batch.candidates},
+                "usage": {},
+                "duration": duration,
+                "retries": 1,
+                "prompt_tokens_est": tokens_est,
+                "raw_text": None,
+            }
+        raise
+
+    if parsed_json is not None and strict_json:
+        try:
+            raw.setdefault("choices", [{}])[0].setdefault("message", {})["content"] = json.dumps(
+                parsed_json, ensure_ascii=False
+            )
+        except Exception:
+            pass
     duration = time.perf_counter() - start_ts
     expected_ids = [cand.id for cand in batch.candidates]
     strict_map: Dict[int, Dict[str, Any]] = {}

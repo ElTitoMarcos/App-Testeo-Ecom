@@ -44,6 +44,7 @@ from .prompts.registry import (
     normalize_task,
 )
 from .services import winner_score as winner_calc
+from .utils.json_extract import coerce_json, message_parts_to_text
 
 logger = logging.getLogger(__name__)
 log = logger
@@ -166,29 +167,42 @@ def _parse_message_content(raw: Dict[str, Any]) -> Tuple[Optional[Any], str]:
     choices = raw.get("choices") or []
     if not choices:
         raise OpenAIError("Respuesta de OpenAI sin choices")
+
     message = choices[0].get("message", {}) or {}
-    content = message.get("content", "")
+
+    text_content = message_parts_to_text(message.get("content"))
     parsed_json: Optional[Any] = None
-    text_parts: List[str] = []
-    if isinstance(content, str):
-        text_parts.append(content)
-    elif isinstance(content, list):
-        for part in content:
-            if not isinstance(part, dict):
+    if text_content:
+        try:
+            parsed_json = coerce_json(text_content)
+        except Exception:
+            parsed_json = None
+
+    if parsed_json is None:
+        for tool_call in message.get("tool_calls") or []:
+            if not isinstance(tool_call, dict):
                 continue
-            part_type = part.get("type") or part.get("role")
-            if part_type in {"text", "output_text"}:
-                text_parts.append(str(part.get("text", "")))
-            elif part_type in {"json", "output_json"}:
-                parsed_json = part.get("json")
-    elif isinstance(content, dict):
-        part_type = content.get("type")
-        if part_type in {"json", "output_json"}:
-            parsed_json = content.get("json")
-        if "text" in content:
-            text_parts.append(str(content.get("text", "")))
-    text = "\n".join(part for part in text_parts if part).strip()
-    return parsed_json, text
+            fn = tool_call.get("function") or {}
+            arguments = fn.get("arguments")
+            if not arguments:
+                continue
+            try:
+                parsed_json = coerce_json(arguments)
+            except Exception:
+                continue
+            else:
+                break
+
+    if parsed_json is None:
+        function_call = message.get("function_call") or {}
+        arguments = function_call.get("arguments")
+        if arguments:
+            try:
+                parsed_json = coerce_json(arguments)
+            except Exception:
+                parsed_json = None
+
+    return parsed_json, (text_content.strip() if isinstance(text_content, str) else "")
 
 
 def _parse_json_content(text: str) -> Any:
@@ -939,6 +953,8 @@ async def _http_post_chat(
         payload["stop"] = stop
     if response_format is not None:
         payload["response_format"] = response_format
+    elif strict_json:
+        payload["response_format"] = {"type": "json_object"}
 
     optional_payload_keys = (
         "top_p",
