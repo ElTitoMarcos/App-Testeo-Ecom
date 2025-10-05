@@ -76,3 +76,13 @@ El arranque por `python -m product_research_app` respeta varias variables útile
 | `PRAPP_BROWSER_URL` | `http://{host}:{port}/` | URL que se abrirá cuando el puerto esté listo. |
 
 Además de `/healthz`, el backend expone `/health` para comprobaciones rápidas de estado (`200` + `{"status": "ok"}`).
+
+### Variables de entorno de arranque
+
+- `PRAPP_HOST` (por defecto `127.0.0.1`)
+- `PRAPP_PORT` (por defecto `8000`)
+- `PRAPP_AUTO_OPEN` (`1` por defecto; `0|false|no` para desactivar)
+- `PRAPP_BROWSER_URL` (URL preferida a abrir; si no responde 200, se prueban `/app`, `/ui`, `/index.html`, `/dashboard`, `/`)
+- `PRAPP_ROOT_REDIRECT` (si se define y no es `/`, la raíz `/` redirige ahí)
+
+> El dev server de Werkzeug puede recibir handshakes TLS en un puerto HTTP (p.ej. de antivirus o probes HTTP/2); esos 400 se silencian para no ensuciar logs.

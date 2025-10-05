@@ -5,6 +5,23 @@ from product_research_app.services.config import init_app_config
 from product_research_app.api import app
 from product_research_app.utils.auto_open import open_browser_when_ready
 
+# Silenciar 400 ruidosos (p.ej. handshakes TLS) del servidor de desarrollo
+try:
+    import werkzeug.serving as _serving
+
+    class _Quiet400Handler(_serving.WSGIRequestHandler):  # type: ignore[misc]
+        def log_request(self, code="-", size="-") -> None:
+            try:
+                if int(code) == 400:
+                    return
+            except Exception:
+                pass
+            super().log_request(code, size)
+
+    _serving.WSGIRequestHandler = _Quiet400Handler
+except Exception:
+    pass
+
 logger = logging.getLogger(__name__)
 
 
