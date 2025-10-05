@@ -25,6 +25,7 @@ import os
 import io
 import re
 import logging
+import sys
 import requests
 from http.server import HTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -3618,7 +3619,13 @@ class RequestHandler(QuietHandlerMixin):
 def run(host: str = '127.0.0.1', port: int = 8000):
     ensure_db()
     resume_incomplete_imports()
-    httpd = HTTPServer((host, port), RequestHandler)
+    try:
+        # Allow rapid restarts by reusing the previous socket address.
+        HTTPServer.allow_reuse_address = True
+        httpd = HTTPServer((host, port), RequestHandler)
+    except OSError as exc:
+        print(f"No se pudo abrir el servidor en {host}:{port}: {exc}")
+        sys.exit(1)
     print(f"Servidor iniciado en http://{host}:{port}")
     try:
         httpd.serve_forever()
