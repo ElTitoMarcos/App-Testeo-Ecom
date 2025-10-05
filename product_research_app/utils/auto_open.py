@@ -39,20 +39,43 @@ def open_browser_when_ready(url: str, host: str = "127.0.0.1", port: int = 8000,
     if os.getenv("RUN_MAIN") == "true":
         return
 
-    # Lock para "abrir solo una vez" por sesión
+    # Lock para "abrir solo una vez" por sesión, con TTL configurable
     lock_path = os.path.join(tempfile.gettempdir(), lock_name)
+    default_ttl = 300.0
+    try:
+        lock_ttl_env = os.getenv("PRAPP_AUTO_OPEN_LOCK_TTL", str(default_ttl))
+        lock_ttl = float(lock_ttl_env)
+        if lock_ttl < 0:
+            lock_ttl = 0.0
+    except (TypeError, ValueError):
+        lock_ttl = default_ttl
+
+    now = time.time()
+    if os.path.exists(lock_path):
+        try:
+            mtime = os.path.getmtime(lock_path)
+        except OSError:
+            mtime = None
+        if mtime is None or (lock_ttl and (now - mtime) > lock_ttl):
+            try:
+                os.remove(lock_path)
+            except OSError:
+                pass
     try:
         # Crear exclusión atómica
         fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         with os.fdopen(fd, "w") as f:
             f.write(str(os.getpid()))
     except FileExistsError:
-        return  # ya abierto/abriéndose en otro proceso
+        # Otro proceso ya lo abrió (o lock todavía vigente)
+        return
 
     def _cleanup():
         try:
             os.remove(lock_path)
         except FileNotFoundError:
+            pass
+        except OSError:
             pass
     atexit.register(_cleanup)
 

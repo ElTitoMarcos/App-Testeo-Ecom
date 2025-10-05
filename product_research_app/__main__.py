@@ -5,11 +5,13 @@ from product_research_app.services.config import init_app_config
 from product_research_app.api import app
 from product_research_app.utils.auto_open import open_browser_when_ready
 
-# Silenciar 400 ruidosos (p.ej. handshakes TLS) del servidor de desarrollo
+QuietHandler = None
 try:
-    import werkzeug.serving as _serving
+    from werkzeug.serving import WSGIRequestHandler as _BaseRequestHandler
 
-    class _Quiet400Handler(_serving.WSGIRequestHandler):  # type: ignore[misc]
+    class QuietHandler(_BaseRequestHandler):  # type: ignore[misc]
+        """WSGIRequestHandler que silencia handshakes 400 ruidosos."""
+
         def log_request(self, code="-", size="-") -> None:
             try:
                 if int(code) == 400:
@@ -18,9 +20,16 @@ try:
                 pass
             super().log_request(code, size)
 
-    _serving.WSGIRequestHandler = _Quiet400Handler
+        def log_error(self, format: str, *args) -> None:  # type: ignore[override]
+            try:
+                message = (format % args) if args else str(format)
+                if "Bad request version" in message or "Bad request syntax" in message:
+                    return
+            except Exception:
+                pass
+            super().log_error(format, *args)
 except Exception:
-    pass
+    QuietHandler = None
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +52,10 @@ def main() -> None:
     try:
         logger.info(message)
         print(message)
-        app.run(host=host, port=port, debug=False, threaded=True, use_reloader=False)
+        run_kwargs = dict(host=host, port=port, debug=False, threaded=True, use_reloader=False)
+        if QuietHandler is not None:
+            run_kwargs["request_handler"] = QuietHandler
+        app.run(**run_kwargs)
     except Exception:
         logger.exception("Fallo fatal al iniciar el servidor")
         try:
