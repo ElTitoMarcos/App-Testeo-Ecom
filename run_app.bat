@@ -15,7 +15,10 @@ echo %DATE% %TIME% — Bootstrap run_app.bat >> "logs\session.log"
 :: ---------- Config ----------
 set "PY_EXPECTED_MIN=3.11"
 set "PY_SETUP_VER=3.12.6"
-set "APP_DEFAULT_PORT=8000"
+if not defined PRAPP_HOST set "PRAPP_HOST=127.0.0.1"
+if not defined PRAPP_PORT set "PRAPP_PORT=8000"
+if not defined PRAPP_AUTO_OPEN set "PRAPP_AUTO_OPEN=1"
+if not defined PRAPP_BROWSER_URL set "PRAPP_BROWSER_URL=http://%PRAPP_HOST%:%PRAPP_PORT%/"
 
 :: Detectar arquitectura
 set "ARCH=amd64"
@@ -195,14 +198,10 @@ if not exist "%ROOT%%PKG%\__init__.py" (
 )
 :pkg_ok
 
-:: ---------- Abrir navegador cuando esté listo (CMD + curl, sin PowerShell) ----------
-start "" cmd /c ^
-  "for /l %%i in (1,1,60) do (curl -I -s http://127.0.0.1:%APP_DEFAULT_PORT% >nul 2>&1 && start "" http://127.0.0.1:%APP_DEFAULT_PORT% & exit) & timeout /t 1 >nul"
-
 :: ---------- Lanzar servidor DIRECTO desde CMD (sin tuberías, sin relanzar) ----------
-echo [INFO] Lanzando: -m %PKG%.web_app  >> "logs\session.log"
+echo [INFO] Lanzando: -m %PKG%  >> "logs\session.log"
 echo Iniciando servidor de Ecom Testing App...
-"%PYEXE%" -m %PKG%.web_app
+"%PYEXE%" -m %PKG%
 set "RC=%ERRORLEVEL%"
 
 echo [INFO] Proceso terminado con código %RC% >> "logs\session.log"

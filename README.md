@@ -63,3 +63,16 @@ PRAPP_AI_COLUMNS_MAX_TOKENS_PER_ITEM=256
 Adjust these numbers based on the access tier in your OpenAI account.
 
 Make sure the cost estimator is aligned with the active reasoning model. In `product_research_app/config.json`, set `aiCost.model` to `gpt-5-mini` (or update the persisted configuration through the UI) so that projected spend reflects the GPT-5 Mini rates.
+
+## Auto-open y variables de entorno
+
+El arranque por `python -m product_research_app` respeta varias variables útiles para entornos locales:
+
+| Variable | Default | Descripción |
+| --- | --- | --- |
+| `PRAPP_HOST` | `127.0.0.1` | Host donde se enlaza el servidor Flask. |
+| `PRAPP_PORT` | `8000` | Puerto TCP expuesto por la aplicación. |
+| `PRAPP_AUTO_OPEN` | `1` | Controla la apertura automática del navegador (usa `0`, `false` o `no` para desactivarlo). |
+| `PRAPP_BROWSER_URL` | `http://{host}:{port}/` | URL que se abrirá cuando el puerto esté listo. |
+
+Además de `/healthz`, el backend expone `/health` para comprobaciones rápidas de estado (`200` + `{"status": "ok"}`).
