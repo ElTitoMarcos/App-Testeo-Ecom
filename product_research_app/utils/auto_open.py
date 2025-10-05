@@ -80,17 +80,24 @@ def open_browser_when_ready(url: str, host: str = "127.0.0.1", port: int = 8000,
     atexit.register(_cleanup)
 
     def _http_ok(u: str) -> bool:
+        def _status_ok(resp) -> bool:
+            status = getattr(resp, "status", getattr(resp, "code", 200))
+            if 200 <= status < 400:
+                headers = getattr(resp, "headers", None)
+                if headers and headers.get("X-PRAPP-WELCOME") == "1":
+                    return False
+                return True
+            return False
+
         try:
             req = Request(u, method="HEAD")
             with urlopen(req, timeout=2) as r:  # type: ignore[arg-type]
-                status = getattr(r, "status", getattr(r, "code", 200))
-                return 200 <= status < 400
+                return _status_ok(r)
         except Exception:
             try:
                 req = Request(u, method="GET")
                 with urlopen(req, timeout=2) as r:  # type: ignore[arg-type]
-                    status = getattr(r, "status", getattr(r, "code", 200))
-                    return 200 <= status < 400
+                    return _status_ok(r)
             except Exception:
                 return False
 
@@ -124,8 +131,22 @@ def open_browser_when_ready(url: str, host: str = "127.0.0.1", port: int = 8000,
                     redirect = "/" + redirect
                 candidates.append(base + redirect)
 
-        for path in ("/app", "/ui", "/dashboard", "/index.html", "/"):
-            candidates.append(base + path)
+        paths_env = os.getenv("PRAPP_AUTO_OPEN_PATHS", "").strip()
+        if paths_env:
+            try:
+                preferred = [p.strip() for p in paths_env.split(",") if p.strip()]
+            except Exception:
+                preferred = []
+        else:
+            preferred = ["/app", "/ui", "/dashboard", "/index.html", "/"]
+
+        for path in preferred:
+            if not path.startswith("/") and not path.startswith("http"):
+                path = "/" + path
+            if path.startswith("http://") or path.startswith("https://"):
+                candidates.append(path)
+            else:
+                candidates.append(base + path)
 
         seen: set[str] = set()
         deduped: list[str] = []

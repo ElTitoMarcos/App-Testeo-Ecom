@@ -82,7 +82,8 @@ Además de `/healthz`, el backend expone `/health` para comprobaciones rápidas 
 - `PRAPP_HOST` (por defecto `127.0.0.1`)
 - `PRAPP_PORT` (por defecto `8000`)
 - `PRAPP_AUTO_OPEN` (`1` por defecto; `0|false|no` para desactivar)
-- `PRAPP_BROWSER_URL` (URL preferida a abrir; si no responde 200, se prueban `/app`, `/ui`, `/index.html`, `/dashboard`, `/`)
+- `PRAPP_BROWSER_URL` (URL preferida a abrir; si no responde 200, se prueban las rutas de `PRAPP_AUTO_OPEN_PATHS`)
 - `PRAPP_ROOT_REDIRECT` (si se define y no es `/`, la raíz `/` redirige ahí)
+- `PRAPP_AUTO_OPEN_PATHS` (CSV con el orden de rutas candidatas para auto-open; por defecto `/app,/ui,/dashboard,/index.html,/`)
 
 > El dev server de Werkzeug puede recibir handshakes TLS en un puerto HTTP (p.ej. de antivirus o probes HTTP/2); esos 400 se silencian para no ensuciar logs.
