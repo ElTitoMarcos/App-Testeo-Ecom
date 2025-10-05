@@ -18,28 +18,20 @@ def healthz():
     return {"ok": True}
 
 
-# Garantizar endpoint /health si no existe previamente
+# Garantizar utilidades básicas (healthcheck y raíz)
 try:
-    has_health = False
-    try:
-        for r in getattr(app, "routes", []):
-            if getattr(r, "path", None) == "/health":
-                has_health = True
-                break
-    except Exception:
-        pass
+    from product_research_app.utils.health import mount_health
+    from product_research_app.utils.root_redirect import mount_root
 
     try:
-        if not has_health and hasattr(app, "view_functions"):
-            if "health._health" in app.view_functions or "health" in app.view_functions:
-                has_health = True
-    except Exception:
-        pass
-
-    if not has_health:
-        from product_research_app.utils.health import mount_health
-
         mount_health(app)
+    except Exception:
+        pass
+
+    try:
+        mount_root(app)
+    except Exception:
+        pass
 except Exception:
     pass
 
