@@ -23,6 +23,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from .utils.paths import normalize_for_storage
+
 
 def get_connection(db_path: Path) -> sqlite3.Connection:
     """Return a SQLite connection to the specified database file.
@@ -990,6 +992,7 @@ def create_import_job(
 
     now = datetime.utcnow().isoformat()
     cur = conn.cursor()
+    stored_temp_path = normalize_for_storage(temp_path)
     cur.execute(
         """
         INSERT INTO import_jobs (
@@ -1006,7 +1009,7 @@ def create_import_job(
             now,
             int(total or 0),
             int(processed or 0),
-            temp_path,
+            stored_temp_path,
             json_dump(config) if config is not None else None,
             budget_cents,
         ),

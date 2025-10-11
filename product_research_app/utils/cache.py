@@ -13,11 +13,13 @@ try:
 except Exception:
     _get_conn = None
 
+from .paths import get_database_path
+
 
 def _conn() -> sqlite3.Connection:
     if _get_conn:
         return _get_conn()
-    path = os.getenv("PRAPP_DB_PATH", "product_research_app/data.sqlite3")
+    path = os.getenv("PRAPP_DB_PATH") or str(get_database_path())
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     return conn

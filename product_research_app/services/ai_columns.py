@@ -11,7 +11,6 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .. import config, database, gpt
@@ -26,14 +25,17 @@ from ..ai.strict_jsonl import parse_jsonl_and_validate
 from ..obs import log_partial_ko, log_recovered
 from ..ratelimit import async_decorrelated_jitter_sleep
 from ..utils.signature import compute_sig_hash
+from ..utils.paths import (
+    get_calibration_cache_file,
+    get_database_path,
+)
 from .desire_utils import cleanse, looks_like_product_desc
 from .prompt_templates import MISSING_ONLY_JSONL_PROMPT, STRICT_JSONL_PROMPT
 
 logger = logging.getLogger(__name__)
 
-APP_DIR = Path(__file__).resolve().parent.parent
-DB_PATH = APP_DIR / "data.sqlite3"
-CALIBRATION_CACHE_FILE = APP_DIR / "ai_calibration_cache.json"
+DB_PATH = get_database_path()
+CALIBRATION_CACHE_FILE = get_calibration_cache_file()
 
 AI_FIELDS = ("desire", "desire_magnitude", "awareness_level", "competition_level")
 

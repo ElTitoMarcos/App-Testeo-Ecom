@@ -76,12 +76,11 @@ def get_last_performance_config() -> dict[str, Union[str, int]]:
     return dict(_PERF_CONFIG)
 
 
+from .utils.paths import get_database_path
+
+
 def _resolve_db_path() -> str:
-    env_path = os.environ.get("PRAPP_DB_PATH")
-    if env_path:
-        return str(Path(env_path).expanduser().resolve())
-    default_path = Path(__file__).resolve().parent / "data.sqlite3"
-    return str(default_path)
+    return str(get_database_path().resolve())
 
 
 def _make_conn() -> sqlite3.Connection:

@@ -12,6 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from .utils.paths import get_config_file
+
 
 DEFAULT_WINNER_ORDER = [
     "awareness",
@@ -71,7 +73,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 }
 
 
-CONFIG_FILE = Path(__file__).resolve().parent / "config.json"
+# Resolve the configuration file using :mod:`pathlib` helpers so the
+# application works seamlessly on Windows, macOS and Linux even when the
+# project directory is read-only (for example inside ``/Applications`` on
+# macOS).  ``get_config_file`` transparently falls back to a per-user data
+# directory when needed.
+CONFIG_FILE = get_config_file()
 
 
 def load_config() -> Dict[str, Any]:
