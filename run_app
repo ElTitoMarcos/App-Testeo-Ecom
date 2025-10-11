@@ -1,0 +1,36 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TARGET=""
+
+if [[ "${OS:-}" == "Windows_NT" ]]; then
+  TARGET="${SCRIPT_DIR}/run_app.bat"
+  if command -v cygpath >/dev/null 2>&1; then
+    TARGET="$(cygpath -w "$TARGET")"
+  fi
+  if command -v cmd.exe >/dev/null 2>&1; then
+    exec cmd.exe /c "\"${TARGET}\""
+  else
+    echo "[ERROR] cmd.exe no está disponible para ejecutar run_app.bat" >&2
+    exit 1
+  fi
+else
+  UNAME=$(uname -s 2>/dev/null || echo "")
+  if [[ "$UNAME" == "Darwin" ]]; then
+    if [ ! -x "${SCRIPT_DIR}/run_app.sh" ]; then
+      echo "[INFO] Ajustando permisos para run_app.sh" >&2
+      chmod +x "${SCRIPT_DIR}/run_app.sh"
+    fi
+    exec bash "${SCRIPT_DIR}/run_app.sh"
+  elif [[ "$UNAME" == "Linux" ]]; then
+    echo "[WARN] Sistema Linux detectado. Ejecutando run_app.sh por compatibilidad." >&2
+    if [ ! -x "${SCRIPT_DIR}/run_app.sh" ]; then
+      chmod +x "${SCRIPT_DIR}/run_app.sh"
+    fi
+    exec bash "${SCRIPT_DIR}/run_app.sh"
+  else
+    echo "[ERROR] Sistema operativo no soportado. Usa Windows o macOS." >&2
+    exit 1
+  fi
+fi
