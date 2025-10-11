@@ -26,6 +26,7 @@ import io
 import re
 import logging
 import requests
+from requests import exceptions as requests_exceptions
 from http.server import HTTPServer
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
@@ -59,23 +60,43 @@ from .sse import publish_progress
 from .utils import sanitize_product_name
 from .utils.db import row_to_dict, rget
 from .services.serializers import serialize_product_row
+from .utils.paths import (
+    get_database_path,
+    get_log_dir,
+    get_upload_temp_dir,
+    normalize_for_storage,
+    package_dir,
+)
 
 WINNER_SCORE_FIELDS = list(winner_calc.FEATURE_MAP.keys())
 
-APP_DIR = Path(__file__).resolve().parent
-DB_PATH = APP_DIR / "data.sqlite3"
+# ``package_dir`` ensures we stay inside the Python package regardless of the
+# operating system.  ``get_database_path`` and ``get_log_dir`` provide
+# user-writable fallbacks when the repository lives in a read-only location
+# (common on macOS when the app sits inside ``/Applications``).
+APP_DIR = package_dir()
+DB_PATH = get_database_path()
 STATIC_DIR = APP_DIR / "static"
 ROOT_DIR = APP_DIR.parent
-LOG_DIR = ROOT_DIR / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+LOG_DIR = get_log_dir()
 LOG_PATH = LOG_DIR / "app.log"
+# Temporary uploads live in the system temporary directory to avoid
+# permission issues on macOS application bundles and Windows program
+# directories.
+UPLOAD_DIR = get_upload_temp_dir()
+
+_log_handlers: List[logging.Handler] = []
+try:
+    _log_handlers.append(logging.FileHandler(LOG_PATH, encoding="utf-8"))
+except OSError:
+    # Fall back to stdout logging when the file handler cannot be created.
+    pass
+_log_handlers.append(logging.StreamHandler())
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_PATH, encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
+    handlers=_log_handlers,
 )
 logger = logging.getLogger(__name__)
 
@@ -986,7 +1007,7 @@ def resume_incomplete_imports():
     """Mark stale pending imports as failed and remove orphan temp files."""
     conn = ensure_db()
     database.mark_stale_pending_imports(conn, 5)
-    tmp_dir = APP_DIR / 'uploads'
+    tmp_dir = UPLOAD_DIR
     if tmp_dir.exists():
         cur = conn.cursor()
         cur.execute("SELECT temp_path FROM import_jobs")
@@ -1950,9 +1971,24 @@ class RequestHandler(QuietHandlerMixin):
                 )
                 if resp.status_code != 200:
                     raise ValueError(resp.text)
+            except requests_exceptions.RequestException as exc:
+                message = "No se pudo validar la API key: sin conexión a internet"
+                if not isinstance(exc, requests_exceptions.ConnectionError):
+                    message = f"No se pudo validar la API key: {exc}"
+                self._set_json(400)
+                self.wfile.write(
+                    json.dumps({"ok": False, "has_key": False, "error": message}).encode(
+                        "utf-8"
+                    )
+                )
+                return
             except Exception as exc:
                 self._set_json(400)
-                self.wfile.write(json.dumps({"ok": False, "has_key": False, "error": str(exc)}).encode('utf-8'))
+                self.wfile.write(
+                    json.dumps({"ok": False, "has_key": False, "error": str(exc)}).encode(
+                        "utf-8"
+                    )
+                )
                 return
             cfg = config.load_config()
             cfg["api_key"] = key
@@ -2416,13 +2452,15 @@ class RequestHandler(QuietHandlerMixin):
         filename = Path(filename).name
         ext = Path(filename).suffix.lower()
         if ext in (".xlsx", ".xls"):
-            tmp_dir = APP_DIR / "uploads"
+            tmp_dir = UPLOAD_DIR
             tmp_dir.mkdir(exist_ok=True)
             tmp_path = tmp_dir / f"import_{int(time.time()*1000)}{ext}"
             with open(tmp_path, "wb") as f:
                 f.write(data)
             conn = ensure_db()
-            job_id = database.create_import_job(conn, str(tmp_path))
+            job_id = database.create_import_job(
+                conn, normalize_for_storage(tmp_path)
+            )
             threading.Thread(target=_process_import_job, args=(job_id, tmp_path, filename), daemon=True).start()
             self.safe_write(lambda: self.send_json({"task_id": job_id}, status=202))
             return
@@ -3605,11 +3643,31 @@ class RequestHandler(QuietHandlerMixin):
         self.wfile.write(json.dumps({"removed": removed}).encode('utf-8'))
 
 
-def run(host: str = '127.0.0.1', port: int = 8000):
+def _resolve_port(port: Optional[int]) -> int:
+    """Resolve the HTTP port honouring environment overrides."""
+
+    if isinstance(port, int) and port > 0:
+        return port
+    env_port = os.environ.get("APP_DEFAULT_PORT")
+    if env_port:
+        try:
+            parsed = int(env_port)
+            if parsed > 0:
+                return parsed
+        except ValueError:
+            pass
+    return 8000
+
+
+def run(host: str = '127.0.0.1', port: Optional[int] = None):
     ensure_db()
     resume_incomplete_imports()
-    httpd = HTTPServer((host, port), RequestHandler)
-    print(f"Servidor iniciado en http://{host}:{port}")
+    resolved_port = _resolve_port(port)
+    try:
+        httpd = HTTPServer((host, resolved_port), RequestHandler)
+    except OSError as exc:
+        raise SystemExit(f"No se pudo iniciar el servidor HTTP: {exc}")
+    print(f"Servidor iniciado en http://{host}:{resolved_port}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -3621,6 +3679,6 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description="Web UI for Product Research Copilot")
     parser.add_argument('--host', default='127.0.0.1', help='Host IP to bind')
-    parser.add_argument('--port', default=8000, type=int, help='Port number')
+    parser.add_argument('--port', default=None, type=int, help='Port number')
     args = parser.parse_args()
     run(args.host, args.port)

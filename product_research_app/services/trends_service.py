@@ -2,14 +2,14 @@ import json
 import logging
 import time
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .. import database
+from ..utils.paths import get_database_path
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path(__file__).resolve().parents[1] / "data.sqlite3"
+DB_PATH = get_database_path()
 
 
 def _parse_extra(extra: str | bytes | None) -> Dict[str, Any]:
@@ -38,6 +38,7 @@ def get_trends_summary(start: datetime, end: datetime, filters: Optional[Dict[st
     filters = filters or {}
     t0 = time.perf_counter()
     conn = database.get_connection(DB_PATH)
+    database.initialize_database(conn)
     cur = conn.cursor()
 
     params = [start.isoformat(), end.isoformat()]

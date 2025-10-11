@@ -48,8 +48,9 @@ from .services import winner_score as winner_calc
 logger = logging.getLogger(__name__)
 log = logger
 
-APP_DIR = Path(__file__).resolve().parent
-DB_PATH = APP_DIR / "data.sqlite3"
+from .utils.paths import get_database_path
+
+DB_PATH = get_database_path()
 
 AI_API_VERBOSE = int(os.getenv("PRAPP_AI_API_VERBOSE", "0"))
 LIMIT_NEAR_FRAC = float(os.getenv("PRAPP_AI_LIMIT_NEAR_FRAC", "0.90"))

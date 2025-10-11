@@ -21,6 +21,7 @@ from product_research_app.database import (
     update_import_job_progress,
 )
 from product_research_app.utils.signature import compute_sig_hash
+from product_research_app.utils.paths import get_database_path
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +144,7 @@ def _resolve_db_path(conn: sqlite3.Connection) -> str:
     for _, name, path in rows:
         if name == "main" and path:
             return str(path)
-    return "product_research_app/data.sqlite3"
+    return str(get_database_path())
 
 
 def _iter_csv_bytes(payload: bytes) -> Iterator[Mapping[str, Any]]:

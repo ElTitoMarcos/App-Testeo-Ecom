@@ -29,12 +29,12 @@ from . import database
 from . import gpt
 from . import scraper
 from .utils.db import row_to_dict, rget
+from .utils.paths import get_database_path
 
 import sqlite3
 
 
-APP_DIR = Path(__file__).resolve().parent
-DB_PATH = APP_DIR / "data.sqlite3"
+DB_PATH = get_database_path()
 
 WINNER_SCORE_FIELDS = [
     "magnitud_deseo",
@@ -56,7 +56,9 @@ def ensure_database() -> sqlite3.Connection:
 
 
 def clear_screen() -> None:
-    os.system("cls" if os.name == "nt" else "clear")
+    """Clear the terminal in a cross-platform way without shell commands."""
+
+    print("\033[2J\033[H", end="")
 
 
 def prompt_user(prompt: str) -> str:

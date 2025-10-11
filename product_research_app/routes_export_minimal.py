@@ -28,12 +28,12 @@ from openpyxl.worksheet.cell_range import CellRange
 from . import database
 from .utils import sanitize_product_name
 from .utils.db import row_to_dict
+from .utils.paths import get_data_dir
 
 logger = logging.getLogger(__name__)
 
-APP_DIR = Path(__file__).resolve().parent
-STATE_DIR = (APP_DIR / ".." / "state").resolve()
-EXPORT_DIR = (APP_DIR / ".." / "exports").resolve()
+STATE_DIR = (get_data_dir() / "state").resolve()
+EXPORT_DIR = (get_data_dir() / "exports").resolve()
 
 _SEQ_LOCK = threading.Lock()
 _SEQ_FILE_NAME = "export_seq.json"

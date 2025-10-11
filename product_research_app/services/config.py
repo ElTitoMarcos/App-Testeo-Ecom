@@ -1,8 +1,8 @@
 import time
-from pathlib import Path
 from typing import Dict, List, Tuple
 
 from ..config import load_config, save_config, DEFAULT_WINNER_ORDER
+from ..utils.paths import get_database_path
 
 ALLOWED_FIELDS = (
     "price",
@@ -26,7 +26,7 @@ def get_default_winner_weights() -> Dict[str, int]:
 
 
 # Compatibility placeholder; not used but kept for tests that monkeypatch it
-DB_PATH = Path(__file__).resolve().parents[1] / "data.sqlite3"
+DB_PATH = get_database_path()
 
 
 def _coerce_weights(raw: Dict[str, object] | None) -> Dict[str, int]:
